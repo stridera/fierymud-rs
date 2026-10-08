@@ -890,6 +890,9 @@ async fn write_frame<W: AsyncWrite + Unpin>(
     // The single output choke point: colour depth / charset / newline
     // encoding for text frames (telnet frames pass through untouched).
     let bytes = output.encode(bytes);
+    if bytes.is_empty() {
+        return true;
+    }
     let written = if let Some(z) = compressor.as_mut() {
         let mut out = Vec::with_capacity(bytes.len() + 16);
         if z.compress_vec(&bytes, &mut out, flate2::FlushCompress::Sync)
@@ -1418,7 +1421,13 @@ async fn handle_negotiate(
         }
         (DO, opt::EOR) => {
             caps.eor = true;
+            caps.output.set_eor(true);
             return forward_capability(sink, "eor", true).await;
+        }
+        (DONT, opt::EOR) => {
+            caps.eor = false;
+            caps.output.set_eor(false);
+            return forward_capability(sink, "eor", false).await;
         }
         (DO, opt::MXP) => {
             caps.mxp = true;
@@ -2427,6 +2436,55 @@ mod limit_tests {
             got2.extend_from_slice(&buf[..n]);
         }
         assert!(!got2.contains(&0x1b), "colour should be stripped");
+    }
+
+    /// Send `Password: ` + the prompt-end marker + a sentinel line and
+    /// return everything the client sees up to the sentinel.
+    async fn wire_after_prompt(client: &mut TcpStream, outbound: &Outbound) -> Vec<u8> {
+        outbound.send(b"Password: ".to_vec()).await.unwrap();
+        outbound.send(iac_eor()).await.unwrap();
+        outbound.send(b"SENTINEL\r\n".to_vec()).await.unwrap();
+        let mut got = Vec::new();
+        let mut buf = [0u8; 2048];
+        while !contains_seq(&got, b"SENTINEL\r\n") {
+            let n = tokio::time::timeout(WAIT, client.read(&mut buf))
+                .await
+                .expect("timed out reading")
+                .unwrap();
+            assert!(n > 0, "closed early");
+            got.extend_from_slice(&buf[..n]);
+        }
+        got
+    }
+
+    async fn connected_outbound(rx: &mut InboundRx) -> Outbound {
+        match next_event(rx).await.kind {
+            InboundKind::Connected { outbound, .. } => outbound,
+            other => panic!("expected Connected first, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn prompt_end_marker_is_sent_after_the_prompt_when_eor_is_negotiated() {
+        let (addr, _gate, mut rx) = start(fast_limits()).await;
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.write_all(&do_(opt::EOR)).await.unwrap();
+        let outbound = connected_outbound(&mut rx).await;
+        let got = wire_after_prompt(&mut client, &outbound).await;
+        assert!(
+            contains_seq(&got, b"Password: \xff\xefSENTINEL\r\n"),
+            "got {got:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn prompt_end_marker_is_withheld_from_clients_that_never_negotiated_eor() {
+        let (addr, _gate, mut rx) = start(fast_limits()).await;
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let outbound = connected_outbound(&mut rx).await;
+        let got = wire_after_prompt(&mut client, &outbound).await;
+        assert!(contains_seq(&got, b"Password: SENTINEL\r\n"), "got {got:?}");
+        assert!(!contains_seq(&got, &[0xFF, 0xEF]), "stray IAC EOR: {got:?}");
     }
 
     fn contains_seq(hay: &[u8], needle: &[u8]) -> bool {

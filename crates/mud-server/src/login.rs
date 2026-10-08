@@ -213,6 +213,21 @@ fn login_message_bytes(world: &World, stage: &str, fallback: &str) -> Vec<u8> {
         .map_or(fallback, |m| m.get_or(stage, "default", fallback));
     crate::commands::render_color_tags(raw, crate::commands::ColorMode::Ansi).into_bytes()
 }
+/// Queue a login prompt (a frame that waits for input) followed by the
+/// `IAC EOR` prompt-end marker, as the in-game prompt does. The marker
+/// travels as its own frame so the prompt text still goes through the
+/// writer's colour/newline encoder; the writer drops the marker for
+/// clients that never negotiated EOR.
+fn send_prompt(outbound: &Outbound, bytes: Vec<u8>) {
+    let _ = outbound.try_send(bytes);
+    let _ = outbound.try_send(mud_net::iac_eor());
+}
+
+/// [`send_prompt`] for a data-driven `LoginMessage` prompt row.
+fn send_login_prompt(outbound: &Outbound, world: &World, stage: &str, fallback: &str) {
+    send_prompt(outbound, login_message_bytes(world, stage, fallback));
+}
+
 /// The connect banner for a client that can (`ascii == false`) or can't
 /// render UTF-8. Data-driven: a `WELCOME_BANNER` row with variant
 /// `ascii` serves plain clients, the `default` row everyone else (and
@@ -981,11 +996,7 @@ fn locked_hint(user: &User, now: chrono::NaiveDateTime) -> Option<String> {
 /// Send the identifier prompt and park the connection there.
 fn reprompt_identifier(ctx: &mut LoginCtx, world: &World) {
     ctx.stage = Stage::AwaitingIdentifier;
-    let _ = ctx.outbound.try_send(login_message_bytes(
-        world,
-        "EMAIL_PROMPT",
-        IDENT_PROMPT_FALLBACK,
-    ));
+    send_login_prompt(&ctx.outbound, world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK);
 }
 
 /// A socket drop leaves the character in the world only when it is
@@ -1159,11 +1170,7 @@ impl ConnRouter {
         let ascii = output.charset() == mud_net::Charset::Ascii;
         self.caps.entry(conn_id).or_default().output = output;
         let _ = outbound.try_send(welcome_banner_bytes(world, ascii));
-        let _ = outbound.try_send(login_message_bytes(
-            world,
-            "EMAIL_PROMPT",
-            IDENT_PROMPT_FALLBACK,
-        ));
+        send_login_prompt(&outbound, world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK);
         self.login.insert(
             conn_id,
             LoginCtx {
@@ -1696,11 +1703,7 @@ impl ConnRouter {
                     let _ = ctx
                         .outbound
                         .try_send(b"Invalid name, please try another.\r\n".to_vec());
-                    let _ = ctx.outbound.try_send(login_message_bytes(
-                        world,
-                        "EMAIL_PROMPT",
-                        IDENT_PROMPT_FALLBACK,
-                    ));
+                    send_login_prompt(&ctx.outbound, world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK);
                     return;
                 }
                 let is_email = trimmed.contains('@');
@@ -1750,11 +1753,12 @@ impl ConnRouter {
                                         .to_vec(),
                                 );
                                 ctx.stage = Stage::AwaitingIdentifier;
-                                let _ = ctx.outbound.try_send(login_message_bytes(
+                                send_login_prompt(
+                                    &ctx.outbound,
                                     world,
                                     "EMAIL_PROMPT",
                                     IDENT_PROMPT_FALLBACK,
-                                ));
+                                );
                                 return;
                             }
                             ctx.stage = Stage::ConfirmCreate {
@@ -1769,11 +1773,12 @@ impl ConnRouter {
                                 .outbound
                                 .try_send("Server error.\r\n".as_bytes().to_vec());
                             ctx.stage = Stage::AwaitingIdentifier;
-                            let _ = ctx.outbound.try_send(login_message_bytes(
+                            send_login_prompt(
+                                &ctx.outbound,
                                 world,
                                 "EMAIL_PROMPT",
                                 IDENT_PROMPT_FALLBACK,
-                            ));
+                            );
                             return;
                         }
                     }
@@ -1809,11 +1814,12 @@ impl ConnRouter {
                                         .outbound
                                         .try_send("Server error.\r\n".as_bytes().to_vec());
                                     ctx.stage = Stage::AwaitingIdentifier;
-                                    let _ = ctx.outbound.try_send(login_message_bytes(
+                                    send_login_prompt(
+                                        &ctx.outbound,
                                         world,
                                         "EMAIL_PROMPT",
                                         IDENT_PROMPT_FALLBACK,
-                                    ));
+                                    );
                                     return;
                                 }
                             };
@@ -1840,11 +1846,12 @@ impl ConnRouter {
                                         .to_vec(),
                                 );
                                 ctx.stage = Stage::AwaitingIdentifier;
-                                let _ = ctx.outbound.try_send(login_message_bytes(
+                                send_login_prompt(
+                                    &ctx.outbound,
                                     world,
                                     "EMAIL_PROMPT",
                                     IDENT_PROMPT_FALLBACK,
-                                ));
+                                );
                                 return;
                             }
                             ctx.stage = Stage::ConfirmCreate {
@@ -1859,11 +1866,12 @@ impl ConnRouter {
                                 .outbound
                                 .try_send("Server error.\r\n".as_bytes().to_vec());
                             ctx.stage = Stage::AwaitingIdentifier;
-                            let _ = ctx.outbound.try_send(login_message_bytes(
+                            send_login_prompt(
+                                &ctx.outbound,
                                 world,
                                 "EMAIL_PROMPT",
                                 IDENT_PROMPT_FALLBACK,
-                            ));
+                            );
                             return;
                         }
                     }
@@ -1878,11 +1886,12 @@ impl ConnRouter {
                     {
                         let _ = ctx.outbound.try_send(msg.into_bytes());
                     }
-                    let _ = ctx.outbound.try_send(login_message_bytes(
+                    send_login_prompt(
+                        &ctx.outbound,
                         world,
                         "PASSWORD_PROMPT",
                         PASSWORD_PROMPT_FALLBACK,
-                    ));
+                    );
                 }
             }
 
@@ -1905,11 +1914,12 @@ impl ConnRouter {
                         identifier,
                         is_email,
                     };
-                    let _ = ctx.outbound.try_send(login_message_bytes(
+                    send_login_prompt(
+                        &ctx.outbound,
                         world,
                         "CREATE_PASSWORD",
                         NEW_PASSWORD_PROMPT_FALLBACK,
-                    ));
+                    );
                 } else if no {
                     let _ = ctx.outbound.try_send(
                         "Okay — please enter an existing email or character name.\r\n"
@@ -1917,11 +1927,7 @@ impl ConnRouter {
                             .to_vec(),
                     );
                     ctx.stage = Stage::AwaitingIdentifier;
-                    let _ = ctx.outbound.try_send(login_message_bytes(
-                        world,
-                        "EMAIL_PROMPT",
-                        IDENT_PROMPT_FALLBACK,
-                    ));
+                    send_login_prompt(&ctx.outbound, world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK);
                 } else {
                     let _ = ctx
                         .outbound
@@ -1949,11 +1955,12 @@ impl ConnRouter {
                         identifier,
                         is_email,
                     };
-                    let _ = ctx.outbound.try_send(login_message_bytes(
+                    send_login_prompt(
+                        &ctx.outbound,
                         world,
                         "CREATE_PASSWORD",
                         NEW_PASSWORD_PROMPT_FALLBACK,
-                    ));
+                    );
                     return;
                 }
                 ctx.stage = Stage::ConfirmNewPassword {
@@ -1961,11 +1968,12 @@ impl ConnRouter {
                     is_email,
                     first_attempt: trimmed.to_string(),
                 };
-                let _ = ctx.outbound.try_send(login_message_bytes(
+                send_login_prompt(
+                    &ctx.outbound,
                     world,
                     "CONFIRM_PASSWORD",
                     CONFIRM_PASSWORD_PROMPT_FALLBACK,
-                ));
+                );
             }
 
             Stage::ConfirmNewPassword {
@@ -1983,11 +1991,12 @@ impl ConnRouter {
                         identifier,
                         is_email,
                     };
-                    let _ = ctx.outbound.try_send(login_message_bytes(
+                    send_login_prompt(
+                        &ctx.outbound,
                         world,
                         "CREATE_PASSWORD",
                         NEW_PASSWORD_PROMPT_FALLBACK,
-                    ));
+                    );
                     return;
                 }
                 // Password confirmed. Email path needs to collect a
@@ -2006,11 +2015,12 @@ impl ConnRouter {
                         email: identifier,
                         password_plaintext: first_attempt,
                     };
-                    let _ = ctx.outbound.try_send(login_message_bytes(
+                    send_login_prompt(
+                        &ctx.outbound,
                         world,
                         "CREATE_NAME_PROMPT",
                         NEW_CHARACTER_NAME_PROMPT_FALLBACK,
-                    ));
+                    );
                 } else {
                     // Character-name path: identifier IS the
                     // character name. Advance to race selection.
@@ -2034,11 +2044,12 @@ impl ConnRouter {
                         email,
                         password_plaintext,
                     };
-                    let _ = ctx.outbound.try_send(login_message_bytes(
+                    send_login_prompt(
+                        &ctx.outbound,
                         world,
                         "CREATE_NAME_PROMPT",
                         NEW_CHARACTER_NAME_PROMPT_FALLBACK,
-                    ));
+                    );
                     return;
                 }
                 match characters::find_by_name(pool, name).await {
@@ -2054,11 +2065,12 @@ impl ConnRouter {
                             email,
                             password_plaintext,
                         };
-                        let _ = ctx.outbound.try_send(login_message_bytes(
+                        send_login_prompt(
+                            &ctx.outbound,
                             world,
                             "CREATE_NAME_PROMPT",
                             NEW_CHARACTER_NAME_PROMPT_FALLBACK,
-                        ));
+                        );
                     }
                     Ok(None) => {
                         // Name is available. Advance to race
@@ -2081,11 +2093,12 @@ impl ConnRouter {
                             email,
                             password_plaintext,
                         };
-                        let _ = ctx.outbound.try_send(login_message_bytes(
+                        send_login_prompt(
+                            &ctx.outbound,
                             world,
                             "CREATE_NAME_PROMPT",
                             NEW_CHARACTER_NAME_PROMPT_FALLBACK,
-                        ));
+                        );
                     }
                 }
             }
@@ -2284,11 +2297,12 @@ impl ConnRouter {
                         preselected,
                         game_hash,
                     };
-                    let _ = ctx.outbound.try_send(login_message_bytes(
+                    send_login_prompt(
+                        &ctx.outbound,
                         world,
                         "PASSWORD_PROMPT",
                         PASSWORD_PROMPT_FALLBACK,
-                    ));
+                    );
                     return;
                 }
                 // Unlinked legacy characters have no `Users` row to carry
@@ -2319,11 +2333,12 @@ impl ConnRouter {
                             .into_bytes(),
                         );
                         ctx.stage = Stage::AwaitingIdentifier;
-                        let _ = ctx.outbound.try_send(login_message_bytes(
+                        send_login_prompt(
+                            &ctx.outbound,
                             world,
                             "EMAIL_PROMPT",
                             IDENT_PROMPT_FALLBACK,
-                        ));
+                        );
                         return;
                     }
                 }
@@ -2363,9 +2378,10 @@ impl ConnRouter {
                     .and_then(|i| characters.get(i))
                     .cloned()
                 else {
-                    let _ = ctx
-                        .outbound
-                        .try_send(format!("Pick 1-{}.\r\n", characters.len()).into_bytes());
+                    send_prompt(
+                        &ctx.outbound,
+                        format!("Pick 1-{}.\r\n", characters.len()).into_bytes(),
+                    );
                     ctx.stage = Stage::CharSelect { user, characters };
                     return;
                 };
@@ -2421,11 +2437,7 @@ impl ConnRouter {
                         .to_vec(),
                 );
                 ctx.stage = Stage::AwaitingIdentifier;
-                let _ = ctx.outbound.try_send(login_message_bytes(
-                    world,
-                    "EMAIL_PROMPT",
-                    IDENT_PROMPT_FALLBACK,
-                ));
+                send_login_prompt(&ctx.outbound, world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK);
                 return;
             }
         };
@@ -2443,11 +2455,7 @@ impl ConnRouter {
                         .to_vec(),
                 );
                 ctx.stage = Stage::AwaitingIdentifier;
-                let _ = ctx.outbound.try_send(login_message_bytes(
-                    world,
-                    "EMAIL_PROMPT",
-                    IDENT_PROMPT_FALLBACK,
-                ));
+                send_login_prompt(&ctx.outbound, world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK);
                 return;
             }
         };
@@ -2468,11 +2476,7 @@ impl ConnRouter {
                 // INSERT (if any) gets rolled back.
                 drop(tx);
                 ctx.stage = Stage::AwaitingIdentifier;
-                let _ = ctx.outbound.try_send(login_message_bytes(
-                    world,
-                    "EMAIL_PROMPT",
-                    IDENT_PROMPT_FALLBACK,
-                ));
+                send_login_prompt(&ctx.outbound, world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK);
                 return;
             }
         };
@@ -2517,11 +2521,7 @@ impl ConnRouter {
                 );
                 drop(tx);
                 ctx.stage = Stage::AwaitingIdentifier;
-                let _ = ctx.outbound.try_send(login_message_bytes(
-                    world,
-                    "EMAIL_PROMPT",
-                    IDENT_PROMPT_FALLBACK,
-                ));
+                send_login_prompt(&ctx.outbound, world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK);
                 return;
             }
         };
@@ -2535,11 +2535,7 @@ impl ConnRouter {
                 .into_bytes(),
             );
             ctx.stage = Stage::AwaitingIdentifier;
-            let _ = ctx.outbound.try_send(login_message_bytes(
-                world,
-                "EMAIL_PROMPT",
-                IDENT_PROMPT_FALLBACK,
-            ));
+            send_login_prompt(&ctx.outbound, world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK);
             return;
         }
         // Both rows are committed. Re-fetch the User + the
@@ -2561,11 +2557,7 @@ impl ConnRouter {
                         .to_vec(),
                 );
                 ctx.stage = Stage::AwaitingIdentifier;
-                let _ = ctx.outbound.try_send(login_message_bytes(
-                    world,
-                    "EMAIL_PROMPT",
-                    IDENT_PROMPT_FALLBACK,
-                ));
+                send_login_prompt(&ctx.outbound, world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK);
                 return;
             }
             Err(e) => {
@@ -2576,11 +2568,7 @@ impl ConnRouter {
                         .to_vec(),
                 );
                 ctx.stage = Stage::AwaitingIdentifier;
-                let _ = ctx.outbound.try_send(login_message_bytes(
-                    world,
-                    "EMAIL_PROMPT",
-                    IDENT_PROMPT_FALLBACK,
-                ));
+                send_login_prompt(&ctx.outbound, world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK);
                 return;
             }
         };
@@ -2594,11 +2582,7 @@ impl ConnRouter {
                         .to_vec(),
                 );
                 ctx.stage = Stage::AwaitingIdentifier;
-                let _ = ctx.outbound.try_send(login_message_bytes(
-                    world,
-                    "EMAIL_PROMPT",
-                    IDENT_PROMPT_FALLBACK,
-                ));
+                send_login_prompt(&ctx.outbound, world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK);
                 return;
             }
             Err(e) => {
@@ -2609,11 +2593,7 @@ impl ConnRouter {
                         .to_vec(),
                 );
                 ctx.stage = Stage::AwaitingIdentifier;
-                let _ = ctx.outbound.try_send(login_message_bytes(
-                    world,
-                    "EMAIL_PROMPT",
-                    IDENT_PROMPT_FALLBACK,
-                ));
+                send_login_prompt(&ctx.outbound, world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK);
                 return;
             }
         };
@@ -2731,11 +2711,7 @@ impl ConnRouter {
                 return;
             }
             ctx.stage = Stage::AwaitingIdentifier;
-            let _ = ctx.outbound.try_send(login_message_bytes(
-                world,
-                "EMAIL_PROMPT",
-                IDENT_PROMPT_FALLBACK,
-            ));
+            send_login_prompt(&ctx.outbound, world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK);
             return;
         }
         if user.id.is_empty()
@@ -2797,11 +2773,7 @@ impl ConnRouter {
                     .to_vec(),
             );
             ctx.stage = Stage::AwaitingIdentifier;
-            let _ = ctx.outbound.try_send(login_message_bytes(
-                world,
-                "EMAIL_PROMPT",
-                IDENT_PROMPT_FALLBACK,
-            ));
+            send_login_prompt(&ctx.outbound, world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK);
             return;
         }
         // Ban check. Refuses post-auth so we don't leak
@@ -2838,11 +2810,7 @@ impl ConnRouter {
                 format!("Your account is banned: {}{until}\r\n", ban.reason).into_bytes(),
             );
             ctx.stage = Stage::AwaitingIdentifier;
-            let _ = ctx.outbound.try_send(login_message_bytes(
-                world,
-                "EMAIL_PROMPT",
-                IDENT_PROMPT_FALLBACK,
-            ));
+            send_login_prompt(&ctx.outbound, world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK);
             return;
         }
         info!(conn_id, user_id = %user.id, email = %user.email, "auth success");
@@ -2868,11 +2836,7 @@ impl ConnRouter {
                     .outbound
                     .try_send("Server error.\r\n".as_bytes().to_vec());
                 ctx.stage = Stage::AwaitingIdentifier;
-                let _ = ctx.outbound.try_send(login_message_bytes(
-                    world,
-                    "EMAIL_PROMPT",
-                    IDENT_PROMPT_FALLBACK,
-                ));
+                send_login_prompt(&ctx.outbound, world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK);
                 return;
             }
         };
@@ -2881,11 +2845,7 @@ impl ConnRouter {
                 .outbound
                 .try_send("No characters on this account.\r\n".as_bytes().to_vec());
             ctx.stage = Stage::AwaitingIdentifier;
-            let _ = ctx.outbound.try_send(login_message_bytes(
-                world,
-                "EMAIL_PROMPT",
-                IDENT_PROMPT_FALLBACK,
-            ));
+            send_login_prompt(&ctx.outbound, world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK);
             return;
         }
         let mut menu = String::from("\r\nCharacters:\r\n");
@@ -2898,7 +2858,7 @@ impl ConnRouter {
             ));
         }
         menu.push_str("Pick a number: ");
-        let _ = ctx.outbound.try_send(menu.into_bytes());
+        send_prompt(&ctx.outbound, menu.into_bytes());
         ctx.stage = Stage::CharSelect {
             user,
             characters: chars,
@@ -3161,6 +3121,7 @@ impl ConnRouter {
                     .to_vec(),
             );
         }
+        let _ = ctx.outbound.try_send(mud_net::iac_eor());
         ctx.stage = Stage::AwaitingWebApproval(Box::new(WebLogin {
             code,
             code_id,
@@ -3225,7 +3186,8 @@ impl ConnRouter {
                     reprompt_identifier(ctx, world);
                 } else {
                     let left = (web.expires_at - now).as_secs().max(1);
-                    let _ = ctx.outbound.try_send(
+                    send_prompt(
+                        &ctx.outbound,
                         format!(
                             "Code {} is still waiting for approval ({left}s left). \
                              Press Enter to check, or type cancel.\r\n",
@@ -5961,7 +5923,7 @@ fn send_race_prompt(outbound: &Outbound) {
         msg.push_str(race);
     }
     msg.push_str("\r\nRace: ");
-    let _ = outbound.try_send(msg.into_bytes());
+    send_prompt(outbound, msg.into_bytes());
 }
 
 /// Match a freshly-typed race against the playable list. Returns
@@ -5991,7 +5953,7 @@ fn send_class_prompt(outbound: &Outbound, world: &World) {
     let mut msg = String::from("Available classes: ");
     msg.push_str(&bases.join(", "));
     msg.push_str("\r\nClass: ");
-    let _ = outbound.try_send(msg.into_bytes());
+    send_prompt(outbound, msg.into_bytes());
 }
 
 /// Look up a base class by `plain_name`, case-insensitively.
@@ -6015,7 +5977,7 @@ fn send_gender_prompt(outbound: &Outbound) {
     let mut msg = String::from("Available genders: ");
     msg.push_str(&PLAYABLE_GENDERS.join(", "));
     msg.push_str("\r\nGender: ");
-    let _ = outbound.try_send(msg.into_bytes());
+    send_prompt(outbound, msg.into_bytes());
 }
 
 /// Match a freshly-typed gender against the accepted list.
@@ -6073,7 +6035,7 @@ fn send_stat_review(outbound: &Outbound, stats: &CoreStats) {
         stats.charisma,
         CoreStats::bonus(stats.charisma),
     );
-    let _ = outbound.try_send(line.into_bytes());
+    send_prompt(outbound, line.into_bytes());
 }
 
 /// Shared prompt for the `ConfirmCreate` doorway. `is_email`
@@ -6081,7 +6043,8 @@ fn send_stat_review(outbound: &Outbound, stats: &CoreStats) {
 /// matching the identifier they typed.
 fn send_confirm_create_prompt(outbound: &Outbound, identifier: &str, is_email: bool) {
     let kind_label = if is_email { "account" } else { "character" };
-    let _ = outbound.try_send(
+    send_prompt(
+        outbound,
         format!("I don't see a {kind_label} for `{identifier}`. Create a new one? (yes/no): ")
             .into_bytes(),
     );
@@ -6722,6 +6685,55 @@ mod tests {
         utf8.apply_mtts(1 | 4 | 8);
         let (fancy, _) = banner_for(&world, utf8);
         assert!(fancy.contains('\u{2588}'), "UTF-8 client lost the logo");
+    }
+
+    /// Frames queued so far, as raw byte vectors.
+    fn frames(rx: &mut tokio::sync::mpsc::Receiver<Vec<u8>>) -> Vec<Vec<u8>> {
+        std::iter::from_fn(|| rx.try_recv().ok()).collect()
+    }
+
+    #[test]
+    fn identifier_prompt_at_connect_ends_with_iac_eor() {
+        let world = World::new();
+        let mut router = ConnRouter::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        router.on_connect_with(1, tx, None, mud_net::OutputHandle::new(), &world);
+        let got = frames(&mut rx);
+        // banner, prompt text, then the marker as its own frame.
+        assert_eq!(got.len(), 3, "{got:?}");
+        assert_eq!(got[1], b"Email or character name: ");
+        assert_eq!(got[2], [0xFF, 0xEF]);
+    }
+
+    #[test]
+    fn reprompts_and_selection_prompts_end_with_iac_eor() {
+        let world = World::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let mut ctx = LoginCtx {
+            outbound: tx,
+            stage: Stage::AwaitingIdentifier,
+            failed_attempts: 0,
+            peer: None,
+            tls: false,
+            notice_shown: false,
+        };
+        reprompt_identifier(&mut ctx, &world);
+        send_race_prompt(&ctx.outbound);
+        send_gender_prompt(&ctx.outbound);
+        send_confirm_create_prompt(&ctx.outbound, "Bob", false);
+        send_login_prompt(
+            &ctx.outbound,
+            &world,
+            "PASSWORD_PROMPT",
+            PASSWORD_PROMPT_FALLBACK,
+        );
+        let got = frames(&mut rx);
+        assert_eq!(got.len(), 10, "{got:?}");
+        for pair in got.chunks(2) {
+            assert!(!pair[0].ends_with(&[0xFF, 0xEF]), "marker glued to text");
+            assert_eq!(pair[1], [0xFF, 0xEF]);
+        }
+        assert_eq!(got[8], b"Password: ");
     }
 
     #[test]

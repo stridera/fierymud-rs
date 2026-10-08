@@ -156,6 +156,8 @@ struct OutputState {
     charset_override: AtomicU8,
     /// An MTTS bitmap arrived; it outranks TERM-name guesses.
     mtts_seen: AtomicBool,
+    /// The client accepted `IAC DO EOR`; prompt-end markers may be sent.
+    eor: AtomicBool,
 }
 
 /// Cheaply cloneable handle on one connection's output capabilities.
@@ -178,6 +180,7 @@ impl OutputHandle {
             color_override: AtomicU8::new(AUTO),
             charset_override: AtomicU8::new(0),
             mtts_seen: AtomicBool::new(false),
+            eor: AtomicBool::new(false),
         }))
     }
 
@@ -258,9 +261,28 @@ impl OutputHandle {
         self.0.utf8.store(true, Ordering::Relaxed);
     }
 
+    /// Record whether the client accepted the END-OF-RECORD option.
+    pub fn set_eor(&self, on: bool) {
+        self.0.eor.store(on, Ordering::Relaxed);
+    }
+
+    /// The client accepted END-OF-RECORD (`IAC DO EOR`).
+    #[must_use]
+    pub fn eor(&self) -> bool {
+        self.0.eor.load(Ordering::Relaxed)
+    }
+
     /// Encode one outbound frame for this client; see the module docs.
+    ///
+    /// A frame that is exactly `IAC EOR` (the prompt-end marker the game
+    /// pushes after every prompt, login prompts included) is dropped
+    /// unless the client negotiated EOR, so raw TCP clients never see
+    /// the two stray bytes.
     #[must_use]
     pub fn encode(&self, frame: Vec<u8>) -> Vec<u8> {
+        if frame == [0xFF, 0xEF] && !self.eor() {
+            return Vec::new();
+        }
         encode_frame(frame, self.color(), self.charset())
     }
 }
@@ -868,5 +890,17 @@ mod tests {
         for idx in 16u8..=231 {
             assert_eq!(nearest_256(rgb_of_256(idx)), idx, "idx {idx}");
         }
+    }
+
+    #[test]
+    fn eor_marker_frame_is_dropped_until_the_client_negotiates_eor() {
+        let h = OutputHandle::new();
+        assert!(h.encode(vec![0xFF, 0xEF]).is_empty());
+        h.set_eor(true);
+        assert_eq!(h.encode(vec![0xFF, 0xEF]), vec![0xFF, 0xEF]);
+        h.set_eor(false);
+        assert!(h.encode(vec![0xFF, 0xEF]).is_empty());
+        // Other telnet frames are never touched.
+        assert_eq!(h.encode(vec![0xFF, 0xF9]), vec![0xFF, 0xF9]);
     }
 }
