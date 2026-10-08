@@ -518,6 +518,9 @@ mod unban;
 #[path = "commands/wear_tests.rs"]
 mod wear_tests;
 #[cfg(test)]
+#[path = "commands/where_staff_tests.rs"]
+mod where_staff_tests;
+#[cfg(test)]
 #[path = "commands/wimpy_mob_tests.rs"]
 mod wimpy_mob_tests;
 #[path = "commands/writing.rs"]

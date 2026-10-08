@@ -27,12 +27,17 @@ inventory::submit! {
         required_perm: None,
         category: Category::Info,
         help: Help {
-            usage: "where [<player> | all]",
+            usage: "where [<name> | all]",
             summary: "Show your location, a named player's location, or list all online.",
             long: "With no argument, prints your own current room \
                    (name, zone, id). With a player name, prints that \
                    online player's current room. 'where all' (Builder+ \
-                   only) lists every online player and where they are.",
+                   only) lists every online player and where they are.\r\n\
+                   \r\n\
+                   Immortal+: 'where <name>' also searches live mobs \
+                   (M lines: [zone:id] name - room) and objects (O \
+                   lines, including carried, worn and contained ones) \
+                   whose name or keywords match.",
         },
         run: cmd_where,
     }
@@ -772,6 +777,13 @@ pub(crate) fn cmd_where(world: &mut World, player: Entity, args: &str) {
         return;
     }
 
+    // Immortal+ (legacy `perform_immort_where`): players, then live
+    // mobs, then objects wherever they sit.
+    if crate::room_access::is_immortal(world, player) {
+        staff_where(world, player, arg);
+        return;
+    }
+
     // `where <name>` — locate one online player. Match is case-
     // insensitive against `Characters.name`. Offline characters
     // intentionally fall through to "isn't online" rather than
@@ -808,6 +820,163 @@ pub(crate) fn cmd_where(world: &mut World, player: Entity, args: &str) {
         ),
     );
 }
+/// Rows shown per section of a staff `where <name>` before the overflow
+/// footer (a short needle like "a" would otherwise flood the screen).
+const WHERE_SECTION_LIMIT: usize = 100;
+
+/// Deepest container nesting `where` follows ("inside A at inside B at ...").
+const WHERE_MAX_NESTING: usize = 8;
+
+/// `room name [zone:id]` for a room entity.
+fn room_label(world: &World, room: Entity) -> String {
+    let name = name_or(world, room, "(unknown)");
+    let (zone, id) = world
+        .get::<WorldKey>(room)
+        .map_or((-1, -1), |k| (k.zone, k.id));
+    format!("{name} [{zone}:{id}]")
+}
+
+/// Where an item is, in legacy `print_object_location` words: in a room,
+/// carried / worn by an actor (with that actor's room), or inside another
+/// item (followed through to wherever that sits). `None` hides the row:
+/// the holder is an actor the viewer cannot see.
+fn item_location(world: &World, viewer: Entity, item: Entity, depth: usize) -> Option<String> {
+    let Some(parent) = world.get::<Located>(item).map(|l| l.0) else {
+        return Some("in an unknown location".to_string());
+    };
+    if world.get::<mud_world::Room>(parent).is_some() {
+        return Some(room_label(world, parent));
+    }
+    if world.get::<Player>(parent).is_some() || world.get::<Mob>(parent).is_some() {
+        if !crate::commands::can_see_player(world, viewer, parent) {
+            return None;
+        }
+        let verb = if world.get::<mud_world::EquippedSlot>(item).is_some() {
+            "worn by"
+        } else {
+            "carried by"
+        };
+        let holder = name_of(world, parent);
+        let at = world
+            .get::<Located>(parent)
+            .map_or_else(|| "nowhere".to_string(), |l| room_label(world, l.0));
+        return Some(format!("{verb} {holder} at {at}"));
+    }
+    if world.get::<Item>(parent).is_some() {
+        let outer = name_of(world, parent);
+        if depth >= WHERE_MAX_NESTING {
+            return Some(format!("inside {outer}"));
+        }
+        let at = item_location(world, viewer, parent, depth + 1)?;
+        return Some(format!("inside {outer} at {at}"));
+    }
+    Some("in an unknown location".to_string())
+}
+
+/// Immortal+ `where <name>` (legacy `perform_immort_where`): every visible
+/// player, then live mob, then object whose name / keywords match. Mob and
+/// object rows lead with the instance's prototype `[zone:id]`.
+fn staff_where(world: &mut World, viewer: Entity, arg: &str) {
+    let needle = arg.to_ascii_lowercase();
+    let mut out = String::new();
+
+    // Players: the original `X is in: room [zone:id]` line.
+    let mut players: Vec<(String, Entity)> = {
+        let mut q =
+            world.query_filtered::<(Entity, &Named, &Located), (With<Player>, With<Online>)>();
+        q.iter(world)
+            .filter(|(e, n, _)| {
+                matches(&needle, n, None) && crate::commands::can_see_player(world, viewer, *e)
+            })
+            .map(|(_, n, l)| (n.name.clone(), l.0))
+            .collect()
+    };
+    players.sort_by(|a, b| a.0.cmp(&b.0));
+    for (name, room) in &players {
+        out.push_str(&format!(
+            "{} is in: {}\r\n",
+            cap_sentence_start(name),
+            room_label(world, *room)
+        ));
+    }
+
+    // Live mobs, in a stable (proto key, spawn order) order.
+    let mut mobs: Vec<(Entity, (i32, i32), String, Entity)> = {
+        let mut q = world.query_filtered::<(
+            Entity,
+            &Named,
+            Option<&Keywords>,
+            &Located,
+            Option<&WorldKey>,
+        ), With<Mob>>();
+        q.iter(world)
+            .filter(|(e, n, kw, _, _)| {
+                matches(&needle, n, *kw) && crate::commands::can_see_player(world, viewer, *e)
+            })
+            .map(|(e, n, _, l, k)| {
+                (
+                    e,
+                    k.map_or((-1, -1), |k| (k.zone, k.id)),
+                    n.name.clone(),
+                    l.0,
+                )
+            })
+            .collect()
+    };
+    mobs.sort_by_key(|(e, key, _, _)| (*key, e.index_u32()));
+    for (i, (_, (zone, id), name, room)) in mobs.iter().take(WHERE_SECTION_LIMIT).enumerate() {
+        out.push_str(&format!(
+            "M{:>3}. [{zone}:{id}] {} - {}\r\n",
+            i + 1,
+            pad_visible(name, 25),
+            room_label(world, *room)
+        ));
+    }
+    if mobs.len() > WHERE_SECTION_LIMIT {
+        out.push_str(&format!(
+            "     ... {} more mob(s); narrow your search.\r\n",
+            mobs.len() - WHERE_SECTION_LIMIT
+        ));
+    }
+
+    // Objects, with carried / worn / contained locations.
+    let mut items: Vec<(Entity, (i32, i32), String)> = {
+        let mut q = world
+            .query_filtered::<(Entity, &Named, Option<&Keywords>, Option<&WorldKey>), With<Item>>();
+        q.iter(world)
+            .filter(|(_, n, kw, _)| matches(&needle, n, *kw))
+            .map(|(e, n, _, k)| (e, k.map_or((-1, -1), |k| (k.zone, k.id)), n.name.clone()))
+            .collect()
+    };
+    items.sort_by_key(|(e, key, _)| (*key, e.index_u32()));
+    let (mut shown, mut hidden_or_over) = (0usize, 0usize);
+    for (item, (zone, id), name) in &items {
+        let Some(location) = item_location(world, viewer, *item, 0) else {
+            continue;
+        };
+        if shown >= WHERE_SECTION_LIMIT {
+            hidden_or_over += 1;
+            continue;
+        }
+        shown += 1;
+        out.push_str(&format!(
+            "O{shown:>3}. [{zone}:{id}] {} - {location}\r\n",
+            pad_visible(name, 25)
+        ));
+    }
+    if hidden_or_over > 0 {
+        out.push_str(&format!(
+            "     ... {hidden_or_over} more object(s); narrow your search.\r\n"
+        ));
+    }
+
+    if out.is_empty() {
+        send_to(world, viewer, "Couldn't find any such thing.\r\n");
+    } else {
+        send_rendered(world, viewer, &out);
+    }
+}
+
 pub(crate) fn cmd_slay(world: &mut World, player: Entity, args: &str) {
     record_admin_action(world, player, "slay", args);
     let arg = args.trim();
