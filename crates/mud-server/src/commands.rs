@@ -20845,18 +20845,26 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         let new_followers: Vec<Entity> = {
             // Legacy `do_simple_move` only drags along followers that are
             // standing and not fighting; a follower who is sitting, resting,
-            // sleeping or in a fight stays behind.
-            let mut q =
-                world.query::<(Entity, &Located, &Follower, Has<Fighting>, Option<&Posture>)>();
+            // sleeping or in a fight stays behind, and so does one mid-cast
+            // (legacy act.movement.cpp `!CASTING`).
+            let mut q = world.query::<(
+                Entity,
+                &Located,
+                &Follower,
+                Has<Fighting>,
+                Has<mud_world::Casting>,
+                Option<&Posture>,
+            )>();
             q.iter(world)
-                .filter(|(e, l, f, fighting, posture)| {
+                .filter(|(e, l, f, fighting, casting, posture)| {
                     f.0 == leader
                         && l.0 == from_room
                         && !fighting
+                        && !casting
                         && posture.is_none_or(|p| p.0 == PostureKind::Standing)
                         && !movers.contains(e)
                 })
-                .map(|(e, _, _, _, _)| e)
+                .map(|(e, _, _, _, _, _)| e)
                 .collect()
         };
         for f in new_followers {

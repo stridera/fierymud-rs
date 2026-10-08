@@ -1823,12 +1823,11 @@ fn session_create(
                 poof_out: character.poof_out.clone(),
             });
         }
-        if let Some(json) = script_vars_json
-            && let Ok(map) =
-                serde_json::from_value::<std::collections::BTreeMap<String, String>>(json)
-            && !map.is_empty()
-        {
-            e.insert(mud_world::ScriptVars(map));
+        // Same hydration as the telnet login: the reserved camp wake-kit
+        // key becomes a component (not a visible var), so this session's
+        // save re-writes it instead of erasing the queued wake bonus.
+        if let Some(json) = script_vars_json {
+            crate::login::insert_loaded_script_vars(&mut e, json, character.rest_source);
         }
         if let Some(json) = trophy_json
             && let Ok(entries) =

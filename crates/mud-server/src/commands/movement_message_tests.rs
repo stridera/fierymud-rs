@@ -170,6 +170,39 @@ fn a_fighting_follower_stays_behind_when_the_leader_moves() {
     );
 }
 
+/// Legacy `do_simple_move` also requires `!CASTING(follower)`: a follower
+/// mid-cast stays behind (and keeps its wind-up).
+#[test]
+fn a_casting_follower_stays_behind_when_the_leader_moves() {
+    let (mut world, leader, _mrx, _brx, _crx) = setup(Direction::North, ExitState::Open, &[]);
+    let from = world.get::<mud_world::Located>(leader).unwrap().0;
+    let (idle, _irx) = player_in(&mut world, from);
+    let (caster, _crx2) = player_in(&mut world, from);
+    for f in [idle, caster] {
+        world
+            .entity_mut(f)
+            .insert((account(), mud_world::Follower(leader)));
+    }
+    world.entity_mut(caster).insert(mud_world::Casting {
+        ability_id: 1,
+        ability_name: "Fireball".to_string(),
+        args: String::new(),
+        kind_label: "spell".to_string(),
+        verb: "cast".to_string(),
+        ticks_remaining: 8,
+        ticks_total: 8,
+        target: mud_world::CastTarget::Area,
+        recognized_by: Vec::new(),
+        slot_reservation: None,
+    });
+    cmd_move(&mut world, leader, Direction::North);
+    let to = world.get::<mud_world::Located>(leader).unwrap().0;
+    assert_ne!(to, from);
+    assert_eq!(world.get::<mud_world::Located>(idle).unwrap().0, to);
+    assert_eq!(world.get::<mud_world::Located>(caster).unwrap().0, from);
+    assert!(world.get::<mud_world::Casting>(caster).is_some());
+}
+
 /// Legacy `do_simple_move` requires `GET_POS(follower) >= POS_STANDING`:
 /// sitting, resting and sleeping followers stay behind.
 #[test]

@@ -639,6 +639,28 @@ pub(crate) fn take_pending_wake(
     mud_world::PendingWakeAttachments::from_var(&raw)
 }
 
+/// Hydrate `ScriptVars` (and the queued camp wake kit) onto a freshly
+/// loaded player entity from the persisted JSON. Shared by the telnet
+/// login and the admin virtual-session loader so both strip the reserved
+/// wake-kit key out of the visible vars and restore it as a component,
+/// which `script_vars_for_save` then writes back on save.
+pub(crate) fn insert_loaded_script_vars(
+    e: &mut bevy_ecs::world::EntityWorldMut<'_>,
+    json: serde_json::Value,
+    rest_source: mud_db::enums::RestSource,
+) {
+    let Ok(mut map) = serde_json::from_value::<std::collections::BTreeMap<String, String>>(json)
+    else {
+        return;
+    };
+    if let Some(pending) = take_pending_wake(&mut map, rest_source) {
+        e.insert(pending);
+    }
+    if !map.is_empty() {
+        e.insert(mud_world::ScriptVars(map));
+    }
+}
+
 /// Shared restore logic: spawn one mob entity per persisted pet
 /// entry, dropping all entries past the disconnect cap (no staff-
 /// exception equivalent for pets — they're player-owned investments,
@@ -3761,16 +3783,8 @@ impl ConnRouter {
             }
             // ScriptVars — JSON object → BTreeMap. Shape was already
             // validated by `check_json` in `load_persisted`.
-            if let Some(json) = script_vars_json
-                && let Ok(mut map) =
-                    serde_json::from_value::<std::collections::BTreeMap<String, String>>(json)
-            {
-                if let Some(pending) = take_pending_wake(&mut map, char_row.rest_source) {
-                    e.insert(pending);
-                }
-                if !map.is_empty() {
-                    e.insert(mud_world::ScriptVars(map));
-                }
+            if let Some(json) = script_vars_json {
+                insert_loaded_script_vars(&mut e, json, char_row.rest_source);
             }
             // Trophy — JSON list → Trophy (validated in `load_persisted`).
             if let Some(json) = trophy_json

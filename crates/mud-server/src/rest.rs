@@ -464,14 +464,7 @@ mod tests {
             rest,
         ));
         if let Some(json) = saved {
-            let mut map: std::collections::BTreeMap<String, String> =
-                serde_json::from_value(json).unwrap();
-            if let Some(p) = crate::login::take_pending_wake(&mut map, rest.source) {
-                e.insert(p);
-            }
-            if !map.is_empty() {
-                e.insert(mud_world::ScriptVars(map));
-            }
+            crate::login::insert_loaded_script_vars(&mut e, json, rest.source);
         }
         e.id()
     }
@@ -500,6 +493,31 @@ mod tests {
         assert!(world.get::<PendingWakeAttachments>(again).is_none());
         award_experience(&mut world, again, 50);
         assert_eq!(effect_count(&mut world, 2), 1, "not reapplied");
+    }
+
+    /// The admin virtual-session loader shares `insert_loaded_script_vars`
+    /// with telnet login: a camped character's queued wake kit must not
+    /// show up as a script var, and the session's save must write it back
+    /// unchanged alongside the player's own vars.
+    #[tokio::test(flavor = "current_thread")]
+    async fn admin_loaded_session_preserves_wake_kit_across_save() {
+        let (saved, rest, mut world, camper) = camp_and_log_out(Some((40, 7)));
+        world.despawn(camper);
+        let mut json = saved.expect("kit persisted");
+        json.as_object_mut()
+            .unwrap()
+            .insert("keep".to_string(), serde_json::json!("1"));
+
+        let back = log_back_in(&mut world, Some(json), rest);
+        assert!(world.get::<PendingWakeAttachments>(back).is_some());
+        let vars = world.get::<mud_world::ScriptVars>(back).unwrap();
+        assert!(!vars.0.contains_key(mud_world::PENDING_WAKE_KIT_KEY));
+        assert_eq!(vars.0.get("keep").map(String::as_str), Some("1"));
+
+        let resaved = crate::login::script_vars_for_save(&world, back).unwrap();
+        let obj = resaved.as_object().unwrap();
+        assert!(obj.contains_key(mud_world::PENDING_WAKE_KIT_KEY));
+        assert_eq!(obj.get("keep").and_then(|v| v.as_str()), Some("1"));
     }
 
     #[tokio::test(flavor = "current_thread")]
