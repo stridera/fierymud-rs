@@ -302,3 +302,58 @@ fn indexed_actor_target_matches_look_mobs_before_players() {
     assert_eq!(find(&mut world, "2.bob"), Some(newer));
     assert_eq!(find(&mut world, "3.bob"), Some(other));
 }
+
+#[test]
+fn indexed_worn_target_follows_equipment_slot_order() {
+    use mud_world::{EquippedSlot, Slot};
+    let (mut world, _room, p, mut rx) = setup();
+    let left = spawn_item(&mut world, p, "a gold ring", "ring", 1);
+    let right = spawn_item(&mut world, p, "a silver ring", "ring", 2);
+    world
+        .entity_mut(left)
+        .insert(EquippedSlot(Slot::LeftFinger));
+    world
+        .entity_mut(right)
+        .insert(EquippedSlot(Slot::RightFinger));
+    // `equipment` lists slot order (left finger, then right finger) even
+    // though the right ring arrived later.
+    dispatch(&mut world, p, "equipment");
+    assert_in_order(&drain(&mut rx), &["gold ring", "silver ring"]);
+    let eq = super::EquipFilter::Equipped;
+    assert_eq!(
+        super::find_carried_by(&mut world, "ring", p, eq),
+        Some(left)
+    );
+    assert_eq!(
+        super::find_carried_by(&mut world, "2.ring", p, eq),
+        Some(right)
+    );
+
+    dispatch(&mut world, p, "remove 2.ring");
+    let _ = drain(&mut rx);
+    assert!(world.get::<EquippedSlot>(left).is_some());
+    assert!(world.get::<EquippedSlot>(right).is_none());
+}
+
+#[test]
+fn anywhere_search_checks_equipment_before_inventory_like_generic_find() {
+    use mud_world::{EquippedSlot, Slot};
+    let (mut world, _room, p, _rx) = setup();
+    let packed = spawn_item(&mut world, p, "a brass ring", "ring", 1);
+    let worn = spawn_item(&mut world, p, "a gold ring", "ring", 2);
+    world
+        .entity_mut(worn)
+        .insert(EquippedSlot(Slot::LeftFinger));
+    let any = super::EquipFilter::Anywhere;
+    assert_eq!(
+        super::find_carried_by(&mut world, "ring", p, any),
+        Some(worn)
+    );
+    // The counter restarts per list (legacy copies the find context), so
+    // a second ring is looked for in the pack, not past the worn one.
+    assert_eq!(super::find_carried_by(&mut world, "2.ring", p, any), None);
+    assert_eq!(
+        super::find_carried_by(&mut world, "1.ring", p, super::EquipFilter::Inventory),
+        Some(packed)
+    );
+}

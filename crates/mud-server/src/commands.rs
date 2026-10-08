@@ -12675,6 +12675,16 @@ pub(crate) fn parse_count_prefix(input: &str) -> (Option<usize>, &str) {
     (None, input)
 }
 
+/// Resolve `[N.]needle` among the things `carrier` has on them.
+///
+/// Order is the display order of each list: inventory is newest-first (as
+/// `inventory` renders it), worn items follow `equipment`'s slot order
+/// ([`Slot::ORDER`]). With [`EquipFilter::Anywhere`] this mirrors legacy
+/// `generic_find(FIND_OBJ_EQUIP | FIND_OBJ_INV)` (`find.cpp`
+/// `universal_find`): equipment is searched first, then inventory, and the
+/// `N.` counter restarts for each list (the context is copied per call), so
+/// `2.ring` that has only one match among the worn items goes on to look
+/// for the second ring in the pack.
 pub(crate) fn find_carried_by(
     world: &mut World,
     needle: &str,
@@ -12690,24 +12700,32 @@ pub(crate) fn find_carried_by(
         Option<&Keywords>,
         Option<&EquippedSlot>,
     ), With<Item>>();
-    let mut hits: Vec<Entity> = q
-        .iter(world)
-        .filter(|(_, l, n, kw, eq)| {
-            if l.0 != carrier {
-                return false;
-            }
-            let is_equipped = eq.is_some();
-            let pass_filter = match filter {
-                EquipFilter::Inventory => !is_equipped,
-                EquipFilter::Equipped => is_equipped,
-                EquipFilter::Anywhere => true,
-            };
-            pass_filter && matches(&needle, n, *kw)
-        })
-        .map(|(e, _, _, _, _)| e)
-        .collect();
-    sort_newest_first(world, carrier, &mut hits, |e| *e);
-    hits.get(index - 1).copied()
+    let mut worn: Vec<(Entity, Slot)> = Vec::new();
+    let mut packed: Vec<Entity> = Vec::new();
+    for (e, l, n, kw, eq) in q.iter(world) {
+        if l.0 != carrier || !matches(&needle, n, kw) {
+            continue;
+        }
+        match eq {
+            Some(slot) => worn.push((e, slot.0)),
+            None => packed.push(e),
+        }
+    }
+    let slot_rank = |s: Slot| {
+        Slot::ORDER
+            .iter()
+            .position(|x| *x == s)
+            .unwrap_or(usize::MAX)
+    };
+    worn.sort_by_key(|(_, s)| slot_rank(*s));
+    sort_newest_first(world, carrier, &mut packed, |e| *e);
+    let worn_hit = || worn.get(index - 1).map(|(e, _)| *e);
+    let packed_hit = || packed.get(index - 1).copied();
+    match filter {
+        EquipFilter::Inventory => packed_hit(),
+        EquipFilter::Equipped => worn_hit(),
+        EquipFilter::Anywhere => worn_hit().or_else(packed_hit),
+    }
 }
 
 pub(crate) fn find_in_room(world: &mut World, needle: &str, room: Entity) -> Option<Entity> {
