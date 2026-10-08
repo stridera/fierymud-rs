@@ -1767,4 +1767,58 @@ mod tests {
         crate::combat::handle_death(&mut world, goblin, "a goblin", room);
         assert_ne!(world.get::<Located>(item).map(|l| l.0), Some(caster));
     }
+
+    fn strip_escapes(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' {
+                for n in chars.by_ref() {
+                    if n == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    /// Issue #63: a damage spell reports the number to the caster (and the
+    /// target), the same "for N damage" shape melee uses.
+    #[test]
+    fn damage_spell_reports_damage_to_caster_and_target() {
+        let (mut world, room) = world_with_zap();
+        let (caster, mut rx) = player_in(&mut world, room);
+        world.entity_mut(caster).insert((
+            Health { hp: 50, max: 50 },
+            KnownAbilities {
+                entries: vec![(ZAP, 500, true)],
+            },
+            mud_world::PlayerFlags(vec![mud_db::enums::PlayerFlag::PkEnabled]),
+        ));
+        let (bob, mut bob_rx) = bob_in(&mut world, room);
+        world.entity_mut(bob).insert((
+            Health {
+                hp: 5000,
+                max: 5000,
+            },
+            mud_world::PlayerFlags(vec![mud_db::enums::PlayerFlag::PkEnabled]),
+        ));
+        let _ = drain(&mut rx);
+        let _ = drain(&mut bob_rx);
+        zap(&mut world, caster, "bob");
+        let caster_out = strip_escapes(&drain(&mut rx));
+        assert!(
+            caster_out.contains("Your Zap hits") && caster_out.contains("for 500 damage"),
+            "caster sees the number: {caster_out:?}"
+        );
+        let bob_out = strip_escapes(&drain(&mut bob_rx));
+        assert!(
+            bob_out.contains("Zap hits you for 500 damage"),
+            "target sees the number: {bob_out:?}"
+        );
+        assert_eq!(hp(&world, bob), 4500);
+    }
 }

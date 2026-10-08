@@ -15128,6 +15128,50 @@ pub(crate) fn invoke_ability_with(
                     let pre_hp = world.get::<Health>(target_entity).map_or(0, |h| h.hp);
                     let (dead, threshold_msg) =
                         crate::commands::apply_damage_from(world, target_entity, amount, player);
+                    // Issue #63: show the damage number on spell hits,
+                    // unconditionally and in the same shape melee uses
+                    // ("... for N damage"), so spells and swings read
+                    // alike. Sent before the death broadcasts below.
+                    {
+                        let damage_label = match damage_color_tag(amount) {
+                            Some(open) => format!("{open}{amount}</>"),
+                            None => amount.to_string(),
+                        };
+                        if target_entity == player {
+                            send_to(
+                                world,
+                                player,
+                                format!(
+                                    "Your {} hurts you for {damage_label} damage.\r\n",
+                                    def.name
+                                ),
+                            );
+                        } else {
+                            let target_name = name_or(world, target_entity, "the target");
+                            send_to(
+                                world,
+                                player,
+                                format!(
+                                    "Your {} hits <b:cyan>{target_name}</> for {damage_label} damage.\r\n",
+                                    def.name,
+                                ),
+                            );
+                            let caster_to_target = cap_sentence_start(&seen_name(
+                                world,
+                                target_entity,
+                                player,
+                                &actor_name_pre,
+                            ));
+                            send_to(
+                                world,
+                                target_entity,
+                                format!(
+                                    "{caster_to_target}'s {} hits you for {damage_label} damage.\r\n",
+                                    def.name,
+                                ),
+                            );
+                        }
+                    }
                     // Lifesteal: heal the caster by the actual damage
                     // dealt. At max HP, legacy spills excess into
                     // overheal via a polynomial that approaches zero
