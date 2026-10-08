@@ -474,9 +474,10 @@ pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
             }
         }
     }
-    if let Ok(e) = world.get_entity_mut(target_effect) {
-        e.despawn();
-    }
+    let bearer = world
+        .get::<AppliedTo>(target_effect)
+        .map_or(player, |a| a.0);
+    crate::effects::remove_effect_instance(world, bearer, target_effect);
     send_to(world, player, format!("You cancel {removed_name}.\r\n"));
 }
 pub(crate) fn cmd_study(world: &mut World, player: Entity, args: &str) {

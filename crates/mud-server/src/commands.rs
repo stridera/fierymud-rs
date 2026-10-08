@@ -19136,25 +19136,15 @@ fn flag_prevents(flag: &str, kind: Prevent) -> bool {
     }
 }
 
-/// Despawn the given effect entities on `target`, first giving back any
-/// stat change a `ModifyDelta` companion recorded (the expiry tick does
-/// the same), so a cleansed debuff does not leave its penalty behind, and
-/// unwind the status markers they backed.
+/// Remove the given effect entities from `target` through
+/// [`crate::effects::remove_effect_instance`], the same reversal expiry
+/// does: stat deltas, resistance bumps, alignment-protect tags and the
+/// markers they backed all come back, so a dispelled or cleansed effect
+/// leaves nothing behind.
 fn despawn_effects_on(world: &mut World, target: Entity, effects: Vec<Entity>) -> usize {
     let count = effects.len();
     for e in effects {
-        if let Some(d) = world.get::<mud_world::ModifyDelta>(e).cloned() {
-            apply_modify_delta(world, target, &d.target, -d.amount);
-        }
-        let name = world.get::<EffectInstance>(e).map(|i| i.name.clone());
-        if let Ok(em) = world.get_entity_mut(e) {
-            em.despawn();
-        }
-        // Same marker unwind as expiry, so a dispelled `fly` / `bless` /
-        // ... does not leave its marker without a backing instance.
-        if let Some(name) = name {
-            crate::effects::teardown_markers_after_removal(world, target, &name);
-        }
+        crate::effects::remove_effect_instance(world, target, e);
     }
     count
 }

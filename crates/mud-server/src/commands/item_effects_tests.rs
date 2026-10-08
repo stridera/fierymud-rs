@@ -1184,3 +1184,170 @@ fn a_relogged_globe_empowered_and_resistance_spells_come_back_whole() {
             .is_none_or(|r| !r.0.contains_key(&ElementType::Fire))
     );
 }
+
+// --- early removal reverses what expiry reverses -------------------------
+
+const RESIST: i32 = 50;
+
+/// A cast elemental ward: the instance carries the `SpellResistanceDelta`
+/// that records its bump, and the bump is already in `Resistances` on top
+/// of `baseline` (an item's own resistance).
+fn cast_fire_ward(world: &mut World, p: Entity, baseline: i32, bump: i32, secs: i32) -> Entity {
+    use mud_db::enums::ElementType;
+    world.entity_mut(p).insert(mud_world::Resistances(
+        [(ElementType::Fire, baseline + bump)].into_iter().collect(),
+    ));
+    world
+        .spawn((
+            EffectInstance {
+                kind: RESIST,
+                name: "resistance".into(),
+                strength: 1,
+                remaining_secs: secs,
+                source: EffectSource::Spell,
+                ability_id: None,
+            },
+            AppliedTo(p),
+            mud_world::SpellResistanceDelta {
+                element: ElementType::Fire,
+                percent: bump,
+            },
+        ))
+        .id()
+}
+
+fn fire_resistance(world: &World, p: Entity) -> Option<i32> {
+    world
+        .get::<mud_world::Resistances>(p)
+        .and_then(|r| r.0.get(&mud_db::enums::ElementType::Fire).copied())
+}
+
+fn magic_tagged_resistance_effect(world: &mut World) {
+    let mut def = effect_def(RESIST, "status", "status", serde_json::json!({}));
+    def.tags = vec!["magic".into()];
+    world
+        .resource_mut::<EffectCatalog>()
+        .by_id
+        .insert(RESIST, def);
+}
+
+#[test]
+fn dispel_returns_a_cast_resistance_to_its_baseline() {
+    let (mut world, p, _rx) = setup();
+    magic_tagged_resistance_effect(&mut world);
+    let ward = cast_fire_ward(&mut world, p, 10, 30, 600);
+    assert_eq!(fire_resistance(&world, p), Some(40));
+    let removed = super::remove_effects_by_tag(&mut world, p, "magic", super::DispelScope::All);
+    assert_eq!(removed, 1);
+    assert!(world.get_entity(ward).is_err());
+    assert_eq!(fire_resistance(&world, p), Some(10), "item baseline kept");
+}
+
+#[test]
+fn dispel_drops_the_resistance_entry_when_nothing_else_backs_it() {
+    let (mut world, p, _rx) = setup();
+    magic_tagged_resistance_effect(&mut world);
+    cast_fire_ward(&mut world, p, 0, 30, 600);
+    super::remove_effects_by_tag(&mut world, p, "magic", super::DispelScope::All);
+    assert_eq!(fire_resistance(&world, p), None);
+}
+
+#[test]
+fn cleanse_paths_return_a_cast_resistance_to_its_baseline() {
+    let (mut world, p, _rx) = setup();
+    cast_fire_ward(&mut world, p, 10, 30, 600);
+    assert_eq!(
+        super::remove_effects_for_condition(&mut world, p, "resistance"),
+        1
+    );
+    assert_eq!(fire_resistance(&world, p), Some(10));
+    cast_fire_ward(&mut world, p, 10, 25, 600);
+    assert_eq!(super::remove_all_effects_on(&mut world, p), 1);
+    assert_eq!(fire_resistance(&world, p), Some(10));
+    cast_fire_ward(&mut world, p, 10, 20, 600);
+    assert_eq!(super::remove_effect_named(&mut world, p, "resistance"), 1);
+    assert_eq!(fire_resistance(&world, p), Some(10));
+}
+
+#[test]
+fn cancel_returns_a_cast_resistance_to_its_baseline() {
+    let (mut world, p, mut rx) = setup();
+    cast_fire_ward(&mut world, p, 10, 30, 600);
+    dispatch(&mut world, p, "cancel resistance");
+    let _ = drain(&mut rx);
+    assert_eq!(fire_resistance(&world, p), Some(10));
+    assert!(effects_on(&mut world, p).is_empty());
+}
+
+#[test]
+fn expiry_still_returns_a_cast_resistance_to_its_baseline() {
+    let (mut world, p, _rx) = setup();
+    cast_fire_ward(&mut world, p, 10, 30, 1);
+    world.insert_resource(crate::TickCount(10));
+    crate::effects::effects_tick(&mut world);
+    assert!(effects_on(&mut world, p).is_empty());
+    assert_eq!(fire_resistance(&world, p), Some(10));
+}
+
+fn cast_protect(world: &mut World, p: Entity, tag: mud_world::AlignmentProtectionTag) -> Entity {
+    match tag {
+        mud_world::AlignmentProtectionTag::Evil => {
+            world.entity_mut(p).insert(mud_world::ProtectFromEvil);
+        }
+        mud_world::AlignmentProtectionTag::Good => {
+            world.entity_mut(p).insert(mud_world::ProtectFromGood);
+        }
+    }
+    world
+        .spawn((
+            EffectInstance {
+                kind: RESIST,
+                name: "resistance".into(),
+                strength: 1,
+                remaining_secs: 600,
+                source: EffectSource::Spell,
+                ability_id: None,
+            },
+            AppliedTo(p),
+            tag,
+        ))
+        .id()
+}
+
+#[test]
+fn dispel_of_protect_from_evil_and_good_drops_the_marker() {
+    let (mut world, p, _rx) = setup();
+    magic_tagged_resistance_effect(&mut world);
+    cast_protect(&mut world, p, mud_world::AlignmentProtectionTag::Evil);
+    cast_protect(&mut world, p, mud_world::AlignmentProtectionTag::Good);
+    super::remove_effects_by_tag(&mut world, p, "magic", super::DispelScope::All);
+    assert!(world.get::<mud_world::ProtectFromEvil>(p).is_none());
+    assert!(world.get::<mud_world::ProtectFromGood>(p).is_none());
+}
+
+#[test]
+fn dispel_of_protect_from_evil_keeps_the_marker_a_worn_item_backs() {
+    let (mut world, p, mut rx) = setup();
+    magic_tagged_resistance_effect(&mut world);
+    cast_protect(&mut world, p, mud_world::AlignmentProtectionTag::Evil);
+    ring(&mut world, p, 312, "ward", vec![status(&["protect_evil"])]);
+    wear(&mut world, p, &mut rx, "ward");
+    super::remove_effects_by_tag(&mut world, p, "magic", super::DispelScope::All);
+    assert!(
+        world.get::<mud_world::ProtectFromEvil>(p).is_some(),
+        "the worn ring still backs it"
+    );
+    remove(&mut world, p, &mut rx, "ward");
+    assert!(world.get::<mud_world::ProtectFromEvil>(p).is_none());
+}
+
+#[test]
+fn cleanse_of_one_protect_keeps_the_marker_a_second_cast_backs() {
+    let (mut world, p, _rx) = setup();
+    let first = cast_protect(&mut world, p, mud_world::AlignmentProtectionTag::Evil);
+    cast_protect(&mut world, p, mud_world::AlignmentProtectionTag::Evil);
+    let _ = super::despawn_effects_on(&mut world, p, vec![first]);
+    assert!(world.get::<mud_world::ProtectFromEvil>(p).is_some());
+    assert_eq!(super::remove_all_effects_on(&mut world, p), 1);
+    assert!(world.get::<mud_world::ProtectFromEvil>(p).is_none());
+}

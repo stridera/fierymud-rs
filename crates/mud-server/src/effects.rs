@@ -207,9 +207,7 @@ pub(crate) fn break_on_hit(world: &mut World, attacker: Entity, victim: Entity) 
         return false;
     }
     for (e, _) in &breaking {
-        if let Ok(em) = world.get_entity_mut(*e) {
-            em.despawn();
-        }
+        remove_effect_instance(world, victim, *e);
     }
     sync_stunned(world, victim);
     let attacker_name = crate::commands::cap_sentence_start(&name_of(world, attacker));
@@ -321,6 +319,86 @@ pub(crate) fn teardown_markers_after_removal(world: &mut World, target: Entity, 
             }
         }
     }
+}
+
+/// Undo everything one `EffectInstance` did to `target` and despawn it:
+/// the `ModifyDelta` stat change, a Refreshed regen bonus, the elemental
+/// `SpellResistanceDelta` bump, the stun marker, then the flag / globe
+/// markers and the evil / good protection marker. The single reversal
+/// behind expiry ([`effects_tick`]) and every early removal (dispel,
+/// cleanse, `cancel`, staff strip) so none of them can leave a bonus
+/// behind. The alignment tag is read before the despawn, and the marker
+/// drops only when no other tagged instance and no worn `protect_*` item
+/// still backs it.
+fn teardown_effect_instance(world: &mut World, target: Entity, eff_entity: Entity) {
+    let name = world
+        .get::<EffectInstance>(eff_entity)
+        .map(|i| i.name.clone());
+    let target_alive = world.get_entity(target).is_ok();
+    // Reverse a `ModifyDelta` companion before despawning the effect,
+    // so stacking buffs from each other's removals don't double-clear.
+    if let Some(delta) = world.get::<ModifyDelta>(eff_entity).cloned()
+        && target_alive
+    {
+        crate::commands::reverse_modify_delta(world, target, &delta.target, delta.amount);
+    }
+    // Rest / repose R6: when the Refreshed effect goes, subtract the
+    // RegenBonus delta the wake path stamped.
+    crate::rest::unwind_refreshed_bonus(world, eff_entity, target);
+    let align_tag = world
+        .get::<mud_world::AlignmentProtectionTag>(eff_entity)
+        .copied();
+    // Reverse a `SpellResistanceDelta` companion the same way
+    // `ModifyDelta` unwinds. Stacked PROT_*/STONE_SKIN cleanly peel back
+    // to whatever the underlying item-resistance value was.
+    if let Some(delta) = world
+        .get::<mud_world::SpellResistanceDelta>(eff_entity)
+        .copied()
+        && target_alive
+        && let Some(mut r) = world.get_mut::<mud_world::Resistances>(target)
+    {
+        let entry = r.0.entry(delta.element).or_insert(0);
+        *entry = entry.saturating_sub(delta.percent);
+        if *entry == 0 {
+            r.0.remove(&delta.element);
+        }
+    }
+    if let Ok(e) = world.get_entity_mut(eff_entity) {
+        e.despawn();
+    }
+    let Some(name) = name else {
+        return;
+    };
+    // The Stunned marker follows the union of stun and paralysis
+    // instances (see `sync_stunned`).
+    if is_stun_name(&name) {
+        sync_stunned(world, target);
+    }
+    teardown_markers_after_removal(world, target, &name);
+    // J2 alignment-protect teardown: PROT_FROM_EVIL / PROT_FROM_GOOD
+    // spawn instances named "resistance" (shared with element-resistance
+    // flavors), tagged with the alignment they guard against.
+    if let Some(tag) = align_tag {
+        let flag = match tag {
+            mud_world::AlignmentProtectionTag::Evil => "protect_evil",
+            mud_world::AlignmentProtectionTag::Good => "protect_good",
+        };
+        mud_world::mob_effects::teardown_flag_marker(world, target, flag);
+    }
+}
+
+/// Remove one `EffectInstance` before its time (dispel, cleanse, `cancel`,
+/// staff strip): fire its `on_remove` hook, then the same reversal expiry
+/// does ([`teardown_effect_instance`]). The one entry point for early
+/// removal; callers never despawn an `EffectInstance` themselves.
+pub(crate) fn remove_effect_instance(world: &mut World, target: Entity, eff_entity: Entity) {
+    if let Some(name) = world
+        .get::<EffectInstance>(eff_entity)
+        .map(|i| i.name.clone())
+    {
+        run_effect_hook(world, EffectHook::OnRemove, target, &name);
+    }
+    teardown_effect_instance(world, target, eff_entity);
 }
 
 /// Decrement remaining duration on every active effect; despawn ones whose
@@ -464,51 +542,11 @@ pub fn effects_tick(world: &mut World) {
                     &format!("{rendered}\r\n"),
                 );
             }
-            // Reverse a `ModifyDelta` companion before despawning the
-            // effect — for `modify` effect-type EffectInstances. The
-            // delta records what stat was bumped and by how much; we
-            // subtract it back here so stacking buffs from each
-            // other's expiries don't double-clear the bonus.
-            if let Some(delta) = world.get::<ModifyDelta>(eff_entity).cloned()
-                && world.get_entity(target).is_ok()
-            {
-                crate::commands::reverse_modify_delta(world, target, &delta.target, delta.amount);
-            }
-            // Rest / repose R6: when the Refreshed Effect fades,
-            // subtract the RegenBonus delta the wake path stamped.
-            // The companion `RefreshedBonus` component records the
-            // exact amount so stacked Refresheds (rare — would
-            // require a mid-session re-rent and re-consume) cleanly
-            // unwind one at a time.
-            crate::rest::unwind_refreshed_bonus(world, eff_entity, target);
-            let align_tag = world
-                .get::<mud_world::AlignmentProtectionTag>(eff_entity)
-                .copied();
-            // Reverse a `SpellResistanceDelta` companion the same way
-            // ModifyDelta unwinds. Stacked PROT_*/STONE_SKIN cleanly
-            // peel back to whatever the underlying item-resistance
-            // value was.
-            if let Some(delta) = world
-                .get::<mud_world::SpellResistanceDelta>(eff_entity)
-                .copied()
-                && world.get_entity(target).is_ok()
-                && let Some(mut r) = world.get_mut::<mud_world::Resistances>(target)
-            {
-                let entry = r.0.entry(delta.element).or_insert(0);
-                *entry = entry.saturating_sub(delta.percent);
-                if *entry == 0 {
-                    r.0.remove(&delta.element);
-                }
-            }
-            if let Ok(e) = world.get_entity_mut(eff_entity) {
-                e.despawn();
-            }
+            // Same reversal as a dispel / cleanse (stat delta, resistance,
+            // alignment tag, markers); only the wear-off text and the
+            // per-kind teardown below are expiry's own.
+            teardown_effect_instance(world, target, eff_entity);
             expired += 1;
-            // The Stunned marker follows the union of stun and paralysis
-            // instances (see `sync_stunned`).
-            if is_stun_name(&name) {
-                sync_stunned(world, target);
-            }
             // Object-decay: an effect named "decay" applied to an
             // Item entity acts as the object's lifetime gate (used
             // by the `portal` effect-type for spawned gates,
@@ -519,20 +557,6 @@ pub fn effects_tick(world: &mut World) {
                 && let Ok(e) = world.get_entity_mut(target)
             {
                 e.despawn();
-            }
-            teardown_markers_after_removal(world, target, &name);
-            // J2 alignment-protect teardown: PROT_FROM_EVIL /
-            // PROT_FROM_GOOD spawn instances named "resistance" (shared
-            // with element-resistance flavors), tagged with the
-            // alignment they guard against. The tag was read before the
-            // instance despawned; the marker drops only when no other
-            // tagged instance and no worn `protect_*` flag still backs it.
-            if let Some(tag) = align_tag {
-                let flag = match tag {
-                    mud_world::AlignmentProtectionTag::Evil => "protect_evil",
-                    mud_world::AlignmentProtectionTag::Good => "protect_good",
-                };
-                mud_world::mob_effects::teardown_flag_marker(world, target, flag);
             }
             // L3 summon teardown — conjuration spells spawn an
             // EffectInstance with name="summoned-{mobType}" pointing
