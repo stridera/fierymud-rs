@@ -268,11 +268,13 @@ pub fn effects_tick(world: &mut World) {
             // Stun marker outlives only as long as at least one
             // backing `stun` EffectInstance is on the target. After
             // despawning *this* one, recheck and clear if none left.
-            if name.eq_ignore_ascii_case("stun") {
+            // Fear's "frozen in terror" is a `paralyzed` instance that backs
+            // the same marker.
+            if crate::fear::is_stun_name(&name) {
                 let still_stunned = {
                     let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
                     q.iter(world).any(|(eff, applied)| {
-                        applied.0 == target && eff.name.eq_ignore_ascii_case("stun")
+                        applied.0 == target && crate::fear::is_stun_name(&eff.name)
                     })
                 };
                 if !still_stunned {

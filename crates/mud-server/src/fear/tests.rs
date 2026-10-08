@@ -4,17 +4,27 @@ use bevy_ecs::prelude::*;
 use mud_db::abilities::AbilityKind;
 use mud_db::enums::{Direction, ExitState, MobBehavior};
 use mud_world::{
-    AppliedTo, CombatStats, EffectInstance, EffectSource, Exits, Feared, Fighting, Health,
-    Keywords, Located, Mob, MobPrototypes, Named, Player, Posture, PostureKind, Profile, Room,
-    WorldKey, WorldKeyIndex,
+    AppliedTo, CombatStats, EffectInstance, EffectSource, EquippedSlot, Exits, Feared, Fighting,
+    Health, Item, Keywords, Located, Mob, MobPrototypes, Named, ObjectRestrictions, Player,
+    Posture, PostureKind, Profile, Room, Slot, Stunned, WorldKey, WorldKeyIndex,
 };
 
 use super::{
-    ChantRolls, Panic, RoarOutcome, RoarRolls, chant_gates_pass, is_feared, on_fear_applied,
-    panic_flee, roar_target, sync_markers,
+    ChantRolls, FearOutcome, FearRolls, Panic, PinnedFearRolls, RoarOutcome, RoarRolls,
+    chant_gates_pass, inflict_fear, is_feared, on_fear_applied, panic_flee, roar_target,
+    sync_markers,
 };
+use crate::combat::MobMemory;
 use crate::commands::test_support::{Rx, drain, mob_proto};
 use crate::commands::{Connection, try_insert, try_remove};
+
+/// Rolls that fail the freeze and drop branches and pass the flee branch.
+const FLEE: FearRolls = FearRolls {
+    freeze: 100,
+    drop: 100,
+    flee: 0,
+    falter: 100,
+};
 
 const ABILITY: i32 = 141;
 const EFFECT: i32 = 30;
@@ -24,7 +34,7 @@ struct Fx {
     here: Entity,
     away: Entity,
     caster: Entity,
-    _rx: Rx,
+    rx: Rx,
 }
 
 fn open_exit(to: Entity) -> mud_world::ExitData {
@@ -50,6 +60,9 @@ fn fx() -> Fx {
     world.insert_resource(mud_world::RaceCatalog::default());
     world.insert_resource(crate::TickCount(0));
     world.insert_resource(mud_world::EffectCatalog::default());
+    // Spell-path tests want the flee branch; cascade tests call
+    // `inflict_fear` with their own rolls.
+    world.insert_resource(PinnedFearRolls(FLEE));
     let away = world
         .spawn((
             Room,
@@ -104,7 +117,7 @@ fn fx() -> Fx {
         here,
         away,
         caster,
-        _rx: rx,
+        rx,
     }
 }
 
@@ -342,7 +355,7 @@ fn a_feared_player_panics_through_the_flee_command() {
         ))
         .id();
     f.world.entity_mut(victim).insert(Fighting(f.caster));
-    on_fear_applied(&mut f.world, f.caster, victim, None);
+    on_fear_applied(&mut f.world, f.caster, victim, 100, false);
     assert_eq!(f.at(victim), Some(f.away), "players flee too (legacy)");
     assert!(f.world.get::<Fighting>(victim).is_none());
     assert!(is_feared(&f.world, victim));
@@ -697,7 +710,7 @@ fn failed_chant_gate_removes_the_effect_whatever_it_is_named() {
         AppliedTo(mob),
     ));
     // A skill of -1 can never beat the d100 chance roll.
-    on_fear_applied(&mut f.world, f.caster, mob, Some(-1));
+    on_fear_applied(&mut f.world, f.caster, mob, -1, true);
     assert_eq!(f.world.query::<&EffectInstance>().iter(&f.world).count(), 0);
     assert!(!is_feared(&f.world, mob));
     assert_eq!(f.at(mob), Some(f.here));
@@ -762,4 +775,393 @@ fn feared_berserk_mob_stays_in_the_fight() {
     super::feared_mobs_flee(&mut f.world);
     assert_eq!(f.at(mob), Some(f.here));
     assert!(f.world.get::<Fighting>(mob).is_some());
+}
+
+// -- the inflict_fear cascade -----------------------------------------------
+
+/// All four rolls pinned to `n`.
+fn all(n: i32) -> FearRolls {
+    FearRolls {
+        freeze: n,
+        drop: n,
+        flee: n,
+        falter: n,
+    }
+}
+
+impl Fx {
+    /// A mob that already carries the lasting `feared` status, fighting the
+    /// caster, as it is when the cascade starts.
+    fn feared_mob(&mut self, level: i32) -> Entity {
+        let mob = self.mob(level, serde_json::json!({}));
+        self.world
+            .entity_mut(mob)
+            .insert((Fighting(self.caster), Feared));
+        self.world.entity_mut(self.caster).insert(Fighting(mob));
+        self.world.spawn((
+            EffectInstance {
+                kind: EFFECT,
+                name: "feared".into(),
+                strength: 1,
+                remaining_secs: 60,
+                source: EffectSource::Spell,
+                ability_id: Some(ABILITY),
+            },
+            AppliedTo(mob),
+        ));
+        mob
+    }
+
+    fn wield(&mut self, holder: Entity, restrictions: bool) -> Entity {
+        let item = self
+            .world
+            .spawn((
+                Item,
+                Named {
+                    name: "a rusty sword".into(),
+                },
+                Located(holder),
+                EquippedSlot(Slot::Wield),
+            ))
+            .id();
+        if restrictions {
+            self.world.entity_mut(item).insert(ObjectRestrictions(vec![
+                mud_db::enums::ObjectRestriction::NoDrop,
+            ]));
+        }
+        item
+    }
+
+    fn effect_secs(&mut self, victim: Entity, name: &str) -> Option<i32> {
+        let mut q = self.world.query::<(&EffectInstance, &AppliedTo)>();
+        q.iter(&self.world)
+            .find(|(e, a)| a.0 == victim && e.name == name)
+            .map(|(e, _)| e.remaining_secs)
+    }
+
+    fn fear(&mut self, victim: Entity, power: i32, rolls: FearRolls) -> FearOutcome {
+        inflict_fear(&mut self.world, self.caster, victim, power, rolls)
+    }
+}
+
+fn caster_rx(f: &mut Fx) -> String {
+    drain(&mut f.rx)
+}
+
+#[test]
+fn frozen_in_terror_paralyses_and_does_not_flee() {
+    let mut f = fx();
+    let mob = f.feared_mob(10);
+    let rolls = FearRolls {
+        freeze: 0,
+        ..all(0)
+    };
+    // power 100 vs level 10: freeze threshold min(80, 153) = 80.
+    assert_eq!(f.fear(mob, 100, rolls), FearOutcome::Frozen);
+    assert_eq!(f.at(mob), Some(f.here), "frozen victims do not run");
+    assert!(f.world.get::<Fighting>(mob).is_none(), "its fight stops");
+    assert!(
+        f.world.get::<Fighting>(f.caster).is_none(),
+        "the caster's fight against it stops too"
+    );
+    assert!(f.world.get::<Stunned>(mob).is_some());
+    // 2 + 100/30 = 5 MUD hours of 75 seconds.
+    assert_eq!(f.effect_secs(mob, "paralyzed"), Some(5 * 75));
+    assert!(!is_feared(&f.world, mob), "no lasting fear on the freeze");
+    assert!(
+        f.world
+            .get::<MobMemory>(mob)
+            .is_some_and(|m| m.0.contains(&f.caster)),
+        "the mob remembers the caster"
+    );
+    let out = caster_rx(&mut f);
+    assert!(
+        out.contains("You frighten A jackal so bad that they are frozen in terror!"),
+        "{out}"
+    );
+}
+
+#[test]
+fn frozen_victim_cannot_flee_and_thaws_when_the_paralysis_expires() {
+    let mut f = fx();
+    let mob = f.feared_mob(10);
+    f.fear(mob, 100, all(0));
+    assert_eq!(panic_flee(&mut f.world, mob, None), Panic::Unable);
+    expire_fear_effects(&mut f, mob);
+    tick_effects(&mut f, 10);
+    tick_effects(&mut f, 20);
+    assert!(
+        f.world.get::<Stunned>(mob).is_none(),
+        "marker follows effect"
+    );
+}
+
+#[test]
+fn freeze_threshold_is_a_strict_less_than_on_the_level_difference() {
+    let mut f = fx();
+    // power 20 vs level 10: 17 * 10 / 10 = 17.
+    let mob = f.feared_mob(10);
+    let at = |freeze| FearRolls { freeze, ..all(100) };
+    assert_eq!(f.fear(mob, 20, at(16)), FearOutcome::Frozen);
+    let mob = f.feared_mob(10);
+    assert_ne!(f.fear(mob, 20, at(17)), FearOutcome::Frozen);
+}
+
+#[test]
+fn thresholds_are_capped() {
+    let mut f = fx();
+    // A huge difference caps freeze at 80, drop at 85, flee at 90, falter at 95.
+    let mob = f.feared_mob(1);
+    assert_eq!(f.fear(mob, 1000, all(79)), FearOutcome::Frozen);
+    let mob = f.feared_mob(1);
+    f.wield(mob, false);
+    assert_eq!(f.fear(mob, 1000, all(80)), FearOutcome::DroppedWeapon);
+    let mob = f.feared_mob(1);
+    f.wield(mob, false);
+    assert_eq!(f.fear(mob, 1000, all(85)), FearOutcome::Fled(Panic::Fled));
+    let mob = f.feared_mob(1);
+    assert_eq!(f.fear(mob, 1000, all(90)), FearOutcome::Faltered);
+    let mob = f.feared_mob(1);
+    assert_eq!(f.fear(mob, 1000, all(95)), FearOutcome::Shrugged);
+}
+
+#[test]
+fn a_victim_above_the_casters_power_shrugs_everything_off() {
+    let mut f = fx();
+    let mob = f.feared_mob(50);
+    // power 10 vs level 50: every threshold is negative.
+    assert_eq!(f.fear(mob, 10, all(0)), FearOutcome::Shrugged);
+}
+
+#[test]
+fn drop_weapon_puts_the_wielded_item_in_the_room_and_lags_the_victim() {
+    let mut f = fx();
+    let mob = f.feared_mob(10);
+    let sword = f.wield(mob, false);
+    // freeze fails (100), drop passes: power 20 vs 10 gives 1 + 18 = 19.
+    let rolls = FearRolls {
+        drop: 18,
+        ..all(100)
+    };
+    assert_eq!(f.fear(mob, 20, rolls), FearOutcome::DroppedWeapon);
+    assert_eq!(f.world.get::<Located>(sword).map(|l| l.0), Some(f.here));
+    assert!(f.world.get::<EquippedSlot>(sword).is_none());
+    assert_eq!(f.at(mob), Some(f.here), "dropping is not fleeing");
+    assert!(!is_feared(&f.world, mob));
+    assert!(f.world.get::<Stunned>(mob).is_some(), "one round of lag");
+    assert_eq!(f.effect_secs(mob, "stun"), Some(4));
+    assert_eq!(
+        f.world.get::<Fighting>(mob).map(|x| x.0),
+        Some(f.caster),
+        "the victim fights back"
+    );
+    let out = caster_rx(&mut f);
+    assert!(
+        out.contains("You made A jackal drop their a rusty sword!"),
+        "{out}"
+    );
+}
+
+#[test]
+fn drop_weapon_mirrors_legacy_and_drops_a_no_drop_weapon() {
+    let mut f = fx();
+    let mob = f.feared_mob(10);
+    let sword = f.wield(mob, true);
+    assert_eq!(
+        f.fear(
+            mob,
+            100,
+            FearRolls {
+                drop: 0,
+                ..all(100)
+            }
+        ),
+        FearOutcome::DroppedWeapon
+    );
+    assert_eq!(f.world.get::<Located>(sword).map(|l| l.0), Some(f.here));
+    assert!(f.world.get::<EquippedSlot>(sword).is_none());
+}
+
+#[test]
+fn the_drop_branch_needs_a_wielded_weapon() {
+    let mut f = fx();
+    let mob = f.feared_mob(10);
+    // Rolls pass drop but there is nothing in hand: fall through to the
+    // later branches (here none pass).
+    let rolls = FearRolls {
+        drop: 0,
+        ..all(100)
+    };
+    assert_eq!(f.fear(mob, 100, rolls), FearOutcome::Shrugged);
+}
+
+#[test]
+fn flee_branch_stops_the_fight_runs_remembers_and_keeps_the_fear() {
+    let mut f = fx();
+    let mob = f.feared_mob(10);
+    // power 20 vs 10: flee threshold 3 + 19 = 22.
+    let rolls = FearRolls {
+        flee: 21,
+        ..all(100)
+    };
+    assert_eq!(f.fear(mob, 20, rolls), FearOutcome::Fled(Panic::Fled));
+    assert_eq!(f.at(mob), Some(f.away));
+    assert!(f.world.get::<Fighting>(mob).is_none());
+    assert!(
+        is_feared(&f.world, mob),
+        "the fear status stays on a runner"
+    );
+    assert!(
+        f.world
+            .get::<MobMemory>(mob)
+            .is_some_and(|m| m.0.contains(&f.caster))
+    );
+    assert!(
+        f.world.get::<Stunned>(mob).is_some(),
+        "lagged after running"
+    );
+    let out = caster_rx(&mut f);
+    assert!(
+        out.contains("A jackal shrieks madly at your vision of terror!"),
+        "{out}"
+    );
+}
+
+#[test]
+fn flee_roll_just_over_the_threshold_does_not_run() {
+    let mut f = fx();
+    let mob = f.feared_mob(10);
+    let rolls = FearRolls {
+        flee: 22,
+        ..all(100)
+    };
+    assert_ne!(f.fear(mob, 20, rolls), FearOutcome::Fled(Panic::Fled));
+}
+
+#[test]
+fn flee_clears_fears_own_lag_first() {
+    let mut f = fx();
+    let mob = f.feared_mob(10);
+    super::lag_for(&mut f.world, mob, 4);
+    assert_eq!(
+        f.fear(
+            mob,
+            100,
+            FearRolls {
+                flee: 0,
+                ..all(100)
+            }
+        ),
+        FearOutcome::Fled(Panic::Fled)
+    );
+    assert_eq!(f.at(mob), Some(f.away), "a lagged victim can still panic");
+}
+
+#[test]
+fn cornered_flee_branch_reports_cornered() {
+    let mut f = fx();
+    f.world.entity_mut(f.here).insert(Exits::default());
+    let mob = f.feared_mob(10);
+    assert_eq!(
+        f.fear(
+            mob,
+            100,
+            FearRolls {
+                flee: 0,
+                ..all(100)
+            }
+        ),
+        FearOutcome::Fled(Panic::Cornered)
+    );
+    assert_eq!(f.at(mob), Some(f.here));
+}
+
+#[test]
+fn falter_prints_its_message_stops_the_fight_and_the_victim_fights_back() {
+    let mut f = fx();
+    let mob = f.feared_mob(10);
+    // power 20 vs 10: falter threshold 5 + 20 = 25.
+    let rolls = FearRolls {
+        falter: 24,
+        ..all(100)
+    };
+    assert_eq!(f.fear(mob, 20, rolls), FearOutcome::Faltered);
+    assert_eq!(f.at(mob), Some(f.here));
+    assert!(!is_feared(&f.world, mob));
+    assert_eq!(f.effect_secs(mob, "stun"), Some(2), "half a round of lag");
+    assert_eq!(f.world.get::<Fighting>(mob).map(|x| x.0), Some(f.caster));
+    let out = caster_rx(&mut f);
+    assert!(
+        out.contains("A jackal gets a scared look, but soldiers on."),
+        "{out}"
+    );
+}
+
+#[test]
+fn nothing_happens_when_every_roll_misses() {
+    let mut f = fx();
+    let mob = f.feared_mob(10);
+    assert_eq!(f.fear(mob, 20, all(100)), FearOutcome::Shrugged);
+    assert_eq!(f.at(mob), Some(f.here));
+    assert!(!is_feared(&f.world, mob));
+    assert!(f.world.get::<Stunned>(mob).is_none(), "no lag on a shrug");
+    assert_eq!(f.world.get::<Fighting>(mob).map(|x| x.0), Some(f.caster));
+    let out = caster_rx(&mut f);
+    assert!(
+        out.contains("A jackal barely raises an eyebrow at your fearful illusion."),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_sleeper_does_not_notice_the_illusion() {
+    let mut f = fx();
+    let mob = f.feared_mob(10);
+    f.world
+        .entity_mut(mob)
+        .insert(Posture(PostureKind::Sleeping));
+    assert_eq!(f.fear(mob, 100, all(0)), FearOutcome::Unnoticed);
+    assert!(!is_feared(&f.world, mob));
+    assert_eq!(f.at(mob), Some(f.here));
+    let out = caster_rx(&mut f);
+    assert!(
+        out.contains("A jackal is in no condition to notice your illusion."),
+        "{out}"
+    );
+}
+
+#[test]
+fn an_already_paralysed_victim_does_not_even_move() {
+    let mut f = fx();
+    let mob = f.feared_mob(10);
+    f.world.spawn((
+        EffectInstance {
+            kind: 1,
+            name: "paralyzed".into(),
+            strength: 1,
+            remaining_secs: 30,
+            source: EffectSource::Spell,
+            ability_id: None,
+        },
+        AppliedTo(mob),
+    ));
+    assert_eq!(f.fear(mob, 100, all(0)), FearOutcome::AlreadyParalysed);
+    assert_eq!(f.at(mob), Some(f.here));
+    let out = caster_rx(&mut f);
+    assert!(out.contains("A jackal doesn't even move."), "{out}");
+}
+
+#[test]
+fn the_spell_path_runs_the_cascade_after_the_effect_lands() {
+    let mut f = fx();
+    f.fear_spell(false);
+    let mob = f.mob(10, serde_json::json!({}));
+    f.world.insert_resource(PinnedFearRolls(FearRolls {
+        freeze: 0,
+        ..all(100)
+    }));
+    f.cast_fear("jackal");
+    assert_eq!(f.at(mob), Some(f.here), "frozen, not fled");
+    assert!(f.world.get::<Stunned>(mob).is_some());
+    assert!(!is_feared(&f.world, mob));
 }

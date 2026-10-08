@@ -371,7 +371,7 @@ pub(crate) use admin_reload::shutdown_poll;
 mod admin_world;
 #[path = "commands/attack_ok.rs"]
 mod attack_ok;
-pub(crate) use attack_ok::is_servant;
+pub(crate) use attack_ok::{attack_ok, is_servant};
 #[path = "commands/balance.rs"]
 mod balance;
 #[path = "commands/banish.rs"]
@@ -17255,7 +17255,8 @@ pub(crate) fn invoke_ability_with(
                         world,
                         player,
                         target_entity,
-                        def.is_area.then_some(formula_ctx.skill),
+                        formula_ctx.skill,
+                        def.is_area,
                     );
                 }
                 // Empowered-flag status effects (HARNESS) install

@@ -2,12 +2,11 @@
 //!
 //! Legacy sources ported here (`fierymud_legacy/src`):
 //!
-//! * `spells.cpp:3089` `inflict_fear` (FEAR, and HYSTERIA room-wide). Its
-//!   flee branch stops the victim's fight, clears its wait state and runs
-//!   `flee` for mobs and players alike, then makes a mob remember the
-//!   caster. The other branches (frozen in terror, drop weapon, falter) are
-//!   represented by the data-driven `feared` status effect and its WILL
-//!   save, so a victim that fails the save always panics.
+//! * `spells.cpp:3089` `inflict_fear` (FEAR, HYSTERIA, ...): see
+//!   [`inflict_fear`]. The spell's `feared` status effect and the WILL save
+//!   that gates it are Rust-side and still run first; a victim that fails
+//!   the save then goes through legacy's cascade of level-difference rolls.
+//!   Only the flee branch leaves the lasting `feared` effect behind.
 //! * `spells.cpp:1215` `chant_ivory_symphony` (the area flee chant): awake,
 //!   non-group targets flee unless they save (skipped in dark rooms),
 //!   sentinel mobs save a second time, then a `skill`% roll gates the flee.
@@ -30,15 +29,15 @@ use std::collections::HashSet;
 use bevy_ecs::prelude::*;
 use mud_db::enums::MobBehavior;
 use mud_world::{
-    AppliedTo, CombatStats, CoreStats, EffectCatalog, EffectInstance, Feared, Fighting, Frozen,
-    Ghost, Located, Mob, MobBehaviors, MobPrototypes, Player, Posture, PostureKind, RiddenBy,
-    SavingThrows, Stunned, WorldKey,
+    AppliedTo, CombatStats, CoreStats, EffectCatalog, EffectInstance, EffectSource, EquippedSlot,
+    Feared, Fighting, Frozen, Ghost, Item, Located, Mob, MobBehaviors, MobPrototypes, Player,
+    Posture, PostureKind, RiddenBy, SavingThrows, Slot, Stunned, WorldKey,
 };
 
 use crate::combat::{mob_flee, remember_attacker};
 use crate::commands::{
-    Prevent, broadcast_room_except_rendered, cmd_flee, effect_prevents, has_effect_named, name_of,
-    room_is_dark, send_to, try_insert, try_remove,
+    Prevent, broadcast_room_except_rendered, cap_sentence_start, cmd_flee, effect_prevents,
+    has_effect_named, name_of, name_or, room_is_dark, send_to, try_insert, try_remove,
 };
 
 /// Is `flag` (a status effect's `flag` param) the fear flag?
@@ -267,25 +266,411 @@ pub(crate) fn chant_gates_pass(
     rolls.chance <= skill
 }
 
-/// A `feared` status effect just landed on `victim`: mark it, then make it
-/// panic. `area_skill` is `Some(skill)` for an area ability, which keeps
-/// the chant's extra gates; a victim that passes them keeps neither the
-/// flee nor the effect.
+/// Real seconds in one MUD hour (legacy effect duration tick).
+const SECS_PER_MUD_HOUR: i32 = 75;
+/// Legacy `PULSE_VIOLENCE`: one combat round of wait state, in seconds.
+const ROUND_SECS: i32 = 4;
+/// Marks a [`stun_for`] lag so a panicking victim can have it cleared
+/// (legacy zeroes the wait state before `flee`) without touching real
+/// stuns.
+const LAG_SOURCE: &str = "fear-lag";
+
+/// The dice of legacy `inflict_fear`, each `random_number(0, 100)`, one per
+/// branch of the cascade.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FearRolls {
+    /// Frozen in terror.
+    pub freeze: i32,
+    /// Drop the wielded weapon.
+    pub drop: i32,
+    /// Panic and flee.
+    pub flee: i32,
+    /// Falter.
+    pub falter: i32,
+}
+
+impl FearRolls {
+    pub(crate) fn random() -> Self {
+        Self {
+            freeze: rand::random_range(0..=100),
+            drop: rand::random_range(0..=100),
+            flee: rand::random_range(0..=100),
+            falter: rand::random_range(0..=100),
+        }
+    }
+}
+
+/// Test seam for the spell path: a world carrying this resource uses its
+/// rolls instead of random ones.
+#[cfg(test)]
+#[derive(Resource, Clone, Copy)]
+pub(crate) struct PinnedFearRolls(pub FearRolls);
+
+/// What `inflict_fear` did to its victim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FearOutcome {
+    /// Asleep: in no condition to notice the illusion.
+    Unnoticed,
+    /// Already paralysed: couldn't even move.
+    AlreadyParalysed,
+    /// Frozen in terror (paralysed), fight stopped.
+    Frozen,
+    /// Dropped the wielded weapon, fight stopped, lagged one round.
+    DroppedWeapon,
+    /// Panicked; the result of the flee attempt.
+    Fled(Panic),
+    /// Faltered: fight stopped, half a round of lag.
+    Faltered,
+    /// Barely raised an eyebrow.
+    Shrugged,
+}
+
+/// Wear off a victim's lasting `feared` status (the Rust-side effect the
+/// spell applied): only legacy's flee branch leaves fear behind.
+fn clear_fear(world: &mut World, victim: Entity) {
+    remove_fear_effects(world, victim);
+    try_remove::<Feared>(world, victim);
+}
+
+/// Is `inst` a stun or paralysis that backs the [`Stunned`] marker?
+pub(crate) fn is_stun_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("stun") || name.eq_ignore_ascii_case("paralyzed")
+}
+
+/// Drop [`Stunned`] unless some stun or paralysis instance still backs it.
+fn sync_stunned(world: &mut World, victim: Entity) {
+    let backed = {
+        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+        q.iter(world)
+            .any(|(eff, applied)| applied.0 == victim && is_stun_name(&eff.name))
+    };
+    if !backed {
+        try_remove::<Stunned>(world, victim);
+    }
+}
+
+/// Hold `victim` for `secs` under an effect called `name` (`"paralyzed"`
+/// for terror, `"stun"` for a wait state): the [`Stunned`] marker keeps it
+/// from swinging or fleeing, the instance blocks movement and casting. A
+/// longer effect already running is not shortened.
+fn stun_for(world: &mut World, victim: Entity, name: &str, secs: i32, lag: bool) {
+    try_insert(world, victim, Stunned);
+    let mut found = false;
+    {
+        let mut q = world.query::<(&mut EffectInstance, &AppliedTo)>();
+        for (mut inst, applied) in q.iter_mut(world) {
+            if applied.0 == victim && inst.name.eq_ignore_ascii_case(name) {
+                inst.remaining_secs = inst.remaining_secs.max(secs);
+                found = true;
+            }
+        }
+    }
+    if found {
+        return;
+    }
+    let kind = world
+        .get_resource::<EffectCatalog>()
+        .and_then(|c| c.find_by_name(name))
+        .map_or(0, |d| d.id);
+    world.spawn((
+        EffectInstance {
+            kind,
+            name: name.to_string(),
+            strength: 1,
+            remaining_secs: secs,
+            source: if lag {
+                EffectSource::Other(LAG_SOURCE.to_string())
+            } else {
+                EffectSource::Spell
+            },
+            ability_id: None,
+        },
+        AppliedTo(victim),
+    ));
+}
+
+/// Legacy `WAIT_STATE(victim, secs)`: a short stun that fear itself put on.
+fn lag_for(world: &mut World, victim: Entity, secs: i32) {
+    stun_for(world, victim, "stun", secs, true);
+}
+
+/// Legacy "turn off wait states so they can flee": strip fear's own lag.
+fn clear_lag(world: &mut World, victim: Entity) {
+    let lags: Vec<Entity> = {
+        let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
+        q.iter(world)
+            .filter(|(_, inst, applied)| {
+                applied.0 == victim
+                    && matches!(&inst.source, EffectSource::Other(s) if s == LAG_SOURCE)
+            })
+            .map(|(e, _, _)| e)
+            .collect()
+    };
+    for e in lags {
+        if let Ok(em) = world.get_entity_mut(e) {
+            em.despawn();
+        }
+    }
+    sync_stunned(world, victim);
+}
+
+/// The victim's wielded weapon, if any (the one slot disarm also reads).
+fn wielded(world: &mut World, victim: Entity) -> Option<Entity> {
+    let mut q = world.query_filtered::<(Entity, &Located, &EquippedSlot), With<Item>>();
+    q.iter(world)
+        .find(|(_, l, eq)| l.0 == victim && eq.0 == Slot::Wield)
+        .map(|(e, _, _)| e)
+}
+
+/// One `act` line, built from the (caster, victim) names.
+type Line<'a> = dyn Fn(&str, &str) -> String + 'a;
+
+/// Who is in a fear scene and what to call them in its three `act` views.
+struct Scene {
+    caster: Entity,
+    victim: Entity,
+    room: Option<Entity>,
+    /// Capitalised, as every line starts with a name.
+    caster_name: String,
+    victim_name: String,
+}
+
+impl Scene {
+    fn new(world: &World, caster: Entity, victim: Entity) -> Self {
+        Self {
+            caster,
+            victim,
+            room: world.get::<Located>(victim).map(|l| l.0),
+            caster_name: cap_sentence_start(&name_of(world, caster)),
+            victim_name: cap_sentence_start(&name_of(world, victim)),
+        }
+    }
+
+    /// Legacy `act` to `TO_CHAR`, `TO_VICT` and `TO_NOTVICT`; each line is
+    /// built from `(caster name, victim name)`.
+    fn act(&self, world: &mut World, lines: (&Line, &Line, &Line)) {
+        let (c, v) = (self.caster_name.as_str(), self.victim_name.as_str());
+        send_to(world, self.caster, format!("{}\r\n", lines.0(c, v)));
+        send_to(world, self.victim, format!("{}\r\n", lines.1(c, v)));
+        if let Some(room) = self.room {
+            broadcast_room_except_rendered(
+                world,
+                room,
+                &[self.caster, self.victim],
+                &format!("{}\r\n", lines.2(c, v)),
+            );
+        }
+    }
+}
+
+/// The three terror lines of the frozen branch.
+fn act_frozen(world: &mut World, scene: &Scene) {
+    scene.act(
+        world,
+        (
+            &|_, v| format!("You frighten {v} so bad that they are frozen in terror!"),
+            &|c, _| {
+                format!(
+                    "<magenta>{c} shows you a vision so <b>terrifying</><magenta> that you \
+                     freeze in horror!</>"
+                )
+            },
+            &|c, v| format!("<magenta>{v} is frozen in shock at {c}'s vision of <b>terror!</></>"),
+        ),
+    );
+}
+
+/// Frozen branch: paralysis, fight stopped on both sides, mob remembers.
+fn fear_freezes(world: &mut World, scene: &Scene, power: i32) -> FearOutcome {
+    act_frozen(world, scene);
+    try_remove::<Fighting>(world, scene.victim);
+    crate::casting::cancel_own_cast(world, scene.victim);
+    stun_for(
+        world,
+        scene.victim,
+        "paralyzed",
+        (2 + power / 30) * SECS_PER_MUD_HOUR,
+        false,
+    );
+    if world.get::<Fighting>(scene.caster).map(|f| f.0) == Some(scene.victim) {
+        try_remove::<Fighting>(world, scene.caster);
+    }
+    if world.get::<Mob>(scene.victim).is_some() {
+        crate::combat::remember_attacker(world, scene.victim, scene.caster);
+    }
+    FearOutcome::Frozen
+}
+
+/// Drop branch. Legacy `unequip_char` + `obj_to_room`: a cursed or no-drop
+/// weapon falls like any other, as it does for `disarm`.
+fn fear_drops_weapon(world: &mut World, scene: &Scene, weapon: Entity) -> FearOutcome {
+    let w = name_or(world, weapon, "<weapon>");
+    scene.act(
+        world,
+        (
+            &|_, v| format!("You made {v} drop their {w}!"),
+            &|c, _| format!("{c} frightens you so badly that you forget to hold on to your {w}!"),
+            &|_, v| format!("{v} is so terrified that they drop {w}!"),
+        ),
+    );
+    if let (Ok(mut e), Some(room)) = (world.get_entity_mut(weapon), scene.room) {
+        e.remove::<EquippedSlot>();
+        e.insert(Located(room));
+    }
+    try_remove::<Fighting>(world, scene.victim);
+    crate::casting::cancel_own_cast(world, scene.victim);
+    lag_for(world, scene.victim, ROUND_SECS);
+    FearOutcome::DroppedWeapon
+}
+
+/// Flee branch: fight and cast stopped, wait cleared, panic, then a round
+/// of wait. A mob remembers the caster (inside [`panic_flee`]).
+fn fear_flees(world: &mut World, scene: &Scene) -> FearOutcome {
+    try_remove::<Fighting>(world, scene.victim);
+    crate::casting::cancel_own_cast(world, scene.victim);
+    scene.act(
+        world,
+        (
+            &|_, v| format!("{v} shrieks madly at your vision of terror!"),
+            &|c, _| format!("{c} fills you with such horror that you panic!"),
+            &|_, v| format!("{v} shrieks uncontrollably!"),
+        ),
+    );
+    clear_lag(world, scene.victim);
+    let panic = panic_flee(world, scene.victim, Some(scene.caster));
+    lag_for(world, scene.victim, ROUND_SECS);
+    FearOutcome::Fled(panic)
+}
+
+/// Falter branch: fight stopped, half a round of wait.
+fn fear_falters(world: &mut World, scene: &Scene) -> FearOutcome {
+    scene.act(
+        world,
+        (
+            &|_, v| format!("{v} gets a scared look, but soldiers on."),
+            &|c, _| format!("{c} frightens you, but you recover."),
+            &|c, v| format!("{v} looks frightened at {c}'s fearful illusion, but recovers."),
+        ),
+    );
+    try_remove::<Fighting>(world, scene.victim);
+    crate::casting::cancel_own_cast(world, scene.victim);
+    lag_for(world, scene.victim, ROUND_SECS / 2);
+    FearOutcome::Faltered
+}
+
+/// Last branch: the illusion is a joke.
+fn fear_shrugged(world: &mut World, scene: &Scene) -> FearOutcome {
+    scene.act(
+        world,
+        (
+            &|_, v| format!("{v} barely raises an eyebrow at your fearful illusion."),
+            &|c, _| format!("{c} tries to frighten you with a pitiful illusion.  Yawn."),
+            &|c, v| format!("{v} barely notices when {c} tries to frighten them."),
+        ),
+    );
+    FearOutcome::Shrugged
+}
+
+/// Legacy `inflict_fear` for a victim the caller already vetted with
+/// `attack_ok` and that failed the `feared` effect's WILL save. `power` is
+/// the caster's skill. Each branch is a level-difference roll
+/// (`d = power - victim level`, `random_number(0, 100) < threshold`),
+/// tried in order:
+///
+/// * frozen in terror: `min(80, 17d/10)`; paralysed `2 + power/30` MUD hours
+/// * drop weapon (needs one): `min(85, 1 + 18d/10)`; lagged one round
+/// * flee: `min(90, 3 + 19d/10)`; lagged one round after running
+/// * falter: `min(95, 5 + 20d/10)`; lagged half a round
+/// * otherwise nothing
+///
+/// Everything but the flee branch ends the lasting `feared` status. Drop,
+/// falter and nothing make the victim fight back (when `attack_ok` allows).
+pub(crate) fn inflict_fear(
+    world: &mut World,
+    caster: Entity,
+    victim: Entity,
+    power: i32,
+    rolls: FearRolls,
+) -> FearOutcome {
+    let scene = Scene::new(world, caster, victim);
+    if world.get::<Posture>(victim).map(|p| p.0) == Some(PostureKind::Sleeping) {
+        let v = &scene.victim_name;
+        send_to(
+            world,
+            caster,
+            format!("{v} is in no condition to notice your illusion.\r\n"),
+        );
+        clear_fear(world, victim);
+        return FearOutcome::Unnoticed;
+    }
+    if has_effect_named(world, victim, "paralyzed") {
+        scene.act(
+            world,
+            (
+                &|_, v| format!("{v} doesn't even move."),
+                &|c, _| format!("{c} shows you visions of great horror, but you can't even move!"),
+                &|_, v| format!("{v} doesn't doesn't appear to notice."),
+            ),
+        );
+        clear_fear(world, victim);
+        return FearOutcome::AlreadyParalysed;
+    }
+
+    let weapon = wielded(world, victim);
+    let diff = power - mud_world::effective_level(world, victim);
+
+    let outcome = if rolls.freeze < 80.min(17 * diff / 10) {
+        fear_freezes(world, &scene, power)
+    } else if let Some(weapon) = weapon.filter(|_| rolls.drop < 85.min(1 + 18 * diff / 10)) {
+        fear_drops_weapon(world, &scene, weapon)
+    } else if rolls.flee < 90.min(3 + 19 * diff / 10) {
+        // Only this branch leaves the lasting status.
+        return fear_flees(world, &scene);
+    } else if rolls.falter < 95.min(5 + 20 * diff / 10) {
+        fear_falters(world, &scene)
+    } else {
+        fear_shrugged(world, &scene)
+    };
+
+    clear_fear(world, victim);
+    if matches!(
+        outcome,
+        FearOutcome::DroppedWeapon | FearOutcome::Faltered | FearOutcome::Shrugged
+    ) && crate::commands::attack_ok(world, victim, caster, false)
+    {
+        try_insert(world, victim, Fighting(caster));
+    }
+    outcome
+}
+
+/// A `feared` status effect just landed on `victim`: mark it, then act on
+/// it. `area_skill` is `Some(skill)` for an area ability (the ivory
+/// symphony chant), which keeps its own extra gates and a plain panic; a
+/// victim that passes them keeps neither the flee nor the effect. Any
+/// other fear spell runs legacy's [`inflict_fear`] cascade with `power`.
 pub(crate) fn on_fear_applied(
     world: &mut World,
     caster: Entity,
     victim: Entity,
-    area_skill: Option<i32>,
+    power: i32,
+    area: bool,
 ) {
     try_insert(world, victim, Feared);
-    if let Some(skill) = area_skill
-        && !chant_gates_pass(world, victim, skill, ChantRolls::random())
-    {
-        remove_fear_effects(world, victim);
-        try_remove::<Feared>(world, victim);
+    if area {
+        if !chant_gates_pass(world, victim, power, ChantRolls::random()) {
+            clear_fear(world, victim);
+            return;
+        }
+        panic_flee(world, victim, Some(caster));
         return;
     }
-    panic_flee(world, victim, Some(caster));
+    #[cfg(test)]
+    let rolls = world
+        .get_resource::<PinnedFearRolls>()
+        .map_or_else(FearRolls::random, |p| p.0);
+    #[cfg(not(test))]
+    let rolls = FearRolls::random();
+    inflict_fear(world, caster, victim, power, rolls);
 }
 
 /// Drop the [`Feared`] marker from anyone with no `feared` effect left
