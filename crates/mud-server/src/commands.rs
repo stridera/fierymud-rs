@@ -7055,7 +7055,8 @@ pub(crate) fn send_char_skills_list(world: &World, viewer: Entity) {
         .try_send(mud_net::gmcp_packet("Char.Skills.List", &payload));
 }
 
-/// Push a `Char.Skills` GMCP frame to `viewer`. Drives the future
+/// Push a `Char.Skills` GMCP frame to `viewer` (change-gated; see
+/// [`gmcp::send_if_changed`]). Drives the future
 /// skill-bar widget: one entry per known ability with the cooldown
 /// timer and an `available` boolean (true when off cooldown). Shape:
 ///
@@ -7065,21 +7066,21 @@ pub(crate) fn send_char_skills_list(world: &World, viewer: Entity) {
 /// mana pool. The shape stays MUD-client-standard (no `mp_cost`
 /// alongside skills) so generic GMCP clients render fine without
 /// special-casing `FieryMUD`.
-pub(crate) fn send_char_skills(world: &World, viewer: Entity) {
-    let Some(conn) = world.get::<Connection>(viewer) else {
+pub(crate) fn send_char_skills(world: &mut World, viewer: Entity) {
+    if world.get::<Connection>(viewer).is_none() {
         return;
-    };
+    }
+    let payload = build_char_skills(world, viewer);
+    gmcp::send_if_changed(world, viewer, "Char.Skills", &payload, false);
+}
+
+fn build_char_skills(world: &World, viewer: Entity) -> String {
+    const EMPTY: &str = r#"{"skills":[]}"#;
     let Some(known) = world.get::<KnownAbilities>(viewer) else {
-        let _ = conn
-            .0
-            .try_send(mud_net::gmcp_packet("Char.Skills", r#"{"skills":[]}"#));
-        return;
+        return EMPTY.to_string();
     };
     let Some(catalog) = world.get_resource::<AbilityCatalog>() else {
-        let _ = conn
-            .0
-            .try_send(mud_net::gmcp_packet("Char.Skills", r#"{"skills":[]}"#));
-        return;
+        return EMPTY.to_string();
     };
     let now = std::time::Instant::now();
     let cooldowns = world.get::<Cooldowns>(viewer);
@@ -7108,10 +7109,7 @@ pub(crate) fn send_char_skills(world: &World, viewer: Entity) {
             r#"{{"name":"{plain}","cooldown":{cooldown_secs},"available":{available},"passive":{passive}}}"#,
         ));
     }
-    let payload = format!(r#"{{"skills":[{}]}}"#, entries.join(","));
-    let _ = conn
-        .0
-        .try_send(mud_net::gmcp_packet("Char.Skills", &payload));
+    format!(r#"{{"skills":[{}]}}"#, entries.join(","))
 }
 
 /// Push a `Group` GMCP frame to `viewer`. The frame describes the
@@ -7129,13 +7127,13 @@ pub(crate) fn send_char_skills(world: &World, viewer: Entity) {
 pub(crate) fn send_group_state(world: &mut World, viewer: Entity) {
     let root = group_root(world, viewer);
     let members = group_members(world, root);
-    let Some(conn) = world.get::<Connection>(viewer) else {
+    if world.get::<Connection>(viewer).is_none() {
         return;
-    };
+    }
     if members.len() <= 1 {
         // Solo — push an empty Group frame so a previously-visible
         // panel clears.
-        let _ = conn.0.try_send(mud_net::gmcp_packet("Group", "{}"));
+        gmcp::send_if_changed(world, viewer, "Group", "{}", false);
         return;
     }
     let viewer_room = world.get::<Located>(viewer).map(|l| l.0);
@@ -7194,7 +7192,7 @@ pub(crate) fn send_group_state(world: &mut World, viewer: Entity) {
         count = members.len(),
         members = entries.join(","),
     );
-    let _ = conn.0.try_send(mud_net::gmcp_packet("Group", &payload));
+    gmcp::send_if_changed(world, viewer, "Group", &payload, false);
 }
 
 /// Push a `Char.Combat` GMCP frame to `viewer`. Drives the bottom-left
@@ -7219,22 +7217,25 @@ pub(crate) fn send_group_state(world: &mut World, viewer: Entity) {
 /// target mob is fighting back — usually the viewer (solo) or a
 /// groupmate holding aggro. Falls back to the viewer when the mob
 /// isn't swinging at anyone yet.
-pub(crate) fn send_char_combat(world: &World, viewer: Entity) {
-    let Some(conn) = world.get::<Connection>(viewer) else {
+pub(crate) fn send_char_combat(world: &mut World, viewer: Entity) {
+    if world.get::<Connection>(viewer).is_none() {
         return;
-    };
+    }
+    let payload = build_char_combat(world, viewer);
+    gmcp::send_if_changed(world, viewer, "Char.Combat", &payload, false);
+}
+
+fn build_char_combat(world: &World, viewer: Entity) -> String {
     let fighting = world.get::<Fighting>(viewer).map(|f| f.0);
     let Some(mob) = fighting else {
         // Cleared frame — client uses empty {} as a hide signal.
-        let _ = conn.0.try_send(mud_net::gmcp_packet("Char.Combat", "{}"));
-        return;
+        return "{}".to_string();
     };
     // Mob may have despawned mid-round (death cleanup races prompt
     // dispatch). Treat a stale Fighting like "no combat" — the next
     // tick will clear the component too.
     if world.get_entity(mob).is_err() {
-        let _ = conn.0.try_send(mud_net::gmcp_packet("Char.Combat", "{}"));
-        return;
+        return "{}".to_string();
     }
     let mob_plain = world
         .get::<Named>(mob)
@@ -7260,12 +7261,9 @@ pub(crate) fn send_char_combat(world: &World, viewer: Entity) {
         .unwrap_or_default();
     let (tank_hp, tank_max) = world.get::<Health>(tank).map_or((0, 0), |h| (h.hp, h.max));
 
-    let payload = format!(
+    format!(
         r#"{{"tank":{{"name":"{tank_plain}","hp":{tank_hp},"max_hp":{tank_max}}},"opponent":{{"name":"{mob_plain}","hp_percent":{mob_pct}}},"target":{{"name":"{mob_plain}","hp_percent":{mob_pct}}}}}"#,
-    );
-    let _ = conn
-        .0
-        .try_send(mud_net::gmcp_packet("Char.Combat", &payload));
+    )
 }
 
 /// Returns true when `mob` should appear with `hostile: true` in the
@@ -7331,7 +7329,10 @@ fn mob_is_hostile_to(world: &World, mob: Entity, viewer: Entity) -> bool {
 /// the client gets a predictable display order on multi-service
 /// rooms.
 #[allow(clippy::too_many_lines)]
-pub(crate) fn send_room_mobs(world: &mut World, viewer: Entity) {
+pub(crate) fn send_room_mobs(world: &mut World, viewer: Entity, force: bool) {
+    if world.get::<Connection>(viewer).is_none() {
+        return;
+    }
     let Some(room) = world.get::<Located>(viewer).map(|l| l.0) else {
         return;
     };
@@ -7431,22 +7432,15 @@ pub(crate) fn send_room_mobs(world: &mut World, viewer: Entity) {
             r#"{{"id":"{id_bits}","name":"{mob_plain}","hostile":{hostile},"hp_percent":{hp_pct},"targeting":{targeting_json}{status_field},"professions":{prof_json}}}"#,
         ));
     }
-    let Some(conn) = world.get::<Connection>(viewer) else {
-        return;
-    };
     let mobs_payload = format!("[{}]", entries.join(","));
-    let _ = conn
-        .0
-        .try_send(mud_net::gmcp_packet("Room.Mobs", &mobs_payload));
+    gmcp::send_if_changed(world, viewer, "Room.Mobs", &mobs_payload, force);
     let services_inner = services
         .iter()
         .map(|s| format!("\"{s}\""))
         .collect::<Vec<_>>()
         .join(",");
     let services_payload = format!(r#"{{"services":[{services_inner}]}}"#);
-    let _ = conn
-        .0
-        .try_send(mud_net::gmcp_packet("Room.Services", &services_payload));
+    gmcp::send_if_changed(world, viewer, "Room.Services", &services_payload, force);
 }
 
 /// Handle inbound `Room.Mob.Get { id: "<entity_bits>" }`. Resolves
@@ -7977,7 +7971,7 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
     // Combat / room / skill panels. `send_room_mobs` also emits
     // the derived `Room.Services` frame in the same pass.
     send_char_combat(world, target);
-    send_room_mobs(world, target);
+    send_room_mobs(world, target, false);
     send_char_skills(world, target);
 
     // Char.Effects: array of `{name, ability, duration, source,
@@ -20052,10 +20046,10 @@ pub(crate) fn apply_ward(amount: i32, ward_pct: i32, is_magical: bool) -> i32 {
 /// `apply_damage` so the client's HP gauge tracks the visible
 /// damage text without a one-round lag (G3.3). No-op when the
 /// entity has no Connection (mob, switched puppet, etc.).
-pub(crate) fn send_char_vitals(world: &World, target: Entity) {
-    let Some(conn) = world.get::<Connection>(target).map(|c| c.0.clone()) else {
+pub(crate) fn send_char_vitals(world: &mut World, target: Entity) {
+    if world.get::<Connection>(target).is_none() {
         return;
-    };
+    }
     let (Some(h), Some(s)) = (
         world.get::<Health>(target).copied(),
         world.get::<Stamina>(target).copied(),
@@ -20074,7 +20068,9 @@ pub(crate) fn send_char_vitals(world: &World, target: Entity) {
         max_mv = s.max,
         nlp = next_level_pct,
     );
-    let _ = conn.try_send(mud_net::gmcp_packet("Char.Vitals", &payload));
+    // Change-gated: the mid-tick push from `apply_damage` records its
+    // hash, so the end-of-tick prompt does not repeat the same frame.
+    gmcp::send_if_changed(world, target, "Char.Vitals", &payload, false);
 }
 
 /// Mitigation multiplier for the alignment-protect family

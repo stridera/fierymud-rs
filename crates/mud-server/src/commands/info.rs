@@ -5940,6 +5940,9 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
     // `look` with no argument) so mappers see the room data first. In
     // a room the viewer can't see it is `{}`, never the room's data.
     crate::commands::gmcp::send_room_info(world, player, true);
+    // Room.Mobs/Services ride along so a client that just moved always
+    // gets a fresh occupant list, even if it is identical to the last.
+    crate::commands::send_room_mobs(world, player, true);
 
     // Dark-room gate: caves, underdark, underwater, and outdoor
     // rooms at night print only "It is pitch black..." plus exits

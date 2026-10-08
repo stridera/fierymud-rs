@@ -64,11 +64,11 @@ fn spawn_coins(world: &mut World, holder: Entity, n: usize) {
     }
 }
 
-/// Occurrences in the visible text; GMCP frames (`Char.Items.List`
-/// carries every item name) are ignored.
+/// Occurrences in the visible text; GMCP frames (`Char.Items.List` and
+/// `Room.Mobs` carry every item / mob name) are ignored.
 fn count(out: &str, needle: &str) -> usize {
     out.lines()
-        .filter(|l| !l.contains("Char."))
+        .filter(|l| !l.contains("Char.") && !l.contains("Room."))
         .map(|l| l.matches(needle).count())
         .sum()
 }

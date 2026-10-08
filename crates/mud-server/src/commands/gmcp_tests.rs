@@ -489,6 +489,14 @@ fn aggro_lists_hating_mobs_and_ignores_unrelated_ones() {
 
 const DUAL_WIELD: i32 = 20;
 const KICK: i32 = 21;
+const PER_PROMPT: [&str; 6] = [
+    "Char.Vitals",
+    "Group",
+    "Char.Combat",
+    "Room.Mobs",
+    "Room.Services",
+    "Char.Skills",
+];
 
 /// A player with vitals and two known skills: a passive one (tagged in
 /// the ability data) and an active one.
@@ -537,4 +545,78 @@ fn char_skills_marks_dual_wield_passive_and_kick_active() {
     };
     assert_eq!(by_name("DUAL WIELD")["passive"], true);
     assert_eq!(by_name("KICK")["passive"], false);
+}
+
+#[test]
+fn unchanged_second_prompt_sends_no_per_prompt_panels() {
+    let (mut fx, p, mut rx) = world_with_skills();
+    super::send_prompt(&mut fx.world, p);
+    let first = frames(&drain_bytes(&mut rx));
+    for pkg in PER_PROMPT {
+        assert_eq!(of(&first, pkg).len(), 1, "first prompt sends {pkg}");
+    }
+    super::send_prompt(&mut fx.world, p);
+    let second = frames(&drain_bytes(&mut rx));
+    for pkg in PER_PROMPT {
+        assert!(of(&second, pkg).is_empty(), "{pkg} repeated: {second:?}");
+    }
+}
+
+#[test]
+fn hp_change_sends_only_vitals() {
+    let (mut fx, p, mut rx) = world_with_skills();
+    super::send_prompt(&mut fx.world, p);
+    drain_bytes(&mut rx);
+    fx.world.get_mut::<Health>(p).unwrap().hp = 41;
+    super::send_prompt(&mut fx.world, p);
+    let fr = frames(&drain_bytes(&mut rx));
+    let vitals = of(&fr, "Char.Vitals");
+    assert_eq!(vitals.len(), 1, "{fr:?}");
+    assert!(vitals[0].contains("\"hp\":41"), "{}", vitals[0]);
+    for pkg in PER_PROMPT.iter().filter(|p| **p != "Char.Vitals") {
+        assert!(of(&fr, pkg).is_empty(), "{pkg} sent on HP change: {fr:?}");
+    }
+}
+
+#[test]
+fn renegotiation_resends_per_prompt_panels() {
+    let (mut fx, p, mut rx) = world_with_skills();
+    super::send_prompt(&mut fx.world, p);
+    drain_bytes(&mut rx);
+    super::clear_gmcp_sent(&mut fx.world, p);
+    super::send_prompt(&mut fx.world, p);
+    let again = frames(&drain_bytes(&mut rx));
+    for pkg in PER_PROMPT {
+        assert_eq!(of(&again, pkg).len(), 1, "{pkg} resent after renegotiation");
+    }
+}
+
+#[test]
+fn look_forces_room_mobs_even_when_unchanged() {
+    let (mut fx, p, mut rx) = world_with_skills();
+    super::send_prompt(&mut fx.world, p);
+    drain_bytes(&mut rx);
+    let (_, fr) = look_frames(&mut fx, p, &mut rx);
+    assert_eq!(of(&fr, "Room.Info").len(), 1, "{fr:?}");
+    assert_eq!(of(&fr, "Room.Mobs").len(), 1, "{fr:?}");
+}
+
+#[test]
+fn combat_and_room_mobs_resend_when_they_change() {
+    let (mut fx, p, mut rx) = world_with_skills();
+    let a = fx.a;
+    super::send_prompt(&mut fx.world, p);
+    drain_bytes(&mut rx);
+    let wolf = mob(&mut fx.world, a, "a wolf");
+    fx.world
+        .entity_mut(wolf)
+        .insert(mud_world::Health { hp: 10, max: 10 });
+    super::send_prompt(&mut fx.world, p);
+    let fr = frames(&drain_bytes(&mut rx));
+    assert_eq!(of(&fr, "Room.Mobs").len(), 1, "{fr:?}");
+    assert!(of(&fr, "Char.Combat").is_empty(), "{fr:?}");
+    fx.world.entity_mut(p).insert(mud_world::Fighting(wolf));
+    super::send_prompt(&mut fx.world, p);
+    let fr = frames(&drain_bytes(&mut rx));
+    assert_eq!(of(&fr, "Char.Combat").len(), 1, "{fr:?}");
 }

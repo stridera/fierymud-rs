@@ -59,8 +59,10 @@ Main vitals gauges + level-progress for Tracker TTL.
 | `next_level_pct`  | number  | % progress to next level (0..100, 100 = pre-ding)  |
 | `string`          | string  | Pre-formatted prompt body (`H:hp/max_hp M:mp/max_mp V:mv/max_mv`) |
 
-**Cadence:** Every prompt. Cheap; the client expects this frame on
-every prompt cycle.
+**Cadence:** Sent on the first prompt, after `Core.Hello` /
+`Core.Supports.Set`, and whenever a field changes (including the
+mid-round push when damage lands). An unchanged prompt sends nothing;
+the client reads the cached `gmcp.Char.Vitals` on `onPrompt`.
 
 **Consumer:** `Vitals/Vitals.lua`, `Vitals/Guages.lua`, `Tracker/Tracker.lua`.
 
@@ -97,8 +99,9 @@ group-main concept lands). When `target` matches `opponent`, render
 one combat row; when they differ, stack `Opponent: X` above
 `Target: Y` with the Target row in a brighter accent.
 
-**Cadence:** On every prompt. Empty `{}` when out of combat
-(the client uses that as a hide signal).
+**Cadence:** On change only (plus after renegotiation). Empty `{}`
+when out of combat (the client uses that as a hide signal); it is sent
+once when combat ends, not on every prompt.
 
 **Consumer:** `Vitals/Guages.lua` `updateCombat()`.
 
@@ -168,8 +171,9 @@ Party panel mid-left.
 }
 ```
 
-**Cadence:** Every prompt while grouped. Send an empty `{}` (or omit
-the frame entirely) to indicate solo — the client hides the panel.
+**Cadence:** On change only (plus after renegotiation), so member HP
+changes re-send it. A solo player gets an empty `{}` once — the client
+hides the panel.
 
 **Consumer:** `Vitals/Guages.lua` `updateGroup()`.
 
@@ -336,7 +340,9 @@ icon, a bank button, etc.).
 level are filtered out server-side and never appear in the array.
 The frame is what the viewer *can see*, not the full room census.
 
-**Cadence:** Every prompt. Empty array clears the panels.
+**Cadence:** On change only (plus after renegotiation), and always
+alongside `Room.Info` on `look` (so every move). Empty array clears the
+panels.
 
 **Consumer:** Threat panel + friendly-NPC panel (to be wired).
 
@@ -360,7 +366,7 @@ Service tag mapping (server-side, from `MobProfession`):
 - `Guildmaster`  → `"guild"`
 - `Trainer`      → `"trainer"`
 
-**Cadence:** Every prompt. Empty array means no services here.
+**Cadence:** Same as `Room.Mobs`. Empty array means no services here.
 
 **Consumer:** Room-header chips (to be wired).
 
@@ -517,13 +523,15 @@ widget. One entry per known ability.
 `passive` comes from the ability row's `passive` tag (`Ability.tags`).
 Clients should not draw an activation chip for `passive: true` skills.
 
-**Cadence:** Every prompt.
+**Cadence:** On change only (plus after renegotiation). Cooldown
+countdowns change the payload, so it re-sends each second while any
+skill is cooling down.
 
 **Consumer:** Skill bar (to be wired).
 
 Distinct from `Char.Skills.List` (flat array of names emitted in
 response to client `Char.Skills.Get`) — that's the legacy IRE
-directory; `Char.Skills` is the per-prompt liveness feed.
+directory; `Char.Skills` is the liveness feed.
 
 ---
 
@@ -541,7 +549,7 @@ new client-side UX requests turn up.)*
   a "snapshot please" request.
 
 - `Char.Skills.Get` — asks for the flat `Char.Skills.List` directory
-  (separate from the per-prompt `Char.Skills` liveness feed).
+  (separate from the `Char.Skills` liveness feed).
 
 - `Room.Mob.Get` — `{ id: string }` from a `Room.Mobs[i].id`. Server
   replies with `Room.Mob.Info` if the mob is in the requesting
