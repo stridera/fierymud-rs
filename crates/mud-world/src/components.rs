@@ -920,6 +920,14 @@ pub struct ItemTimer {
     pub decompose_window_secs: i32,
 }
 
+/// Marks an `ItemTimer` that came from legacy `start_decomposing`
+/// (a corpse's contents rotting on the floor) rather than from the
+/// item's own `timer_hours`. Only this clock is cancelled once a
+/// creature picks the item up (legacy `stop_decomposing`); intrinsic
+/// timers keep running while carried.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Decomposing;
+
 /// Coin amount (in copper). On a corpse (or other container) it is
 /// the money inside, claimed by `get all from <corpse>` onto the
 /// player's `Wealth`. On a standalone `Item` it is a loose pile on the

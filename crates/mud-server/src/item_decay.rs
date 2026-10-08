@@ -12,8 +12,8 @@
 use bevy_ecs::prelude::*;
 use mud_db::enums::{ObjectFlag, ObjectType};
 use mud_world::{
-    CoinPile, Corpse, Description, Item, ItemTimer, Keywords, Located, Named, ObjectFlags,
-    ObjectProto, ObjectPrototypes, WorldKey,
+    CoinPile, Corpse, Decomposing, Description, Item, ItemTimer, Keywords, Located, Named,
+    ObjectFlags, ObjectProto, ObjectPrototypes, WorldKey,
 };
 
 use crate::commands::{broadcast_room_except_rendered, send_to};
@@ -49,12 +49,57 @@ pub fn attach_timer_if_decaying(world: &mut World, entity: Entity, proto: &Objec
     });
 }
 
+/// Legacy `stop_decomposing` (handler.cpp `obj_to_char`, `equip_char`,
+/// `obj_to_obj` into a carried container): a rotting item that a
+/// creature now holds stops rotting, contents included. Items move
+/// through too many paths (get, loot, give, wear, shops, scripts) to
+/// hook one by one, so the sweep checks where each `Decomposing` item
+/// sits: following `Located` up through containers, a `Player` or
+/// `Mob` at the root means carried or worn. Only the timer
+/// `start_decomposing` added is removed; an item's own `timer_hours`
+/// clock never carries the marker.
+fn stop_decomposing_carried(world: &mut World) {
+    let rotting: Vec<Entity> = {
+        let mut q = world.query_filtered::<Entity, (With<Decomposing>, With<Item>)>();
+        q.iter(world).collect()
+    };
+    for item in rotting {
+        if held_by_creature(world, item) {
+            let mut em = world.entity_mut(item);
+            em.remove::<Decomposing>();
+            em.remove::<ItemTimer>();
+        }
+    }
+}
+
+/// True when the outermost holder of `item` (through any depth of
+/// containers) is a player or mob rather than a room.
+fn held_by_creature(world: &World, item: Entity) -> bool {
+    let mut at = item;
+    for _ in 0..64 {
+        let Some(holder) = world.get::<Located>(at).map(|l| l.0) else {
+            return false;
+        };
+        if world.get::<mud_world::Player>(holder).is_some()
+            || world.get::<mud_world::Mob>(holder).is_some()
+        {
+            return true;
+        }
+        if world.get::<mud_world::Room>(holder).is_some() {
+            return false;
+        }
+        at = holder;
+    }
+    false
+}
+
 /// Decrement every `ItemTimer` by 1 second per call. Items hitting
 /// zero are destroyed; when the holder is a player or the item is
 /// on the floor of a populated room, a flavor line announces the
 /// disappearance so players aren't left wondering where their
 /// torch went. Runs at the same 1-Hz cadence as corpse decay.
 pub fn item_decay_tick(world: &mut World) {
+    stop_decomposing_carried(world);
     // Snapshot first so we can both mutate timers AND despawn
     // without re-borrowing the query.
     let snapshots: Vec<(Entity, i32)> = {
@@ -181,10 +226,13 @@ pub(crate) fn start_decomposing(world: &mut World, item: Entity) {
         let ticks = level
             .saturating_add(11)
             .saturating_add(if is_key { 192 } else { 0 });
-        world.entity_mut(item).insert(ItemTimer {
-            remaining_secs: ticks.saturating_mul(SECS_PER_MUD_HOUR),
-            decompose_window_secs: 0,
-        });
+        world.entity_mut(item).insert((
+            ItemTimer {
+                remaining_secs: ticks.saturating_mul(SECS_PER_MUD_HOUR),
+                decompose_window_secs: 0,
+            },
+            Decomposing,
+        ));
     }
     if world.get::<Corpse>(item).is_some() {
         return;
@@ -448,5 +496,103 @@ mod tests {
         });
         start_decomposing(&mut world, e);
         assert_eq!(world.get::<ItemTimer>(e).unwrap().remaining_secs, 7);
+    }
+
+    fn rotting(world: &mut World, name: &str, at: Entity) -> Entity {
+        let e = item(world, name, at);
+        world.entity_mut(e).insert((
+            ItemTimer {
+                remaining_secs: 1000,
+                decompose_window_secs: 0,
+            },
+            Decomposing,
+        ));
+        e
+    }
+
+    #[test]
+    fn picked_up_rotting_item_stops_rotting() {
+        let mut world = World::new();
+        let room = world.spawn(mud_world::Room).id();
+        let player = world.spawn((mud_world::Player, Located(room))).id();
+        let sword = rotting(&mut world, "sword", room);
+        let rope = rotting(&mut world, "rope", room);
+        item_decay_tick(&mut world);
+        assert_eq!(world.get::<ItemTimer>(sword).unwrap().remaining_secs, 999);
+        // get
+        world.entity_mut(sword).insert(Located(player));
+        item_decay_tick(&mut world);
+        assert!(world.get::<ItemTimer>(sword).is_none());
+        assert!(world.get::<Decomposing>(sword).is_none());
+        // Left on the floor, the other keeps rotting.
+        assert_eq!(world.get::<ItemTimer>(rope).unwrap().remaining_secs, 998);
+    }
+
+    #[test]
+    fn worn_rotting_item_stops_rotting() {
+        let mut world = World::new();
+        let room = world.spawn(mud_world::Room).id();
+        let player = world.spawn((mud_world::Player, Located(room))).id();
+        let helm = rotting(&mut world, "helm", player);
+        world
+            .entity_mut(helm)
+            .insert(mud_world::EquippedSlot(mud_world::Slot::Head));
+        item_decay_tick(&mut world);
+        assert!(world.get::<ItemTimer>(helm).is_none());
+    }
+
+    #[test]
+    fn rotting_contents_stop_when_their_bag_is_carried() {
+        let mut world = World::new();
+        let room = world.spawn(mud_world::Room).id();
+        let player = world.spawn((mud_world::Player, Located(room))).id();
+        let bag = rotting(&mut world, "bag", room);
+        let gem = rotting(&mut world, "gem", bag);
+        item_decay_tick(&mut world);
+        // On the floor the bag and its contents both rot.
+        assert!(world.get::<ItemTimer>(gem).is_some());
+        world.entity_mut(bag).insert(Located(player));
+        item_decay_tick(&mut world);
+        assert!(world.get::<ItemTimer>(bag).is_none());
+        assert!(world.get::<ItemTimer>(gem).is_none());
+    }
+
+    #[test]
+    fn rotting_item_put_into_a_carried_bag_stops_rotting() {
+        let mut world = World::new();
+        let room = world.spawn(mud_world::Room).id();
+        let player = world.spawn((mud_world::Player, Located(room))).id();
+        let bag = item(&mut world, "bag", player);
+        let gem = rotting(&mut world, "gem", room);
+        world.entity_mut(gem).insert(Located(bag));
+        item_decay_tick(&mut world);
+        assert!(world.get::<ItemTimer>(gem).is_none());
+    }
+
+    #[test]
+    fn rotting_item_in_a_floor_container_keeps_rotting() {
+        let mut world = World::new();
+        let room = world.spawn(mud_world::Room).id();
+        let chest = item(&mut world, "chest", room);
+        let gem = rotting(&mut world, "gem", chest);
+        item_decay_tick(&mut world);
+        assert_eq!(world.get::<ItemTimer>(gem).unwrap().remaining_secs, 999);
+    }
+
+    #[test]
+    fn intrinsic_timers_keep_running_while_carried() {
+        let mut world = World::new();
+        let room = world.spawn(mud_world::Room).id();
+        let player = world.spawn((mud_world::Player, Located(room))).id();
+        let torch = item(&mut world, "torch", player);
+        world.entity_mut(torch).insert(ItemTimer {
+            remaining_secs: 1000,
+            decompose_window_secs: 0,
+        });
+        // start_decomposing leaves an existing timer unmarked.
+        start_decomposing(&mut world, torch);
+        assert!(world.get::<Decomposing>(torch).is_none());
+        item_decay_tick(&mut world);
+        assert_eq!(world.get::<ItemTimer>(torch).unwrap().remaining_secs, 999);
     }
 }
