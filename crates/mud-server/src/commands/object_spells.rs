@@ -406,6 +406,69 @@ mod tests {
         assert!(world.get::<ItemAlterDirty>(helm).is_some());
     }
 
+    /// Spawn an effect the way the cast pipeline names it: by what it
+    /// modifies, tagged with the ability that put it there.
+    fn effect_from(world: &mut World, on: Entity, label: &str, ability: i32) -> Entity {
+        world
+            .spawn((
+                mud_world::EffectInstance {
+                    kind: 0,
+                    name: label.to_string(),
+                    strength: -1,
+                    remaining_secs: 600,
+                    source: mud_world::EffectSource::Spell,
+                    ability_id: Some(ability),
+                },
+                mud_world::AppliedTo(on),
+            ))
+            .id()
+    }
+
+    #[test]
+    fn remove_curse_on_a_person_lifts_the_curse_debuff_whatever_it_is_labelled() {
+        let (mut world, _room, caster, mut rx) = world_with_curses();
+        // Curse's debuff sits under its stat label (`acc`), not "curse".
+        let debuff = effect_from(&mut world, caster, "acc", CURSE);
+        let other = effect_from(&mut world, caster, "acc", 999);
+        let helm = item(&mut world, "a shiny helm", "helm", caster);
+        world
+            .entity_mut(helm)
+            .insert(ObjectRestrictions(vec![ObjectRestriction::NoDrop]));
+        cast(&mut world, caster, "remove curse", "me");
+        assert!(world.get_entity(debuff).is_err(), "{}", drain(&mut rx));
+        assert!(
+            world.get_entity(other).is_ok(),
+            "another spell's effect with the same label stays"
+        );
+        assert!(
+            cursed(&world, helm),
+            "the person had a curse effect, so the carried item is left alone"
+        );
+    }
+
+    #[test]
+    fn lifting_the_curse_debuff_gives_back_its_stat_penalty() {
+        let (mut world, _room, caster, _rx) = world_with_curses();
+        world.entity_mut(caster).insert(mud_world::CombatStats {
+            accuracy: 49,
+            ..Default::default()
+        });
+        let debuff = effect_from(&mut world, caster, "accuracy", CURSE);
+        world.entity_mut(debuff).insert(mud_world::ModifyDelta {
+            target: "accuracy".into(),
+            amount: -1,
+        });
+        cast(&mut world, caster, "remove curse", "me");
+        assert!(world.get_entity(debuff).is_err());
+        assert_eq!(
+            world
+                .get::<mud_world::CombatStats>(caster)
+                .unwrap()
+                .accuracy,
+            50
+        );
+    }
+
     #[test]
     fn remove_curse_on_a_clean_item_senses_nothing() {
         let (mut world, _room, caster, mut rx) = world_with_curses();

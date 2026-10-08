@@ -15479,7 +15479,7 @@ pub(crate) fn invoke_ability_with(
                 } else {
                     let mut total = 0usize;
                     for cond in &conditions {
-                        total += remove_effect_named(world, target_entity, cond);
+                        total += remove_effects_for_condition(world, target_entity, cond);
                     }
                     total
                 };
@@ -19069,10 +19069,25 @@ fn flag_prevents(flag: &str, kind: Prevent) -> bool {
     }
 }
 
+/// Despawn the given effect entities on `target`, first giving back any
+/// stat change a `ModifyDelta` companion recorded (the expiry tick does
+/// the same), so a cleansed debuff does not leave its penalty behind.
+fn despawn_effects_on(world: &mut World, target: Entity, effects: Vec<Entity>) -> usize {
+    let count = effects.len();
+    for e in effects {
+        if let Some(d) = world.get::<mud_world::ModifyDelta>(e).cloned() {
+            apply_modify_delta(world, target, &d.target, -d.amount);
+        }
+        if let Ok(em) = world.get_entity_mut(e) {
+            em.despawn();
+        }
+    }
+    count
+}
+
 /// Despawn every `EffectInstance` on `target` whose name matches
 /// `name` (case-insensitive). Returns the number despawned. Used by
-/// curative skills (bandage stops bleed) and by the `cleanse`
-/// effect-type consumer in `invoke_ability`.
+/// curative skills (bandage stops bleed).
 pub(crate) fn remove_effect_named(world: &mut World, target: Entity, name: &str) -> usize {
     let to_remove: Vec<Entity> = {
         let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
@@ -19081,13 +19096,49 @@ pub(crate) fn remove_effect_named(world: &mut World, target: Entity, name: &str)
             .map(|(e, _, _)| e)
             .collect()
     };
-    let count = to_remove.len();
-    for e in to_remove {
-        if let Ok(em) = world.get_entity_mut(e) {
-            em.despawn();
-        }
-    }
-    count
+    despawn_effects_on(world, target, to_remove)
+}
+
+/// `cleanse` for one `condition` (`poison`, `curse`, ...): despawn the
+/// effects on `target` that either carry that name or were put there by
+/// the ability of that name (matched on the ability's plain name, so the
+/// penalty is lifted whatever stat the ability's effect is labelled with:
+/// Curse's debuff sits under `acc`). Legacy: remove curse strips
+/// `SPELL_CURSE` affects. Returns the number despawned.
+pub(crate) fn remove_effects_for_condition(
+    world: &mut World,
+    target: Entity,
+    condition: &str,
+) -> usize {
+    let key = |s: &str| -> String {
+        s.chars()
+            .filter(char::is_ascii_alphanumeric)
+            .map(|c| c.to_ascii_lowercase())
+            .collect()
+    };
+    let wanted = key(condition);
+    let ability_ids: Vec<i32> = world
+        .get_resource::<AbilityCatalog>()
+        .map(|cat| {
+            cat.by_name
+                .values()
+                .filter(|a| key(&a.plain_name) == wanted)
+                .map(|a| a.id)
+                .collect()
+        })
+        .unwrap_or_default();
+    let to_remove: Vec<Entity> = {
+        let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
+        q.iter(world)
+            .filter(|(_, eff, applied)| {
+                applied.0 == target
+                    && (eff.name.eq_ignore_ascii_case(condition)
+                        || eff.ability_id.is_some_and(|id| ability_ids.contains(&id)))
+            })
+            .map(|(e, _, _)| e)
+            .collect()
+    };
+    despawn_effects_on(world, target, to_remove)
 }
 
 /// Name-approval gate for social commands. Returns `true` (and
@@ -19129,13 +19180,7 @@ pub(crate) fn remove_all_effects_on(world: &mut World, target: Entity) -> usize 
             .map(|(e, _, _)| e)
             .collect()
     };
-    let count = to_remove.len();
-    for e in to_remove {
-        if let Ok(em) = world.get_entity_mut(e) {
-            em.despawn();
-        }
-    }
-    count
+    despawn_effects_on(world, target, to_remove)
 }
 
 pub(crate) fn resolve_effect_duration(
