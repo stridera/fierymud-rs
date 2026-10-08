@@ -514,6 +514,11 @@ pub(crate) mod test_support;
 mod text_layout_tests;
 #[path = "commands/unban.rs"]
 mod unban;
+#[path = "commands/vlist.rs"]
+mod vlist;
+#[cfg(test)]
+#[path = "commands/vlist_tests.rs"]
+mod vlist_tests;
 #[cfg(test)]
 #[path = "commands/wear_tests.rs"]
 mod wear_tests;
