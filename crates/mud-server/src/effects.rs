@@ -83,10 +83,13 @@ fn run_effect_hook(world: &mut World, hook: EffectHook, target: Entity, effect_n
 }
 
 /// Does an effect of this name hold its bearer still? A `stun` (bash and
-/// friends, fear's wait states) or a `paralyzed` status (Minor / Major
-/// Paralysis, fear's "frozen in terror").
+/// friends, fear's wait states), a `paralyzed` status (Minor / Major
+/// Paralysis, fear's "frozen in terror") or a `mesmerized` one (legacy
+/// `EFF_MESMERIZED` blocks acting and attacking the same way).
 pub(crate) fn is_stun_name(name: &str) -> bool {
-    name.eq_ignore_ascii_case("stun") || name.eq_ignore_ascii_case("paralyzed")
+    name.eq_ignore_ascii_case("stun")
+        || name.eq_ignore_ascii_case("paralyzed")
+        || name.eq_ignore_ascii_case("mesmerized")
 }
 
 /// Make `target`'s [`Stunned`] marker match its effects: present exactly
@@ -132,12 +135,14 @@ fn sync_stunned_all(world: &mut World) {
 /// gives it `EFF_MINOR_PARALYSIS`, which any hit breaks.
 pub(crate) const FREEZE_SOURCE: &str = "fear-freeze";
 
-/// Does this `paralyzed` instance break when its bearer is hit? Data
-/// first: the ability's own effect row says `breakOnDamage` in its
-/// override params (else the effect's defaults), which is true for Minor
-/// Paralysis and false for Major Paralysis. Fear's own freeze has no
-/// ability row and is tagged [`FREEZE_SOURCE`] instead.
-fn paralysis_breaks_on_hit(world: &World, inst: &EffectInstance) -> bool {
+/// Does this status instance break when its bearer is hit? Data first:
+/// the ability's own effect row says `breakOnDamage` in its override
+/// params (else the effect's defaults) for the status flag the instance
+/// carries (its name), so any status flag can opt in: true for Minor
+/// Paralysis, Entangle and Mesmerize, false for Major Paralysis, which
+/// holds. Fear's own freeze has no ability row and is tagged
+/// [`FREEZE_SOURCE`] instead.
+fn breaks_on_hit(world: &World, inst: &EffectInstance) -> bool {
     if matches!(&inst.source, mud_world::EffectSource::Other(s) if s == FREEZE_SOURCE) {
         return true;
     }
@@ -159,58 +164,90 @@ fn paralysis_breaks_on_hit(world: &World, inst: &EffectInstance) -> bool {
             let pick = |key| field(over.as_ref(), key).or_else(|| field(defaults, key));
             pick("flag")
                 .and_then(|f| f.as_str().map(str::to_ascii_lowercase))
-                .is_some_and(|f| f == "paralyzed")
+                .is_some_and(|f| f == inst.name.to_ascii_lowercase())
                 && pick("breakOnDamage").and_then(|b| b.as_bool()) == Some(true)
         })
 }
 
-/// Legacy `damage()` (fight.cpp:1650): a hit shatters Minor Paralysis.
-/// Called from the central attacker-damage entry for any positive hit.
-/// Breakable `paralyzed` instances (see [`paralysis_breaks_on_hit`]) are
-/// removed with legacy's three lines; Major Paralysis stays. Returns
-/// whether something broke.
-pub(crate) fn break_paralysis_on_hit(world: &mut World, attacker: Entity, victim: Entity) -> bool {
-    let breaking: Vec<Entity> = {
+/// Legacy `damage()` (fight.cpp:1650-1666): which message set a broken
+/// status plays. Minor Paralysis (and Entangle, which legacy casts as
+/// Minor Paralysis) shatters; Mesmerize jolts. Other flags break silently.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BreakKind {
+    Frozen,
+    Mesmerized,
+    Silent,
+}
+
+fn break_kind(name: &str) -> BreakKind {
+    if name.eq_ignore_ascii_case("paralyzed") || name.eq_ignore_ascii_case("webbed") {
+        BreakKind::Frozen
+    } else if name.eq_ignore_ascii_case("mesmerized") {
+        BreakKind::Mesmerized
+    } else {
+        BreakKind::Silent
+    }
+}
+
+/// Legacy `damage()` (fight.cpp:1650): a hit shatters Minor Paralysis,
+/// Entangle and Mesmerize. Called from the central attacker-damage entry
+/// for any positive hit (legacy also breaks them on a 0-damage hit; the
+/// swing path only reaches here with damage, so a plain miss does not).
+/// Breakable instances (see [`breaks_on_hit`]) are removed with legacy's
+/// three lines per kind; Major Paralysis stays. Returns whether something
+/// broke.
+pub(crate) fn break_on_hit(world: &mut World, attacker: Entity, victim: Entity) -> bool {
+    let breaking: Vec<(Entity, BreakKind)> = {
         let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
         q.iter(world)
-            .filter(|(_, inst, applied)| {
-                applied.0 == victim
-                    && inst.name.eq_ignore_ascii_case("paralyzed")
-                    && paralysis_breaks_on_hit(world, inst)
-            })
-            .map(|(e, _, _)| e)
+            .filter(|(_, inst, applied)| applied.0 == victim && breaks_on_hit(world, inst))
+            .map(|(e, inst, _)| (e, break_kind(&inst.name)))
             .collect()
     };
     if breaking.is_empty() {
         return false;
     }
-    for e in breaking {
-        if let Ok(em) = world.get_entity_mut(e) {
+    for (e, _) in &breaking {
+        if let Ok(em) = world.get_entity_mut(*e) {
             em.despawn();
         }
     }
     sync_stunned(world, victim);
     let attacker_name = crate::commands::cap_sentence_start(&name_of(world, attacker));
     let victim_name = crate::commands::cap_sentence_start(&name_of(world, victim));
-    send_to(
-        world,
-        attacker,
-        format!("Your blow disrupts the magic keeping {victim_name} frozen.\r\n"),
-    );
-    send_to(
-        world,
-        victim,
-        format!("{attacker_name}'s blow shatters the magic paralyzing you!\r\n"),
-    );
-    if let Some(room) = world.get::<Located>(victim).map(|l| l.0) {
-        crate::commands::broadcast_room_except_rendered(
-            world,
-            room,
-            &[attacker, victim],
-            &format!(
-                "{attacker_name}'s attack frees {victim_name} from magic which held them motionless.\r\n"
+    let room = world.get::<Located>(victim).map(|l| l.0);
+    for kind in [BreakKind::Frozen, BreakKind::Mesmerized] {
+        if !breaking.iter().any(|(_, k)| *k == kind) {
+            continue;
+        }
+        let (to_char, to_vict, to_room) = match kind {
+            BreakKind::Frozen => (
+                format!("Your blow disrupts the magic keeping {victim_name} frozen.\r\n"),
+                format!("{attacker_name}'s blow shatters the magic paralyzing you!\r\n"),
+                format!(
+                    "{attacker_name}'s attack frees {victim_name} from magic which held them motionless.\r\n"
+                ),
             ),
-        );
+            _ => (
+                format!(
+                    "You drew {victim_name}'s attention from whatever they were pondering.\r\n"
+                ),
+                format!("{attacker_name} attacks, jolting you out of your reverie!\r\n"),
+                format!(
+                    "{attacker_name}'s attack distracts {victim_name} from whatever was fascinating them.\r\n"
+                ),
+            ),
+        };
+        send_to(world, attacker, to_char);
+        send_to(world, victim, to_vict);
+        if let Some(room) = room {
+            crate::commands::broadcast_room_except_rendered(
+                world,
+                room,
+                &[attacker, victim],
+                &to_room,
+            );
+        }
     }
     true
 }
@@ -905,5 +942,132 @@ mod tests {
         effects_tick(&mut world);
         let inst = world.get::<EffectInstance>(eff).expect("untouched");
         assert_eq!(inst.remaining_secs, 5, "off-period tick is a no-op");
+    }
+
+    // -- break on hit (legacy damage(), fight.cpp:1650-1666) ---------------
+
+    use crate::commands::test_support::{Rx, drain, player_in};
+
+    /// A room with a victim ("Tester") and an attacker ("Hitter"), each
+    /// with a connection, and one effect instance of status `flag` from
+    /// ability 77 whose effect row carries `break_on_damage`.
+    struct Hit {
+        world: World,
+        attacker: Entity,
+        victim: Entity,
+        arx: Rx,
+        vrx: Rx,
+        wrx: Rx,
+    }
+
+    fn hit_fixture(flag: &str, break_on_damage: Option<bool>) -> Hit {
+        let mut world = World::new();
+        let room = world.spawn_empty().id();
+        let (victim, vrx) = player_in(&mut world, room);
+        let (attacker, arx) = player_in(&mut world, room);
+        world.entity_mut(attacker).insert(mud_world::Named {
+            name: "Hitter".into(),
+        });
+        let (watcher, wrx) = player_in(&mut world, room);
+        world.entity_mut(watcher).insert(mud_world::Named {
+            name: "Watcher".into(),
+        });
+        world.init_resource::<AbilityCatalog>();
+        world.init_resource::<EffectCatalog>();
+        let mut over = serde_json::json!({ "flag": flag });
+        if let Some(b) = break_on_damage {
+            over["breakOnDamage"] = b.into();
+        }
+        world
+            .resource_mut::<AbilityCatalog>()
+            .effects_for
+            .insert(77, vec![(900, Some(over))]);
+        world.spawn((
+            EffectInstance {
+                kind: 900,
+                name: flag.into(),
+                strength: 1,
+                remaining_secs: 300,
+                source: mud_world::EffectSource::Spell,
+                ability_id: Some(77),
+            },
+            AppliedTo(victim),
+        ));
+        Hit {
+            world,
+            attacker,
+            victim,
+            arx,
+            vrx,
+            wrx,
+        }
+    }
+
+    fn effect_count(h: &mut Hit, flag: &str) -> usize {
+        let victim = h.victim;
+        let mut q = h.world.query::<(&EffectInstance, &AppliedTo)>();
+        q.iter(&h.world)
+            .filter(|(i, a)| a.0 == victim && i.name == flag)
+            .count()
+    }
+
+    #[test]
+    fn a_hit_breaks_mesmerize_with_legacy_messages() {
+        let mut h = hit_fixture("mesmerized", Some(true));
+        h.world.entity_mut(h.victim).insert(Stunned);
+        crate::commands::apply_attacker_damage(&mut h.world, h.victim, 5, h.attacker);
+        assert_eq!(effect_count(&mut h, "mesmerized"), 0);
+        assert!(h.world.get::<Stunned>(h.victim).is_none());
+        let out = drain(&mut h.arx);
+        assert!(
+            out.contains("You drew Tester's attention from whatever they were pondering."),
+            "{out}"
+        );
+        let out = drain(&mut h.vrx);
+        assert!(
+            out.contains("Hitter attacks, jolting you out of your reverie!"),
+            "{out}"
+        );
+        let out = drain(&mut h.wrx);
+        assert!(
+            out.contains("Hitter's attack distracts Tester from whatever was fascinating them."),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_hit_breaks_entangle_with_the_minor_paralysis_messages() {
+        let mut h = hit_fixture("webbed", Some(true));
+        crate::commands::apply_attacker_damage(&mut h.world, h.victim, 5, h.attacker);
+        assert_eq!(effect_count(&mut h, "webbed"), 0);
+        let out = drain(&mut h.arx);
+        assert!(
+            out.contains("Your blow disrupts the magic keeping Tester frozen."),
+            "{out}"
+        );
+        let out = drain(&mut h.vrx);
+        assert!(
+            out.contains("Hitter's blow shatters the magic paralyzing you!"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_status_not_marked_break_on_damage_survives_the_hit() {
+        for flag in ["webbed", "mesmerized", "paralyzed"] {
+            for marked in [Some(false), None] {
+                let mut h = hit_fixture(flag, marked);
+                crate::commands::apply_attacker_damage(&mut h.world, h.victim, 5, h.attacker);
+                assert_eq!(effect_count(&mut h, flag), 1, "{flag} {marked:?}");
+                assert!(drain(&mut h.arx).is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn a_dot_tick_without_an_attacker_does_not_break_it() {
+        let mut h = hit_fixture("mesmerized", Some(true));
+        crate::commands::apply_damage(&mut h.world, h.victim, 5);
+        assert_eq!(effect_count(&mut h, "mesmerized"), 1);
     }
 }

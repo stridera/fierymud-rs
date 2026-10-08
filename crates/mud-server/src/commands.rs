@@ -17249,7 +17249,7 @@ pub(crate) fn invoke_ability_with(
                 mud_world::mob_effects::install_flag_marker(world, target_entity, &flag);
                 // Paralysis holds its bearer like a stun: no swinging, no
                 // fleeing (legacy `perform_violence` / `attack_ok`).
-                if flag == "paralyzed" {
+                if crate::effects::is_stun_name(&flag) {
                     crate::effects::sync_stunned(world, target_entity);
                 }
                 // Fear: the victim panics and flees at once (legacy
@@ -18671,6 +18671,7 @@ fn flag_prevents(flag: &str, kind: Prevent) -> bool {
                 | "held"
                 | "hold_person"
                 | "paralyzed"
+                | "mesmerized"
                 | "asleep"
                 | "sleeping"
                 | "rooted"
@@ -18680,7 +18681,14 @@ fn flag_prevents(flag: &str, kind: Prevent) -> bool {
         ),
         Prevent::Casting => matches!(
             f.as_str(),
-            "silenced" | "silence" | "stunned" | "stun" | "asleep" | "sleeping" | "paralyzed"
+            "silenced"
+                | "silence"
+                | "stunned"
+                | "stun"
+                | "asleep"
+                | "sleeping"
+                | "paralyzed"
+                | "mesmerized"
         ),
         Prevent::Speaking => matches!(
             f.as_str(),
@@ -20177,8 +20185,10 @@ pub(crate) fn apply_attacker_damage(
         // (melee, skills, spells) breaks the attacker's invisibility.
         break_invisibility(world, attacker);
         // Legacy `damage()` (fight.cpp:1650): a hit frees the victim from
-        // Minor Paralysis (and fear's freeze). Major Paralysis holds.
-        crate::effects::break_paralysis_on_hit(world, attacker, target);
+        // Minor Paralysis (and fear's freeze), Entangle and Mesmerize --
+        // whatever the ability data marks `breakOnDamage`. Major
+        // Paralysis holds.
+        crate::effects::break_on_hit(world, attacker, target);
     }
     apply_damage(world, target, amount)
 }
