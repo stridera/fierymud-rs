@@ -1425,7 +1425,13 @@ async fn handle_negotiate(
             return forward_capability(sink, "eor", true).await;
         }
         (DONT, opt::EOR) => {
-            caps.eor = false;
+            // RFC 1143: a DONT for an option we have enabled is a request
+            // to stop, and we must acknowledge it with WONT. A DONT that
+            // merely refuses our WILL (never enabled) gets no reply, or
+            // the two sides would loop.
+            if std::mem::replace(&mut caps.eor, false) {
+                let _ = out_tx.try_send(wont(opt::EOR));
+            }
             caps.output.set_eor(false);
             return forward_capability(sink, "eor", false).await;
         }
@@ -2485,6 +2491,48 @@ mod limit_tests {
         let got = wire_after_prompt(&mut client, &outbound).await;
         assert!(contains_seq(&got, b"Password: SENTINEL\r\n"), "got {got:?}");
         assert!(!contains_seq(&got, &[0xFF, 0xEF]), "stray IAC EOR: {got:?}");
+    }
+
+    /// Read from `client` until `needle` shows up on the wire.
+    async fn read_until(client: &mut TcpStream, needle: &[u8]) -> Vec<u8> {
+        let mut got = Vec::new();
+        let mut buf = [0u8; 2048];
+        while !contains_seq(&got, needle) {
+            let n = tokio::time::timeout(WAIT, client.read(&mut buf))
+                .await
+                .expect("timed out reading")
+                .unwrap();
+            assert!(n > 0, "closed early");
+            got.extend_from_slice(&buf[..n]);
+        }
+        got
+    }
+
+    #[tokio::test]
+    async fn dont_eor_after_eor_was_enabled_is_acknowledged_with_wont_and_disables_it() {
+        let (addr, _gate, mut rx) = start(fast_limits()).await;
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.write_all(&do_(opt::EOR)).await.unwrap();
+        let outbound = connected_outbound(&mut rx).await;
+        client.write_all(&dont(opt::EOR)).await.unwrap();
+        // IAC WONT EOR (RFC 1143), distinct from the server's own WILL.
+        read_until(&mut client, &[0xFF, 0xFC, 0x19]).await;
+        let got = wire_after_prompt(&mut client, &outbound).await;
+        assert!(contains_seq(&got, b"Password: SENTINEL\r\n"), "got {got:?}");
+        assert!(!contains_seq(&got, &[0xFF, 0xEF]), "stray IAC EOR: {got:?}");
+    }
+
+    #[tokio::test]
+    async fn dont_eor_refusing_our_will_gets_no_wont() {
+        let (addr, _gate, mut rx) = start(fast_limits()).await;
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.write_all(&dont(opt::EOR)).await.unwrap();
+        let outbound = connected_outbound(&mut rx).await;
+        let got = wire_after_prompt(&mut client, &outbound).await;
+        assert!(
+            !contains_seq(&got, &[0xFF, 0xFC, 0x19]),
+            "unsolicited WONT EOR: {got:?}"
+        );
     }
 
     fn contains_seq(hay: &[u8], needle: &[u8]) -> bool {
