@@ -393,18 +393,82 @@ fn teardown_effect_instance(world: &mut World, target: Entity, eff_entity: Entit
     }
 }
 
+/// Conjuration spells spawn an `EffectInstance` named `summoned-{mobType}`
+/// pointing at the spawned mob via `AppliedTo(mob)`. When the instance goes
+/// (expiry, dispel, cleanse, `cancel`, staff strip) the conjured mob
+/// vanishes with it, the legacy "follower fades" behaviour: drop a final
+/// flavor line into the mob's room so observers see it, then despawn the
+/// mob. Players are never despawned, and a mob a sibling instance already
+/// took is a no-op.
+fn despawn_summoned_mob(world: &mut World, target: Entity) {
+    if world.get::<mud_world::Player>(target).is_some() {
+        return;
+    }
+    if let Some(mob_room) = world.get::<mud_world::Located>(target).map(|l| l.0) {
+        let mob_name = world
+            .get::<mud_world::Named>(target)
+            .map_or("the summoned creature".to_string(), |n| n.name.clone());
+        let players: Vec<Entity> = {
+            let mut q =
+                world.query_filtered::<(Entity, &mud_world::Located), With<mud_world::Player>>();
+            q.iter(world)
+                .filter(|(_, l)| l.0 == mob_room)
+                .map(|(e, _)| e)
+                .collect()
+        };
+        let msg = format!("{mob_name} fades back to where it was summoned from.\r\n");
+        for p in players {
+            send_to(world, p, msg.clone());
+        }
+    }
+    if let Ok(em) = world.get_entity_mut(target) {
+        em.despawn();
+    }
+}
+
 /// Remove one `EffectInstance` before its time (dispel, cleanse, `cancel`,
 /// staff strip): fire its `on_remove` hook, then the same reversal expiry
 /// does ([`teardown_effect_instance`]). The one entry point for early
 /// removal; callers never despawn an `EffectInstance` themselves.
 pub(crate) fn remove_effect_instance(world: &mut World, target: Entity, eff_entity: Entity) {
-    if let Some(name) = world
+    let name = world
         .get::<EffectInstance>(eff_entity)
-        .map(|i| i.name.clone())
-    {
-        run_effect_hook(world, EffectHook::OnRemove, target, &name);
+        .map(|i| i.name.clone());
+    if let Some(name) = &name {
+        run_effect_hook(world, EffectHook::OnRemove, target, name);
     }
     teardown_effect_instance(world, target, eff_entity);
+    // A conjured mob dies with its instance on early removal too, same as
+    // expiry; only the wear-off text stays expiry-only.
+    if name.is_some_and(|n| n.starts_with("summoned-")) {
+        despawn_summoned_mob(world, target);
+    }
+}
+
+/// Strip every non-innate `EffectInstance` from `target` through
+/// [`remove_effect_instance`]: legacy `perform_death` (fight.cpp:839) runs
+/// `effect_remove` over the whole effect list. Race innates and worn-item
+/// grants (see [`mud_world::mob_effects::is_innate_effect`]) stay, since
+/// their lifetime belongs to the race / the item. Returns how many went.
+pub(crate) fn strip_non_innate_effects(world: &mut World, target: Entity) -> usize {
+    let doomed: Vec<Entity> = {
+        let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
+        q.iter(world)
+            .filter(|(_, inst, applied)| {
+                applied.0 == target && !mud_world::mob_effects::is_innate_effect(&inst.source)
+            })
+            .map(|(e, ..)| e)
+            .collect()
+    };
+    let mut removed = 0;
+    for e in doomed {
+        // A hook or sibling removal may already have taken it.
+        if world.get::<EffectInstance>(e).is_some() {
+            remove_effect_instance(world, target, e);
+            removed += 1;
+        }
+    }
+    removed
 }
 
 /// Decrement remaining duration on every active effect; despawn ones whose
@@ -564,34 +628,10 @@ pub fn effects_tick(world: &mut World) {
             {
                 e.despawn();
             }
-            // L3 summon teardown — conjuration spells spawn an
-            // EffectInstance with name="summoned-{mobType}" pointing
-            // at the spawned mob via AppliedTo(mob). When the
-            // instance expires, the conjured mob vanishes — same
-            // semantics as the legacy "follower fades" behavior.
-            // Cleanup: drop a final flavor line into the mob's room
-            // so observers see the dispel, then despawn the mob and
-            // anything it was carrying.
+            // L3 summon teardown: the conjured mob goes with its
+            // instance (shared with early removal).
             if name.starts_with("summoned-") {
-                if let Some(mob_room) = world.get::<mud_world::Located>(target).map(|l| l.0) {
-                    let mob_name = world
-                        .get::<mud_world::Named>(target)
-                        .map_or("the summoned creature".to_string(), |n| n.name.clone());
-                    let players: Vec<bevy_ecs::entity::Entity> = {
-                        let mut q = world.query_filtered::<(bevy_ecs::entity::Entity, &mud_world::Located), bevy_ecs::prelude::With<mud_world::Player>>();
-                        q.iter(world)
-                            .filter(|(_, l)| l.0 == mob_room)
-                            .map(|(e, _)| e)
-                            .collect()
-                    };
-                    let msg = format!("{mob_name} fades back to where it was summoned from.\r\n");
-                    for p in players {
-                        crate::commands::send_to(world, p, msg.clone());
-                    }
-                }
-                if let Ok(em) = world.get_entity_mut(target) {
-                    em.despawn();
-                }
+                despawn_summoned_mob(world, target);
             }
             // Wall teardown — WALL_OF_STONE / WALL_OF_ICE spawn an
             // EffectInstance named "wall-{type}" with

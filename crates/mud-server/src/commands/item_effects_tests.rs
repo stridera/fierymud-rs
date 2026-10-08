@@ -1351,3 +1351,168 @@ fn cleanse_of_one_protect_keeps_the_marker_a_second_cast_backs() {
     assert_eq!(super::remove_all_effects_on(&mut world, p), 1);
     assert!(world.get::<mud_world::ProtectFromEvil>(p).is_none());
 }
+
+// ---- Death strips effects; dispelling a summon takes the mob with it ----
+
+fn cast_strength_buff(world: &mut World, p: Entity, amount: i32) {
+    assert!(crate::commands::apply_modify_delta(
+        world,
+        p,
+        "str_bonus",
+        amount
+    ));
+    world.spawn((
+        EffectInstance {
+            kind: MODIFY,
+            name: "str".into(),
+            strength: amount,
+            remaining_secs: 600,
+            source: EffectSource::Spell,
+            ability_id: None,
+        },
+        AppliedTo(p),
+        mud_world::ModifyDelta {
+            target: "str_bonus".into(),
+            amount,
+        },
+    ));
+}
+
+fn kill(world: &mut World, p: Entity) {
+    world.insert_resource(crate::TickCount(1));
+    let room = world.get::<Located>(p).unwrap().0;
+    crate::combat::handle_death(world, p, "Tester", room);
+}
+
+#[test]
+fn death_strips_a_cast_buff_and_the_stat_returns_to_baseline() {
+    let (mut world, p, mut rx) = setup();
+    ring(&mut world, p, 50, "iron", vec![modify("str_bonus", 2)]);
+    wear(&mut world, p, &mut rx, "iron");
+    cast_strength_buff(&mut world, p, 4);
+    spell_instance(&mut world, p, "bless", 1);
+    assert_eq!(strength(&world, p), 19);
+    kill(&mut world, p);
+    assert!(world.get::<mud_world::Ghost>(p).is_some());
+    assert_eq!(
+        strength(&world, p),
+        13,
+        "buff stripped, ring left in corpse"
+    );
+    assert!(effects_on(&mut world, p).is_empty());
+    assert!(world.get::<Bless>(p).is_none(), "marker dropped");
+}
+
+#[test]
+fn death_keeps_race_innate_effects() {
+    let (mut world, p, _rx) = setup();
+    let mut races = RaceEffectCatalog::default();
+    races.insert(
+        "HUMAN",
+        RaceEffect {
+            effect_id: STATUS,
+            strength: 1,
+            modifier_data: serde_json::json!({"flags": ["fly"]}),
+        },
+    );
+    world.insert_resource(races);
+    mud_world::mob_effects::apply_race_effects(&mut world, p, "HUMAN");
+    cast_strength_buff(&mut world, p, 4);
+    spell_instance(&mut world, p, "bless", 1);
+    kill(&mut world, p);
+    let fx = effects_on(&mut world, p);
+    assert_eq!(fx.len(), 1, "{fx:?}");
+    assert!(mud_world::mob_effects::is_race_effect(&fx[0].1));
+    assert!(world.get::<Flying>(p).is_some(), "race fly survives");
+    assert!(world.get::<Bless>(p).is_none());
+    assert_eq!(strength(&world, p), 13);
+}
+
+#[test]
+fn relog_after_death_has_no_stale_buff() {
+    let (mut world, p, _rx) = setup();
+    cast_strength_buff(&mut world, p, 4);
+    spell_instance(&mut world, p, "bless", 1);
+    kill(&mut world, p);
+    let snap = crate::login::snapshot_player(&mut world, p, 1).expect("snapshot");
+    assert_eq!(snap.effect_instances_json, None, "no effect persisted");
+    let saved_stats = base_core_stats(&world, p).unwrap();
+    assert_eq!(saved_stats.strength, 13, "no buff baked into the row");
+    // Fresh login from that save: nothing to restore.
+    let (mut world2, p2, _rx2) = setup();
+    *world2.get_mut::<CoreStats>(p2).unwrap() = saved_stats;
+    assert_eq!(strength(&world2, p2), 13);
+    assert!(effects_on(&mut world2, p2).is_empty());
+    assert!(world2.get::<Bless>(p2).is_none());
+}
+
+fn summoned_mob(world: &mut World, room: Entity, name: &str) -> (Entity, Entity) {
+    let mob = world
+        .spawn((
+            mud_world::Mob,
+            Named {
+                name: "a conjured wolf".into(),
+            },
+            Located(room),
+        ))
+        .id();
+    let eff = world
+        .spawn((
+            EffectInstance {
+                kind: STATUS,
+                name: name.into(),
+                strength: 1,
+                remaining_secs: 600,
+                source: EffectSource::Spell,
+                ability_id: None,
+            },
+            AppliedTo(mob),
+        ))
+        .id();
+    (mob, eff)
+}
+
+#[test]
+fn dispelling_a_summon_removes_the_conjured_mob() {
+    let (mut world, p, mut rx) = setup();
+    let room = world.get::<Located>(p).unwrap().0;
+    let (mob, eff) = summoned_mob(&mut world, room, "summoned-wolf");
+    assert_eq!(
+        super::remove_effect_named(&mut world, mob, "summoned-wolf"),
+        1
+    );
+    assert!(world.get_entity(eff).is_err(), "instance gone");
+    assert!(world.get_entity(mob).is_err(), "conjured mob gone");
+    assert!(drain(&mut rx).contains("fades back"));
+}
+
+#[test]
+fn removing_a_non_summon_effect_leaves_the_mob_alone() {
+    let (mut world, p, _rx) = setup();
+    let room = world.get::<Located>(p).unwrap().0;
+    let (mob, _eff) = summoned_mob(&mut world, room, "bless");
+    assert_eq!(super::remove_effect_named(&mut world, mob, "bless"), 1);
+    assert!(world.get_entity(mob).is_ok());
+}
+
+#[test]
+fn removing_two_summon_instances_on_one_mob_does_not_panic() {
+    let (mut world, p, _rx) = setup();
+    let room = world.get::<Located>(p).unwrap().0;
+    let (mob, a) = summoned_mob(&mut world, room, "summoned-wolf");
+    let b = world
+        .spawn((
+            EffectInstance {
+                kind: STATUS,
+                name: "summoned-wolf".into(),
+                strength: 1,
+                remaining_secs: 600,
+                source: EffectSource::Spell,
+                ability_id: None,
+            },
+            AppliedTo(mob),
+        ))
+        .id();
+    let _ = super::despawn_effects_on(&mut world, mob, vec![a, b]);
+    assert!(world.get_entity(mob).is_err());
+}

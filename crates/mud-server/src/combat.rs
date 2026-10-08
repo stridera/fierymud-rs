@@ -1965,6 +1965,13 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
             try_remove::<mud_world::EquippedSlot>(world, it);
         }
 
+        // Legacy `perform_die` (fight.cpp:839) strips every effect before
+        // the corpse is made. Gear is already released above, so worn-item
+        // grants are gone with their items (or kept for soulbound ones);
+        // what is left here is spells, debuffs and admin effects. Race
+        // innates stay. Done before the save below so nothing stale persists.
+        crate::effects::strip_non_innate_effects(world, victim);
+
         // Carried coin goes into the corpse with the items (legacy
         // `make_corpse` drops a money object inside the corpse). The
         // whole carried purse moves in one pile; bank and account
