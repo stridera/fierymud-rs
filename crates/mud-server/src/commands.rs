@@ -17247,6 +17247,11 @@ pub(crate) fn invoke_ability_with(
                 // when the last backing instance fades. The mapping is
                 // shared with `MobDefaultEffects`.
                 mud_world::mob_effects::install_flag_marker(world, target_entity, &flag);
+                // Paralysis holds its bearer like a stun: no swinging, no
+                // fleeing (legacy `perform_violence` / `attack_ok`).
+                if flag == "paralyzed" {
+                    crate::effects::sync_stunned(world, target_entity);
+                }
                 // Fear: the victim panics and flees at once (legacy
                 // `inflict_fear` flee branch, `chant_ivory_symphony`).
                 // Area abilities keep the chant's extra gates.
@@ -20171,6 +20176,9 @@ pub(crate) fn apply_attacker_damage(
         // Legacy `damage()` -> `appear()`: dealing damage of any kind
         // (melee, skills, spells) breaks the attacker's invisibility.
         break_invisibility(world, attacker);
+        // Legacy `damage()` (fight.cpp:1650): a hit frees the victim from
+        // Minor Paralysis (and fear's freeze). Major Paralysis holds.
+        crate::effects::break_paralysis_on_hit(world, attacker, target);
     }
     apply_damage(world, target, amount)
 }

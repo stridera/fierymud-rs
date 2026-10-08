@@ -1165,3 +1165,171 @@ fn the_spell_path_runs_the_cascade_after_the_effect_lands() {
     assert!(f.world.get::<Stunned>(mob).is_some());
     assert!(!is_feared(&f.world, mob));
 }
+
+// -- paralysis: break on hit, the Stunned marker ----------------------------
+
+/// A `paralyzed` status instance from ability `ability`, whose effect row
+/// carries `break_on_damage` in its override params.
+fn paralysis_from_ability(f: &mut Fx, victim: Entity, ability: i32, break_on_damage: bool) {
+    let effect = 900 + ability;
+    f.world.init_resource::<mud_world::AbilityCatalog>();
+    f.world
+        .resource_mut::<mud_world::AbilityCatalog>()
+        .effects_for
+        .insert(
+            ability,
+            vec![(
+                effect,
+                Some(serde_json::json!({
+                    "flag": "paralyzed",
+                    "breakOnDamage": break_on_damage,
+                })),
+            )],
+        );
+    f.world.spawn((
+        EffectInstance {
+            kind: effect,
+            name: "paralyzed".into(),
+            strength: 1,
+            remaining_secs: 300,
+            source: EffectSource::Spell,
+            ability_id: Some(ability),
+        },
+        AppliedTo(victim),
+    ));
+}
+
+fn hit(f: &mut Fx, victim: Entity, amount: i32) {
+    crate::commands::apply_damage_from(&mut f.world, victim, amount, f.caster);
+}
+
+#[test]
+fn a_hit_breaks_the_freeze_with_legacys_messages() {
+    let mut f = fx();
+    let (tx, mut vrx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
+    let victim = f
+        .world
+        .spawn((
+            Player,
+            Named {
+                name: "Victim".into(),
+            },
+            Located(f.here),
+            Connection(tx),
+            Health { hp: 100, max: 100 },
+            Posture(PostureKind::Standing),
+        ))
+        .id();
+    assert_eq!(f.fear(victim, 100, all(0)), FearOutcome::Frozen);
+    drain(&mut f.rx);
+    drain(&mut vrx);
+    hit(&mut f, victim, 5);
+    assert!(
+        f.effect_secs(victim, "paralyzed").is_none(),
+        "freeze broken"
+    );
+    assert!(f.world.get::<Stunned>(victim).is_none());
+    let out = drain(&mut f.rx);
+    assert!(
+        out.contains("Your blow disrupts the magic keeping Victim frozen."),
+        "{out}"
+    );
+    let out = drain(&mut vrx);
+    assert!(
+        out.contains("Caster's blow shatters the magic paralyzing you!"),
+        "{out}"
+    );
+}
+
+#[test]
+fn the_room_sees_the_freeze_break() {
+    let mut f = fx();
+    let (tx, mut orx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
+    f.world.spawn((
+        Player,
+        Named {
+            name: "Watcher".into(),
+        },
+        Located(f.here),
+        Connection(tx),
+        Posture(PostureKind::Standing),
+    ));
+    let mob = f.feared_mob(10);
+    f.fear(mob, 100, all(0));
+    drain(&mut orx);
+    hit(&mut f, mob, 5);
+    let out = drain(&mut orx);
+    assert!(
+        out.contains("Caster's attack frees A jackal from magic which held them motionless."),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_dot_tick_does_not_break_the_freeze() {
+    let mut f = fx();
+    let mob = f.feared_mob(10);
+    f.fear(mob, 100, all(0));
+    crate::commands::apply_damage(&mut f.world, mob, 5);
+    assert!(f.effect_secs(mob, "paralyzed").is_some());
+}
+
+#[test]
+fn minor_paralysis_breaks_by_its_data_and_major_paralysis_holds() {
+    let mut f = fx();
+    let minor = f.mob(10, serde_json::json!({}));
+    paralysis_from_ability(&mut f, minor, 239, true);
+    let major = f.mob(10, serde_json::json!({}));
+    paralysis_from_ability(&mut f, major, 230, false);
+    tick_effects(&mut f, 10);
+    assert!(f.world.get::<Stunned>(minor).is_some());
+    hit(&mut f, minor, 5);
+    hit(&mut f, major, 5);
+    assert!(f.effect_secs(minor, "paralyzed").is_none(), "minor breaks");
+    assert!(f.world.get::<Stunned>(minor).is_none());
+    assert!(f.effect_secs(major, "paralyzed").is_some(), "major holds");
+    assert!(f.world.get::<Stunned>(major).is_some());
+}
+
+#[test]
+fn stunned_follows_the_union_of_stun_and_paralysis() {
+    let mut f = fx();
+    let mob = f.mob(10, serde_json::json!({}));
+    // A spell-applied paralysis alone holds the mob (marker via the sync).
+    paralysis_from_ability(&mut f, mob, 230, false);
+    tick_effects(&mut f, 10);
+    assert!(f.world.get::<Stunned>(mob).is_some());
+    // A short stun overlapping it ends first: still held.
+    super::lag_for(&mut f.world, mob, 1);
+    expire_one(&mut f, mob, "stun");
+    tick_effects(&mut f, 20);
+    assert!(f.effect_secs(mob, "stun").is_none());
+    assert!(
+        f.world.get::<Stunned>(mob).is_some(),
+        "paralysis still holds"
+    );
+    // Cleansing the paralysis frees it at the next sync.
+    crate::commands::remove_effect_named(&mut f.world, mob, "paralyzed");
+    tick_effects(&mut f, 30);
+    assert!(f.world.get::<Stunned>(mob).is_none());
+}
+
+#[test]
+fn breaking_a_freeze_leaves_an_overlapping_stun_in_force() {
+    let mut f = fx();
+    let mob = f.feared_mob(10);
+    f.fear(mob, 100, all(0));
+    super::lag_for(&mut f.world, mob, 4);
+    hit(&mut f, mob, 5);
+    assert!(f.effect_secs(mob, "paralyzed").is_none());
+    assert!(f.world.get::<Stunned>(mob).is_some(), "the lag still holds");
+}
+
+fn expire_one(f: &mut Fx, victim: Entity, name: &str) {
+    let mut q = f.world.query::<(&mut EffectInstance, &AppliedTo)>();
+    for (mut inst, applied) in q.iter_mut(&mut f.world) {
+        if applied.0 == victim && inst.name == name {
+            inst.remaining_secs = 1;
+        }
+    }
+}

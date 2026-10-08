@@ -39,6 +39,7 @@ use crate::commands::{
     Prevent, broadcast_room_except_rendered, cap_sentence_start, cmd_flee, effect_prevents,
     has_effect_named, name_of, name_or, room_is_dark, send_to, try_insert, try_remove,
 };
+use crate::effects::{FREEZE_SOURCE, sync_stunned};
 
 /// Is `flag` (a status effect's `flag` param) the fear flag?
 pub(crate) fn is_fear_flag(flag: &str) -> bool {
@@ -332,29 +333,11 @@ fn clear_fear(world: &mut World, victim: Entity) {
     try_remove::<Feared>(world, victim);
 }
 
-/// Is `inst` a stun or paralysis that backs the [`Stunned`] marker?
-pub(crate) fn is_stun_name(name: &str) -> bool {
-    name.eq_ignore_ascii_case("stun") || name.eq_ignore_ascii_case("paralyzed")
-}
-
-/// Drop [`Stunned`] unless some stun or paralysis instance still backs it.
-fn sync_stunned(world: &mut World, victim: Entity) {
-    let backed = {
-        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-        q.iter(world)
-            .any(|(eff, applied)| applied.0 == victim && is_stun_name(&eff.name))
-    };
-    if !backed {
-        try_remove::<Stunned>(world, victim);
-    }
-}
-
 /// Hold `victim` for `secs` under an effect called `name` (`"paralyzed"`
 /// for terror, `"stun"` for a wait state): the [`Stunned`] marker keeps it
 /// from swinging or fleeing, the instance blocks movement and casting. A
 /// longer effect already running is not shortened.
-fn stun_for(world: &mut World, victim: Entity, name: &str, secs: i32, lag: bool) {
-    try_insert(world, victim, Stunned);
+fn stun_for(world: &mut World, victim: Entity, name: &str, secs: i32, source: &str) {
     let mut found = false;
     {
         let mut q = world.query::<(&mut EffectInstance, &AppliedTo)>();
@@ -366,6 +349,7 @@ fn stun_for(world: &mut World, victim: Entity, name: &str, secs: i32, lag: bool)
         }
     }
     if found {
+        sync_stunned(world, victim);
         return;
     }
     let kind = world
@@ -378,20 +362,17 @@ fn stun_for(world: &mut World, victim: Entity, name: &str, secs: i32, lag: bool)
             name: name.to_string(),
             strength: 1,
             remaining_secs: secs,
-            source: if lag {
-                EffectSource::Other(LAG_SOURCE.to_string())
-            } else {
-                EffectSource::Spell
-            },
+            source: EffectSource::Other(source.to_string()),
             ability_id: None,
         },
         AppliedTo(victim),
     ));
+    sync_stunned(world, victim);
 }
 
 /// Legacy `WAIT_STATE(victim, secs)`: a short stun that fear itself put on.
 fn lag_for(world: &mut World, victim: Entity, secs: i32) {
-    stun_for(world, victim, "stun", secs, true);
+    stun_for(world, victim, "stun", secs, LAG_SOURCE);
 }
 
 /// Legacy "turn off wait states so they can flee": strip fear's own lag.
@@ -490,7 +471,7 @@ fn fear_freezes(world: &mut World, scene: &Scene, power: i32) -> FearOutcome {
         scene.victim,
         "paralyzed",
         (2 + power / 30) * SECS_PER_MUD_HOUR,
-        false,
+        FREEZE_SOURCE,
     );
     if world.get::<Fighting>(scene.caster).map(|f| f.0) == Some(scene.victim) {
         try_remove::<Fighting>(world, scene.caster);

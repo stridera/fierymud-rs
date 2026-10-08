@@ -82,6 +82,139 @@ fn run_effect_hook(world: &mut World, hook: EffectHook, target: Entity, effect_n
     }
 }
 
+/// Does an effect of this name hold its bearer still? A `stun` (bash and
+/// friends, fear's wait states) or a `paralyzed` status (Minor / Major
+/// Paralysis, fear's "frozen in terror").
+pub(crate) fn is_stun_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("stun") || name.eq_ignore_ascii_case("paralyzed")
+}
+
+/// Make `target`'s [`Stunned`] marker match its effects: present exactly
+/// while at least one stun or paralysis instance is active, whatever
+/// overlapped with what. Legacy paralysis stops the victim fighting and
+/// acting (`perform_violence`, `attack_ok`, the command interpreter), so
+/// both kinds back the same marker.
+pub(crate) fn sync_stunned(world: &mut World, target: Entity) {
+    let backed = {
+        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+        q.iter(world)
+            .any(|(eff, applied)| applied.0 == target && is_stun_name(&eff.name))
+    };
+    if backed {
+        try_insert(world, target, Stunned);
+    } else {
+        try_remove::<Stunned>(world, target);
+    }
+}
+
+/// [`sync_stunned`] for everyone with the marker or a backing instance.
+fn sync_stunned_all(world: &mut World) {
+    let mut targets: std::collections::HashSet<Entity> = world
+        .query_filtered::<Entity, With<Stunned>>()
+        .iter(world)
+        .collect();
+    {
+        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+        targets.extend(
+            q.iter(world)
+                .filter(|(eff, _)| is_stun_name(&eff.name))
+                .map(|(_, applied)| applied.0),
+        );
+    }
+    for t in targets {
+        if world.get_entity(t).is_ok() {
+            sync_stunned(world, t);
+        }
+    }
+}
+
+/// `EffectSource::Other` tag of the "frozen in terror" paralysis: legacy
+/// gives it `EFF_MINOR_PARALYSIS`, which any hit breaks.
+pub(crate) const FREEZE_SOURCE: &str = "fear-freeze";
+
+/// Does this `paralyzed` instance break when its bearer is hit? Data
+/// first: the ability's own effect row says `breakOnDamage` in its
+/// override params (else the effect's defaults), which is true for Minor
+/// Paralysis and false for Major Paralysis. Fear's own freeze has no
+/// ability row and is tagged [`FREEZE_SOURCE`] instead.
+fn paralysis_breaks_on_hit(world: &World, inst: &EffectInstance) -> bool {
+    if matches!(&inst.source, mud_world::EffectSource::Other(s) if s == FREEZE_SOURCE) {
+        return true;
+    }
+    let (Some(ability), Some(abilities), Some(effects)) = (
+        inst.ability_id,
+        world.get_resource::<AbilityCatalog>(),
+        world.get_resource::<EffectCatalog>(),
+    ) else {
+        return false;
+    };
+    let field = |v: Option<&serde_json::Value>, key: &str| v.and_then(|v| v.get(key)).cloned();
+    abilities
+        .effects_for
+        .get(&ability)
+        .into_iter()
+        .flatten()
+        .any(|(effect_id, over)| {
+            let defaults = effects.by_id.get(effect_id).map(|d| &d.default_params);
+            let pick = |key| field(over.as_ref(), key).or_else(|| field(defaults, key));
+            pick("flag")
+                .and_then(|f| f.as_str().map(str::to_ascii_lowercase))
+                .is_some_and(|f| f == "paralyzed")
+                && pick("breakOnDamage").and_then(|b| b.as_bool()) == Some(true)
+        })
+}
+
+/// Legacy `damage()` (fight.cpp:1650): a hit shatters Minor Paralysis.
+/// Called from the central attacker-damage entry for any positive hit.
+/// Breakable `paralyzed` instances (see [`paralysis_breaks_on_hit`]) are
+/// removed with legacy's three lines; Major Paralysis stays. Returns
+/// whether something broke.
+pub(crate) fn break_paralysis_on_hit(world: &mut World, attacker: Entity, victim: Entity) -> bool {
+    let breaking: Vec<Entity> = {
+        let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
+        q.iter(world)
+            .filter(|(_, inst, applied)| {
+                applied.0 == victim
+                    && inst.name.eq_ignore_ascii_case("paralyzed")
+                    && paralysis_breaks_on_hit(world, inst)
+            })
+            .map(|(e, _, _)| e)
+            .collect()
+    };
+    if breaking.is_empty() {
+        return false;
+    }
+    for e in breaking {
+        if let Ok(em) = world.get_entity_mut(e) {
+            em.despawn();
+        }
+    }
+    sync_stunned(world, victim);
+    let attacker_name = crate::commands::cap_sentence_start(&name_of(world, attacker));
+    let victim_name = crate::commands::cap_sentence_start(&name_of(world, victim));
+    send_to(
+        world,
+        attacker,
+        format!("Your blow disrupts the magic keeping {victim_name} frozen.\r\n"),
+    );
+    send_to(
+        world,
+        victim,
+        format!("{attacker_name}'s blow shatters the magic paralyzing you!\r\n"),
+    );
+    if let Some(room) = world.get::<Located>(victim).map(|l| l.0) {
+        crate::commands::broadcast_room_except_rendered(
+            world,
+            room,
+            &[attacker, victim],
+            &format!(
+                "{attacker_name}'s attack frees {victim_name} from magic which held them motionless.\r\n"
+            ),
+        );
+    }
+    true
+}
+
 /// One effect tick = one second.
 const EFFECT_PERIOD_TICKS: u64 = 10;
 /// Damage-per-tick for the `bleed` debuff. 2/s for 30s = 60 total
@@ -101,6 +234,8 @@ pub fn effects_tick(world: &mut World) {
 
     // Drop fear markers whose backing effect expired or was removed.
     crate::fear::sync_markers(world);
+    // Same for Stunned, which also catches cleansed / dispelled paralysis.
+    sync_stunned_all(world);
 
     // Pre-pass: fire `on_apply` hooks for any EffectInstance that
     // hasn't been seen yet, then mark it `EffectInstanceApplied`.
@@ -265,21 +400,10 @@ pub fn effects_tick(world: &mut World) {
                 e.despawn();
             }
             expired += 1;
-            // Stun marker outlives only as long as at least one
-            // backing `stun` EffectInstance is on the target. After
-            // despawning *this* one, recheck and clear if none left.
-            // Fear's "frozen in terror" is a `paralyzed` instance that backs
-            // the same marker.
-            if crate::fear::is_stun_name(&name) {
-                let still_stunned = {
-                    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-                    q.iter(world).any(|(eff, applied)| {
-                        applied.0 == target && crate::fear::is_stun_name(&eff.name)
-                    })
-                };
-                if !still_stunned {
-                    try_remove::<Stunned>(world, target);
-                }
+            // The Stunned marker follows the union of stun and paralysis
+            // instances (see `sync_stunned`).
+            if is_stun_name(&name) {
+                sync_stunned(world, target);
             }
             // Object-decay: an effect named "decay" applied to an
             // Item entity acts as the object's lifetime gate (used
