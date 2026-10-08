@@ -18,7 +18,7 @@ use crate::commands::{broadcast_room_except_rendered, send_to};
 /// Legacy MUD-hour to wall seconds. Matches the constant used by
 /// effect duration resolution; centralized here to keep the timer
 /// math grounded in one place.
-const SECS_PER_MUD_HOUR: i32 = 75;
+pub(crate) const SECS_PER_MUD_HOUR: i32 = 75;
 
 /// Run-at-spawn hook: if the proto has a positive `timer_hours`
 /// AND the object isn't flagged PERMANENT, attach an `ItemTimer`

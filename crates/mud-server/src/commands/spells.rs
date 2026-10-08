@@ -385,10 +385,12 @@ pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
     if needle.is_empty() {
         let mut out = format!("\r\n{} cancellable effect(s):\r\n", cancellable.len());
         for (_, name, src, remaining) in &cancellable {
+            let shown = super::info::effect_display_name(name);
+            let hours = super::info::format_effect_hours(*remaining);
             if let Some(src) = src {
-                out.push_str(&format!("  {name} ({remaining}s) — from {src}\r\n"));
+                out.push_str(&format!("  {shown} ({hours}) — from {src}\r\n"));
             } else {
-                out.push_str(&format!("  {name} ({remaining}s)\r\n"));
+                out.push_str(&format!("  {shown} ({hours})\r\n"));
             }
         }
         out.push_str("\r\nUse `cancel <name>` to drop one.\r\n");

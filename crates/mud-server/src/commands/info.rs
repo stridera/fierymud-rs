@@ -12279,6 +12279,64 @@ pub(crate) fn cmd_cooldowns(world: &mut World, player: Entity, _args: &str) {
     send_to(world, player, out);
 }
 
+/// Underscored ability enums ("DETECT_MAGIC", "detect_magic") render as
+/// "Detect Magic". The shared `capitalize` helper joins with `-` (it also
+/// serves race names like HALF_ELF), so it can't be reused here.
+fn pretty_ability(raw: &str) -> String {
+    raw.split('_')
+        .map(|seg| {
+            let mut chars = seg.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(c) => {
+                    let head = c.to_ascii_uppercase().to_string();
+                    let tail: String = chars.as_str().to_ascii_lowercase();
+                    head + &tail
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Display name for an effect row. `modify` effects are named after the
+/// stat they move ("eva", "cha", "max_hp"); spell the abbreviations out
+/// instead of printing three-letter stubs. Anything unmapped falls back to
+/// [`pretty_ability`].
+pub(super) fn effect_display_name(raw: &str) -> String {
+    let full = match raw.to_ascii_lowercase().as_str() {
+        "str" | "str_bonus" => "Strength",
+        "dex" | "dex_bonus" => "Dexterity",
+        "con" | "con_bonus" => "Constitution",
+        "int" | "int_bonus" => "Intelligence",
+        "wis" | "wis_bonus" => "Wisdom",
+        "cha" | "cha_bonus" => "Charisma",
+        "eva" => "Evasion",
+        "acc" => "Accuracy",
+        "ap" => "Attack Power",
+        "max_hp" => "Maximum Hit Points",
+        "max_move" | "max_stamina" | "stamina_max" => "Maximum Stamina",
+        "regen_hp" => "Hit Point Regeneration",
+        "save_spell" => "Spell Saving Throw",
+        "ward_pct" => "Ward",
+        _ => return pretty_ability(raw),
+    };
+    full.to_string()
+}
+
+/// Remaining effect time in MUD hours (75 real seconds each), rounded up
+/// and never below one, matching legacy `show_active_spells` where
+/// `duration + 1` hours are shown ("1 hour", "3 hours").
+pub(super) fn format_effect_hours(remaining_secs: i32) -> String {
+    let per_hour = crate::item_decay::SECS_PER_MUD_HOUR;
+    let hours = (remaining_secs.max(0).saturating_add(per_hour - 1) / per_hour).max(1);
+    if hours == 1 {
+        "1 hour".to_string()
+    } else {
+        format!("{hours} hours")
+    }
+}
+
 /// `cancel [<effect>]`: drop a non-permanent effect from yourself.
 /// Empty arg lists cancellable effects; named arg matches by
 /// case-insensitive substring on the effect's name.
@@ -12305,30 +12363,9 @@ pub(crate) fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
     } else {
         format!("\r\n<b:cyan>{} active effect(s):</>\r\n", active.len())
     };
-    // Local prettifier: underscored ability enums ("DETECT_MAGIC",
-    // "detect_magic") render as "Detect Magic" — the existing
-    // `capitalize` helper joins with `-` because it's also used for
-    // race names like HALF_ELF, so we can't share it here.
-    #[allow(clippy::items_after_statements)]
-    fn pretty_ability(raw: &str) -> String {
-        raw.split('_')
-            .map(|seg| {
-                let mut chars = seg.chars();
-                match chars.next() {
-                    None => String::new(),
-                    Some(c) => {
-                        let head = c.to_ascii_uppercase().to_string();
-                        let tail: String = chars.as_str().to_ascii_lowercase();
-                        head + &tail
-                    }
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
     let catalog = world.resource::<AbilityCatalog>();
     for (name, remaining, ability_id, delta_amount) in active {
-        let pretty_name = pretty_ability(&name);
+        let pretty_name = effect_display_name(&name);
         // Look up the spawning ability's plain_name when known so
         // players can see "Bleed (45s) — from Rend" instead of
         // just the bare effect tag.
@@ -12365,16 +12402,16 @@ pub(crate) fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
                 "  <b:cyan>{pretty_name}</>{delta_label} <b:cyan>(permanent)</>{suffix}\r\n"
             ));
         } else {
-            // Render long durations as "37m" / "2h15m" instead of
-            // raw "2245s remaining". Color-graded by `effect_duration_color`
-            // so a buff about to expire reads warm and the player
-            // notices in time to refresh.
+            // MUD hours, like legacy `show_active_spells` ("3 hrs
+            // remaining"). The colour band still keys off the real
+            // seconds left so an about-to-expire buff reads warm.
             #[allow(clippy::cast_sign_loss)]
             let secs = remaining.max(0) as u64;
             let dur_open = effect_duration_color(secs);
+            let hours = format_effect_hours(remaining);
             let dur_label = match dur_open {
-                Some(open) => format!("{open}{}</>", format_idle(secs)),
-                None => format_idle(secs),
+                Some(open) => format!("{open}{hours}</>"),
+                None => hours,
             };
             out.push_str(&format!(
                 "  <cyan>{pretty_name}</>{delta_label} ({dur_label} remaining){suffix}\r\n"

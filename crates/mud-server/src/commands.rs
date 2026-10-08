@@ -432,6 +432,9 @@ mod gmcp_tests;
 mod magic_focus;
 pub(crate) use magic_focus::Concentrating;
 #[cfg(test)]
+#[path = "commands/effects_list_tests.rs"]
+mod effects_list_tests;
+#[cfg(test)]
 #[path = "commands/expand_tests.rs"]
 mod expand_tests;
 #[cfg(test)]
