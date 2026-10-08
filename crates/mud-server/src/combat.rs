@@ -1748,9 +1748,7 @@ fn apply_kill_alignment(world: &mut World, killer: Entity, victim: Entity) {
     let no_credit = if victim_is_player {
         world.get::<crate::commands::Linkdead>(victim).is_some()
     } else {
-        world
-            .get::<mud_world::MobTraits>(victim)
-            .is_some_and(|t| t.has(mud_db::enums::MobTrait::Illusion))
+        is_illusory_mob(world, victim)
     };
     if no_credit {
         return;
@@ -2067,7 +2065,12 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
         // Resolve the killer once, before any Fighting links are torn
         // down, and hand the same identity to XP, coin and autoloot.
         let killer = resolve_killer(world, victim, room);
-        award_kill_xp(world, victim, victim_name, killer);
+        // Legacy `disburse_kill_exp` returns early for an illusory mob:
+        // no XP, no trophy credit.
+        let illusory = is_illusory_mob(world, victim);
+        if !illusory {
+            award_kill_xp(world, victim, victim_name, killer);
+        }
         // Legacy `receive_kill_credit` shifts every credited member's
         // alignment against the victim, mob kills included.
         if let Some(killer) = killer {
@@ -2102,6 +2105,29 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
                 .map(|(e, _)| e)
                 .collect()
         };
+        if illusory {
+            // Legacy `make_corpse`: an illusory mob "seems to have vanished
+            // entirely" -- no corpse, so no loot or coin; whatever it carried
+            // goes with it (`extract_char`).
+            broadcast_room_except_rendered(
+                world,
+                room,
+                &[],
+                &format!(
+                    "{} seems to have vanished entirely.\r\n",
+                    crate::commands::cap_sentence_start(victim_name),
+                ),
+            );
+            for it in owned_items {
+                if let Ok(e) = world.get_entity_mut(it) {
+                    e.despawn();
+                }
+            }
+            disengage_attackers_of(world, victim);
+            finish_mob_death(world, victim);
+            info!(?victim, name = %victim_name, "illusory mob vanished");
+            return;
+        }
         let corpse = world
             .spawn((
                 Item,
@@ -2177,19 +2203,33 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
             }
         }
         disengage_attackers_of(world, victim);
-        // G3.4: stamp the death tick on this MobReset row's timer
-        // so the respawn loop honors the per-row cooldown. Read
-        // BEFORE despawn or the FromMobReset component vanishes.
-        if let Some(reset_id) = world.get::<FromMobReset>(victim).map(|f| f.0) {
-            let now = world.resource::<TickCount>().0;
-            if let Some(mut timers) = world.get_resource_mut::<crate::respawn::MobRespawnTimers>() {
-                timers.last_death_tick.insert(reset_id, now);
-            }
-        }
-        if let Ok(e) = world.get_entity_mut(victim) {
-            e.despawn();
-        }
+        finish_mob_death(world, victim);
         info!(?victim, name = %victim_name, ?corpse, "mob despawned");
+    }
+}
+
+/// True for a mob flagged illusory (`MobTrait::Illusion`, legacy
+/// `MOB_ILLUSORY`).
+fn is_illusory_mob(world: &World, mob: Entity) -> bool {
+    world
+        .get::<mud_world::MobTraits>(mob)
+        .is_some_and(|t| t.has(mud_db::enums::MobTrait::Illusion))
+}
+
+/// Tail of a mob death: stamp the death tick on the `MobReset` row's
+/// timer, then despawn the mob.
+fn finish_mob_death(world: &mut World, victim: Entity) {
+    // G3.4: stamp the death tick on this MobReset row's timer
+    // so the respawn loop honors the per-row cooldown. Read
+    // BEFORE despawn or the FromMobReset component vanishes.
+    if let Some(reset_id) = world.get::<FromMobReset>(victim).map(|f| f.0) {
+        let now = world.resource::<TickCount>().0;
+        if let Some(mut timers) = world.get_resource_mut::<crate::respawn::MobRespawnTimers>() {
+            timers.last_death_tick.insert(reset_id, now);
+        }
+    }
+    if let Ok(e) = world.get_entity_mut(victim) {
+        e.despawn();
     }
 }
 
@@ -5117,6 +5157,35 @@ mod tests {
                 expected,
                 "illusory {illusory}"
             );
+        }
+    }
+
+    #[test]
+    fn illusory_mob_kill_gives_no_xp_and_leaves_no_corpse() {
+        for (illusory, expect_xp, expect_corpse) in [(false, true, true), (true, false, false)] {
+            let mut world = World::new();
+            let room = make_room(&mut world);
+            let goblin = credit_goblin(&mut world, room, 0, None);
+            if illusory {
+                world.entity_mut(goblin).insert(mud_world::MobTraits(vec![
+                    mud_db::enums::MobTrait::Illusion,
+                ]));
+            }
+            let killer = credit_player(&mut world, room, "Killer", 0);
+            world.entity_mut(killer).insert(Fighting(goblin));
+            run_combat_tick(&mut world);
+            assert!(world.get_entity(goblin).is_err());
+            assert_eq!(
+                xp_of(&world, killer) > 0,
+                expect_xp,
+                "illusory {illusory}: xp"
+            );
+            let corpses = world
+                .query_filtered::<&Located, With<Corpse>>()
+                .iter(&world)
+                .filter(|l| l.0 == room)
+                .count();
+            assert_eq!(corpses > 0, expect_corpse, "illusory {illusory}: corpse");
         }
     }
 }
