@@ -459,6 +459,9 @@ mod item_edit;
 #[path = "commands/item_edit_tests.rs"]
 mod item_edit_tests;
 #[cfg(test)]
+#[path = "commands/item_effects_tests.rs"]
+mod item_effects_tests;
+#[cfg(test)]
 #[path = "commands/look_mob_tests.rs"]
 mod look_mob_tests;
 #[cfg(test)]
@@ -18602,7 +18605,7 @@ pub(crate) fn remove_effects_by_tag(
         q.iter(world)
             .filter(|(_, eff, applied)| {
                 applied.0 == target
-                    && !mud_world::mob_effects::is_race_effect(&eff.source)
+                    && !mud_world::mob_effects::is_innate_effect(&eff.source)
                     && (tag_match.contains(&eff.kind)
                         || eff
                             .ability_id
@@ -19101,7 +19104,7 @@ pub(crate) fn remove_effect_named(world: &mut World, target: Entity, name: &str)
         q.iter(world)
             .filter(|(_, eff, applied)| {
                 applied.0 == target
-                    && !mud_world::mob_effects::is_race_effect(&eff.source)
+                    && !mud_world::mob_effects::is_innate_effect(&eff.source)
                     && eff.name.eq_ignore_ascii_case(name)
             })
             .map(|(e, _, _)| e)
@@ -19143,7 +19146,7 @@ pub(crate) fn remove_effects_for_condition(
         q.iter(world)
             .filter(|(_, eff, applied)| {
                 applied.0 == target
-                    && !mud_world::mob_effects::is_race_effect(&eff.source)
+                    && !mud_world::mob_effects::is_innate_effect(&eff.source)
                     && (eff.name.eq_ignore_ascii_case(condition)
                         || eff.ability_id.is_some_and(|id| ability_ids.contains(&id)))
             })
@@ -19182,13 +19185,16 @@ pub(crate) fn name_approval_gate(world: &World, player: Entity) -> bool {
     }
 }
 
-/// Despawn every `EffectInstance` on `target`, regardless of name.
-/// Used by `cleanse` effects whose `condition` is `"all"`.
+/// Despawn every `EffectInstance` on `target`, regardless of name, except
+/// innates that belong to their source (race, worn gear). Used by
+/// `cleanse` effects whose `condition` is `"all"`.
 pub(crate) fn remove_all_effects_on(world: &mut World, target: Entity) -> usize {
     let to_remove: Vec<Entity> = {
         let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
         q.iter(world)
-            .filter(|(_, _, applied)| applied.0 == target)
+            .filter(|(_, eff, applied)| {
+                applied.0 == target && !mud_world::mob_effects::is_innate_effect(&eff.source)
+            })
             .map(|(e, _, _)| e)
             .collect()
     };

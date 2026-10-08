@@ -3,9 +3,12 @@
 //! `modifier_data = {"target": "<stat>", "amount": <int>}`) flow into
 //! the wearer's `CombatStats` / `CoreStats` / `Health` / etc. via
 //! `commands::apply_modify_delta`. Spell-like `ObjectEffects`
-//! (sanctuary rings, etc.) spawn `EffectInstance` entities tagged
-//! with `GrantedByItem` so unequip can despawn only this item's
-//! grants. `ObjectResistance` rows roll into the wearer's
+//! (sanctuary rings, etc.) are `status` rows whose `modifier_data.flags`
+//! become one permanent `EffectInstance` per flag, sourced
+//! `worn_item` and tagged with `GrantedByItem`, with the flag's marker
+//! component installed through `install_flag_marker` (the path race and
+//! mob-default effects use). Unequip despawns only this item's
+//! instances and tears the markers down like an expiry would. `ObjectResistance` rows roll into the wearer's
 //! `Resistances` map. Symmetric `unapply_*` reverses every change.
 //!
 //! Hooks:
@@ -26,9 +29,10 @@
 //! `fierylib/scripts/migrate_object_affects.py`.
 
 use bevy_ecs::prelude::*;
+use mud_world::mob_effects::{WORN_ITEM_EFFECT_SOURCE, is_display_only_flag, row_flags};
 use mud_world::{
-    AppliedTo, EffectInstance, EffectSource, EquippedSlot, GrantedByItem, ObjectGrantedEffect,
-    ObjectPrototypes, Resistances, WorldKey,
+    AppliedTo, CoreStats, EffectInstance, EffectSource, EquippedSlot, GrantedByItem,
+    ObjectGrantedEffect, ObjectPrototypes, Resistances, WorldKey,
 };
 
 use crate::commands::{apply_modify_delta, reverse_modify_delta, try_insert};
@@ -197,26 +201,54 @@ pub fn apply_object_to_wearer(world: &mut World, item: Entity, wearer: Entity) {
             }
             continue;
         }
-        // Spell-like effect: spawn an EffectInstance pinned to the
-        // wearer for as long as the item is worn.
-        let entity = world
-            .spawn((
-                EffectInstance {
-                    kind: def.id,
-                    name: def.name.clone(),
-                    strength: grant.strength.max(1),
-                    // Permanent — gear-granted effects last as long
-                    // as the item is worn. The unequip path despawns
-                    // them; effects_tick never decrements -1.
-                    remaining_secs: -1,
-                    source: EffectSource::Item,
-                    ability_id: None,
-                },
-                AppliedTo(wearer),
-                GrantedByItem(item),
-            ))
-            .id();
-        spawned_effect_entities.push(entity);
+        // `status` effect: one permanent instance per flag, with the
+        // flag's marker installed through the same path race and
+        // mob-default effects use. Other effect types have no
+        // permanent-while-worn meaning.
+        let flags = if def.effect_type == "status" {
+            row_flags(&grant.modifier_data, &def.default_params)
+        } else {
+            Vec::new()
+        };
+        if flags.is_empty() {
+            tracing::debug!(
+                proto_zone = proto.zone_id,
+                proto_id = proto.id,
+                effect = %def.name,
+                "ObjectEffect has no wearable status flag; skipped"
+            );
+            continue;
+        }
+        for flag in flags {
+            let marked = mud_world::mob_effects::install_flag_marker(world, wearer, &flag);
+            if !marked && !is_display_only_flag(&flag) {
+                tracing::debug!(
+                    proto_zone = proto.zone_id,
+                    proto_id = proto.id,
+                    flag = %flag,
+                    "ObjectEffect flag has no marker component; ignored"
+                );
+                continue;
+            }
+            let entity = world
+                .spawn((
+                    EffectInstance {
+                        kind: def.id,
+                        name: flag,
+                        strength: grant.strength.max(1),
+                        // Permanent: lasts as long as the item is worn.
+                        // Unequip despawns it; effects_tick never
+                        // decrements -1.
+                        remaining_secs: -1,
+                        source: EffectSource::Other(WORN_ITEM_EFFECT_SOURCE.to_string()),
+                        ability_id: None,
+                    },
+                    AppliedTo(wearer),
+                    GrantedByItem(item),
+                ))
+                .id();
+            spawned_effect_entities.push(entity);
+        }
     }
     // ---- Bookkeeping for unapply ----
     let bookkeeping = GrantedDeltas {
@@ -266,13 +298,201 @@ pub fn unapply_object_from_wearer(world: &mut World, item: Entity, wearer: Entit
     // Despawn gear-granted effects. The effects_tick path doesn't
     // care if the entity vanishes between ticks; AppliedTo is just
     // an edge.
+    let mut torn_down: Vec<String> = Vec::new();
     for effect_entity in &bookkeeping.effects {
+        if let Some(inst) = world.get::<EffectInstance>(*effect_entity) {
+            torn_down.push(inst.name.clone());
+        }
         if let Ok(em) = world.get_entity_mut(*effect_entity) {
             em.despawn();
         }
     }
+    // Drop each flag's marker unless a spell or race innate still backs
+    // it, exactly as an expiring effect does.
+    torn_down.sort();
+    torn_down.dedup();
+    for name in torn_down {
+        crate::effects::teardown_markers_after_removal(world, wearer, &name);
+    }
     if let Ok(mut e) = world.get_entity_mut(item) {
         e.remove::<GrantedDeltas>();
+    }
+}
+
+/// What an item grants, as player-facing text. `applies` mirrors legacy
+/// identify's `Apply: +2 to strength` lines; `provides` its
+/// `Item provides:` effect-flag list.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ItemGrantText {
+    pub applies: Vec<String>,
+    pub provides: Vec<String>,
+}
+
+/// Human label for an apply target (`str_bonus` -> `strength`).
+fn apply_label(key: &str) -> String {
+    match key {
+        "str" | "str_bonus" => "strength".to_string(),
+        "dex" | "dex_bonus" => "dexterity".to_string(),
+        "con" | "con_bonus" => "constitution".to_string(),
+        "int" | "int_bonus" => "intelligence".to_string(),
+        "wis" | "wis_bonus" => "wisdom".to_string(),
+        "cha" | "cha_bonus" => "charisma".to_string(),
+        "max_hp" => "max hit points".to_string(),
+        "max_move" | "max_stamina" | "stamina_max" => "max stamina".to_string(),
+        "max_mana" => "max mana".to_string(),
+        "ward" | "ward_pct" => "ward".to_string(),
+        other => other.replace('_', " "),
+    }
+}
+
+/// List `proto`'s stat applies, resistances and granted effect flags.
+/// Reads the same data `apply_object_to_wearer` applies, so identify can
+/// never promise something wearing the item doesn't deliver.
+#[must_use]
+pub fn describe_item_grants(world: &World, proto: &mud_world::ObjectProto) -> ItemGrantText {
+    let mut out = ItemGrantText::default();
+    let catalog = world.get_resource::<mud_world::EffectCatalog>();
+    for g in &proto.granted_effects {
+        let at = g
+            .wear_location
+            .map(|w| format!(" (worn on: {})", w.label().to_lowercase()))
+            .unwrap_or_default();
+        let Some(def) = catalog.and_then(|c| c.by_id.get(&g.effect_id)) else {
+            continue;
+        };
+        if def.effect_type == "modify" {
+            let target = g
+                .modifier_data
+                .get("target")
+                .and_then(serde_json::Value::as_str);
+            let amount = g
+                .modifier_data
+                .get("amount")
+                .and_then(serde_json::Value::as_i64);
+            if let (Some(t), Some(a)) = (target, amount)
+                && a != 0
+            {
+                out.applies.push(format!("{a:+} to {}{at}", apply_label(t)));
+            }
+        } else if def.effect_type == "status" {
+            for flag in row_flags(&g.modifier_data, &def.default_params) {
+                if mud_world::mob_effects::install_flag_marker_known(&flag)
+                    || is_display_only_flag(&flag)
+                {
+                    out.provides.push(format!("{}{at}", flag.replace('_', " ")));
+                }
+            }
+        }
+    }
+    for (element, value, _) in &proto.resistances {
+        if *value != 0 {
+            out.applies.push(format!(
+                "{value:+}% resistance to {}",
+                format!("{element:?}").to_lowercase()
+            ));
+        }
+    }
+    out
+}
+
+/// Take `item` off whoever is wearing it: reverses its gear bonuses and
+/// worn effects (when it has any applied). Call this BEFORE removing
+/// `EquippedSlot` / re-locating the item at any site that strips worn
+/// gear without going through `remove` (death, disarm, fear, banish), so
+/// stats and markers never outlive the item and a stale `GrantedDeltas`
+/// can't stop the next wearer's bonuses from applying.
+pub fn release_gear(world: &mut World, item: Entity) {
+    if world.get::<GrantedDeltas>(item).is_none() {
+        return;
+    }
+    let Some(wearer) = world.get::<mud_world::Located>(item).map(|l| l.0) else {
+        // Nobody to reverse against: drop the stale bookkeeping and
+        // the orphaned effects.
+        if let Some(b) = world.get::<GrantedDeltas>(item).cloned() {
+            for e in b.effects {
+                if let Ok(em) = world.get_entity_mut(e) {
+                    em.despawn();
+                }
+            }
+        }
+        if let Ok(mut e) = world.get_entity_mut(item) {
+            e.remove::<GrantedDeltas>();
+        }
+        return;
+    };
+    unapply_object_from_wearer(world, item, wearer);
+}
+
+/// What worn gear currently adds to values that are saved with the
+/// character. Gear is re-applied from the equipped items at login, so
+/// the save must write the value WITHOUT it or every relog would stack
+/// the bonus again.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GearOffsets {
+    pub strength: i32,
+    pub dexterity: i32,
+    pub constitution: i32,
+    pub intelligence: i32,
+    pub wisdom: i32,
+    pub charisma: i32,
+    pub max_hp: i32,
+    pub max_stamina: i32,
+}
+
+/// Sum the persisted-value deltas of every applied item on `wearer`.
+#[must_use]
+pub fn gear_offsets(world: &World, wearer: Entity) -> GearOffsets {
+    let mut off = GearOffsets::default();
+    let Some(contents) = world.get::<mud_world::Contents>(wearer) else {
+        return off;
+    };
+    for item in contents.iter() {
+        let Some(applied) = world.get::<GrantedDeltas>(item) else {
+            continue;
+        };
+        for (key, amount) in &applied.deltas {
+            let slot = match key.as_str() {
+                "str" | "strength" | "str_bonus" => &mut off.strength,
+                "dex" | "dexterity" | "dex_bonus" => &mut off.dexterity,
+                "con" | "constitution" | "con_bonus" => &mut off.constitution,
+                "int" | "intelligence" | "int_bonus" => &mut off.intelligence,
+                "wis" | "wisdom" | "wis_bonus" => &mut off.wisdom,
+                "cha" | "charisma" | "cha_bonus" => &mut off.charisma,
+                "max_hp" => &mut off.max_hp,
+                "max_move" | "max_stamina" | "stamina_max" => &mut off.max_stamina,
+                _ => continue,
+            };
+            *slot = slot.saturating_add(*amount);
+        }
+    }
+    off
+}
+
+/// `CoreStats` as they should be saved: current values minus gear.
+#[must_use]
+pub fn base_core_stats(world: &World, wearer: Entity) -> Option<CoreStats> {
+    let mut stats = world.get::<CoreStats>(wearer).copied()?;
+    let off = gear_offsets(world, wearer);
+    stats.strength = stats.strength.saturating_sub(off.strength);
+    stats.dexterity = stats.dexterity.saturating_sub(off.dexterity);
+    stats.constitution = stats.constitution.saturating_sub(off.constitution);
+    stats.intelligence = stats.intelligence.saturating_sub(off.intelligence);
+    stats.wisdom = stats.wisdom.saturating_sub(off.wisdom);
+    stats.charisma = stats.charisma.saturating_sub(off.charisma);
+    Some(stats)
+}
+
+/// A current-points value as it should be saved: a +max item also
+/// granted that many current points on equip and will grant them again
+/// at login, so take them out (never below 1 for a living wearer).
+/// Negative max offsets need no correction: the load-time clamp handles
+/// them.
+#[must_use]
+pub fn base_current(current: i32, max_offset: i32) -> i32 {
+    if current > 0 && max_offset > 0 {
+        current.saturating_sub(max_offset).max(1)
+    } else {
+        current
     }
 }
 

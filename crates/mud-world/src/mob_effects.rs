@@ -29,10 +29,30 @@ pub fn install_flag_marker(world: &mut World, target: Entity, flag: &str) -> boo
     true
 }
 
+/// True when [`install_flag_marker`] has a marker component for `flag`
+/// (kept in step with its match arms).
+#[must_use]
+pub fn install_flag_marker_known(flag: &str) -> bool {
+    matches!(
+        flag,
+        "hidden"
+            | "sneak"
+            | "concealment"
+            | "fly"
+            | "bless"
+            | "sanctuary"
+            | "detect_invisible"
+            | "haste"
+    )
+}
+
 /// The effect flags a `MobDefaultEffects` row carries: the importer's
 /// `modifier_data.flags` array, a singular `modifier_data.flag`, or
 /// (when the row names neither) the effect's `default_params.flag`.
-fn row_flags(modifier_data: &serde_json::Value, default_params: &serde_json::Value) -> Vec<String> {
+pub fn row_flags(
+    modifier_data: &serde_json::Value,
+    default_params: &serde_json::Value,
+) -> Vec<String> {
     let mut flags: Vec<String> = modifier_data
         .get("flags")
         .and_then(serde_json::Value::as_array)
@@ -147,6 +167,33 @@ pub fn is_race_effect(source: &EffectSource) -> bool {
     matches!(source, EffectSource::Other(s) if s == RACE_EFFECT_SOURCE)
 }
 
+/// `EffectSource::Other` tag on effect instances a worn item grants
+/// (`ObjectEffects` status flags). Like race innates they live exactly
+/// as long as their source: rebuilt from the equipped items at login /
+/// spawn, torn down by source on unequip, never persisted and never
+/// touched by dispel or cleanse.
+pub const WORN_ITEM_EFFECT_SOURCE: &str = "worn_item";
+
+/// True for an `EffectInstance` created by wearing an item.
+#[must_use]
+pub fn is_worn_item_effect(source: &EffectSource) -> bool {
+    matches!(source, EffectSource::Other(s) if s == WORN_ITEM_EFFECT_SOURCE)
+}
+
+/// True for an effect whose lifetime belongs to its source (race
+/// innate or worn item), not to a timer: never saved, never dispelled.
+#[must_use]
+pub fn is_innate_effect(source: &EffectSource) -> bool {
+    is_race_effect(source) || is_worn_item_effect(source)
+}
+
+/// True when `flag` is a passive perception flag that has no marker
+/// component yet but is still shown as a permanent effect.
+#[must_use]
+pub fn is_display_only_flag(flag: &str) -> bool {
+    DISPLAY_ONLY_FLAGS.contains(&flag)
+}
+
 /// Passive perception flags with no marker component yet: a race still
 /// carries them as a permanent, display-only `EffectInstance` so
 /// `effects` / `score` show the innate ("infravision (permanent)").
@@ -209,6 +256,7 @@ pub fn apply_race_effects(world: &mut World, entity: Entity, race: &str) {
                 q.iter(world).any(|(inst, applied)| {
                     applied.0 == entity
                         && inst.remaining_secs < 0
+                        && !is_worn_item_effect(&inst.source)
                         && inst.name.eq_ignore_ascii_case(&flag)
                 })
             };
@@ -232,5 +280,48 @@ pub fn apply_race_effects(world: &mut World, entity: Entity, race: &str) {
                 AppliedTo(entity),
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `install_flag_marker_known` must list exactly the flags
+    /// `install_flag_marker` installs a marker for.
+    #[test]
+    fn known_marker_flags_match_the_installer() {
+        let mut world = World::new();
+        for flag in [
+            "hidden",
+            "sneak",
+            "concealment",
+            "fly",
+            "bless",
+            "sanctuary",
+            "detect_invisible",
+            "haste",
+            "infravision",
+            "poisoned",
+            "invisible",
+            "",
+        ] {
+            let target = world.spawn_empty().id();
+            assert_eq!(
+                install_flag_marker(&mut world, target, flag),
+                install_flag_marker_known(flag),
+                "flag {flag:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn worn_item_effects_are_innate_like_race_effects() {
+        let worn = EffectSource::Other(WORN_ITEM_EFFECT_SOURCE.to_string());
+        let race = EffectSource::Other(RACE_EFFECT_SOURCE.to_string());
+        assert!(is_innate_effect(&worn) && is_innate_effect(&race));
+        assert!(is_worn_item_effect(&worn) && !is_worn_item_effect(&race));
+        assert!(!is_innate_effect(&EffectSource::Spell));
+        assert!(!is_innate_effect(&EffectSource::Item));
     }
 }

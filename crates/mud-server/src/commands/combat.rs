@@ -2694,7 +2694,9 @@ pub(crate) fn cmd_disarm(world: &mut World, player: Entity, args: &str) {
     };
     drain_stamina(world, player, cost);
 
-    // Drop weapon: remove EquippedSlot, re-Located to the room.
+    // Drop weapon: reverse its gear bonuses, remove EquippedSlot,
+    // re-Located to the room.
+    crate::equip_apply::release_gear(world, weapon);
     if let Ok(mut e) = world.get_entity_mut(weapon) {
         e.remove::<EquippedSlot>();
         e.insert(Located(target_room));

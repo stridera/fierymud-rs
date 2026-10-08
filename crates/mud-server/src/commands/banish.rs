@@ -304,6 +304,7 @@ fn extract_mob(world: &mut World, mob: Entity, room: Entity, destroy_gear: bool)
         if destroy_gear {
             super::info::despawn_item_tree(world, item);
         } else {
+            crate::equip_apply::release_gear(world, item);
             try_remove::<EquippedSlot>(world, item);
             world.entity_mut(item).insert(Located(room));
         }

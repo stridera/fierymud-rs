@@ -514,6 +514,9 @@ fn fear_drops_weapon(world: &mut World, scene: &Scene, weapon: Entity) -> FearOu
             &|_, v| format!("{v} is so terrified that they drop {w}!"),
         ),
     );
+    if scene.room.is_some() {
+        crate::equip_apply::release_gear(world, weapon);
+    }
     if let (Ok(mut e), Some(room)) = (world.get_entity_mut(weapon), scene.room) {
         e.remove::<EquippedSlot>();
         e.insert(Located(room));

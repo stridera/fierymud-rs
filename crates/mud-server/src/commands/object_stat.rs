@@ -177,11 +177,12 @@ pub(crate) fn render_object_stat(
                 applies.push(format!("{target} {amount}{at}"));
             }
             Some(d) => {
-                let label = g
-                    .modifier_data
-                    .get("flag")
-                    .and_then(serde_json::Value::as_str)
-                    .map_or(d.name, str::to_string);
+                let flags = mud_world::mob_effects::row_flags(&g.modifier_data, &d.default_params);
+                let label = if flags.is_empty() {
+                    d.name
+                } else {
+                    flags.join(", ")
+                };
                 grants.push(format!("{label} (strength {}){at}", g.strength));
             }
             None => grants.push(format!("effect #{} (unknown){at}", g.effect_id)),

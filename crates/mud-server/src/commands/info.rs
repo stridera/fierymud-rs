@@ -11744,6 +11744,8 @@ pub(crate) fn despawn_item_tree(world: &mut World, item: Entity) {
         i += 1;
     }
     for e in tree {
+        // A worn item's bonuses and effects go with it.
+        crate::equip_apply::release_gear(world, e);
         if let Ok(em) = world.get_entity_mut(e) {
             em.despawn();
         }
@@ -13970,6 +13972,29 @@ pub(crate) fn render_identify_block(
             "    <cyan>Wear:</>     <dim>{}</>\r\n",
             labels.join(", ")
         ));
+    }
+
+    if p.armor_pct != 0 {
+        out.push_str(&format!(
+            "    <cyan>Armor:</>    <yellow>{}%</> <dim>mitigation</>\r\n",
+            p.armor_pct
+        ));
+    }
+
+    // What wearing it does (legacy identify's `Item provides:` and
+    // `Apply:` lines): effect flags it grants and stat applies.
+    let grants = crate::equip_apply::describe_item_grants(world, &p);
+    if !grants.provides.is_empty() || !grants.applies.is_empty() {
+        out.push_str("\r\n  <b:cyan>Worn Effects</>\r\n");
+        if !grants.provides.is_empty() {
+            out.push_str(&format!(
+                "    <cyan>Item provides:</> <b:magenta>{}</>\r\n",
+                grants.provides.join(", ")
+            ));
+        }
+        for apply in &grants.applies {
+            out.push_str(&format!("    <cyan>Apply:</> {apply}\r\n"));
+        }
     }
 
     // Combat block — only for weapons. Avg damage and damage type

@@ -1954,6 +1954,9 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
                 // Skip both moves — bound gear stays on the ghost.
                 continue;
             }
+            // Reverse the gear bonuses while the item still points at its
+            // wearer, then move it into the corpse.
+            crate::equip_apply::release_gear(world, it);
             if world.get::<Located>(it).is_some() {
                 world.entity_mut(it).insert(Located(corpse));
             }
@@ -2211,6 +2214,7 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
                 });
         }
         for it in &owned_items {
+            crate::equip_apply::release_gear(world, *it);
             if world.get::<Located>(*it).is_some() {
                 world.entity_mut(*it).insert(Located(corpse));
             }

@@ -760,7 +760,7 @@ pub(crate) fn restore_persisted_effects(
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
     let elapsed = now_unix.saturating_sub(persisted.saved_at_unix).max(0);
     for eff in persisted.effects {
-        if mud_world::mob_effects::is_race_effect(&eff.source) {
+        if mud_world::mob_effects::is_innate_effect(&eff.source) {
             continue;
         }
         let is_admin = matches!(eff.source, mud_world::EffectSource::Admin);
@@ -4556,8 +4556,18 @@ pub(crate) fn snapshot_player(
     generation: u64,
 ) -> Option<PlayerSaveSnapshot> {
     let account = world.get::<Account>(entity).cloned()?;
-    let hp = world.get::<Health>(entity).map_or(0, |h| h.hp);
-    let stamina = world.get::<Stamina>(entity).map_or(0, |s| s.current);
+    // Worn gear is re-applied from the equipped items at login, so the
+    // character row keeps the values without it (else every relog stacks
+    // the bonus again).
+    let gear = crate::equip_apply::gear_offsets(world, entity);
+    let hp = crate::equip_apply::base_current(
+        world.get::<Health>(entity).map_or(0, |h| h.hp),
+        gear.max_hp,
+    );
+    let stamina = crate::equip_apply::base_current(
+        world.get::<Stamina>(entity).map_or(0, |s| s.current),
+        gear.max_stamina,
+    );
     let (zone_id, room_id) = world
         .get::<Located>(entity)
         .and_then(|l| world.get::<WorldKey>(l.0).copied())
@@ -4833,7 +4843,7 @@ pub(crate) fn snapshot_player(
             .iter(world)
             .filter(|(_, applied, _)| applied.0 == entity)
             // Race innates are rebuilt from `RaceEffects` at login.
-            .filter(|(inst, _, _)| !mud_world::mob_effects::is_race_effect(&inst.source))
+            .filter(|(inst, _, _)| !mud_world::mob_effects::is_innate_effect(&inst.source))
             .map(|(inst, _, modd)| PersistedEffectInstance {
                 kind: inst.kind,
                 name: inst.name.clone(),
@@ -4901,7 +4911,7 @@ pub(crate) fn snapshot_player(
         .map(mud_world::Aliases::to_rows)
         .unwrap_or_default();
     let core_stats_payload: Option<mud_db::characters::CoreStatsPayload> =
-        world.get::<CoreStats>(entity).copied().map(Into::into);
+        crate::equip_apply::base_core_stats(world, entity).map(Into::into);
     // Time-played accumulator. We compute the deltas now, but only
     // bump the in-memory anchor AFTER the tx commits — otherwise a
     // rolled-back save would advance the local counter without the
