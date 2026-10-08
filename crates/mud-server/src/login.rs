@@ -3605,6 +3605,22 @@ impl ConnRouter {
             return;
         }
 
+        // Unread-mail flag for the enter-game notice. Mail is
+        // account-scoped, so an unlinked character (empty user id) has no
+        // mailbox. A failed count only drops the notice; it must not block
+        // the login.
+        let has_mail = if user.id.is_empty() {
+            false
+        } else {
+            match mud_db::mail::unread_count(pool, &user.id).await {
+                Ok(n) => n > 0,
+                Err(e) => {
+                    warn!(conn_id, error = %e, "unread mail count failed");
+                    false
+                }
+            }
+        };
+
         let LoginCtx { outbound, .. } = self.login.remove(&conn_id).unwrap();
         let entity = spawn_player(world, &user, &char_row, outbound);
         let item_count = spawn_inventory(world, entity, &item_rows);
@@ -3876,7 +3892,13 @@ impl ConnRouter {
         self.playing.insert(conn_id, entity);
         self.sync_client_width(conn_id, entity, world);
         self.attach_output(conn_id, entity, world);
-        show_enter_game(world, entity, &char_row.name, char_row.last_login.is_none());
+        show_enter_game(
+            world,
+            entity,
+            &char_row.name,
+            char_row.last_login.is_none(),
+            has_mail,
+        );
         // One-shot per login: ship the chat-channel directory so
         // the client can build chat tabs from server data instead
         // of hardcoding the channel list. Role-aware — wiznet
@@ -3909,8 +3931,15 @@ impl ConnRouter {
 /// What a character sees on entering the game, in legacy `CON_MENU` '1'
 /// order: MOTD (and staff `imotd`), welcome line, "$n has entered the game."
 /// to the room, then the auto-look through the real `look` command so GMCP
-/// Room.Info precedes the room text.
-fn show_enter_game(world: &mut World, entity: Entity, name: &str, first_login: bool) {
+/// Room.Info precedes the room text, then the legacy "You have mail
+/// waiting." notice when the account has unread mail.
+fn show_enter_game(
+    world: &mut World,
+    entity: Entity,
+    name: &str,
+    first_login: bool,
+    has_mail: bool,
+) {
     // Display MOTD before the spawn-prompt. Pulled from the
     // schema's `SystemText` table (key `"motd"`) via the
     // [`mud_world::SystemTexts`] resource; falls back to the
@@ -3987,6 +4016,9 @@ fn show_enter_game(world: &mut World, entity: Entity, name: &str, first_login: b
             &commands::cap_sentence_start(&format!("{player_name} has entered the game.\r\n")),
         );
         commands::info::cmd_look(world, entity, "");
+    }
+    if has_mail {
+        commands::send_to(world, entity, "You have mail waiting.\r\n");
     }
 }
 
@@ -7335,7 +7367,7 @@ mod tests {
         let room = enter_game_room(&mut world);
         let (me, mut rx) = enter_game_player(&mut world, room, "Tester");
 
-        show_enter_game(&mut world, me, "Tester", false);
+        show_enter_game(&mut world, me, "Tester", false, false);
 
         let out = drain(&mut rx);
         let welcome = out.find("Welcome, Tester.").expect(&out);
@@ -7350,12 +7382,39 @@ mod tests {
     }
 
     #[test]
+    fn unread_mail_notice_follows_the_look() {
+        let mut world = World::new();
+        let room = enter_game_room(&mut world);
+        let (me, mut rx) = enter_game_player(&mut world, room, "Tester");
+
+        show_enter_game(&mut world, me, "Tester", false, true);
+
+        let out = drain(&mut rx);
+        let desc = out.rfind("Banners hang").expect(&out);
+        let notice = out.find("You have mail waiting.").expect(&out);
+        assert!(desc < notice, "{out}");
+        assert_eq!(out.matches("You have mail waiting.").count(), 1, "{out}");
+    }
+
+    #[test]
+    fn no_mail_notice_without_unread_mail() {
+        let mut world = World::new();
+        let room = enter_game_room(&mut world);
+        let (me, mut rx) = enter_game_player(&mut world, room, "Tester");
+
+        show_enter_game(&mut world, me, "Tester", false, false);
+
+        let out = drain(&mut rx);
+        assert!(!out.contains("mail waiting"), "{out}");
+    }
+
+    #[test]
     fn first_login_hint_comes_before_the_look() {
         let mut world = World::new();
         let room = enter_game_room(&mut world);
         let (me, mut rx) = enter_game_player(&mut world, room, "Tester");
 
-        show_enter_game(&mut world, me, "Tester", true);
+        show_enter_game(&mut world, me, "Tester", true, false);
 
         let out = drain(&mut rx);
         let hint = out.find("Try:").expect(&out);
@@ -7403,7 +7462,7 @@ mod tests {
         let typed = drain(&mut rx);
         assert!(!typed.contains("Banners hang"), "control: {typed}");
 
-        show_enter_game(&mut world, me, "Tester", false);
+        show_enter_game(&mut world, me, "Tester", false, false);
         let out = drain(&mut rx);
         assert!(out.contains("Banners hang"), "look was swallowed: {out}");
         assert!(!out.contains("aliased"), "alias expanded at login: {out}");
@@ -7416,7 +7475,7 @@ mod tests {
         let (me, mut my_rx) = enter_game_player(&mut world, room, "Tester");
         let (_watcher, mut watcher_rx) = enter_game_player(&mut world, room, "Watcher");
 
-        show_enter_game(&mut world, me, "Tester", false);
+        show_enter_game(&mut world, me, "Tester", false, false);
 
         let seen = drain(&mut watcher_rx);
         assert_eq!(

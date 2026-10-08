@@ -1953,6 +1953,10 @@ pub struct ClassDef {
     /// Legacy "exp needed to level" multiplier (`Class.exp_gain_factor`):
     /// `1.0` is the base table, `1.3` needs 30% more XP per level.
     pub exp_gain_factor: f64,
+    /// Killer-class alignment bias (`Class.alignment_bias`) fed to the
+    /// kill alignment formula: positive for "good" classes, negative for
+    /// "bad", `0` for neutral.
+    pub alignment_bias: i32,
     /// Per-element resistance map distilled from the schema's
     /// `Class.resistances` JSON: keys are `ElementType` variants
     /// the runtime models, unrecognized strings are dropped at

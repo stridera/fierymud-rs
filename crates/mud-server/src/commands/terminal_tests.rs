@@ -61,6 +61,7 @@ fn world() -> World {
             primary_stat: None,
             hp_per_level: 0,
             exp_gain_factor: 1.0,
+            alignment_bias: 0,
             resistances: std::collections::HashMap::new(),
         },
     );

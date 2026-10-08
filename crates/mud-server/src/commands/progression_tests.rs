@@ -53,6 +53,7 @@ fn class(id: i32, name: &str, factor: f64) -> ClassDef {
         primary_stat: None,
         hp_per_level: 0,
         exp_gain_factor: factor,
+        alignment_bias: 0,
         resistances: HashMap::new(),
     }
 }

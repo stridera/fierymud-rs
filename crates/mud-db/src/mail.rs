@@ -68,6 +68,25 @@ pub async fn inbox_for(pool: &PgPool, recipient_user_id: &str) -> sqlx::Result<V
     .await
 }
 
+/// Count unread, non-deleted mail for a user. Drives the login-time
+/// "You have mail waiting." notice; cheaper than `inbox_for` since no
+/// bodies or sender join are fetched.
+pub async fn unread_count(pool: &PgPool, recipient_user_id: &str) -> sqlx::Result<i64> {
+    let row = sqlx::query!(
+        r#"
+        SELECT COUNT(*) AS "count!"
+        FROM "AccountMail"
+        WHERE recipient_user_id = $1
+          AND is_deleted = FALSE
+          AND read_at IS NULL
+        "#,
+        recipient_user_id,
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(row.count)
+}
+
 /// Mark a mail row as read. No-op if the row is missing or already
 /// read; safe to call repeatedly.
 pub async fn mark_read(pool: &PgPool, mail_id: i32) -> sqlx::Result<()> {

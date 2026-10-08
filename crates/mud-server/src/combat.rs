@@ -1675,17 +1675,18 @@ const MAX_ALIGNMENT: i32 = 1000;
 
 /// Killer-class bias legacy `change_alignment` adds to the killer's
 /// alignment before the formula ("good" classes should know better,
-/// "bad" classes less so). Matches on the class's plain name; legacy's
-/// switch falls through, so Paladin/Priest get +100, Ranger/Druid +50,
-/// Anti-Paladin/Diabolist/Necromancer -100, Thief/Assassin -50.
-fn class_alignment_bias(plain_name: &str) -> i32 {
-    match plain_name.to_ascii_lowercase().as_str() {
-        "paladin" | "priest" => 100,
-        "ranger" | "druid" => 50,
-        "anti-paladin" | "diabolist" | "necromancer" => -100,
-        "thief" | "assassin" => -50,
-        _ => 0,
-    }
+/// "bad" classes less so). Read from the class's `alignment_bias` in the
+/// [`mud_world::ClassCatalog`] (builder-editable, seeded from legacy:
+/// Paladin/Priest +100, Ranger/Druid +50, Anti-Paladin/Diabolist/
+/// Necromancer -100, Thief/Assassin -50). Unknown class: no bias.
+fn class_alignment_bias(world: &World, class_id: Option<i32>) -> i32 {
+    class_id
+        .and_then(|id| {
+            world
+                .get_resource::<mud_world::ClassCatalog>()
+                .and_then(|c| c.by_id.get(&id))
+        })
+        .map_or(0, |c| c.alignment_bias)
 }
 
 /// Alignment change for a kill, mirroring legacy `change_alignment`
@@ -1796,13 +1797,7 @@ fn apply_kill_alignment(world: &mut World, killer: Entity, victim: Entity) {
         let (member_level, class_id) = world
             .get::<mud_world::Profile>(member)
             .map_or((1, None), |p| (p.level, p.class_id));
-        let bias = class_id
-            .and_then(|id| {
-                world
-                    .get_resource::<mud_world::ClassCatalog>()
-                    .and_then(|c| c.by_id.get(&id))
-            })
-            .map_or(0, |c| class_alignment_bias(&c.plain_name));
+        let bias = class_alignment_bias(world, class_id);
         let Some(mut cs) = world.get_mut::<CombatStats>(member) else {
             continue;
         };
@@ -3771,8 +3766,41 @@ mod tests {
         // Class bias: a paladin at 900 reads as 1000 (+100) so the
         // killer drag applies.
         assert_eq!(f(900, 100, 50, 0, 50), 898);
-        assert_eq!(super::class_alignment_bias("Anti-Paladin"), -100);
-        assert_eq!(super::class_alignment_bias("Warrior"), 0);
+    }
+
+    #[test]
+    fn class_alignment_bias_reads_the_catalog_value() {
+        fn class(id: i32, plain_name: &str, alignment_bias: i32) -> mud_world::ClassDef {
+            mud_world::ClassDef {
+                id,
+                name: plain_name.to_string(),
+                plain_name: plain_name.to_string(),
+                is_subclass: false,
+                parent_class_id: None,
+                description: None,
+                hit_dice: "1d8".to_string(),
+                primary_stat: None,
+                hp_per_level: 10,
+                exp_gain_factor: 1.0,
+                alignment_bias,
+                resistances: std::collections::HashMap::new(),
+            }
+        }
+        let mut world = World::new();
+        // No catalog installed: no bias.
+        assert_eq!(super::class_alignment_bias(&world, Some(1)), 0);
+        let mut catalog = mud_world::ClassCatalog::default();
+        // Bias comes from the row, not the name: a "Paladin" with 0 has
+        // none and an arbitrary class with -37 gets -37.
+        catalog.by_id.insert(1, class(1, "Paladin", 0));
+        catalog.by_id.insert(2, class(2, "Anti-Paladin", -100));
+        catalog.by_id.insert(3, class(3, "Warrior", -37));
+        world.insert_resource(catalog);
+        assert_eq!(super::class_alignment_bias(&world, Some(1)), 0);
+        assert_eq!(super::class_alignment_bias(&world, Some(2)), -100);
+        assert_eq!(super::class_alignment_bias(&world, Some(3)), -37);
+        assert_eq!(super::class_alignment_bias(&world, Some(99)), 0);
+        assert_eq!(super::class_alignment_bias(&world, None), 0);
     }
 
     #[test]

@@ -36,6 +36,10 @@ pub struct ClassRow {
     /// (`Class.exp_gain_factor`, default `1.0`). Scales the class-neutral
     /// `LevelDefinition.exp_required` table at load time.
     pub exp_gain_factor: f64,
+    /// Legacy killer-class alignment bias (`Class.alignment_bias`,
+    /// default `0`) added to the killer's alignment inside the kill
+    /// alignment formula. Positive for "good" classes, negative for "bad".
+    pub alignment_bias: i32,
     /// JSON map of element name → mitigation percent. Folds into
     /// the wearer's `Resistances` at spawn time alongside race
     /// resistances and gear bookkeeping.
@@ -57,6 +61,7 @@ pub async fn list_all(pool: &PgPool) -> sqlx::Result<Vec<ClassRow>> {
             primary_stat,
             hp_per_level,
             exp_gain_factor,
+            alignment_bias,
             COALESCE(resistances, '{}'::jsonb) AS "resistances!: serde_json::Value"
         FROM "Class"
         ORDER BY id

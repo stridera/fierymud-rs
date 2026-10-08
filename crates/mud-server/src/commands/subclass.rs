@@ -190,6 +190,7 @@ mod tests {
             primary_stat: None,
             hp_per_level: 10,
             exp_gain_factor: 1.0,
+            alignment_bias: 0,
             resistances: HashMap::new(),
         }
     }

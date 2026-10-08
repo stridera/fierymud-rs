@@ -1083,3 +1083,32 @@ async fn deleting_a_corpse_cascades_to_its_remaining_items() {
 
     corpse_test_cleanup(&pool, &[&owner]).await;
 }
+
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn mail_unread_count_tracks_read_and_delete() {
+    let pool = pool().await;
+    let user_id = testplayer_user_id(&pool).await;
+    let before = mud_db::mail::unread_count(&pool, &user_id)
+        .await
+        .expect("count");
+    let id = mud_db::mail::send(&pool, &user_id, &user_id, "unread-count test", "body")
+        .await
+        .expect("send");
+    let after = mud_db::mail::unread_count(&pool, &user_id)
+        .await
+        .expect("count");
+    assert_eq!(after, before + 1);
+
+    mud_db::mail::mark_read(&pool, id).await.expect("read");
+    assert_eq!(
+        mud_db::mail::unread_count(&pool, &user_id).await.unwrap(),
+        before
+    );
+
+    sqlx::query(r#"DELETE FROM "AccountMail" WHERE id = $1"#)
+        .bind(id)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}
