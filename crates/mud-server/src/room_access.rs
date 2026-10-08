@@ -42,13 +42,13 @@ pub(crate) fn is_immortal(world: &World, entity: Entity) -> bool {
 
 /// Legacy `rooms.cpp` (can-go-direction): characters at `LVL_GOD` (101) or
 /// above ignore hidden and closed/locked exits. The role ladder maps levels
-/// 101-102 to `Builder`, so the gate is `Builder`+; plain `Immortal`
-/// (`LVL_IMMORT`, 100) still has to open doors.
+/// 101-102 to `Builder`, so the gate is a `Builder`+ role *and* character
+/// level 101+; plain `Immortal` (`LVL_IMMORT`, 100) still has to open doors.
 ///
 /// Only a line the staff member typed themself counts: a trigger-queued or
 /// `force`d command never borrows the acting character's rank.
 pub(crate) fn can_pass_closed_doors(world: &World, entity: Entity) -> bool {
-    is_god_level(world, entity)
+    is_god_level_character(world, entity)
 }
 
 /// Legacy `GET_LEVEL(ch) >= LVL_GOD` (101) judged on the *character's*
@@ -67,10 +67,13 @@ pub(crate) fn is_god_level(world: &World, entity: Entity) -> bool {
 }
 
 /// Legacy `rooms.cpp` `unlock_door`: only `GET_LEVEL(ch) < LVL_IMMORT` need a
-/// key (or a keyhole); staff (`Immortal`+) unlock anything without one.
+/// key (or a keyhole); staff (`Immortal`+ role and character level 100+)
+/// unlock anything without one.
 /// Typed lines only, as for [`can_pass_closed_doors`].
 pub(crate) fn can_unlock_without_key(world: &World, entity: Entity) -> bool {
-    crate::commands::command_is_typed() && is_immortal(world, entity)
+    crate::commands::command_is_typed()
+        && is_immortal(world, entity)
+        && world.get::<Profile>(entity).is_some_and(|p| p.level >= 100)
 }
 
 // ---------------------------------------------------------------------------

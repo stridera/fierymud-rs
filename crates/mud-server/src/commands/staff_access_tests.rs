@@ -165,6 +165,30 @@ fn a_forced_unlock_still_needs_the_key() {
 }
 
 #[test]
+fn a_low_level_character_on_a_staff_account_is_stopped_by_doors_and_needs_the_key() {
+    // Legacy gates are on GET_LEVEL, so a level-40 character on a Builder
+    // account gets neither pass-through nor keyless unlock.
+    let staff_account = |level| Account {
+        role: UserRole::Builder,
+        ..level_account(level)
+    };
+    let (mut world, p, a, _b, mut rx) = door_world(40, ExitState::Locked);
+    world.entity_mut(p).insert(staff_account(40));
+    dispatch(&mut world, p, "north");
+    assert_eq!(at(&world, p), a, "{}", drain(&mut rx));
+    dispatch(&mut world, p, "unlock north");
+    assert_eq!(state_of(&world, a), ExitState::Locked);
+    assert!(drain(&mut rx).contains("no keyhole"));
+
+    // Same account at level 101 does both.
+    let (mut world, p, a, b, _rx) = door_world(101, ExitState::Locked);
+    world.entity_mut(p).insert(staff_account(101));
+    dispatch(&mut world, p, "north");
+    assert_eq!(at(&world, p), b);
+    let _ = a;
+}
+
+#[test]
 fn followers_are_checked_against_the_door_on_their_own_rank() {
     let (mut world, leader, a, b, _rx) = door_world(105, ExitState::Locked);
     let (mortal, mut mrx) = player_in(&mut world, a);
@@ -182,9 +206,17 @@ fn followers_are_checked_against_the_door_on_their_own_rank() {
         .id();
     world.entity_mut(mortal).insert(mud_world::Mounted(mount));
     let (god, mut grx) = player_in(&mut world, a);
-    world
-        .entity_mut(god)
-        .insert((level_account(101), mud_world::Follower(leader)));
+    world.entity_mut(god).insert((
+        level_account(101),
+        Profile {
+            level: 101,
+            class_id: None,
+            race: "Human".into(),
+            experience: 0,
+            gender: "neutral".into(),
+        },
+        mud_world::Follower(leader),
+    ));
     let (mortal2, _m2) = player_in(&mut world, a);
     // A mortal following the mortal (chain) is stranded with them.
     world
