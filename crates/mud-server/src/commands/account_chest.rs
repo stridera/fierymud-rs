@@ -132,6 +132,28 @@ pub(crate) struct ChestItemState {
     pub liquid_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub light_remaining: Option<i32>,
+    /// Player / staff text overrides (`nameitem`, `iedit`): the item's
+    /// [`mud_world::ItemCustomization`] minus its `dirty` flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_examine: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_keywords: Option<Vec<String>>,
+}
+
+/// Capture the per-instance state of `item` for its chest row.
+pub(crate) fn chest_state_of(world: &World, item: Entity) -> ChestItemState {
+    let custom = world.get::<mud_world::ItemCustomization>(item);
+    ChestItemState {
+        charges: world.get::<Charges>(item).map(|c| c.0),
+        liquid_remaining: world.get::<LiquidContainer>(item).map(|l| l.remaining),
+        liquid_type: world.get::<LiquidContainer>(item).map(|l| l.liquid.clone()),
+        light_remaining: world.get::<LightFuel>(item).map(|f| f.remaining),
+        custom_name: custom.and_then(|c| c.name.clone()),
+        custom_examine: custom.and_then(|c| c.examine.clone()),
+        custom_keywords: custom.and_then(|c| c.keywords.clone()),
+    }
 }
 
 async fn cmd_account_chest(world: &mut World, player: Entity, pool: &mud_db::sqlx::PgPool) {
@@ -249,12 +271,7 @@ async fn cmd_chest_deposit(
         .unwrap_or_default();
     let mut ordered = coordinator.begin_ordered(&account.character_id).await;
     coordinator.apply_completions(world);
-    let state = ChestItemState {
-        charges: world.get::<Charges>(item).map(|c| c.0),
-        liquid_remaining: world.get::<LiquidContainer>(item).map(|l| l.remaining),
-        liquid_type: world.get::<LiquidContainer>(item).map(|l| l.liquid.clone()),
-        light_remaining: world.get::<LightFuel>(item).map(|f| f.remaining),
-    };
+    let state = chest_state_of(world, item);
     let custom_data = serde_json::to_value(&state).ok();
     let item_name = name_of(world, item);
     // The item's inventory row is removed in the same transaction as the
@@ -395,6 +412,27 @@ async fn cmd_chest_withdraw(
     ordered.supersede_earlier_snapshots();
 }
 
+/// Re-attach the stashed text overrides to a withdrawn item. The new
+/// inventory row has no customization columns yet, so they are dirty: the
+/// next save writes them.
+fn restore_customization(world: &mut World, item: Entity, state: &ChestItemState) {
+    if state.custom_name.is_some()
+        || state.custom_examine.is_some()
+        || state.custom_keywords.is_some()
+    {
+        crate::item_custom::install(
+            world,
+            item,
+            mud_world::ItemCustomization {
+                name: state.custom_name.clone(),
+                examine: state.custom_examine.clone(),
+                keywords: state.custom_keywords.clone(),
+                dirty: true,
+            },
+        );
+    }
+}
+
 /// Spawn a chest row back into the player's inventory. Mirrors
 /// `respawn::spawn_item_into`'s bundle but takes per-instance state
 /// from `custom_data`. Pulled out so tests can exercise the
@@ -489,10 +527,12 @@ pub(crate) fn spawn_withdrawn_item(
     {
         em.insert(Charges(c));
     }
+    restore_customization(world, item_entity, &state);
+    let shown = crate::commands::name_of(world, item_entity);
     send_to(
         world,
         player,
-        format!("You retrieve {} from the account chest.\r\n", proto.name),
+        format!("You retrieve {shown} from the account chest.\r\n"),
     );
     crate::commands::refresh_player_items_gmcp(world, player);
 }
@@ -921,6 +961,9 @@ mod tests {
             liquid_remaining: Some(2),
             liquid_type: Some("WATER".to_string()),
             light_remaining: None,
+            custom_name: Some("Daedela's sack".to_string()),
+            custom_examine: Some("A tidy sack.".to_string()),
+            custom_keywords: Some(vec!["sack".to_string()]),
         };
         let json = serde_json::to_value(&state).unwrap();
         let back: ChestItemState = serde_json::from_value(json).unwrap();
@@ -928,6 +971,9 @@ mod tests {
         assert_eq!(back.liquid_remaining, Some(2));
         assert_eq!(back.liquid_type.as_deref(), Some("WATER"));
         assert_eq!(back.light_remaining, None);
+        assert_eq!(back.custom_name.as_deref(), Some("Daedela's sack"));
+        assert_eq!(back.custom_examine.as_deref(), Some("A tidy sack."));
+        assert_eq!(back.custom_keywords, Some(vec!["sack".to_string()]));
     }
 
     #[test]

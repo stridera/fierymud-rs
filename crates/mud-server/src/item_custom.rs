@@ -24,15 +24,15 @@ pub(crate) const MAX_KEYWORD_LEN: usize = 24;
 
 /// Reduce player-typed text to a plain item name: colour tags and every
 /// character outside letters, digits, space and a little punctuation are
-/// dropped, whitespace is collapsed. Fails when the result is out of
-/// bounds; the message is ready to send.
+/// dropped (parentheses included, so a name cannot fake a status tag such
+/// as `(edited)`), whitespace is collapsed. Fails when the result is out of
+/// bounds or imitates a corpse label; the message is ready to send.
 pub(crate) fn sanitize_player_name(raw: &str) -> Result<String, String> {
     let stripped = render_color_tags(&strip_ansi(raw), ColorMode::Strip);
     let mut out = String::with_capacity(stripped.len());
     let mut last_space = true;
     for c in stripped.chars() {
-        if c.is_ascii_alphanumeric() || matches!(c, '\'' | '-' | ',' | '.' | '(' | ')' | '!' | '?')
-        {
+        if c.is_ascii_alphanumeric() || matches!(c, '\'' | '-' | ',' | '.' | '!' | '?') {
             out.push(c);
             last_space = false;
         } else if c.is_whitespace() && !last_space {
@@ -52,7 +52,37 @@ pub(crate) fn sanitize_player_name(raw: &str) -> Result<String, String> {
             "That name is too long ({len} characters; the limit is {MAX_PLAYER_NAME_LEN}).\r\n"
         ));
     }
+    if mimics_corpse_label(&out) {
+        return Err("That name looks like a corpse label; pick another.\r\n".to_string());
+    }
     Ok(out)
+}
+
+/// Corpse labels ("the corpse of Bob") gate looting and dragging by name,
+/// so a player-given name must not read like one, with or without a
+/// leading article.
+fn mimics_corpse_label(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let mut words = lower.split_whitespace().peekable();
+    if words
+        .peek()
+        .is_some_and(|w| matches!(*w, "the" | "a" | "an" | "some"))
+    {
+        words.next();
+    }
+    words.next() == Some("corpse") && words.next() == Some("of")
+}
+
+/// Words the targeting parser or commands give a meaning of their own;
+/// a custom name must not make an item answer to them.
+fn is_reserved_target_word(w: &str) -> bool {
+    if matches!(w, "all" | "self" | "me" | "everyone" | "someone" | "here") {
+        return true;
+    }
+    let digits = w.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+    !digits.is_empty()
+        && digits.chars().all(|c| c.is_ascii_digit())
+        && (digits.len() == w.len() || matches!(&w[digits.len()..], "st" | "nd" | "rd" | "th"))
 }
 
 /// Drop ANSI CSI escape sequences (`ESC [ ... letter`) so a pasted colour
@@ -76,12 +106,22 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
-/// Staff text: colour tags are allowed, control characters (including ESC
-/// and line breaks, since `iedit` takes typed single lines) are removed.
+/// Bidirectional-override and zero-width characters: invisible, yet able to
+/// reorder or disguise the text around them.
+fn is_invisible_format_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200B}'..='\u{200D}' | '\u{FEFF}'
+    )
+}
+
+/// Staff text: colour tags are allowed; control characters (including ESC
+/// and line breaks, since `iedit` takes typed single lines), bidi controls
+/// and zero-width characters are removed.
 pub(crate) fn sanitize_staff_text(raw: &str, max: usize) -> Result<String, String> {
     let cleaned: String = strip_ansi(raw)
         .chars()
-        .filter(|c| !c.is_control())
+        .filter(|c| !c.is_control() && !is_invisible_format_char(*c))
         .collect::<String>()
         .trim()
         .to_string();
@@ -129,7 +169,8 @@ pub(crate) fn sanitize_keywords(raw: &str) -> Result<Vec<String>, String> {
 
 /// Keywords a customized item answers to: the base list (the prototype's,
 /// or the staff override) plus every word of its custom name, so `get
-/// daedela` finds "Daedela's cloth sack".
+/// daedela` finds "Daedela's cloth sack". Single-character words and
+/// reserved targeting words (`all`, `self`, numbers, `2nd`) are skipped.
 pub(crate) fn effective_keywords(base: &[String], custom_name: Option<&str>) -> Vec<String> {
     let mut out: Vec<String> = base.to_vec();
     if let Some(name) = custom_name {
@@ -139,7 +180,7 @@ pub(crate) fn effective_keywords(base: &[String], custom_name: Option<&str>) -> 
                 .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '\'' | '-'))
                 .collect::<String>()
                 .to_ascii_lowercase();
-            if !w.is_empty() && !out.contains(&w) {
+            if w.len() >= 2 && !is_reserved_target_word(&w) && !out.contains(&w) {
                 out.push(w);
             }
         }

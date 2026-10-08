@@ -5516,6 +5516,7 @@ pub(crate) fn apply_commit(
             em.insert(mud_world::PersistedItemId(new_id));
         }
     }
+    settle_item_customizations(world, snap);
     if let Some(d) = &snap.death {
         // The corpse is committed: let it be looted and dragged, and stop
         // carrying the death transaction in this player's snapshots.
@@ -5541,6 +5542,33 @@ pub(crate) fn apply_commit(
     {
         em.insert(mud_world::TimePlayed(t));
         em.insert(mud_world::LastPersistedAt(snap.now_inst));
+    }
+}
+
+/// The commit wrote every `dirty` item customization it carried, so the
+/// overrides are settled: clear their `dirty` flag, otherwise every later
+/// save would keep overwriting the row and clobber edits made in the
+/// database. An override changed again since the snapshot stays dirty for
+/// the next save. A row that had to be re-INSERTed was written regardless
+/// of the flag, so this only ever clears.
+fn settle_item_customizations(world: &mut World, snap: &PlayerSaveSnapshot) {
+    for (idx, item) in snap.items.iter().enumerate() {
+        let Some(saved) = item.custom.as_ref().filter(|c| c.overwrite) else {
+            continue;
+        };
+        let Some(target) = snap.entity_for_idx.get(idx).copied() else {
+            continue;
+        };
+        let Some(mut now) = world.get_mut::<mud_world::ItemCustomization>(target) else {
+            continue;
+        };
+        if now.dirty
+            && now.name == saved.name
+            && now.examine == saved.examine
+            && now.keywords == saved.keywords
+        {
+            now.dirty = false;
+        }
     }
 }
 
@@ -8726,6 +8754,123 @@ mod tests {
             name_of_row(pool.clone(), loaded_id).await.as_deref(),
             Some("Admin set")
         );
+
+        mud_db::sqlx::query("DELETE FROM \"CharacterItems\" WHERE character_id = $1")
+            .bind(&c.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        temp_cleanup(&pool, &[], &[&c.id], &[]).await;
+    }
+
+    /// A committed save settles the customizations it wrote: `dirty` clears,
+    /// unless the override changed again after the snapshot was taken.
+    #[test]
+    fn apply_commit_clears_dirty_only_for_what_it_wrote() {
+        let mut world = World::new();
+        let room = world.spawn_empty().id();
+        let a = spawn_player_for(&mut world, "ac-dirty", room);
+        let custom = |name: &str, dirty: bool| mud_world::ItemCustomization {
+            name: Some(name.into()),
+            dirty,
+            ..Default::default()
+        };
+        let written = world
+            .spawn((
+                Item,
+                WorldKey { zone: 1, id: 1 },
+                Located(a),
+                custom("Written", true),
+            ))
+            .id();
+        let edited_since = world
+            .spawn((
+                Item,
+                WorldKey { zone: 1, id: 2 },
+                Located(a),
+                custom("Before", true),
+            ))
+            .id();
+        let clean = world
+            .spawn((
+                Item,
+                WorldKey { zone: 1, id: 3 },
+                Located(a),
+                custom("Clean", false),
+            ))
+            .id();
+        let snap = snapshot_player(&mut world, a, 1).unwrap();
+        world.entity_mut(edited_since).insert(custom("After", true));
+        apply_commit(&mut world, &snap, HashMap::new());
+        let dirty = |e: Entity| world.get::<mud_world::ItemCustomization>(e).unwrap().dirty;
+        assert!(!dirty(written), "written customization is settled");
+        assert!(dirty(edited_since), "a newer edit stays dirty");
+        assert!(!dirty(clean));
+    }
+
+    /// After the save that wrote a customization commits, later saves leave
+    /// the row alone, so an edit made straight in the database survives.
+    #[tokio::test]
+    async fn dirty_customization_is_written_once_then_left_alone() {
+        let Some((pool, _db_lock)) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let object: Option<(i32, i32)> =
+            mud_db::sqlx::query_as("SELECT zone_id, id FROM \"Objects\" LIMIT 1")
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+        let Some((oz, oid)) = object else {
+            eprintln!("skipping: no Objects rows");
+            return;
+        };
+        let (_user, c) = temp_unlinked_char(&pool, "dirtyonce").await;
+        let mut world = World::new();
+        world.insert_resource(SaveCoordinator::default());
+        let room = world.spawn_empty().id();
+        let player = spawn_player_for(&mut world, &c.id, room);
+        let item = world
+            .spawn((Item, WorldKey { zone: oz, id: oid }, Located(player)))
+            .id();
+        // Save once so the item has a row, then rename it.
+        let out = save_player(&mut world, player, &pool).await;
+        assert!(out.committed, "{:?}", out.error);
+        let row_id = world.get::<mud_world::PersistedItemId>(item).unwrap().0;
+        world.entity_mut(item).insert(mud_world::ItemCustomization {
+            name: Some("Mine".into()),
+            dirty: true,
+            ..Default::default()
+        });
+        let out = save_player(&mut world, player, &pool).await;
+        assert!(out.committed, "{:?}", out.error);
+        let row_name = || async {
+            mud_db::sqlx::query_scalar::<_, Option<String>>(
+                "SELECT custom_name FROM \"CharacterItems\" WHERE id = $1",
+            )
+            .bind(row_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+        assert_eq!(row_name().await.as_deref(), Some("Mine"));
+        assert!(
+            !world
+                .get::<mud_world::ItemCustomization>(item)
+                .unwrap()
+                .dirty,
+            "dirty cleared once the write committed"
+        );
+        mud_db::sqlx::query(
+            "UPDATE \"CharacterItems\" SET custom_name = 'Muditor set' WHERE id = $1",
+        )
+        .bind(row_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let out = save_player(&mut world, player, &pool).await;
+        assert!(out.committed, "{:?}", out.error);
+        assert_eq!(row_name().await.as_deref(), Some("Muditor set"));
 
         mud_db::sqlx::query("DELETE FROM \"CharacterItems\" WHERE character_id = $1")
             .bind(&c.id)

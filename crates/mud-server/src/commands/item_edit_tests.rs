@@ -397,3 +397,117 @@ fn customization_round_trips_through_the_row_loader() {
         "freshly loaded customization must not overwrite the row"
     );
 }
+
+#[test]
+fn chest_round_trip_keeps_the_custom_name_examine_and_keywords() {
+    use super::account_chest::{chest_state_of, spawn_withdrawn_item};
+    let (mut world, _room, p, _rx) = setup(UserRole::Player);
+    world.insert_resource(mud_world::TriggerCatalog::default());
+    let sack = item(
+        &mut world,
+        p,
+        1,
+        ObjectType::Container,
+        "a cloth sack",
+        "sack",
+    );
+    item_custom::edit(&mut world, sack, |c| {
+        c.name = Some("Daedela's cloth sack".into());
+        c.examine = Some("Stitched with care.".into());
+        c.keywords = Some(vec!["sack".into(), "gems".into()]);
+    });
+    // Deposit stores the state in the chest row's `custom_data` JSON.
+    let custom_data = serde_json::to_value(chest_state_of(&world, sack)).unwrap();
+    world.despawn(sack);
+    let row = mud_db::account_items::AccountItemRow {
+        id: 1,
+        user_id: String::new(),
+        slot: 0,
+        object_zone_id: 1,
+        object_id: 1,
+        quantity: 1,
+        custom_data: Some(custom_data),
+        stored_by_character_id: None,
+        stored_at: chrono::Utc::now().naive_utc(),
+    };
+    spawn_withdrawn_item(&mut world, p, &row, 77);
+    let back = world
+        .query_filtered::<Entity, With<Item>>()
+        .iter(&world)
+        .next()
+        .unwrap();
+    assert_eq!(name(&world, back), "Daedela's cloth sack");
+    assert_eq!(
+        world.get::<Description>(back).unwrap().0,
+        "Stitched with care."
+    );
+    let kw = &world.get::<Keywords>(back).unwrap().0;
+    assert!(kw.contains(&"gems".to_string()) && kw.contains(&"daedela's".to_string()));
+    let c = world.get::<ItemCustomization>(back).unwrap();
+    assert!(c.dirty, "the new inventory row has no customization yet");
+}
+
+#[test]
+fn chest_round_trip_of_a_plain_item_adds_no_customization() {
+    use super::account_chest::chest_state_of;
+    let (mut world, _room, p, _rx) = setup(UserRole::Player);
+    let sack = item(
+        &mut world,
+        p,
+        1,
+        ObjectType::Container,
+        "a cloth sack",
+        "sack",
+    );
+    let v = serde_json::to_value(chest_state_of(&world, sack)).unwrap();
+    assert!(v.get("custom_name").is_none(), "{v}");
+}
+
+#[test]
+fn sanitize_player_name_blocks_fake_tags_and_corpse_labels() {
+    assert_eq!(
+        item_custom::sanitize_player_name("(edited) bag").unwrap(),
+        "edited bag"
+    );
+    assert!(
+        !item_custom::sanitize_player_name("Bag (glowing)")
+            .unwrap()
+            .contains(['(', ')'])
+    );
+    for bad in [
+        "the corpse of Bob",
+        "The Corpse Of Bob",
+        "corpse of Bob",
+        "a corpse of Bob",
+        "(the) corpse  of Bob",
+    ] {
+        assert!(item_custom::sanitize_player_name(bad).is_err(), "{bad}");
+    }
+    assert!(item_custom::sanitize_player_name("Bob's corpse of luck").is_ok());
+    assert!(item_custom::sanitize_player_name("corpse bag").is_ok());
+}
+
+#[test]
+fn custom_name_words_skip_reserved_and_tiny_keywords() {
+    let kw = item_custom::effective_keywords(
+        &["sack".to_string()],
+        Some("All 2nd 3 x self ME everyone 12 a1 My gem-bag"),
+    );
+    assert_eq!(
+        kw,
+        vec!["sack", "a1", "my", "gem-bag"]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn sanitize_staff_text_strips_bidi_and_zero_width_chars() {
+    let raw = "a\u{202E}b\u{200B}c\u{200D}d\u{FEFF}e\u{2066}f\u{2069}g\u{202A}h";
+    assert_eq!(
+        item_custom::sanitize_staff_text(raw, 80).unwrap(),
+        "abcdefgh"
+    );
+    assert!(item_custom::sanitize_staff_text("\u{200B}\u{202E}", 80).is_err());
+}
