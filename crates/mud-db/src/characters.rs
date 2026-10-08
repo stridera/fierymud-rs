@@ -99,6 +99,13 @@ pub struct CharacterRow {
     /// "before-now" value for the score sheet's "Last login:"
     /// line. Null for brand-new characters who've never logged in.
     pub last_login: Option<chrono::NaiveDateTime>,
+    /// Naive-UTC instant the previous session ENDED (quit, rent, camp,
+    /// idle kick, linkdead retirement, shutdown). Offline rest (Repose)
+    /// accrues from this, never from `last_login` (stamped at session
+    /// start, so play time would count as rest). `NULL` = no clean
+    /// logout on record (first login after the column was added, or a
+    /// crash): accrue nothing. Cleared at login by [`update_last_login`].
+    pub last_logout: Option<chrono::NaiveDateTime>,
     /// Immortal-invisibility level. Mirrors `Characters.invis_level`.
     /// Zero means fully visible. Loaded into the `WizInvis(level)`
     /// component on login when nonzero; saved back from the same
@@ -443,13 +450,35 @@ pub async fn save_state<'e, E: PgExecutor<'e>>(
 /// prior behavior made the column mean "last save," which broke the
 /// `clientinfo` "Last login" line and any downstream return-player
 /// detection.
+///
+/// Also clears `last_logout`: the offline window it described was just
+/// consumed by this login's Repose accrual, and a session that ends
+/// without a clean logout stamp (crash) must not accrue it a second time.
 pub async fn update_last_login(pool: &PgPool, character_id: &str) -> sqlx::Result<()> {
     sqlx::query!(
-        r#"UPDATE "Characters" SET last_login = $2 WHERE id = $1"#,
+        r#"UPDATE "Characters" SET last_login = $2, last_logout = NULL WHERE id = $1"#,
         character_id,
         chrono::Utc::now().naive_utc(),
     )
     .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Stamp `last_logout` (naive UTC) when a session ends. Written inside the
+/// final-save transaction (never on autosave), so it commits atomically
+/// with the state it describes.
+pub async fn save_last_logout<'e, E: PgExecutor<'e>>(
+    executor: E,
+    character_id: &str,
+    at: chrono::NaiveDateTime,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        r#"UPDATE "Characters" SET last_logout = $2 WHERE id = $1"#,
+        character_id,
+        at,
+    )
+    .execute(executor)
     .await?;
     Ok(())
 }
@@ -836,6 +865,7 @@ pub async fn find_by_name(pool: &PgPool, name: &str) -> sqlx::Result<Option<Char
             strength, dexterity, constitution, intelligence, wisdom, charisma,
             wealth, bank_wealth, gender, skill_points, hunger, thirst, time_played,
             last_login AS "last_login: chrono::NaiveDateTime",
+            last_logout AS "last_logout: chrono::NaiveDateTime",
             invis_level, freeze_level, wimpy_threshold,
             poof_in, poof_out,
             position AS "position!: Position",
@@ -962,6 +992,7 @@ pub async fn list_for_user(pool: &PgPool, user_id: &str) -> sqlx::Result<Vec<Cha
             thirst,
             time_played,
             last_login AS "last_login: chrono::NaiveDateTime",
+            last_logout AS "last_logout: chrono::NaiveDateTime",
             invis_level,
             freeze_level,
             wimpy_threshold,

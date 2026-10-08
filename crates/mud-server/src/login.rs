@@ -1006,7 +1006,7 @@ async fn retire_player(world: &mut World, entity: Entity, pool: &PgPool) {
     // report a partial save. A failed write is handed to the
     // background writer for retry before the entity (and its
     // items) are despawned, so the state isn't lost with it.
-    let outcome = save_player(world, entity, pool).await;
+    let outcome = save_player_final(world, entity, pool).await;
     retry_failed_save(world, outcome, pool);
     // Despawn the player AND every item they were carrying / wearing
     // (Located(player) catches both inventory and equipped —
@@ -1154,7 +1154,7 @@ impl ConnRouter {
             // tracing::warn inside save_player covers staff
             // diagnostics. A failed write is retried in the background
             // (and awaited by the flush below, up to its timeout).
-            let outcome = save_player(world, entity, pool).await;
+            let outcome = save_player_final(world, entity, pool).await;
             retry_failed_save(world, outcome, pool);
         }
         // Background (autosave / `actor:save()`) writes may still be in
@@ -4091,7 +4091,6 @@ pub(crate) fn spawn_player(
     let now_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
-    let last_login_unix = c.last_login.map(|ts| ts.and_utc().timestamp());
     let (zone, room) = pick_starting_room(c, race_start);
 
     // Rest / repose R3: accrue Repose for the elapsed offline window
@@ -4099,7 +4098,9 @@ pub(crate) fn spawn_player(
     // lands with the new pool value. Source / tier round-trip
     // verbatim — they're consumed only on first XP gain (R4), never
     // on login per ADR 0001 §1.
-    let elapsed_secs = last_login_unix.map_or(0, |prev| now_unix.saturating_sub(prev).max(0));
+    // Offline window = now - last_logout. `last_login` is the START of the
+    // previous session, so measuring from it would count play time as rest.
+    let elapsed_secs = offline_elapsed_secs(c.last_logout, now_unix);
     let next_level_xp = repose_next_level_xp(world, c.class_id, c.level);
     let new_repose = accrue_repose(c.repose, c.rest_tier, next_level_xp, elapsed_secs);
 
@@ -4396,6 +4397,11 @@ pub(crate) struct PlayerSaveSnapshot {
     /// snapshot is taken. A write whose generation is lower than one
     /// already committed is stale and must not run (see `autosave.rs`).
     pub(crate) generation: u64,
+    /// Set only by a session-ending save ([`save_player_final`]): the
+    /// instant to stamp into `Characters.last_logout` in the same
+    /// transaction. `None` for autosave / `save` / Lua saves, which must
+    /// never move it (offline rest accrues from it).
+    pub(crate) last_logout: Option<chrono::NaiveDateTime>,
     /// This save consumed a Lua `PendingSave` request; if the write fails
     /// the coordinator re-arms the marker so the request isn't lost.
     pub(crate) resume_pending_save: bool,
@@ -4879,6 +4885,7 @@ pub(crate) fn snapshot_player(
         rest_source,
         rest_tier,
         repose,
+        last_logout: None,
         items: new_items,
         entity_for_idx,
         drunk,
@@ -5318,6 +5325,9 @@ pub(crate) async fn write_snapshot(
     for id in &snap.retired_corpses {
         mud_db::player_corpses::delete_in(&mut tx, *id).await?;
     }
+    if let Some(at) = snap.last_logout {
+        mud_db::characters::save_last_logout(&mut *tx, cid, at).await?;
+    }
     mud_db::characters::save_drunkenness(&mut *tx, cid, snap.drunk).await?;
     mud_db::characters::save_script_vars(&mut *tx, cid, snap.script_vars_json.as_ref()).await?;
     mud_db::characters::save_trophy(&mut *tx, cid, snap.trophy_json.as_ref()).await?;
@@ -5461,6 +5471,29 @@ pub(crate) fn apply_commit(
 /// any older background snapshot still waiting for the lock is dropped as
 /// stale once this write commits.
 pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool) -> SaveOutcome {
+    save_player_inner(world, entity, pool, false).await
+}
+
+/// [`save_player`] for a save that ENDS the session (quit, rent, camp, idle
+/// kick, linkdead retirement, dropped link, server shutdown): additionally
+/// stamps `Characters.last_logout` in the same transaction. This is the only
+/// writer of that column, so offline rest never counts time spent playing.
+/// The stamp rides the snapshot, so a failed write retried in the background
+/// still records when the session actually ended.
+pub(crate) async fn save_player_final(
+    world: &mut World,
+    entity: Entity,
+    pool: &PgPool,
+) -> SaveOutcome {
+    save_player_inner(world, entity, pool, true).await
+}
+
+async fn save_player_inner(
+    world: &mut World,
+    entity: Entity,
+    pool: &PgPool,
+    session_end: bool,
+) -> SaveOutcome {
     let Some(character_id) = world.get::<Account>(entity).map(|a| a.character_id.clone()) else {
         return SaveOutcome {
             aborted: true,
@@ -5476,12 +5509,15 @@ pub(crate) async fn save_player(world: &mut World, entity: Entity, pool: &PgPool
     // lock; fold its stamps into the world BEFORE snapshotting.
     coordinator.apply_completions(world);
     let generation = ordered.next_generation();
-    let Some(snap) = snapshot_player(world, entity, generation) else {
+    let Some(mut snap) = snapshot_player(world, entity, generation) else {
         return SaveOutcome {
             aborted: true,
             ..SaveOutcome::default()
         };
     };
+    if session_end {
+        snap.last_logout = Some(chrono::Utc::now().naive_utc());
+    }
     let mut outcome = SaveOutcome::default();
     match write_snapshot(pool, &snap).await {
         Ok(assigned) => {
@@ -5975,6 +6011,16 @@ fn pick_starting_room(c: &CharacterRow, race_start: Option<(i32, i32)>) -> (i32,
     FALLBACK_START
 }
 
+/// Seconds spent offline: `now - last_logout`, floored at 0. `None` (no clean
+/// logout on record: first login after the column was added, or a crash)
+/// yields 0 so it can never fall back to `last_login` and re-open the
+/// play-time-counts-as-rest exploit.
+fn offline_elapsed_secs(last_logout: Option<chrono::NaiveDateTime>, now_unix: i64) -> i64 {
+    last_logout.map_or(0, |ts| {
+        now_unix.saturating_sub(ts.and_utc().timestamp()).max(0)
+    })
+}
+
 /// Rest / repose: XP needed to advance from `level` to the next level
 /// (class-scaled, from the live `LevelTable`; the same bracket
 /// `level_progress` shows). `None` when there is no next level to
@@ -6081,6 +6127,7 @@ mod tests {
             thirst: 0,
             time_played: 0,
             last_login: None,
+            last_logout: None,
             invis_level: 0,
             freeze_level: None,
             wimpy_threshold: 0,
@@ -8039,6 +8086,182 @@ mod tests {
             .await
             .unwrap();
         temp_cleanup(&pool, &[], &[&c.id], &[]).await;
+    }
+
+    // --- last_logout: offline rest measures from session END ---
+
+    fn naive_at(unix: i64) -> chrono::NaiveDateTime {
+        chrono::DateTime::from_timestamp(unix, 0)
+            .unwrap()
+            .naive_utc()
+    }
+
+    #[test]
+    fn four_hour_session_then_immediate_relog_grants_no_repose() {
+        // Logout stamped at the moment the session ends (4 h after it began):
+        // relogging right away leaves ~0 s offline, whatever last_login says.
+        let now = 1_900_000_000;
+        let elapsed = offline_elapsed_secs(Some(naive_at(now)), now + 2);
+        assert_eq!(accrue_l10(0, 1, elapsed), 0);
+    }
+
+    #[test]
+    fn quit_then_four_hours_offline_fills_tier1_cap() {
+        let now = 1_900_000_000;
+        let elapsed = offline_elapsed_secs(Some(naive_at(now - 4 * HOUR)), now);
+        assert_eq!(elapsed, 4 * HOUR);
+        assert_eq!(accrue_l10(0, 1, elapsed), accrue_l10(0, 1, 40 * HOUR));
+        assert!(accrue_l10(0, 1, elapsed) > 0);
+    }
+
+    #[test]
+    fn null_last_logout_grants_nothing() {
+        assert_eq!(offline_elapsed_secs(None, 1_900_000_000), 0);
+        // Even with a stale last_login on the row, only last_logout counts.
+        let mut r = row(None, None);
+        r.last_login = Some(naive_at(1_900_000_000 - 100 * HOUR));
+        assert_eq!(offline_elapsed_secs(r.last_logout, 1_900_000_000), 0);
+    }
+
+    #[test]
+    fn logout_in_the_future_clamps_to_zero() {
+        assert_eq!(offline_elapsed_secs(Some(naive_at(2_000)), 1_000), 0);
+    }
+
+    async fn last_logout_of(pool: &PgPool, cid: &str) -> Option<chrono::NaiveDateTime> {
+        mud_db::sqlx::query_scalar::<_, Option<chrono::NaiveDateTime>>(
+            "SELECT last_logout FROM \"Characters\" WHERE id = $1",
+        )
+        .bind(cid)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// `save` / autosave / background saves never move `last_logout`; the
+    /// session-ending save stamps it; the next login clears it again.
+    #[tokio::test(flavor = "current_thread")]
+    async fn only_session_end_saves_stamp_last_logout() {
+        let Some((pool, _db_lock)) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let (_user, c) = temp_unlinked_char(&pool, "lo1").await;
+        let mut world = World::new();
+        world.insert_resource(SaveCoordinator::default());
+        let room = world.spawn_empty().id();
+        let player = spawn_player_for(&mut world, &c.id, room);
+
+        let out = save_player(&mut world, player, &pool).await;
+        assert!(out.committed, "{:?}", out.error);
+        assert!(spawn_background_save(&mut world, player, &pool));
+        let coordinator = world.resource::<SaveCoordinator>().clone();
+        assert!(coordinator.flush(&mut world, Duration::from_secs(10)).await);
+        assert_eq!(last_logout_of(&pool, &c.id).await, None, "autosave stamped");
+
+        let before = chrono::Utc::now().naive_utc();
+        let out = save_player_final(&mut world, player, &pool).await;
+        assert!(out.committed, "{:?}", out.error);
+        let stamped = last_logout_of(&pool, &c.id)
+            .await
+            .expect("final save stamps");
+        assert!(stamped >= before - chrono::Duration::seconds(1));
+        assert!(stamped <= chrono::Utc::now().naive_utc() + chrono::Duration::seconds(1));
+
+        // A later autosave leaves the stamp alone.
+        assert!(spawn_background_save(&mut world, player, &pool));
+        assert!(coordinator.flush(&mut world, Duration::from_secs(10)).await);
+        assert_eq!(last_logout_of(&pool, &c.id).await, Some(stamped));
+
+        // Next login consumes the window and clears it (a crash can't re-accrue).
+        mud_db::characters::update_last_login(&pool, &c.id)
+            .await
+            .unwrap();
+        assert_eq!(last_logout_of(&pool, &c.id).await, None);
+        temp_cleanup(&pool, &[], &[&c.id], &[]).await;
+    }
+
+    /// Round trip through the real column: quit, push `last_logout` back 4 h,
+    /// reload the row exactly as login does -> full tier-1 cap.
+    #[tokio::test(flavor = "current_thread")]
+    async fn quit_then_four_hours_offline_row_round_trip() {
+        let Some((pool, _db_lock)) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let (_user, c) = temp_unlinked_char(&pool, "lo2").await;
+        let now_unix = chrono::Utc::now().timestamp();
+        let load = |pool: PgPool, name: String| async move {
+            mud_db::characters::find_by_name(&pool, &name)
+                .await
+                .unwrap()
+                .unwrap()
+        };
+
+        // NULL last_logout (first login after deploy) -> nothing.
+        let r = load(pool.clone(), c.name.clone()).await;
+        assert_eq!(r.last_logout, None);
+        assert_eq!(offline_elapsed_secs(r.last_logout, now_unix), 0);
+
+        let mut world = World::new();
+        world.insert_resource(SaveCoordinator::default());
+        let room = world.spawn_empty().id();
+        let player = spawn_player_for(&mut world, &c.id, room);
+        let out = save_player_final(&mut world, player, &pool).await;
+        assert!(out.committed, "{:?}", out.error);
+
+        // Just quit and relogged: ~0 offline.
+        let r = load(pool.clone(), c.name.clone()).await;
+        assert!(offline_elapsed_secs(r.last_logout, now_unix) <= 5);
+
+        mud_db::sqlx::query(
+            "UPDATE \"Characters\" SET last_logout = last_logout - interval '4 hours' WHERE id = $1",
+        )
+        .bind(&c.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let r = load(pool.clone(), c.name.clone()).await;
+        let elapsed = offline_elapsed_secs(r.last_logout, now_unix);
+        assert!((4 * HOUR..=4 * HOUR + 5).contains(&elapsed), "{elapsed}");
+        assert_eq!(accrue_l10(0, 1, elapsed), accrue_l10(0, 1, 40 * HOUR));
+        temp_cleanup(&pool, &[], &[&c.id], &[]).await;
+    }
+
+    /// Every exit that goes through `retire_player` stamps `last_logout`:
+    /// a dropped link out of combat, and a linkdead character timing out.
+    #[tokio::test(flavor = "current_thread")]
+    async fn disconnect_and_linkdead_retirement_stamp_last_logout() {
+        let Some((pool, _db_lock)) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let (_u1, a) = temp_unlinked_char(&pool, "lo3").await;
+        let (_u2, b) = temp_unlinked_char(&pool, "lo4").await;
+        let mut world = World::new();
+        world.insert_resource(mud_world::SocialRegistry::default());
+        world.insert_resource(SaveCoordinator::default());
+        world.insert_resource(crate::TickCount(0));
+        let mut router = ConnRouter::new();
+        let room = world.spawn(mud_world::Room).id();
+
+        // Plain disconnect (not fighting): on_disconnect -> retire_player.
+        let pa = spawn_player_for(&mut world, &a.id, room);
+        router.playing.insert(1, pa);
+        router.on_disconnect(&mut world, 1, &pool).await;
+        assert!(world.get_entity(pa).is_err());
+        assert!(last_logout_of(&pool, &a.id).await.is_some(), "disconnect");
+
+        // Linkdead character retired by the timeout.
+        let pb = spawn_player_for(&mut world, &b.id, room);
+        world
+            .entity_mut(pb)
+            .insert(commands::Linkdead { since_tick: 0 });
+        world.insert_resource(crate::TickCount(LINKDEAD_TIMEOUT_TICKS));
+        router.drain_linkdead(&mut world, &pool).await;
+        assert!(world.get_entity(pb).is_err());
+        assert!(last_logout_of(&pool, &b.id).await.is_some(), "linkdead");
+        temp_cleanup(&pool, &[], &[&a.id, &b.id], &[]).await;
     }
 
     fn failing_pool() -> PgPool {
