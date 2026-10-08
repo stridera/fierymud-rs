@@ -497,6 +497,9 @@ mod skills_extra;
 mod spawn_effects_tests;
 #[path = "commands/spells.rs"]
 mod spells;
+#[cfg(test)]
+#[path = "commands/staff_move_tests.rs"]
+mod staff_move_tests;
 #[path = "commands/status_lists.rs"]
 mod status_lists;
 #[path = "commands/subclass.rs"]

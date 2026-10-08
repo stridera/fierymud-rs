@@ -75,11 +75,14 @@ inventory::submit! {
         required_perm: None,
         category: Category::Admin,
         help: Help {
-            usage: "transfer <player>",
-            summary: "Pull an online player to your current room.",
-            long: "Builder+ command. Looks up an online player by exact \
-                   name (case-insensitive) and moves them to wherever \
-                   you are.",
+            usage: "transfer <player | mob>",
+            summary: "Pull an online player or a mob to your current room.",
+            long: "Builder+ command. The target is a player or mob you \
+                   can see, by name or keyword; 'N.name' picks the Nth \
+                   match and '<zone>:<id>' (or 'N.<zone>:<id>') picks a \
+                   spawned instance of that mob prototype. Moves it to \
+                   wherever you are (ending any fight it is in). You \
+                   cannot transfer a player of higher level than you.",
         },
         run: cmd_transfer,
     }
@@ -92,10 +95,17 @@ inventory::submit! {
         required_perm: None,
         category: Category::Admin,
         help: Help {
-            usage: "teleport <player> <zone> <room>",
-            summary: "Send an online player to a specific room.",
+            usage: "teleport <player | mob> <zone> <room> | <zone:id> | <id> | <target>",
+            summary: "Send a player or mob to a room, or to wherever a target is.",
             long: "Builder+. Inverse of 'transfer' (which pulls them \
-                   to you) and 'goto' (which moves you).",
+                   to you) and 'goto' (which moves you). The subject \
+                   is a player or mob by name, 'N.name' or \
+                   '<zone>:<id>' (a spawned mob instance). The \
+                   destination is a room ('<zone> <id>', '<zone>:<id>', \
+                   or a bare '<id>' in your zone) or any visible \
+                   player, mob or object lying in a room: 'teleport \
+                   bob 30:12', 'teleport 30:5 3.guard'. You cannot \
+                   teleport a player of equal or higher level.",
         },
         run: cmd_teleport,
     }
@@ -2663,24 +2673,184 @@ pub(crate) fn cmd_force(world: &mut World, player: Entity, args: &str) {
         commands::dispatch(world, target, cmd_text);
     });
 }
-pub(crate) fn cmd_transfer(world: &mut World, player: Entity, args: &str) {
-    let arg = args.trim();
-    if arg.is_empty() {
-        send_to(world, player, "Usage: transfer <player>\r\n");
-        return;
+/// A `(zone, id)` prototype key.
+type WorldKeyPair = (i32, i32);
+
+/// `zone:id` -> a mob prototype key (selects a spawned instance).
+fn parse_instance_key(needle: &str) -> Option<(i32, i32)> {
+    let (zone, id) = needle.split_once(':')?;
+    Some((zone.parse().ok()?, id.parse().ok()?))
+}
+
+/// Legacy `find_char_around_char(ch, find_vis_by_name(ch, name))`: a
+/// character or mob `viewer` can see, by name / keywords, `N.name`, or
+/// `zone:id` (a spawned instance of that mob prototype; `N.zone:id` picks
+/// the Nth). Candidates in the viewer's own room come first, in `look`
+/// order; then online players; then mobs by (prototype, spawn order).
+fn find_actor_anywhere(world: &mut World, viewer: Entity, token: &str) -> Option<Entity> {
+    let (index, needle) = commands::parse_indexed_needle(token);
+    let key = parse_instance_key(needle);
+    let needle = needle.to_ascii_lowercase();
+    let viewer_room = world.get::<Located>(viewer).map(|l| l.0);
+    let mut here: Vec<Entity> = Vec::new();
+    let mut elsewhere: Vec<(bool, Option<WorldKeyPair>, Entity)> = Vec::new();
+    {
+        let mut q = world.query::<(
+            Entity,
+            &Named,
+            Option<&Keywords>,
+            &Located,
+            Option<&WorldKey>,
+            Has<Player>,
+            Has<Online>,
+        )>();
+        for (e, n, kw, loc, wk, is_player, online) in q.iter(world) {
+            let is_mob = world.get::<Mob>(e).is_some();
+            if !(is_mob || (is_player && online)) {
+                continue;
+            }
+            let hit = match key {
+                Some(k) => is_mob && wk.is_some_and(|w| (w.zone, w.id) == k),
+                None => matches(&needle, n, kw),
+            };
+            if !hit || !commands::can_see_player(world, viewer, e) {
+                continue;
+            }
+            if Some(loc.0) == viewer_room {
+                here.push(e);
+            } else {
+                elsewhere.push((is_mob, wk.map(|w| (w.zone, w.id)), e));
+            }
+        }
     }
-    let target = {
-        let mut q = world.query_filtered::<(Entity, &Named), (With<Player>, With<Online>)>();
-        q.iter(world)
-            .find(|(_, n)| n.name.eq_ignore_ascii_case(arg))
-            .map(|(e, _)| e)
+    if let Some(room) = viewer_room {
+        commands::sort_newest_first(world, room, &mut here, |e| *e);
+        here.sort_by_key(|e| commands::mobs_before_players_key(world, *e));
+    }
+    elsewhere.sort_by_key(|(is_mob, k, e)| (*is_mob, *k, e.index_u32()));
+    here.into_iter()
+        .chain(elsewhere.into_iter().map(|(_, _, e)| e))
+        .nth(index - 1)
+}
+
+/// Legacy `NOPERSON`.
+const NO_SUCH_ACTOR: &str = "There is no one by that name here.\r\n";
+
+/// Legacy rank guard on moving another character: staff may not move a
+/// player of higher level (`transfer`: strictly higher; `teleport`: equal
+/// or higher). Mobs are always fair game.
+fn outranks_for_move(world: &World, staff: Entity, target: Entity, or_equal: bool) -> bool {
+    if world.get::<Player>(target).is_none() {
+        return false;
+    }
+    let level = |e: Entity| world.get::<Profile>(e).map_or(0, |p| p.level);
+    let (mine, theirs) = (level(staff), level(target));
+    if or_equal {
+        theirs >= mine
+    } else {
+        theirs > mine
+    }
+}
+
+/// Players in `room` other than the excluded ones (message recipients).
+fn players_in_room_except(world: &mut World, room: Entity, except: &[Entity]) -> Vec<Entity> {
+    let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
+    q.iter(world)
+        .filter(|(e, l)| l.0 == room && !except.contains(e))
+        .map(|(e, _)| e)
+        .collect()
+}
+
+/// Where `teleport <target> <where...>` sends someone (legacy
+/// `find_target_room`): a room (`zone id`, `zone:id`, or a bare id in the
+/// staff member's zone), or wherever a visible character / mob / object
+/// lying in a room currently is.
+fn resolve_teleport_destination(
+    world: &mut World,
+    staff: Entity,
+    words: &[&str],
+) -> Result<Entity, String> {
+    let room_at = |world: &World, zone: i32, id: i32| {
+        world
+            .resource::<WorldKeyIndex>()
+            .rooms
+            .get(&(zone, id))
+            .copied()
+            .ok_or_else(|| format!("No room ({zone}, {id}).\r\n"))
     };
-    let Some(target) = target else {
-        send_to(world, player, format!("'{arg}' isn't online.\r\n"));
+    let dest = match words {
+        [z, i] if z.parse::<i32>().is_ok() && i.parse::<i32>().is_ok() => {
+            room_at(world, z.parse().unwrap_or(0), i.parse().unwrap_or(0))?
+        }
+        [one] if parse_instance_key(one).is_some() => {
+            // `zone:id` names a room here (a mob instance is a name).
+            let (zone, id) = parse_instance_key(one).unwrap_or((0, 0));
+            room_at(world, zone, id)?
+        }
+        [one, ..] if one.parse::<i32>().is_ok() => {
+            let id: i32 = one.parse().unwrap_or(0);
+            let zone = world
+                .get::<Located>(staff)
+                .and_then(|l| world.get::<WorldKey>(l.0))
+                .map(|k| k.zone)
+                .ok_or_else(|| "Can't resolve current zone.\r\n".to_string())?;
+            world
+                .resource::<WorldKeyIndex>()
+                .rooms
+                .get(&(zone, id))
+                .copied()
+                .ok_or_else(|| format!("No room {id} in zone {zone}.\r\n"))?
+        }
+        [name, ..] => {
+            // Legacy: one word, a character/mob first, then an object.
+            if let Some(actor) = find_actor_anywhere(world, staff, name) {
+                world
+                    .get::<Located>(actor)
+                    .map(|l| l.0)
+                    .ok_or_else(|| "That creature is nowhere.\r\n".to_string())?
+            } else {
+                let (index, needle) = commands::parse_indexed_needle(name);
+                let needle = needle.to_ascii_lowercase();
+                let mut q = world
+                    .query_filtered::<(Entity, &Named, Option<&Keywords>, &Located), With<Item>>();
+                let mut rooms: Vec<(Entity, Entity)> = q
+                    .iter(world)
+                    .filter(|(_, n, kw, _)| matches(&needle, n, *kw))
+                    .map(|(e, _, _, l)| (e, l.0))
+                    .collect();
+                rooms.sort_by_key(|(e, _)| e.index_u32());
+                let Some((_, holder)) = rooms.get(index - 1).copied() else {
+                    return Err("No such creature or object around.\r\n".to_string());
+                };
+                if world.get::<mud_world::Room>(holder).is_none() {
+                    return Err("That object is not available.\r\n".to_string());
+                }
+                holder
+            }
+        }
+        [] => return Err("Where do you wish to send this person?\r\n".to_string()),
+    };
+    if !crate::room_access::entry_allowed(world, staff, dest) {
+        return Err("You are not godly enough to use that room!\r\n".to_string());
+    }
+    Ok(dest)
+}
+
+pub(crate) fn cmd_transfer(world: &mut World, player: Entity, args: &str) {
+    let Some(first_arg) = args.split_whitespace().next() else {
+        send_to(world, player, "Whom do you wish to transfer?\r\n");
+        return;
+    };
+    let Some(target) = find_actor_anywhere(world, player, first_arg) else {
+        send_to(world, player, NO_SUCH_ACTOR);
         return;
     };
     if target == player {
-        send_to(world, player, "You're already with yourself.\r\n");
+        send_to(world, player, "That doesn't make much sense, does it?\r\n");
+        return;
+    }
+    if outranks_for_move(world, player, target, false) {
+        send_to(world, player, "Go transfer someone your own size.\r\n");
         return;
     }
     let Some(dest_loc) = world.get::<Located>(player).copied() else {
@@ -2701,17 +2871,10 @@ pub(crate) fn cmd_transfer(world: &mut World, player: Entity, args: &str) {
     }
 
     let admin_name = name_of(world, player);
-    let target_name = name_of(world, target);
+    let target_name = cap_sentence_start(&name_of(world, target));
 
     // Source-room bystanders (everyone but the target).
-    let src_bystanders: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-        q.iter(world)
-            .filter(|(e, l)| *e != target && l.0 == src_loc.0)
-            .map(|(e, _)| e)
-            .collect()
-    };
-    for b in src_bystanders {
+    for b in players_in_room_except(world, src_loc.0, &[target]) {
         send_rendered(
             world,
             b,
@@ -2719,18 +2882,11 @@ pub(crate) fn cmd_transfer(world: &mut World, player: Entity, args: &str) {
         );
     }
 
-    // Move the target.
+    // Move the target (clears its fights).
     crate::combat::relocate(world, target, dest_loc.0);
 
     // Destination-room bystanders (everyone but admin and the just-arrived target).
-    let dest_bystanders: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-        q.iter(world)
-            .filter(|(e, l)| *e != player && *e != target && l.0 == dest_loc.0)
-            .map(|(e, _)| e)
-            .collect()
-    };
-    for b in dest_bystanders {
+    for b in players_in_room_except(world, dest_loc.0, &[player, target]) {
         send_rendered(
             world,
             b,
@@ -2740,42 +2896,38 @@ pub(crate) fn cmd_transfer(world: &mut World, player: Entity, args: &str) {
 
     send_rendered(world, player, &format!("You summon {target_name}.\r\n"));
     send_rendered(world, target, &format!("{admin_name} summons you.\r\n"));
-    cmd_look(world, target, "");
+    if world.get::<Player>(target).is_some() {
+        cmd_look(world, target, "");
+    }
 }
 pub(crate) fn cmd_teleport(world: &mut World, player: Entity, args: &str) {
     let parts: Vec<&str> = args.split_whitespace().collect();
-    if parts.len() != 3 {
-        send_to(world, player, "Usage: teleport <player> <zone> <room>\r\n");
+    let Some((target_word, dest_words)) = parts.split_first() else {
+        send_to(world, player, "Whom do you wish to teleport?\r\n");
+        return;
+    };
+    let Some(target) = find_actor_anywhere(world, player, target_word) else {
+        send_to(world, player, NO_SUCH_ACTOR);
+        return;
+    };
+    if target == player {
+        send_to(world, player, "Use 'goto' to teleport yourself.\r\n");
         return;
     }
-    let target_word = parts[0];
-    let Ok(zone) = parts[1].parse::<i32>() else {
-        send_to(world, player, "Zone must be an integer.\r\n");
+    if outranks_for_move(world, player, target, true) {
+        send_to(world, player, "Maybe you shouldn't do that.\r\n");
         return;
+    }
+    let dest = match resolve_teleport_destination(world, player, dest_words) {
+        Ok(d) => d,
+        Err(msg) => {
+            send_to(world, player, msg);
+            return;
+        }
     };
-    let Ok(room_id) = parts[2].parse::<i32>() else {
-        send_to(world, player, "Room id must be an integer.\r\n");
-        return;
-    };
-    let target = {
-        let mut q = world.query_filtered::<(Entity, &Named), (With<Player>, With<Online>)>();
-        q.iter(world)
-            .find(|(_, n)| n.name.eq_ignore_ascii_case(target_word))
-            .map(|(e, _)| e)
-    };
-    let Some(target) = target else {
-        send_to(world, player, format!("'{target_word}' isn't online.\r\n"));
-        return;
-    };
-    let dest = world
-        .resource::<WorldKeyIndex>()
-        .rooms
-        .get(&(zone, room_id))
-        .copied();
-    let Some(dest) = dest else {
-        send_to(world, player, format!("No room ({zone}, {room_id}).\r\n"));
-        return;
-    };
+    let (zone, room_id) = world
+        .get::<WorldKey>(dest)
+        .map_or((-1, -1), |k| (k.zone, k.id));
     // NoTeleportRoom gate — `Room.allows_teleport = false` on the
     // *destination* refuses the teleport (legacy gates the target,
     // not the origin). Admin staff still honor it: builders clear
@@ -2799,19 +2951,13 @@ pub(crate) fn cmd_teleport(world: &mut World, player: Entity, args: &str) {
         return;
     }
     let mount = world.get::<mud_world::Mounted>(target).map(|m| m.0);
+    let target_capped = cap_sentence_start(&target_name);
 
-    let src_bystanders: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-        q.iter(world)
-            .filter(|(e, l)| *e != target && l.0 == src_loc.0)
-            .map(|(e, _)| e)
-            .collect()
-    };
-    for b in src_bystanders {
+    for b in players_in_room_except(world, src_loc.0, &[target]) {
         send_rendered(
             world,
             b,
-            &format!("{target_name} vanishes in a puff of smoke.\r\n"),
+            &format!("{target_capped} vanishes in a puff of smoke.\r\n"),
         );
     }
 
@@ -2820,15 +2966,7 @@ pub(crate) fn cmd_teleport(world: &mut World, player: Entity, args: &str) {
         crate::combat::relocate(world, mount, dest);
     }
 
-    let dest_bystanders: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-        q.iter(world)
-            .filter(|(e, l)| *e != target && l.0 == dest)
-            .map(|(e, _)| e)
-            .collect()
-    };
-    let target_capped = crate::commands::cap_sentence_start(&target_name);
-    for b in dest_bystanders {
+    for b in players_in_room_except(world, dest, &[target]) {
         send_rendered(
             world,
             b,
@@ -2846,7 +2984,9 @@ pub(crate) fn cmd_teleport(world: &mut World, player: Entity, args: &str) {
         target,
         &format!("{admin_name} teleports you elsewhere.\r\n"),
     );
-    cmd_look(world, target, "");
+    if world.get::<Player>(target).is_some() {
+        cmd_look(world, target, "");
+    }
 }
 #[allow(clippy::too_many_lines)]
 pub(crate) fn cmd_goto(world: &mut World, player: Entity, args: &str) {
