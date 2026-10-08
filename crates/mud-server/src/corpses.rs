@@ -17,15 +17,25 @@
 //!   included, from the rows via the same loader player inventories use.
 //! * **Decay.** The `PlayerCorpses` row (and its items, by cascade) is
 //!   deleted first; only once that commits do the contents drop to the
-//!   room. Mob corpses are in-memory only.
+//!   room. Mob corpses are in-memory only. The delete (like a
+//!   resurrection's retirement) waits while any looter's save is still
+//!   uncommitted, see [`CorpseLootLedger`]: the cascade would otherwise
+//!   take item rows the looter's pending save has yet to re-home.
+//! * **Item decay.** An item with a `CharacterItems` row that is destroyed
+//!   inside a settled corpse has its row (and its nested rows) deleted
+//!   through the [`CorpseDb`] writer, or boot would bring it back.
+//! * **Purge.** Staff `purge` never touches a player corpse in bulk; an
+//!   explicit one is removed with its contents ([`purge_player_corpse`]).
 
 use bevy_ecs::prelude::*;
 use mud_db::sqlx::PgPool;
 use mud_world::{
-    Corpse, CorpseDecay, CorpseOriginLevel, Item, Keywords, Located, Named, PlayerCorpse,
-    PlayerCorpseId, WorldKey, WorldKeyIndex,
+    Corpse, CorpseDecay, CorpseOriginLevel, Item, Keywords, Located, Named, PersistedItemId,
+    PlayerCorpse, PlayerCorpseId, WorldKey, WorldKeyIndex,
 };
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 /// Where a corpse is filed when its room carries no `WorldKey` and the
@@ -56,6 +66,93 @@ pub(crate) struct PlayerCorpseOwner(pub(crate) String);
 /// same transaction that re-homes the items and credits the coins.
 #[derive(Component, Debug, Clone, Default)]
 pub(crate) struct PendingCorpseRetire(pub(crate) Vec<i32>);
+
+/// How long a looter's mark outlives their entity: the quit-save retry
+/// schedule (see `autosave::QUIT_RETRY_BACKOFF`, ~2.6 minutes) can still
+/// commit after the player is gone, so their marks hold the corpse until
+/// then. Past it the save has been given up on and the mark is dropped.
+const LOOT_ORPHAN_GRACE: Duration = Duration::from_secs(600);
+
+/// Which players have taken items or coins out of a settled player corpse
+/// without that take being committed yet. Looting writes nothing to the
+/// corpse itself: the looter's own save re-homes the rows. Deleting the
+/// corpse row first would cascade those rows away, so decay, retirement
+/// and purge wait for the entry to clear (the looter's commit,
+/// [`settle_loot`] from `apply_commit`).
+///
+/// Keyed by `(looter, PlayerCorpses.id)`; the value is a per-ledger
+/// sequence number (so a take made after a snapshot isn't cleared by that
+/// snapshot's commit) and when it was recorded.
+#[derive(Resource, Default, Debug)]
+pub(crate) struct CorpseLootLedger {
+    next_seq: u64,
+    pending: HashMap<(Entity, i32), (u64, Instant)>,
+}
+
+/// Remember that `player` took something out of player corpse `corpse`
+/// (settled ones only; an unsettled corpse refuses looting). Cleared by
+/// the commit of a save snapshotted after this call.
+pub(crate) fn note_loot(world: &mut World, player: Entity, corpse: Entity) {
+    let Some(id) = world.get::<PlayerCorpseId>(corpse).map(|c| c.0) else {
+        return;
+    };
+    // Only characters that get saved can ever clear a mark.
+    if world.get::<mud_world::Account>(player).is_none() {
+        return;
+    }
+    let mut ledger = world.get_resource_or_insert_with(CorpseLootLedger::default);
+    ledger.next_seq += 1;
+    let seq = ledger.next_seq;
+    ledger.pending.insert((player, id), (seq, Instant::now()));
+}
+
+/// The marks `player` holds right now, captured into their save snapshot.
+pub(crate) fn loot_marks(world: &World, player: Entity) -> Vec<(i32, u64)> {
+    world
+        .get_resource::<CorpseLootLedger>()
+        .map(|l| {
+            l.pending
+                .iter()
+                .filter(|((p, _), _)| *p == player)
+                .map(|((_, id), (seq, _))| (*id, *seq))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A save carrying `committed` marks has just committed: clear them,
+/// keeping any take made after that snapshot.
+pub(crate) fn settle_loot(world: &mut World, player: Entity, committed: &[(i32, u64)]) {
+    if committed.is_empty() {
+        return;
+    }
+    let Some(mut ledger) = world.get_resource_mut::<CorpseLootLedger>() else {
+        return;
+    };
+    for (id, seq) in committed {
+        if ledger
+            .pending
+            .get(&(player, *id))
+            .is_some_and(|(now, _)| now == seq)
+        {
+            ledger.pending.remove(&(player, *id));
+        }
+    }
+}
+
+/// True when a player other than `except` still has an uncommitted take
+/// from corpse `corpse_id`. Marks of players who have left and whose
+/// final save is long past retrying are ignored.
+pub(crate) fn has_pending_loot(world: &World, corpse_id: i32, except: Option<Entity>) -> bool {
+    let Some(ledger) = world.get_resource::<CorpseLootLedger>() else {
+        return false;
+    };
+    ledger.pending.iter().any(|((player, id), (_, at))| {
+        *id == corpse_id
+            && Some(*player) != except
+            && (world.get_entity(*player).is_ok() || at.elapsed() < LOOT_ORPHAN_GRACE)
+    })
+}
 
 /// The in-world corpse was emptied by a resurrection: its rows are
 /// deleted by the revived player's save, not by the despawn observer
@@ -263,6 +360,61 @@ pub(crate) fn hand_over(world: &mut World, player: Entity, corpse: Entity) -> us
     items.len()
 }
 
+/// Why [`purge_player_corpse`] declined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PurgeRefusal {
+    /// The death write hasn't committed (or the decay delete is running):
+    /// the rows can't be deleted yet, and despawning now would let the
+    /// pending write recreate the corpse at the next boot.
+    Settling,
+    /// A looter's save from this corpse hasn't committed; deleting the
+    /// corpse row now would cascade their item rows away.
+    LootPending,
+}
+
+/// Staff purge of one player corpse: the corpse and everything inside it
+/// (nested bags included) leave the world and the database. The corpse row
+/// goes through the [`CorpseDb`] writer exactly like a decay (the
+/// `Remove<PlayerCorpseId>` observer), its item rows by cascade. Returns
+/// how many items went with it.
+pub(crate) fn purge_player_corpse(
+    world: &mut World,
+    corpse: Entity,
+) -> Result<usize, PurgeRefusal> {
+    if is_unsettled(world, corpse) || world.get::<DecayDeleting>(corpse).is_some() {
+        return Err(PurgeRefusal::Settling);
+    }
+    if let Some(id) = world.get::<PlayerCorpseId>(corpse).map(|c| c.0)
+        && has_pending_loot(world, id, None)
+    {
+        return Err(PurgeRefusal::LootPending);
+    }
+    let mut tree: Vec<Entity> = Vec::new();
+    let mut frontier = vec![corpse];
+    while let Some(parent) = frontier.pop() {
+        if let Some(contents) = world.get::<mud_world::Contents>(parent) {
+            for e in contents.iter() {
+                if world.get::<Item>(e).is_some() {
+                    tree.push(e);
+                    frontier.push(e);
+                }
+            }
+        }
+    }
+    // Corpse first: its row delete is queued while the contents are still
+    // in place, and the contents then despawn as unattached entities (no
+    // redundant per-item deletes; the cascade covers them).
+    if let Ok(em) = world.get_entity_mut(corpse) {
+        em.despawn();
+    }
+    for &e in &tree {
+        if let Ok(em) = world.get_entity_mut(e) {
+            em.despawn();
+        }
+    }
+    Ok(tree.len())
+}
+
 // ---------------------------------------------------------------------
 // Ordered corpse-row writes (drag, decay, despawn)
 // ---------------------------------------------------------------------
@@ -278,6 +430,12 @@ enum Op {
         /// The decaying corpse waiting on this delete; `None` for a
         /// fire-and-forget cleanup.
         waiting: Option<Entity>,
+    },
+    /// Rows of items destroyed inside corpse `corpse` (see
+    /// `mud_db::character_items::delete_corpse_item_rows`).
+    DeleteItems {
+        corpse: i32,
+        ids: Vec<i32>,
     },
 }
 
@@ -309,6 +467,15 @@ impl CorpseDb {
                         {
                             tracing::warn!(error = %e, corpse_id = id,
                                 "couldn't record the dragged corpse's room");
+                        }
+                    }
+                    Op::DeleteItems { corpse, ids } => {
+                        if let Err(e) =
+                            mud_db::character_items::delete_corpse_item_rows(&pool, corpse, &ids)
+                                .await
+                        {
+                            tracing::warn!(error = %e, corpse_id = corpse,
+                                "couldn't delete a destroyed corpse item's rows");
                         }
                     }
                     Op::Delete { id, waiting } => {
@@ -357,6 +524,54 @@ pub(crate) fn register_observers(world: &mut World) {
             }
         },
     );
+    // An item with a row that despawns inside a settled corpse takes its
+    // row (and the rows of anything still nested in it) with it, or the
+    // next boot would put it back.
+    world.add_observer(
+        |on: On<Remove, PersistedItemId>,
+         rows: Query<&PersistedItemId>,
+         located: Query<&Located>,
+         contents: Query<&mud_world::Contents>,
+         items: Query<(), With<Item>>,
+         corpses: Query<(&PlayerCorpseId, Has<RetiredCorpse>, Has<DecayDeleting>)>,
+         db: Option<Res<CorpseDb>>| {
+            let Some(db) = db else { return };
+            // The settled, live corpse the item sits in (directly or nested).
+            // Corpses already retired or being deleted are handled elsewhere.
+            let mut corpse_id = None;
+            let mut cur = on.entity;
+            // Real nesting is a handful of bags; the cap only guards
+            // against a malformed `Located` cycle.
+            for _ in 0..32 {
+                let Ok(loc) = located.get(cur) else { break };
+                cur = loc.0;
+                if let Ok((id, retired, deleting)) = corpses.get(cur) {
+                    if !retired && !deleting {
+                        corpse_id = Some(id.0);
+                    }
+                    break;
+                }
+            }
+            let Some(corpse_id) = corpse_id else { return };
+            // The item first, then everything still nested inside it.
+            let mut ids = Vec::new();
+            let mut frontier = vec![on.entity];
+            while let Some(e) = frontier.pop() {
+                if let Ok(row) = rows.get(e) {
+                    ids.push(row.0);
+                }
+                if let Ok(c) = contents.get(e) {
+                    frontier.extend(c.iter().filter(|k| items.contains(*k)));
+                }
+            }
+            if !ids.is_empty() {
+                let _ = db.tx.send(Op::DeleteItems {
+                    corpse: corpse_id,
+                    ids,
+                });
+            }
+        },
+    );
 }
 
 /// A dragged player corpse now lies in `room`: record it.
@@ -387,6 +602,12 @@ pub(crate) fn begin_decay_delete(world: &mut World, corpse: Entity) -> bool {
         return false;
     };
     if world.get::<DecayDeleting>(corpse).is_some() {
+        return true;
+    }
+    // Someone's loot from this corpse hasn't been saved yet: the delete
+    // would cascade away their item rows. Hold the corpse (not marked, so
+    // the decay tick asks again) until their save commits.
+    if has_pending_loot(world, id, None) {
         return true;
     }
     if let Ok(mut em) = world.get_entity_mut(corpse) {
@@ -1235,5 +1456,377 @@ mod tests {
         let mob_corpse = world.spawn(Corpse).id();
         note_coin_take(&mut world, player, mob_corpse, 10);
         assert!(world.get::<PendingCorpseCoinTakes>(player).is_none());
+    }
+
+    /// Poll `check` for up to ~5s (the corpse writer is a background task).
+    async fn eventually<F, Fut>(mut check: F) -> bool
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        for _ in 0..100 {
+            if check().await {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    /// A dead player with a settled corpse (sword, bag, gem + `coins`) in
+    /// a world that has the delete observers and the corpse writer.
+    struct Dead {
+        world: World,
+        room: Entity,
+        cid: String,
+        name: String,
+        player: Entity,
+        corpse: Entity,
+        corpse_id: i32,
+        kit: Kit,
+    }
+
+    async fn settled_corpse(
+        pool: &PgPool,
+        keys: ((i32, i32), (i32, i32)),
+        tag: &str,
+        coins: i64,
+    ) -> Dead {
+        let (cid, name) = temp_char(pool, tag).await;
+        let (mut world, room) = live_world(&[keys.0, keys.1]);
+        register_observers(&mut world);
+        world.insert_resource(CorpseDb::spawn(pool.clone()));
+        let player = spawn_player(&mut world, &cid, &name, room, UserRole::Player, coins);
+        let kit = equip_and_save(&mut world, pool, player, keys).await;
+        mud_db::sqlx::query("UPDATE \"Characters\" SET wealth = $2 WHERE id = $1")
+            .bind(&cid)
+            .bind(coins)
+            .execute(pool)
+            .await
+            .unwrap();
+        crate::combat::handle_death(&mut world, player, &name, room);
+        assert!(save_player(&mut world, player, pool).await.committed);
+        let corpse = corpse_of(&mut world, &name);
+        let corpse_id = world.get::<PlayerCorpseId>(corpse).unwrap().0;
+        Dead {
+            world,
+            room,
+            cid,
+            name,
+            player,
+            corpse,
+            corpse_id,
+            kit,
+        }
+    }
+
+    #[tokio::test]
+    async fn loot_then_immediate_decay_waits_for_the_loots_commit() {
+        let Some((pool, _lock)) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let Some(keys) = object_keys(&pool).await else {
+            eprintln!("skipping: no Objects rows");
+            return;
+        };
+        let mut d = settled_corpse(&pool, keys, "ldv", 300).await;
+        let (lid, lname) = temp_char(&pool, "ldl").await;
+        let looter = spawn_player(&mut d.world, &lid, &lname, d.room, UserRole::Builder, 0);
+
+        crate::commands::info::cmd_get(&mut d.world, looter, "all corpse");
+        assert!(has_pending_loot(&d.world, d.corpse_id, None));
+        assert!(!has_pending_loot(&d.world, d.corpse_id, Some(looter)));
+
+        // The corpse rots before the looter's save lands.
+        d.world
+            .get_mut::<CorpseDecay>(d.corpse)
+            .unwrap()
+            .remaining_secs = 1;
+        crate::combat::corpse_decay_tick(&mut d.world);
+        assert!(
+            d.world.get::<DecayDeleting>(d.corpse).is_none(),
+            "delete must wait for the looter's commit"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(corpse_rows(&pool, &d.cid).await.len(), 1);
+        let held = item_rows(&pool, &d.cid).await;
+        assert_eq!(held.len(), 3, "the looted rows still exist");
+
+        // The commit clears the mark; the next decay pass deletes.
+        let out = save_player(&mut d.world, looter, &pool).await;
+        assert!(out.committed, "{:?}", out.error);
+        assert!(!has_pending_loot(&d.world, d.corpse_id, None));
+        crate::combat::corpse_decay_tick(&mut d.world);
+        assert!(d.world.get::<DecayDeleting>(d.corpse).is_some());
+        assert!(eventually(|| async { corpse_rows(&pool, &d.cid).await.is_empty() }).await);
+
+        let theirs = item_rows(&pool, &lid).await;
+        assert_eq!(theirs.len(), 3, "the looter's rows survive the delete");
+        assert!(theirs.iter().all(|r| r.3.is_none()));
+        assert_eq!(wealth_of(&pool, &lid).await, 300);
+        assert!(item_rows(&pool, &d.cid).await.is_empty());
+        cleanup(&pool, &[&d.cid, &lid]).await;
+    }
+
+    #[tokio::test]
+    async fn resurrection_retire_waits_for_another_looters_commit() {
+        let Some((pool, _lock)) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let Some(keys) = object_keys(&pool).await else {
+            eprintln!("skipping: no Objects rows");
+            return;
+        };
+        let mut d = settled_corpse(&pool, keys, "rtv", 0).await;
+        let (lid, lname) = temp_char(&pool, "rtl").await;
+        let looter = spawn_player(&mut d.world, &lid, &lname, d.room, UserRole::Builder, 0);
+
+        // A staff member takes one thing; then the owner is raised.
+        crate::commands::info::cmd_get(&mut d.world, looter, "object corpse");
+        assert!(has_pending_loot(&d.world, d.corpse_id, None));
+        hand_over(&mut d.world, d.player, d.corpse);
+        assert!(d.world.get_entity(d.corpse).is_err());
+
+        let out = save_player(&mut d.world, d.player, &pool).await;
+        assert!(out.committed, "{:?}", out.error);
+        assert_eq!(
+            corpse_rows(&pool, &d.cid).await.len(),
+            1,
+            "the corpse row stays while the looter's take is unsaved"
+        );
+        assert_eq!(
+            d.world.get::<PendingCorpseRetire>(d.player).unwrap().0,
+            vec![d.corpse_id]
+        );
+        let stranded: Vec<DbRow> = item_rows(&pool, &d.cid)
+            .await
+            .into_iter()
+            .filter(|r| r.3.is_some())
+            .collect();
+        assert!(!stranded.is_empty(), "the looted rows are still filed");
+
+        let out = save_player(&mut d.world, looter, &pool).await;
+        assert!(out.committed, "{:?}", out.error);
+        let out = save_player(&mut d.world, d.player, &pool).await;
+        assert!(out.committed, "{:?}", out.error);
+        assert!(corpse_rows(&pool, &d.cid).await.is_empty(), "now retired");
+        assert!(d.world.get::<PendingCorpseRetire>(d.player).is_none());
+        let theirs = item_rows(&pool, &lid).await;
+        assert!(!theirs.is_empty() && theirs.iter().all(|r| r.3.is_none()));
+        let mine = item_rows(&pool, &d.cid).await;
+        assert_eq!(mine.len() + theirs.len(), 3, "no row lost");
+        cleanup(&pool, &[&d.cid, &lid]).await;
+    }
+
+    #[tokio::test]
+    async fn item_decay_inside_a_corpse_deletes_its_row_and_keeps_released_contents() {
+        let Some((pool, _lock)) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let Some(keys) = object_keys(&pool).await else {
+            eprintln!("skipping: no Objects rows");
+            return;
+        };
+        let mut d = settled_corpse(&pool, keys, "idc", 0).await;
+        let bag_row = d.world.get::<PersistedItemId>(d.kit.bag).unwrap().0;
+        let gem_row = d.world.get::<PersistedItemId>(d.kit.gem).unwrap().0;
+        let sword_row = d.world.get::<PersistedItemId>(d.kit.sword).unwrap().0;
+        d.world.entity_mut(d.kit.bag).insert(mud_world::ItemTimer {
+            remaining_secs: 1,
+            decompose_window_secs: 0,
+        });
+
+        crate::item_decay::item_decay_tick(&mut d.world);
+        assert!(d.world.get_entity(d.kit.bag).is_err());
+        assert!(
+            eventually(|| async {
+                !item_rows(&pool, &d.cid)
+                    .await
+                    .iter()
+                    .any(|r| r.0 == bag_row)
+            })
+            .await,
+            "the decayed bag's row must go"
+        );
+        let rows = item_rows(&pool, &d.cid).await;
+        let gem = rows.iter().find(|r| r.0 == gem_row).expect("gem row kept");
+        assert_eq!(gem.2, None, "released to the corpse, no dangling bag");
+        assert_eq!(gem.3, Some(d.corpse_id));
+        assert!(rows.iter().any(|r| r.0 == sword_row));
+        assert_eq!(d.world.get::<Located>(d.kit.gem).unwrap().0, d.corpse);
+        assert_eq!(corpse_rows(&pool, &d.cid).await.len(), 1);
+        cleanup(&pool, &[&d.cid]).await;
+    }
+
+    #[tokio::test]
+    async fn despawning_a_bag_inside_a_corpse_deletes_the_nested_rows_too() {
+        let Some((pool, _lock)) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let Some(keys) = object_keys(&pool).await else {
+            eprintln!("skipping: no Objects rows");
+            return;
+        };
+        let mut d = settled_corpse(&pool, keys, "idn", 0).await;
+        let sword_row = d.world.get::<PersistedItemId>(d.kit.sword).unwrap().0;
+        d.world.entity_mut(d.kit.bag).despawn();
+        assert!(
+            eventually(|| async { item_rows(&pool, &d.cid).await.len() == 1 }).await,
+            "bag and gem rows must go"
+        );
+        let rows = item_rows(&pool, &d.cid).await;
+        assert_eq!(rows[0].0, sword_row);
+        assert_eq!(rows[0].3, Some(d.corpse_id));
+        cleanup(&pool, &[&d.cid]).await;
+    }
+
+    #[tokio::test]
+    async fn despawning_a_carried_item_leaves_its_row_to_the_save_diff() {
+        let Some((pool, _lock)) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let Some(keys) = object_keys(&pool).await else {
+            eprintln!("skipping: no Objects rows");
+            return;
+        };
+        let (cid, name) = temp_char(&pool, "idp").await;
+        let (mut world, room) = live_world(&[keys.0, keys.1]);
+        register_observers(&mut world);
+        world.insert_resource(CorpseDb::spawn(pool.clone()));
+        let player = spawn_player(&mut world, &cid, &name, room, UserRole::Player, 0);
+        let kit = equip_and_save(&mut world, &pool, player, keys).await;
+        world.entity_mut(kit.sword).despawn();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(item_rows(&pool, &cid).await.len(), 3);
+        assert!(save_player(&mut world, player, &pool).await.committed);
+        assert_eq!(item_rows(&pool, &cid).await.len(), 2);
+        cleanup(&pool, &[&cid]).await;
+    }
+
+    #[tokio::test]
+    async fn purging_a_settled_corpse_removes_contents_and_deletes_the_row() {
+        let Some((pool, _lock)) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let Some(keys) = object_keys(&pool).await else {
+            eprintln!("skipping: no Objects rows");
+            return;
+        };
+        let mut d = settled_corpse(&pool, keys, "pgs", 40).await;
+        assert_eq!(purge_player_corpse(&mut d.world, d.corpse), Ok(3));
+        for e in [d.corpse, d.kit.sword, d.kit.bag, d.kit.gem] {
+            assert!(d.world.get_entity(e).is_err(), "{e:?} should be gone");
+        }
+        assert!(
+            eventually(|| async {
+                corpse_rows(&pool, &d.cid).await.is_empty()
+                    && item_rows(&pool, &d.cid).await.is_empty()
+            })
+            .await,
+            "row and (by cascade) item rows deleted"
+        );
+        let _ = (&d.name, d.player);
+        cleanup(&pool, &[&d.cid]).await;
+    }
+
+    fn bare_corpse(world: &mut World, room: Entity, id: Option<i32>) -> (Entity, Entity) {
+        let corpse = world
+            .spawn((Item, Corpse, PlayerCorpse, Located(room)))
+            .id();
+        if let Some(id) = id {
+            world.entity_mut(corpse).insert(PlayerCorpseId(id));
+        }
+        let held = world.spawn((Item, Located(corpse))).id();
+        (corpse, held)
+    }
+
+    #[test]
+    fn purge_refuses_an_unsettled_corpse_and_changes_nothing() {
+        let mut world = World::new();
+        let room = world.spawn_empty().id();
+        let (corpse, held) = bare_corpse(&mut world, room, None);
+        assert_eq!(
+            purge_player_corpse(&mut world, corpse),
+            Err(PurgeRefusal::Settling)
+        );
+        assert!(world.get_entity(corpse).is_ok() && world.get_entity(held).is_ok());
+        // A corpse mid-decay-delete is refused too.
+        let (rotting, _) = bare_corpse(&mut world, room, Some(4));
+        world.entity_mut(rotting).insert(DecayDeleting);
+        assert_eq!(
+            purge_player_corpse(&mut world, rotting),
+            Err(PurgeRefusal::Settling)
+        );
+    }
+
+    #[test]
+    fn purge_refuses_while_a_looters_save_is_pending() {
+        let mut world = World::new();
+        let room = world.spawn_empty().id();
+        let (corpse, held) = bare_corpse(&mut world, room, Some(11));
+        let looter = world
+            .spawn(Account {
+                user_id: String::new(),
+                character_id: "x".into(),
+                role: UserRole::Player,
+                account_role: UserRole::Player,
+                perms: vec![],
+            })
+            .id();
+        note_loot(&mut world, looter, corpse);
+        assert_eq!(
+            purge_player_corpse(&mut world, corpse),
+            Err(PurgeRefusal::LootPending)
+        );
+        assert!(world.get_entity(held).is_ok());
+        // The looter's commit clears it.
+        let marks = loot_marks(&world, looter);
+        assert_eq!(marks.len(), 1);
+        settle_loot(&mut world, looter, &marks);
+        assert_eq!(purge_player_corpse(&mut world, corpse), Ok(1));
+        assert!(world.get_entity(corpse).is_err() && world.get_entity(held).is_err());
+    }
+
+    #[test]
+    fn loot_marks_keep_takes_made_after_the_snapshot() {
+        let mut world = World::new();
+        let room = world.spawn_empty().id();
+        let (corpse, _) = bare_corpse(&mut world, room, Some(21));
+        let (unsettled, _) = bare_corpse(&mut world, room, None);
+        let acct = |cid: &str| Account {
+            user_id: String::new(),
+            character_id: cid.into(),
+            role: UserRole::Player,
+            account_role: UserRole::Player,
+            perms: vec![],
+        };
+        let a = world.spawn(acct("a")).id();
+        let mob = world.spawn_empty().id();
+
+        note_loot(&mut world, a, unsettled);
+        note_loot(&mut world, mob, corpse);
+        assert!(
+            !has_pending_loot(&world, 21, None),
+            "nothing to wait for yet"
+        );
+
+        note_loot(&mut world, a, corpse);
+        let snap = loot_marks(&world, a);
+        note_loot(&mut world, a, corpse); // taken after the snapshot
+        settle_loot(&mut world, a, &snap);
+        assert!(
+            has_pending_loot(&world, 21, None),
+            "the later take is still unsaved"
+        );
+        assert!(!has_pending_loot(&world, 21, Some(a)), "own marks ignored");
+        let snap = loot_marks(&world, a);
+        settle_loot(&mut world, a, &snap);
+        assert!(!has_pending_loot(&world, 21, None));
     }
 }

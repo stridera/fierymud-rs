@@ -199,6 +199,43 @@ pub async fn list_for_corpse(pool: &PgPool, corpse_id: i32) -> sqlx::Result<Vec<
     .await
 }
 
+/// Delete rows of items that were destroyed while inside player corpse
+/// `corpse_id` (item decay, scripted extraction), in one transaction.
+/// `ids` lists the destroyed item first, then anything that went down with
+/// it. A row that survives its container (the contents were released to
+/// the enclosing container) is re-parented to the deleted row's own
+/// container instead of being left dangling. Only rows still filed under
+/// `corpse_id` are touched, so an item a looter already took can never be
+/// deleted by this. Idempotent.
+pub async fn delete_corpse_item_rows(
+    pool: &PgPool,
+    corpse_id: i32,
+    ids: &[i32],
+) -> sqlx::Result<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let mut tx = pool.begin().await?;
+    for id in ids {
+        sqlx::query(
+            r#"UPDATE "CharacterItems"
+               SET container_id = (SELECT container_id FROM "CharacterItems"
+                                   WHERE id = $1 AND corpse_id = $2)
+               WHERE container_id = $1 AND corpse_id = $2"#,
+        )
+        .bind(id)
+        .bind(corpse_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(r#"DELETE FROM "CharacterItems" WHERE id = $1 AND corpse_id = $2"#)
+            .bind(id)
+            .bind(corpse_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await
+}
+
 /// Diff-write the character's inventory. Compares the in-memory snapshot
 /// against the DB row set:
 ///

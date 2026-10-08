@@ -10323,6 +10323,9 @@ fn get_from_container(
         && world.get_entity(container).is_ok()
         && crate::corpses::contents_fingerprint(world, container) != before
     {
+        // The corpse's rows can't be deleted (decay, retirement, purge)
+        // until this player's save has committed the take.
+        crate::corpses::note_loot(world, player, container);
         crate::quest_progress::save_player_soon(world, player);
     }
 }

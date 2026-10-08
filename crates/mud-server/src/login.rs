@@ -4458,6 +4458,11 @@ pub(crate) struct PlayerSaveSnapshot {
     /// Corpses a resurrection emptied into this player: deleted in this
     /// write's transaction, after their items are re-homed.
     retired_corpses: Vec<i32>,
+    /// Corpses this player has looted since their last settled mark:
+    /// `(PlayerCorpses.id, loot sequence)`. This commit is what makes those
+    /// takes durable, so [`apply_commit`] clears exactly these marks and
+    /// decay / retirement of the corpse may proceed.
+    corpse_loot_marks: Vec<(i32, u64)>,
     /// `PlayerCorpses.id` the death transaction inserted (0 = none).
     /// Set once the transaction commits; [`apply_commit`] reads it.
     pub(crate) committed_corpse_id: std::sync::atomic::AtomicI32,
@@ -4907,10 +4912,20 @@ pub(crate) fn snapshot_player(
             .get::<crate::corpses::PendingCorpseCoinTakes>(entity)
             .map(|t| t.0.clone())
             .unwrap_or_default(),
+        // A corpse some OTHER player has looted from, and whose save hasn't
+        // committed, keeps its row: deleting it now would cascade away
+        // their item rows before they are re-homed. It stays pending and
+        // the next save retries.
         retired_corpses: world
             .get::<crate::corpses::PendingCorpseRetire>(entity)
-            .map(|p| p.0.clone())
+            .map(|p| {
+                p.0.iter()
+                    .copied()
+                    .filter(|id| !crate::corpses::has_pending_loot(world, *id, Some(entity)))
+                    .collect()
+            })
             .unwrap_or_default(),
+        corpse_loot_marks: crate::corpses::loot_marks(world, entity),
         committed_corpse_id: std::sync::atomic::AtomicI32::new(0),
     })
 }
@@ -5454,6 +5469,7 @@ pub(crate) fn apply_commit(
     }
     crate::corpses::settle_coin_takes(world, snap.entity, &snap.corpse_coin_takes);
     crate::corpses::settle_retired(world, snap.entity, &snap.retired_corpses);
+    crate::corpses::settle_loot(world, snap.entity, &snap.corpse_loot_marks);
     if let Some(t) = snap.new_time_played
         && let Ok(mut em) = world.get_entity_mut(snap.entity)
     {

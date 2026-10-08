@@ -9,7 +9,7 @@ use mud_db::enums::UserRole;
 use mud_world::{
     Account, AppliedTo, Description, EffectCatalog, EffectInstance, EffectSource, Fighting, Frozen,
     Health, Item, Keywords, Located, Mob, MobPrototypes, Named, ObjectPrototypes, Online, Player,
-    PlayerFlags, Profile, Stamina, Wealth, WearableIn, WorldKey, WorldKeyIndex,
+    PlayerCorpse, PlayerFlags, Profile, Stamina, Wealth, WearableIn, WorldKey, WorldKeyIndex,
 };
 use tracing::info;
 
@@ -989,6 +989,20 @@ pub(crate) fn cmd_dumpworld(world: &mut World, player: Entity, args: &str) {
     );
     info!(path = %path, bytes, "dumpworld checkpoint written");
 }
+/// `purge <player corpse>`: report what [`crate::corpses::purge_player_corpse`] did.
+fn purge_one_player_corpse(world: &mut World, admin: Entity, corpse: Entity, name: &str) {
+    let msg = match crate::corpses::purge_player_corpse(world, corpse) {
+        Ok(items) => format!("You purge {name} and its {items} item(s).\r\n"),
+        Err(crate::corpses::PurgeRefusal::Settling) => {
+            format!("{name} is still settling; try again in a moment.\r\n")
+        }
+        Err(crate::corpses::PurgeRefusal::LootPending) => {
+            format!("Someone's loot from {name} hasn't been saved yet; try again in a moment.\r\n")
+        }
+    };
+    send_rendered(world, admin, &msg);
+}
+
 pub(crate) fn cmd_purge(world: &mut World, player: Entity, args: &str) {
     record_admin_action(world, player, "purge", args);
     let arg = args.trim();
@@ -1014,6 +1028,13 @@ pub(crate) fn cmd_purge(world: &mut World, player: Entity, args: &str) {
             return;
         };
         let target_name = name_or(world, target, "(unknown)");
+        // A player corpse is database-backed: it goes (with everything in
+        // it) only once its rows are settled and no looter's save is
+        // pending, and its row is deleted through the corpse writer.
+        if world.get::<PlayerCorpse>(target).is_some() {
+            purge_one_player_corpse(world, player, target, &target_name);
+            return;
+        }
         // Cascade-despawn: anything Located on the target (mob's gear /
         // container contents) goes too.
         let nested: Vec<Entity> = {
@@ -1043,13 +1064,20 @@ pub(crate) fn cmd_purge(world: &mut World, player: Entity, args: &str) {
             .map(|(e, _)| e)
             .collect()
     };
-    let items: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Item>>();
+    // Player corpses hold a dead player's persisted gear: never swept.
+    let room_items: Vec<(Entity, bool)> = {
+        let mut q = world.query_filtered::<(Entity, &Located, Has<PlayerCorpse>), With<Item>>();
         q.iter(world)
-            .filter(|(_, l)| l.0 == room)
-            .map(|(e, _)| e)
+            .filter(|(_, l, _)| l.0 == room)
+            .map(|(e, _, pc)| (e, pc))
             .collect()
     };
+    let corpses_left = room_items.iter().filter(|(_, pc)| *pc).count();
+    let items: Vec<Entity> = room_items
+        .into_iter()
+        .filter(|(_, pc)| !*pc)
+        .map(|(e, _)| e)
+        .collect();
     let mob_count = mobs.len();
     let item_count = items.len();
     // Despawn nested children of mobs first (gear, contents).
@@ -1070,11 +1098,14 @@ pub(crate) fn cmd_purge(world: &mut World, player: Entity, args: &str) {
             em.despawn();
         }
     }
-    send_to(
-        world,
-        player,
-        format!("Purged {mob_count} mob(s), {item_count} item(s), and {nested_count} nested.\r\n"),
-    );
+    let mut report =
+        format!("Purged {mob_count} mob(s), {item_count} item(s), and {nested_count} nested.");
+    if corpses_left > 0 {
+        report.push_str(&format!(
+            " {corpses_left} player corpse(s) left alone (use 'purge <corpse>' to remove one)."
+        ));
+    }
+    send_to(world, player, format!("{report}\r\n"));
 }
 pub(crate) fn cmd_restore(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
@@ -2781,4 +2812,92 @@ pub(crate) fn cmd_goto(world: &mut World, player: Entity, args: &str) {
         world.entity_mut(mount).insert(Located(target));
     }
     cmd_look(world, player, "");
+}
+
+#[cfg(test)]
+mod purge_tests {
+    use super::*;
+    use crate::commands::test_support::{drain, player_in};
+    use mud_world::{Corpse, PlayerCorpseId, Room};
+
+    fn corpse_with_item(world: &mut World, room: Entity, id: Option<i32>) -> (Entity, Entity) {
+        let corpse = world
+            .spawn((
+                Item,
+                Corpse,
+                PlayerCorpse,
+                Named {
+                    name: "the corpse of Bob".into(),
+                },
+                Keywords(vec!["corpse".into(), "bob".into()]),
+                Located(room),
+            ))
+            .id();
+        if let Some(id) = id {
+            world.entity_mut(corpse).insert(PlayerCorpseId(id));
+        }
+        let held = world
+            .spawn((
+                Item,
+                Named {
+                    name: "a sword".into(),
+                },
+                Keywords(vec!["sword".into()]),
+                Located(corpse),
+            ))
+            .id();
+        (corpse, held)
+    }
+
+    #[test]
+    fn room_purge_leaves_player_corpses_alone_and_says_so() {
+        let mut world = World::new();
+        let room = world.spawn(Room).id();
+        let (admin, mut rx) = player_in(&mut world, room);
+        let (corpse, held) = corpse_with_item(&mut world, room, Some(3));
+        let junk = world
+            .spawn((
+                Item,
+                Named {
+                    name: "a rock".into(),
+                },
+                Located(room),
+            ))
+            .id();
+
+        cmd_purge(&mut world, admin, "");
+        assert!(world.get_entity(corpse).is_ok());
+        assert!(world.get_entity(held).is_ok());
+        assert!(world.get_entity(junk).is_err(), "ordinary items still go");
+        let out = drain(&mut rx);
+        assert!(out.contains("1 player corpse(s) left alone"), "{out}");
+    }
+
+    #[test]
+    fn explicit_purge_removes_a_settled_corpse_with_its_contents() {
+        let mut world = World::new();
+        let room = world.spawn(Room).id();
+        let (admin, mut rx) = player_in(&mut world, room);
+        let (corpse, held) = corpse_with_item(&mut world, room, Some(3));
+
+        cmd_purge(&mut world, admin, "corpse");
+        assert!(world.get_entity(corpse).is_err());
+        assert!(world.get_entity(held).is_err(), "contents go with it");
+        let out = drain(&mut rx);
+        assert!(out.contains("You purge the corpse of Bob"), "{out}");
+    }
+
+    #[test]
+    fn explicit_purge_refuses_an_unsettled_corpse() {
+        let mut world = World::new();
+        let room = world.spawn(Room).id();
+        let (admin, mut rx) = player_in(&mut world, room);
+        let (corpse, held) = corpse_with_item(&mut world, room, None);
+
+        cmd_purge(&mut world, admin, "corpse");
+        assert!(world.get_entity(corpse).is_ok());
+        assert!(world.get_entity(held).is_ok());
+        let out = drain(&mut rx);
+        assert!(out.contains("still settling"), "{out}");
+    }
 }
