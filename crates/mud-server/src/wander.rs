@@ -238,7 +238,14 @@ pub fn scavenger_tick(world: &mut World) {
     if scavengers.is_empty() {
         return;
     }
-    let scavenger_rooms: HashSet<Entity> = scavengers.iter().map(|&(_, room)| room).collect();
+    // Player house rooms are off limits: nothing a player placed at home is
+    // loot, whoever happens to follow its owner in. (No world exit leads
+    // there, so only a follower can be inside; legacy `ROOM_HOUSE`.)
+    let scavenger_rooms: HashSet<Entity> = scavengers
+        .iter()
+        .map(|&(_, room)| room)
+        .filter(|&room| world.get::<mud_world::HouseRoom>(room).is_none())
+        .collect();
     // Free-floor items per scavenger room. Items Located on other actors
     // or inside containers never match a room key. Corpses are skipped: a
     // player who dies in a Scavenger-patrolled room and respawns expects
@@ -246,11 +253,12 @@ pub fn scavenger_tick(world: &mut World) {
     // inventory and despawned with the mob's next tick.
     let mut floor: HashMap<Entity, Vec<Entity>> = HashMap::new();
     {
-        let mut q = world.query_filtered::<(
-            Entity,
-            &Located,
-            Option<&ObjectRestrictions>,
-        ), (With<Item>, With<Named>, Without<Corpse>)>();
+        let mut q = world.query_filtered::<(Entity, &Located, Option<&ObjectRestrictions>), (
+            With<Item>,
+            With<Named>,
+            Without<Corpse>,
+            Without<mud_world::HouseItem>,
+        )>();
         for (item, loc, restrictions) in q.iter(world) {
             // Same gate as the `get` command: a !TAKE item is fixed in
             // place for everyone, mobs included.
@@ -639,6 +647,46 @@ mod tests {
         scavenger_tick(&mut world);
         assert_eq!(world.get::<Located>(coin).map(|l| l.0), Some(mob));
         assert_eq!(world.get::<Located>(statue).map(|l| l.0), Some(room));
+    }
+
+    /// Nothing in a player's house is loot: neither items lying in a house
+    /// room (a follower of its owner can stand there) nor placed house
+    /// items that somehow lie on an ordinary floor.
+    #[test]
+    fn scavenger_leaves_player_houses_alone() {
+        crate::mob_ai::force_scavenge_roll(Some(true));
+        let mut world = World::new();
+        world.insert_resource(TickCount(SCAVENGER_PERIOD_TICKS));
+        let house = make_room(&mut world);
+        world.entity_mut(house).insert(mud_world::HouseRoom {
+            house_id: 1,
+            local_index: 0,
+        });
+        let street = make_room(&mut world);
+        let named = |n: &str| Named { name: n.into() };
+        let pet = make_mob(&mut world, house);
+        let thief = make_mob(&mut world, street);
+        for m in [pet, thief] {
+            world
+                .entity_mut(m)
+                .insert(MobBehaviors(vec![MobBehavior::Scavenger]));
+        }
+        let vase = world.spawn((Item, named("a vase"), Located(house))).id();
+        let placed = world
+            .spawn((
+                Item,
+                named("a lamp"),
+                mud_world::HouseItem(7),
+                Located(street),
+            ))
+            .id();
+        scavenger_tick(&mut world);
+        assert_eq!(world.get::<Located>(vase).map(|l| l.0), Some(house));
+        assert_eq!(world.get::<Located>(placed).map(|l| l.0), Some(street));
+        // An ordinary item beside them is still fair game.
+        let coin = world.spawn((Item, named("a coin"), Located(street))).id();
+        scavenger_tick(&mut world);
+        assert_eq!(world.get::<Located>(coin).map(|l| l.0), Some(thief));
     }
 
     /// Timing guard at prod scale. Prod saw 138-223 ms per pass with the

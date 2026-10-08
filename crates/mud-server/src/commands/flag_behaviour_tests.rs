@@ -325,3 +325,86 @@ fn assist_flags_and_will_assist_rules() {
     let (fighting, p, _) = assist_scene(50, &[Peacekeeper], &[], 1000, -1000);
     assert_eq!(fighting, Some(p), "peacekeeper vs a badly-aligned foe");
 }
+
+fn level_50_profile() -> mud_world::Profile {
+    mud_world::Profile {
+        level: 50,
+        class_id: None,
+        race: "human".into(),
+        experience: 0,
+        gender: "male".into(),
+    }
+}
+
+#[test]
+fn defended_player_sees_second_person_and_bystanders_third() {
+    use mud_db::enums::MobBehavior::Protector;
+    let (mut fx, p, mut rx) = caster_with_flag_spell("familiarity");
+    let room = fx.a;
+    let (_bystander, mut brx) = player(&mut fx.world, room, "Bystander");
+    let brute = mob_in(&mut fx, "a brute", 0);
+    fx.world.entity_mut(brute).insert(level_50_profile());
+    let deputy = mob_in(&mut fx, "a loyal deputy", 0);
+    fx.world
+        .entity_mut(deputy)
+        .insert(mud_world::MobBehaviors(vec![Protector]));
+    let _ = drain(&mut rx);
+    let _ = drain(&mut brx);
+    // The brute attacks the player; the protector deputy jumps in.
+    super::mob_helpers_engage(&mut fx.world, p, brute, room);
+    assert_eq!(
+        fx.world.get::<mud_world::Fighting>(deputy).map(|f| f.0),
+        Some(brute)
+    );
+    let seen = drain(&mut rx);
+    assert!(seen.contains("A loyal deputy jumps to your aid!"), "{seen}");
+    assert!(!seen.contains("aid of"), "{seen}");
+    let seen = drain(&mut brx);
+    assert!(
+        seen.contains("A loyal deputy jumps to the aid of Caster!"),
+        "{seen}"
+    );
+}
+
+#[test]
+fn a_pet_never_assists_against_its_master() {
+    use mud_db::enums::MobBehavior::Helper;
+    let (mut fx, p, _rx) = caster_with_flag_spell("familiarity");
+    let room = fx.a;
+    fx.world.get_mut::<mud_world::Profile>(p).unwrap().level = 50;
+    let victim = mob_in(&mut fx, "a hapless cityguard", 0);
+    let pet = mob_in(&mut fx, "a loyal hound", 0);
+    fx.world.entity_mut(pet).insert((
+        mud_world::MobBehaviors(vec![Helper]),
+        mud_world::Follower(p),
+    ));
+    // The player attacks the guard: the hound, who follows the player, must
+    // not turn on its master on the guard's behalf.
+    super::mob_helpers_engage(&mut fx.world, victim, p, room);
+    assert!(fx.world.get::<mud_world::Fighting>(pet).is_none());
+    // Not following anyone, the same hound does back the guard.
+    fx.world.entity_mut(pet).remove::<mud_world::Follower>();
+    super::mob_helpers_engage(&mut fx.world, victim, p, room);
+    assert_eq!(
+        fx.world.get::<mud_world::Fighting>(pet).map(|f| f.0),
+        Some(p)
+    );
+}
+
+#[test]
+fn a_charmed_pet_of_the_target_stays_out() {
+    use mud_db::enums::MobBehavior::Helper;
+    let (mut fx, _p, _rx) = caster_with_flag_spell("familiarity");
+    let room = fx.a;
+    // A mob master (charmed servants follow mobs too).
+    let master = mob_in(&mut fx, "a warlock", 0);
+    fx.world.entity_mut(master).insert(level_50_profile());
+    let victim = mob_in(&mut fx, "a hapless cityguard", 0);
+    let thrall = mob_in(&mut fx, "a thrall", 0);
+    fx.world.entity_mut(thrall).insert((
+        mud_world::MobBehaviors(vec![Helper]),
+        mud_world::Follower(master),
+    ));
+    super::mob_helpers_engage(&mut fx.world, victim, master, room);
+    assert!(fx.world.get::<mud_world::Fighting>(thrall).is_none());
+}

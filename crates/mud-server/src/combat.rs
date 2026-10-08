@@ -2304,7 +2304,8 @@ fn finish_mob_death(world: &mut World, victim: Entity) {
     }
 }
 
-/// On mob death: look up the proto's `wealth`, find the first player
+/// On mob death: total the proto's `wealth` plus any coin the mob carries
+/// (`Wealth`, e.g. scavenged piles), find the first player
 /// engaged with the victim, and route the coin onto either the killer
 /// (`AUTO_GOLD` or `AUTO_LOOT` on) or the freshly-spawned corpse via
 /// `CoinPile` (both off — claimed via `get all from corpse`).
@@ -2316,7 +2317,7 @@ fn award_kill_coin(
     corpse: Entity,
     killer: Option<Entity>,
 ) {
-    let coin = world
+    let proto_coin = world
         .get::<WorldKey>(victim)
         .and_then(|k| {
             world
@@ -2324,6 +2325,11 @@ fn award_kill_coin(
                 .and_then(|p| p.by_key.get(&(k.zone, k.id)).map(|proto| proto.wealth))
         })
         .unwrap_or(0);
+    // Coin the mob picked up in life (scavenged piles) rides in its
+    // `Wealth` and drops with the proto purse, like legacy's single
+    // `GET_GOLD` that `make_corpse` moves to the corpse.
+    let carried = world.get::<Wealth>(victim).map_or(0, |w| w.0.max(0));
+    let coin = proto_coin.max(0).saturating_add(carried);
     if coin <= 0 {
         return;
     }
@@ -3787,7 +3793,7 @@ mod tests {
     }
 
     #[test]
-    fn mob_death_does_not_touch_player_wealth_paths() {
+    fn mob_death_drops_carried_wealth_on_the_corpse() {
         let mut world = World::new();
         let room = make_room(&mut world);
         world.insert_resource(TickCount(0));
@@ -3812,9 +3818,10 @@ mod tests {
             .find(|(_, l)| l.0 == room)
             .map(|(e, _)| e)
             .expect("mob corpse");
-        assert!(
-            world.get::<mud_world::CoinPile>(corpse).is_none(),
-            "mob carried Wealth is not a corpse source; only proto wealth is"
+        assert_eq!(
+            world.get::<mud_world::CoinPile>(corpse).map(|c| c.0),
+            Some(500),
+            "coin a mob carries (scavenged) drops on its corpse"
         );
         assert!(world.get::<mud_world::PlayerCorpse>(corpse).is_none());
     }
@@ -5330,6 +5337,54 @@ mod tests {
             .iter(&world)
             .count();
         assert_eq!(piles, 0, "no coin left on the corpse");
+    }
+
+    #[test]
+    fn scavenged_coin_pays_out_with_the_proto_purse() {
+        // A scavenger that picked up 100 coins (its `Wealth`) pays that
+        // plus its proto wealth (75) to the killer.
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let goblin = credit_goblin(&mut world, room, 0, None);
+        let pile = world
+            .spawn((
+                Item,
+                mud_world::CoinPile(100),
+                Named {
+                    name: "coins".into(),
+                },
+                Located(room),
+            ))
+            .id();
+        assert_eq!(
+            crate::commands::info::take_loose_coins(&mut world, goblin, pile),
+            Some(100)
+        );
+        let killer = credit_player(&mut world, room, "Killer", 0);
+        world.entity_mut(killer).insert((
+            mud_world::PlayerFlags(vec![mud_db::enums::PlayerFlag::AutoLoot]),
+            Fighting(goblin),
+        ));
+        run_combat_tick(&mut world);
+        assert!(world.get_entity(goblin).is_err(), "goblin died");
+        assert_eq!(wealth_of(&world, killer), 175);
+    }
+
+    #[test]
+    fn scavenged_coin_lands_on_the_corpse_without_autoloot() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let goblin = credit_goblin(&mut world, room, 0, None);
+        world.entity_mut(goblin).insert(Wealth(100));
+        let killer = credit_player(&mut world, room, "Killer", 0);
+        world.entity_mut(killer).insert(Fighting(goblin));
+        run_combat_tick(&mut world);
+        let coin = world
+            .query_filtered::<&mud_world::CoinPile, With<Corpse>>()
+            .iter(&world)
+            .map(|c| c.0)
+            .sum::<i64>();
+        assert_eq!(coin, 175);
     }
 
     #[test]

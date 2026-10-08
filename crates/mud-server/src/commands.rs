@@ -12824,52 +12824,16 @@ fn size_band_refusal(
     None
 }
 
-/// Wear one specific carried item (legacy `perform_wear`). Returns
-/// whether it ended up equipped. With `quiet` (legacy `collective`, used
-/// by `wear all`) refusals are not reported.
-#[allow(clippy::too_many_lines)]
-pub(crate) fn wear_item(
-    world: &mut World,
+/// Why `wearer` may not put `item` on (legacy `may_wear_eq`'s restriction
+/// checks), as the refusal line, or `None` when it fits. The one predicate
+/// behind `wear_item` and the mob equip AI, so a mob never starts a swap
+/// the wear step would refuse.
+pub(crate) fn wear_refusal(
+    world: &World,
     player: Entity,
     item: Entity,
-    target: WearWhere,
-    quiet: bool,
-) -> bool {
-    let item_name = name_of(world, item);
-    let say = |world: &mut World, msg: &str| {
-        if !quiet {
-            send_rendered(world, player, msg);
-        }
-    };
-
-    let legal = item_wear_positions(world, item);
-    let Some(&primary) = legal.last() else {
-        say(world, &format!("{item_name} can't be worn.\r\n"));
-        return false;
-    };
-    let slot = match target {
-        WearWhere::Default => primary,
-        WearWhere::Hands(forced) => {
-            if !legal.contains(&forced.position()) {
-                let verb = match forced {
-                    Slot::Wield => "wielded",
-                    Slot::Hold => "held",
-                    _ => "worn there",
-                };
-                say(world, &format!("{item_name} can't be {verb}.\r\n"));
-                return false;
-            }
-            forced
-        }
-        WearWhere::Position(wanted) => {
-            if !legal.contains(&wanted.position()) {
-                say(world, &format!("You can't wear {item_name} there.\r\n"));
-                return false;
-            }
-            wanted
-        }
-    };
-
+    item_name: &str,
+) -> Option<String> {
     // Alignment + class + race restrictions: refuse if the proto's
     // restriction list contains the player's bucket. Lookup is
     // by WorldKey → ObjectPrototypes; items without a proto
@@ -12921,14 +12885,10 @@ pub(crate) fn wear_item(
         let player_align = world.get::<CombatStats>(player).map_or(0, |c| c.alignment);
         let bucket = mud_db::enums::Alignment::from_score(player_align);
         if alignment_restriction.contains(&bucket) {
-            say(
-                world,
-                &format!(
-                    "{item_name} repels your touch — your {} alignment is incompatible.\r\n",
-                    bucket.label()
-                ),
-            );
-            return false;
+            return Some(format!(
+                "{item_name} repels your touch — your {} alignment is incompatible.\r\n",
+                bucket.label()
+            ));
         }
     }
     if !class_restriction.is_empty() {
@@ -12936,11 +12896,9 @@ pub(crate) fn wear_item(
         if let Some(cid) = player_class
             && class_restriction.contains(&cid)
         {
-            say(
-                world,
-                &format!("{item_name} won't bend to your training — your class can't use it.\r\n"),
-            );
-            return false;
+            return Some(format!(
+                "{item_name} won't bend to your training — your class can't use it.\r\n"
+            ));
         }
     }
     if !race_restriction.is_empty()
@@ -12949,11 +12907,7 @@ pub(crate) fn wear_item(
             .iter()
             .any(|r| r.eq_ignore_ascii_case(&race))
     {
-        say(
-            world,
-            &format!("{item_name} wasn't made for your kind.\r\n"),
-        );
-        return false;
+        return Some(format!("{item_name} wasn't made for your kind.\r\n"));
     }
     // B6: inclusive race allow-list. Empty = no opinion;
     // non-empty = wearer must be one of these.
@@ -12961,11 +12915,7 @@ pub(crate) fn wear_item(
         && let Some(race) = world.get::<Profile>(player).map(|p| p.race.clone())
         && !allowed_races.iter().any(|r| r.eq_ignore_ascii_case(&race))
     {
-        say(
-            world,
-            &format!("{item_name} was crafted for other hands.\r\n"),
-        );
-        return false;
+        return Some(format!("{item_name} was crafted for other hands.\r\n"));
     }
     // B6: size band — `min_size <= wearer.size <= max_size`. The
     // wearer's effective size lives on the `Sized` component
@@ -12975,8 +12925,60 @@ pub(crate) fn wear_item(
     let wearer_size = world.get::<mud_world::Sized>(player).map(|s| s.0);
     if let Some(wsize) = wearer_size
         && let Some(refusal) =
-            size_band_refusal(wsize, min_size.as_deref(), max_size.as_deref(), &item_name)
+            size_band_refusal(wsize, min_size.as_deref(), max_size.as_deref(), item_name)
     {
+        return Some(refusal);
+    }
+    None
+}
+
+/// Wear one specific carried item (legacy `perform_wear`). Returns
+/// whether it ended up equipped. With `quiet` (legacy `collective`, used
+/// by `wear all`) refusals are not reported.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn wear_item(
+    world: &mut World,
+    player: Entity,
+    item: Entity,
+    target: WearWhere,
+    quiet: bool,
+) -> bool {
+    let item_name = name_of(world, item);
+    let say = |world: &mut World, msg: &str| {
+        if !quiet {
+            send_rendered(world, player, msg);
+        }
+    };
+
+    let legal = item_wear_positions(world, item);
+    let Some(&primary) = legal.last() else {
+        say(world, &format!("{item_name} can't be worn.\r\n"));
+        return false;
+    };
+    let slot = match target {
+        WearWhere::Default => primary,
+        WearWhere::Hands(forced) => {
+            if !legal.contains(&forced.position()) {
+                let verb = match forced {
+                    Slot::Wield => "wielded",
+                    Slot::Hold => "held",
+                    _ => "worn there",
+                };
+                say(world, &format!("{item_name} can't be {verb}.\r\n"));
+                return false;
+            }
+            forced
+        }
+        WearWhere::Position(wanted) => {
+            if !legal.contains(&wanted.position()) {
+                say(world, &format!("You can't wear {item_name} there.\r\n"));
+                return false;
+            }
+            wanted
+        }
+    };
+
+    if let Some(refusal) = wear_refusal(world, player, item, &item_name) {
         say(world, &refusal);
         return false;
     }
@@ -21388,6 +21390,11 @@ fn mob_assist(world: &mut World, helper: Entity, room: Entity, pairs: [(Entity, 
     let cap_helper = cap_sentence_start(&helper_name);
     let mut watched: Option<(Entity, Entity)> = None;
     for (vict, target) in pairs {
+        // Legacy `mob_attack`: `victim == ch->master` returns. A pet (charmed
+        // or otherwise following) never turns on whoever it follows.
+        if world.get::<Follower>(helper).is_some_and(|f| f.0 == target) {
+            continue;
+        }
         if !will_assist(world, helper, vict, target) {
             continue;
         }
@@ -21417,7 +21424,7 @@ fn mob_assist(world: &mut World, helper: Entity, room: Entity, pairs: [(Entity, 
                 room,
                 helper,
                 vict,
-                &format!("{cap_helper} jumps to the aid of you!\r\n"),
+                &format!("{cap_helper} jumps to your aid!\r\n"),
                 &format!("{cap_helper} jumps to the aid of {vict_name}!\r\n"),
             );
             try_insert(world, helper, Fighting(target));

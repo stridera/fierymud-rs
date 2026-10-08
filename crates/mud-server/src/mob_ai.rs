@@ -475,27 +475,6 @@ fn auto_wear_slot(world: &World, item: Entity) -> Option<Slot> {
         .rfind(|s| !matches!(s, Slot::Light | Slot::Hold))
 }
 
-/// A mob never puts on gear built for another class or race.
-fn mob_may_wear(world: &World, mob: Entity, item: Entity) -> bool {
-    let Some(p) = proto_of(world, item) else {
-        return true;
-    };
-    if class_of(world, mob).is_some_and(|c| p.restricted_class_ids.contains(&c)) {
-        return false;
-    }
-    let race = mud_world::effective_race(world, mob);
-    if p.restricted_races
-        .iter()
-        .any(|r| r.eq_ignore_ascii_case(&race))
-    {
-        return false;
-    }
-    p.allowed_races.is_empty()
-        || p.allowed_races
-            .iter()
-            .any(|r| r.eq_ignore_ascii_case(&race))
-}
-
 /// Legacy `perform_remove` for a mob: take `item` off into the pack.
 fn unequip(world: &mut World, mob: Entity, item: Entity) {
     let item_name = crate::commands::name_of(world, item);
@@ -537,14 +516,25 @@ pub(crate) fn mob_attempt_equip(world: &mut World, mob: Entity) {
         {
             continue;
         }
-        if !can_see_obj(world, mob, obj) || !mob_may_wear(world, mob, obj) {
+        // The very predicate `wear_item` applies (alignment, class, race,
+        // size), checked before anything is taken off: a refused upgrade
+        // must not strip the mob and loop every pulse.
+        if !can_see_obj(world, mob, obj)
+            || crate::commands::wear_refusal(world, mob, obj, "").is_some()
+        {
             continue;
         }
         let Some(slot) = auto_wear_slot(world, obj) else {
             continue;
         };
-        let current = worn_in(world, mob, slot);
-        if let Some(cur) = current {
+        // Paired anatomy (rings, wrists, necks, ears): any free side takes
+        // the item; only when every side is taken is the first compared.
+        let group = slot.group();
+        let mut current = None;
+        if group.iter().all(|&s| worn_in(world, mob, s).is_some()) {
+            let Some(cur) = worn_in(world, mob, group[0]) else {
+                continue;
+            };
             if appraise_item(world, mob, cur) >= appraise_item(world, mob, obj) {
                 continue;
             }
@@ -553,11 +543,10 @@ pub(crate) fn mob_attempt_equip(world: &mut World, mob: Entity) {
                 continue;
             }
             unequip(world, mob, cur);
+            current = Some(cur);
         }
         let worn = crate::commands::wear_item(world, mob, obj, WearWhere::Position(slot), true);
         if !worn && let Some(cur) = current {
-            // The upgrade was refused (alignment, size, ...): put the
-            // old piece back rather than strip the mob.
             crate::commands::wear_item(world, mob, cur, WearWhere::Position(slot), true);
         }
     }
@@ -758,6 +747,71 @@ mod tests {
         scavenger_tick(&mut world);
         assert!(worn(&world, better));
         assert_eq!(world.get::<CombatStats>(mob).unwrap().armor_pct, 30);
+    }
+
+    #[test]
+    fn a_refused_upgrade_leaves_the_mob_dressed_and_silent() {
+        let (mut world, room, mob) = setup();
+        world.get_mut::<CombatStats>(mob).unwrap().alignment = -600;
+        let (_watcher, mut rx) = crate::commands::test_support::player_in(&mut world, room);
+        let old = item(&mut world, mob, 1, ObjectType::Armor, |p| {
+            p.armor_pct = 4;
+            p.wear_flags = vec![WearFlag::Head];
+        });
+        // Far better, but anti-evil: `wear_item` would refuse it.
+        let holy = item(&mut world, mob, 2, ObjectType::Armor, |p| {
+            p.armor_pct = 100;
+            p.wear_flags = vec![WearFlag::Head];
+            p.restricted_alignments = vec![mud_db::enums::Alignment::Evil];
+        });
+        assert!(crate::commands::wear_item(
+            &mut world,
+            mob,
+            old,
+            crate::commands::WearWhere::Default,
+            true,
+        ));
+        let _ = crate::commands::test_support::drain(&mut rx);
+        for _ in 0..3 {
+            scavenger_tick(&mut world);
+        }
+        assert!(
+            world.get::<EquippedSlot>(old).is_some(),
+            "old helm stays on"
+        );
+        assert!(world.get::<EquippedSlot>(holy).is_none());
+        assert_eq!(world.get::<CombatStats>(mob).unwrap().armor_pct, 4);
+        assert_eq!(crate::commands::test_support::drain(&mut rx), "");
+    }
+
+    #[test]
+    fn a_free_paired_slot_takes_the_new_piece_without_removing_the_old() {
+        let (mut world, _room, mob) = setup();
+        let ring = |world: &mut World, id: i32, armor_pct: i32| {
+            item(world, mob, id, ObjectType::Armor, |p| {
+                p.armor_pct = armor_pct;
+                p.wear_flags = vec![WearFlag::Finger];
+            })
+        };
+        let first = ring(&mut world, 1, 2);
+        assert!(crate::commands::wear_item(
+            &mut world,
+            mob,
+            first,
+            crate::commands::WearWhere::Default,
+            true,
+        ));
+        // Better than the worn ring, and the other finger is bare.
+        let second = ring(&mut world, 2, 40);
+        scavenger_tick(&mut world);
+        let slot = |w: &World, e: Entity| w.get::<EquippedSlot>(e).map(|s| s.0);
+        assert!(slot(&world, first).is_some(), "first ring stays on");
+        assert!(
+            slot(&world, second).is_some(),
+            "second ring takes the free finger"
+        );
+        assert_ne!(slot(&world, first), slot(&world, second));
+        assert_eq!(world.get::<CombatStats>(mob).unwrap().armor_pct, 42);
     }
 
     #[test]
