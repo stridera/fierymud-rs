@@ -4,178 +4,13 @@
 //! sentence, and the purely magical ones (armor, bless, ...) only show to
 //! viewers who can detect magic.
 //!
-//! The table is temporary scaffolding: it is content a builder might one day
-//! edit, so it should migrate to the DB (an `EffectDef` look-line column)
-//! once the Muditor editor for it exists.
+//! The lines live in the `EffectAura` table and are loaded at boot into
+//! `EffectAuraCatalog`; builders edit them without a recompile.
 
 use bevy_ecs::prelude::{Entity, World};
-use mud_world::{AppliedTo, CombatStats, EffectInstance, MobPrototypes, Profile, WorldKey};
-
-/// One flavor line. `keys` are normalized effect labels (lowercase, spaces):
-/// the originating ability's name or the effect's flag name. The text uses
-/// `{S}` his/her/its, `{M}` him/her/it, `{E}` he/she/it, and `{^S}` / `{^E}`
-/// for the capitalized forms at the start of a sentence.
-struct Aura {
-    keys: &'static [&'static str],
-    needs_detect_magic: bool,
-    text: &'static str,
-}
-
-const AURAS: &[Aura] = &[
-    // Seen only with Detect Magic (or holylight).
-    Aura {
-        keys: &["armor", "group armor"],
-        needs_detect_magic: true,
-        text: "A <b:white>translucent shimmering aura</> surrounds {M}.",
-    },
-    Aura {
-        keys: &["bless"],
-        needs_detect_magic: true,
-        text: "The shimmering telltales of a <b:yellow>magical blessing</> flutter about {S} head.",
-    },
-    Aura {
-        keys: &["demonic aspect"],
-        needs_detect_magic: true,
-        text: "A <red>demonic tinge</> circulates in {S} <red>blood</>.",
-    },
-    Aura {
-        keys: &["demonic mutation"],
-        needs_detect_magic: true,
-        text: "Two <red>large red horns</> sprout from {S} head.",
-    },
-    Aura {
-        keys: &["dark presence"],
-        needs_detect_magic: true,
-        text: "You sense a <dim>dark presence</> within {M}.",
-    },
-    Aura {
-        keys: &["dragons health", "dragon's health"],
-        needs_detect_magic: true,
-        text: "The power of <magenta>dragon's blood</> fills {M}!",
-    },
-    Aura {
-        keys: &[
-            "lesser endurance",
-            "endurance",
-            "greater endurance",
-            "vitality",
-            "greater vitality",
-        ],
-        needs_detect_magic: true,
-        text: "{^S} health appears to be bolstered by magical power.",
-    },
-    Aura {
-        keys: &["chill touch"],
-        needs_detect_magic: true,
-        text: "A <cyan>weakening chill</> circulates in {S} veins.",
-    },
-    Aura {
-        keys: &["clarity"],
-        needs_detect_magic: true,
-        text: "A <b:yellow>clarity</> of mind surrounds {M}.",
-    },
-    Aura {
-        keys: &["minor globe"],
-        needs_detect_magic: true,
-        text: "<red>{^S} body is encased in a shimmering globe!</>",
-    },
-    // Visible to everyone.
-    Aura {
-        keys: &["stone skin", "stoneskin"],
-        needs_detect_magic: false,
-        text: "<dim>{^S} body seems to be made of stone!</>",
-    },
-    Aura {
-        keys: &["barkskin"],
-        needs_detect_magic: false,
-        text: "<yellow>{^S} skin is thick, brown, and wrinkly.</>",
-    },
-    Aura {
-        keys: &["bone armor"],
-        needs_detect_magic: false,
-        text: "<white>Heavy bony plates cover {S} body.</>",
-    },
-    Aura {
-        keys: &["demonskin"],
-        needs_detect_magic: false,
-        text: "<red>{^S} skin is shiny, smooth, and <b:red>very red</>.</>",
-    },
-    Aura {
-        keys: &["gaias cloak", "gaia's cloak"],
-        needs_detect_magic: false,
-        text: "<green>A whirlwind of leaves and <yellow>sticks</> whips around {S} body.</>",
-    },
-    Aura {
-        keys: &["ice armor"],
-        needs_detect_magic: false,
-        text: "A layer of <blue>solid ice</> covers {M} entirely.",
-    },
-    Aura {
-        keys: &["mirage"],
-        needs_detect_magic: false,
-        text: "<white>{^S} image <red>wavers</> and <dim>shimmers</> and is somewhat indistinct.</>",
-    },
-    Aura {
-        keys: &["blind", "blindness"],
-        needs_detect_magic: false,
-        text: "{^S} <dim>dull</> eyes suggest {E} is blind!",
-    },
-    Aura {
-        keys: &["fireshield"],
-        needs_detect_magic: false,
-        text: "<b:red>{^S} body is encased in fire!</>",
-    },
-    Aura {
-        keys: &["coldshield"],
-        needs_detect_magic: false,
-        text: "<b:blue>{^S} body is encased in jagged ice!</>",
-    },
-    Aura {
-        keys: &["major globe"],
-        needs_detect_magic: false,
-        text: "<b:red>{^S} body is encased in shimmering globe of force!</>",
-    },
-    Aura {
-        keys: &["entangle"],
-        needs_detect_magic: false,
-        text: "<green>{^E} is entwined by a tangled mass of vines.</>",
-    },
-    Aura {
-        keys: &["paralyzed", "minor paralysis", "major paralysis"],
-        needs_detect_magic: false,
-        text: "<cyan>{^E} is completely still, and shows no awareness of {S} surroundings.</>",
-    },
-    Aura {
-        keys: &["web"],
-        needs_detect_magic: false,
-        text: "<green>{^E} is tangled in glowing <b:yellow>webs</>!</>",
-    },
-    Aura {
-        keys: &["wings of hell"],
-        needs_detect_magic: false,
-        text: "<b:red>Huge leathery <dim>bat-like</> wings sprout from {S} back.</>",
-    },
-    Aura {
-        keys: &["wings of heaven"],
-        needs_detect_magic: false,
-        text: "<b:white>{^E} has a pair of beautiful bright white wings.</>",
-    },
-    Aura {
-        keys: &["magic torch"],
-        needs_detect_magic: false,
-        text: "{^E} is being followed by a <red>bright glowing light</>.",
-    },
-    Aura {
-        keys: &["circle of light"],
-        needs_detect_magic: false,
-        text: "<b:white>A circle of light floats over {S} head.</>",
-    },
-    Aura {
-        keys: &["on fire", "burning"],
-        needs_detect_magic: false,
-        text: "<b:red>{^E} is on FIRE!</>",
-    },
-];
+use mud_world::{
+    AppliedTo, CombatStats, EffectAuraCatalog, EffectInstance, MobPrototypes, Profile, WorldKey,
+};
 
 fn normalize(label: &str) -> String {
     label.replace('_', " ").to_ascii_lowercase()
@@ -247,35 +82,33 @@ pub(super) fn aura_lines(world: &mut World, viewer: Entity, target: Entity) -> S
         .any(|l| l == "detect magic" || l == "sphere of divination")
         || crate::commands::player_can_see_in_dark(world, viewer);
     let (he, his, him) = pronouns(&target_gender(world, target));
+    let alignment = world.get::<CombatStats>(target).map_or(0, |s| s.alignment);
+    let Some(catalog) = world.get_resource::<EffectAuraCatalog>() else {
+        return String::new();
+    };
     let mut out = String::new();
-    let mut dragon = false;
-    for aura in AURAS {
+    let mut shown_groups: Vec<&str> = Vec::new();
+    for aura in &catalog.auras {
         if aura.needs_detect_magic && !sees_magic {
             continue;
         }
         if !aura.keys.iter().any(|k| labels.iter().any(|l| l == k)) {
             continue;
         }
-        // Dragon's health supersedes the plain endurance line (legacy else-if).
-        if aura.keys.contains(&"dragons health") {
-            dragon = true;
-        } else if aura.keys.contains(&"endurance") && dragon {
+        if aura.min_alignment.is_some_and(|min| alignment < min)
+            || aura.max_alignment.is_some_and(|max| alignment > max)
+        {
             continue;
         }
-        out.push_str(&render(aura.text, he, his, him));
-        out.push_str("\r\n");
-    }
-    // Sanctuary's aura depends on the bearer's alignment.
-    if labels.iter().any(|l| l == "sanctuary") {
-        let alignment = world.get::<CombatStats>(target).map_or(0, |s| s.alignment);
-        let line = if alignment <= -350 {
-            "<dim>{^S} body is surrounded by a black aura!</>"
-        } else if alignment >= 350 {
-            "<b:white>{^S} body is surrounded by a white aura!</>"
-        } else {
-            "<b:blue>{^S} body is surrounded by a blue aura!</>"
-        };
-        out.push_str(&render(line, he, his, him));
+        // Only the first matching line of an exclusive group shows
+        // (Dragon's health supersedes plain endurance, as in legacy).
+        if let Some(group) = aura.exclusive_group.as_deref() {
+            if shown_groups.contains(&group) {
+                continue;
+            }
+            shown_groups.push(group);
+        }
+        out.push_str(&render(&aura.text, he, his, him));
         out.push_str("\r\n");
     }
     out

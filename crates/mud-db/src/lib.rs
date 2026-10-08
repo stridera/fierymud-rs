@@ -23,6 +23,7 @@ pub mod consumable_effects;
 pub mod dialogue;
 pub mod discord_config;
 pub mod discord_links;
+pub mod effect_auras;
 pub mod effects;
 pub mod entity_variables;
 pub mod enums;

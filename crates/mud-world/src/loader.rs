@@ -365,6 +365,24 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     }
     world.insert_resource(race_effects);
 
+    // EffectAura: `look`-at-actor aura flavor sentences.
+    let mut effect_auras = crate::resources::EffectAuraCatalog::default();
+    for r in mud_db::effect_auras::list_all(pool).await? {
+        effect_auras.auras.push(crate::resources::EffectAura {
+            keys: r
+                .keys
+                .iter()
+                .map(|k| k.replace('_', " ").to_ascii_lowercase())
+                .collect(),
+            text: r.text,
+            needs_detect_magic: r.needs_detect_magic,
+            exclusive_group: r.exclusive_group,
+            min_alignment: r.min_alignment,
+            max_alignment: r.max_alignment,
+        });
+    }
+    world.insert_resource(effect_auras);
+
     // Pass 4c.6: race defaults + full catalog. `RaceDefaults` carries
     // the narrow size + start-room maps that older callers consult.
     // `RaceCatalog` hydrates the full Race row — stat caps,

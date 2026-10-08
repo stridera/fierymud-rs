@@ -1190,6 +1190,28 @@ pub struct MobDefaultEffectCatalog {
     pub by_key: HashMap<(i32, i32), Vec<MobDefaultEffect>>,
 }
 
+/// One `EffectAura` row: a `look`-at-actor flavor sentence. `keys` are
+/// normalized (lowercase, spaces) effect labels; the text uses `{S}`
+/// his/her/its, `{M}` him/her/it, `{E}` he/she/it and `{^S}` / `{^E}` for the
+/// capitalized forms.
+#[derive(Debug, Clone)]
+pub struct EffectAura {
+    pub keys: Vec<String>,
+    pub text: String,
+    pub needs_detect_magic: bool,
+    /// Rows sharing a group show only the first match.
+    pub exclusive_group: Option<String>,
+    /// Inclusive bearer-alignment bounds.
+    pub min_alignment: Option<i32>,
+    pub max_alignment: Option<i32>,
+}
+
+/// `EffectAura` rows in display order, loaded at boot and read by `look`.
+#[derive(Resource, Default, Debug)]
+pub struct EffectAuraCatalog {
+    pub auras: Vec<EffectAura>,
+}
+
 /// One `RaceEffects` row: a permanent effect every member of the race
 /// carries.
 #[derive(Debug, Clone)]
