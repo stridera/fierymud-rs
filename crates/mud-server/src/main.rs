@@ -20,6 +20,7 @@ mod item_decay;
 mod layout;
 mod login;
 mod memorize;
+mod mob_ai;
 mod prompt;
 mod quest_dialogue;
 mod quest_progress;

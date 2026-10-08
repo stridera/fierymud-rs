@@ -221,6 +221,8 @@ fn helper_joins(familiar: bool, roll: i32) -> (bool, String) {
     if familiar {
         fx.world.entity_mut(p).insert(mud_world::Familiar);
     }
+    // Above level 20, so helpers do more than watch.
+    fx.world.get_mut::<mud_world::Profile>(p).unwrap().level = 50;
     let victim = mob_in(&mut fx, "a hapless cityguard", 0);
     let helper = mob_in(&mut fx, "a loyal deputy", 0);
     fx.world
@@ -246,8 +248,80 @@ fn familiarity_can_make_a_helper_mob_back_off() {
     // Roll of 50 or more: it assists as usual.
     let (joined, seen) = helper_joins(true, 50);
     assert!(joined, "helper joined");
-    assert!(seen.contains("leaps to"), "{seen}");
+    assert!(seen.contains("jumps to the aid of"), "{seen}");
     // Without familiarity the roll never matters.
     let (joined, _) = helper_joins(false, 1);
     assert!(joined, "no Familiar, no back-off");
+}
+
+/// Legacy `mob_assist` scene: a level-`level` player attacks a mob
+/// cityguard (given `guard_flags`, level 50) while a deputy with
+/// `helper_flags` and `helper_alignment` stands by. Returns what the deputy
+/// ended up fighting, plus the player and the guard.
+fn assist_scene(
+    level: i32,
+    helper_flags: &[mud_db::enums::MobBehavior],
+    guard_flags: &[mud_db::enums::MobBehavior],
+    helper_alignment: i32,
+    player_alignment: i32,
+) -> (Option<Entity>, Entity, Entity) {
+    let (mut fx, p, _rx) = caster_with_flag_spell("familiarity");
+    fx.world.get_mut::<mud_world::Profile>(p).unwrap().level = level;
+    fx.world.get_mut::<CombatStats>(p).unwrap().alignment = player_alignment;
+    let guard = mob_in(&mut fx, "a hapless cityguard", 0);
+    fx.world.entity_mut(guard).insert((
+        mud_world::MobBehaviors(guard_flags.to_vec()),
+        mud_world::Profile {
+            level: 50,
+            class_id: None,
+            race: "human".into(),
+            experience: 0,
+            gender: "male".into(),
+        },
+    ));
+    let deputy = mob_in(&mut fx, "a loyal deputy", helper_alignment);
+    fx.world
+        .entity_mut(deputy)
+        .insert(mud_world::MobBehaviors(helper_flags.to_vec()));
+    let room = fx.a;
+    super::mob_helpers_engage(&mut fx.world, guard, p, room);
+    let fighting = fx.world.get::<mud_world::Fighting>(deputy).map(|f| f.0);
+    (fighting, p, guard)
+}
+
+#[test]
+fn helpers_only_watch_a_low_level_target() {
+    use mud_db::enums::MobBehavior::Helper;
+    // Level 20 or less: watch only (legacy `GET_LEVEL(FIGHTING(vict)) <= 20`).
+    let (fighting, ..) = assist_scene(20, &[Helper], &[], 0, 0);
+    assert_eq!(fighting, None, "level 20 target is only watched");
+    let (fighting, p, _) = assist_scene(21, &[Helper], &[], 0, 0);
+    assert_eq!(fighting, Some(p), "level 21 target is fought");
+}
+
+#[test]
+fn assist_flags_and_will_assist_rules() {
+    use mud_db::enums::MobBehavior::{Helper, Peaceful, Peacekeeper, Protector};
+    // MOB_ASSISTER excludes PEACEFUL mobs; a bare mob never joins.
+    assert_eq!(assist_scene(50, &[Helper, Peaceful], &[], 0, 0).0, None);
+    assert_eq!(assist_scene(50, &[], &[], 0, 0).0, None);
+    // A helper backs any mob.
+    let (fighting, p, _) = assist_scene(50, &[Helper], &[], 0, 0);
+    assert_eq!(fighting, Some(p));
+    // A protector backs the player against a plain mob (level 50 foe) ...
+    let (fighting, _, guard) = assist_scene(50, &[Protector], &[], 0, 0);
+    assert_eq!(fighting, Some(guard), "protector defends the player");
+    // ... but against a protector or peacekeeper it sides with them, never
+    // with the player.
+    let (fighting, p, _) = assist_scene(50, &[Protector], &[Protector], 0, 0);
+    assert_eq!(fighting, Some(p), "protector backs the other protector");
+    let (fighting, p, _) = assist_scene(50, &[Protector], &[Peacekeeper], 0, 0);
+    assert_eq!(fighting, Some(p), "protector backs the peacekeeper");
+    // A peacekeeper backs a protector, but not a plain mob ...
+    let (fighting, p, _) = assist_scene(50, &[Peacekeeper], &[Protector], 0, 0);
+    assert_eq!(fighting, Some(p), "peacekeeper backs a protector");
+    assert_eq!(assist_scene(50, &[Peacekeeper], &[], 0, 0).0, None);
+    // ... unless the foe's alignment is more than 1350 away from its own.
+    let (fighting, p, _) = assist_scene(50, &[Peacekeeper], &[], 1000, -1000);
+    assert_eq!(fighting, Some(p), "peacekeeper vs a badly-aligned foe");
 }

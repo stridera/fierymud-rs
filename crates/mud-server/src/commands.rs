@@ -21309,12 +21309,167 @@ fn familiarity_stops_assist(world: &World, target: Entity, ally: Entity) -> bool
     roll < 50
 }
 
-/// Mob HELPER behavior: every mob in `room` (other than attacker /
-/// defender) carrying the `Helper` `MobBehavior` auto-engages the
-/// attacker. Mirrors `auto_assist_followers_of` for mobs and
-/// fires from the same call site (`cmd_attack`). Skips mobs already
-/// in combat — they don't switch targets just because someone
-/// nearby is being attacked.
+/// Legacy `MOB_ASSISTER`: a non-peaceful mob flagged helper, protector or
+/// peacekeeper.
+fn is_mob_assister(behaviors: &mud_world::MobBehaviors) -> bool {
+    use mud_db::enums::MobBehavior;
+    !behaviors.has(MobBehavior::Peaceful)
+        && (behaviors.has(MobBehavior::Helper)
+            || behaviors.has(MobBehavior::Protector)
+            || behaviors.has(MobBehavior::Peacekeeper))
+}
+
+/// A player, or a mob that merely looks like one (legacy
+/// `!IS_NPC(ch) || MOB_PLAYER_PHANTASM`).
+fn is_player_like(world: &World, e: Entity) -> bool {
+    world.get::<Player>(e).is_some()
+        || world
+            .get::<mud_world::MobTraits>(e)
+            .is_some_and(|t| t.has(mud_db::enums::MobTrait::PlayerPhantasm))
+}
+
+fn mob_has(world: &World, e: Entity, flag: mud_db::enums::MobBehavior) -> bool {
+    world
+        .get::<mud_world::MobBehaviors>(e)
+        .is_some_and(|b| b.has(flag))
+}
+
+/// Legacy `will_assist(ch, vict)` for `vict` fighting `target` in the
+/// helper's room (the caller has established that, that `ch` is not
+/// fighting and that `ch` is neither of the two).
+fn will_assist(world: &World, ch: Entity, vict: Entity, target: Entity) -> bool {
+    use mud_db::enums::MobBehavior::{Helper, Peacekeeper, Protector};
+    // Vict is a player (or appears to be): only a protector helps, and
+    // not against a protector, a peacekeeper or another player.
+    if is_player_like(world, vict) {
+        return mob_has(world, ch, Protector)
+            && !mob_has(world, target, Protector)
+            && !mob_has(world, target, Peacekeeper)
+            && !is_player_like(world, target);
+    }
+    // Vict is a mobile.
+    if mob_has(world, ch, Peacekeeper) || mob_has(world, ch, Protector) {
+        if mob_has(world, target, Peacekeeper) || mob_has(world, target, Protector) {
+            return false;
+        }
+        if mob_has(world, vict, Peacekeeper) || mob_has(world, vict, Protector) {
+            return true;
+        }
+        let alignment = |e: Entity| world.get::<CombatStats>(e).map_or(0, |c| c.alignment);
+        if mob_has(world, ch, Peacekeeper) && (alignment(ch) - alignment(target)).abs() > 1350 {
+            return true;
+        }
+    }
+    mob_has(world, ch, Helper)
+}
+
+/// Legacy `act(msg, ..., TO_ROOM)` with `$N` = `subject`: everyone in the
+/// room but `actor` sees `others_line`; `subject` (if a player) sees
+/// `subject_line` instead.
+fn act_room_with_subject(
+    world: &mut World,
+    room: Entity,
+    actor: Entity,
+    subject: Entity,
+    subject_line: &str,
+    others_line: &str,
+) {
+    send_rendered(world, subject, subject_line);
+    broadcast_room_except_rendered(world, room, &[actor, subject], others_line);
+}
+
+/// Legacy `mob_assist` for one helper in `room`, run against the two
+/// fighters `(vict, target)` pairs (each fights the other). The first
+/// ally it will assist whose opponent is above level 20 gets help,
+/// unless the opponent is under familiarity and the roll sends the helper
+/// away confused. Opponents of level 20 or less are only watched.
+fn mob_assist(world: &mut World, helper: Entity, room: Entity, pairs: [(Entity, Entity); 2]) {
+    let helper_name = name_of(world, helper);
+    let cap_helper = cap_sentence_start(&helper_name);
+    let mut watched: Option<(Entity, Entity)> = None;
+    for (vict, target) in pairs {
+        if !will_assist(world, helper, vict, target) {
+            continue;
+        }
+        if mud_world::effective_level(world, target) <= 20 {
+            watched = Some((vict, target));
+        } else if world.get::<mud_world::Familiar>(target).is_some()
+            && familiarity_stops_assist(world, target, vict)
+        {
+            let target_name = name_of(world, target);
+            act_room_with_subject(
+                world,
+                room,
+                helper,
+                target,
+                &format!(
+                    "{cap_helper} moves to join the fight, but gets a good look at you and stops, confused.\r\n"
+                ),
+                &format!(
+                    "{cap_helper} moves to join the fight, but gets a good look at {target_name} and stops, confused.\r\n"
+                ),
+            );
+            return;
+        } else {
+            let vict_name = name_of(world, vict);
+            act_room_with_subject(
+                world,
+                room,
+                helper,
+                vict,
+                &format!("{cap_helper} jumps to the aid of you!\r\n"),
+                &format!("{cap_helper} jumps to the aid of {vict_name}!\r\n"),
+            );
+            try_insert(world, helper, Fighting(target));
+            return;
+        }
+    }
+    if let Some((_, target)) = watched {
+        match rand::random_range(1..=10) {
+            1 => broadcast_room_except_rendered(
+                world,
+                room,
+                &[helper],
+                &format!("{cap_helper} watches the battle in amusement.\r\n"),
+            ),
+            2 => {
+                let he = match crate::flight::possessive(world, helper) {
+                    "his" => "he",
+                    "her" => "she",
+                    _ => "it",
+                };
+                broadcast_room_except_rendered(
+                    world,
+                    room,
+                    &[helper],
+                    &format!("{cap_helper} chuckles as {he} watches the fight.\r\n"),
+                );
+            }
+            3 => {
+                let target_name = name_of(world, target);
+                act_room_with_subject(
+                    world,
+                    room,
+                    helper,
+                    target,
+                    &format!("{cap_helper} takes note of your battle tactics.\r\n"),
+                    &format!("{cap_helper} takes note of {target_name}'s battle tactics.\r\n"),
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Mob assist (legacy `mob_assist` / `will_assist`): when `attacker`
+/// attacks `defender`, every mob in `room` flagged helper, protector or
+/// peacekeeper (and not peaceful) that is free to act and not already
+/// fighting decides whether to join, per `will_assist`: helpers back any
+/// mob, protectors back players (and protectors / peacekeepers) against
+/// non-protectors, peacekeepers back protectors and attack badly-aligned
+/// foes. A foe of level 20 or less is only watched. Fires from the same
+/// call site as `auto_assist_followers_of` (`cmd_attack`); a
+/// `PeacefulRoom` blocks it.
 pub(crate) fn mob_helpers_engage(
     world: &mut World,
     defender: Entity,
@@ -21342,56 +21497,20 @@ pub(crate) fn mob_helpers_engage(
                     && *e != attacker
                     && l.0 == room
                     && fighting.is_none()
-                    && beh.has(mud_db::enums::MobBehavior::Helper)
+                    && is_mob_assister(beh)
             })
             .map(|(e, _, _, _)| e)
             .collect()
     };
-    if helpers.is_empty() {
-        return;
-    }
-    let defender_name = name_of(world, defender);
-    let attacker_name = name_of(world, attacker);
-    // Legacy `mob_assist`: against a target under `EFF_FAMILIARITY` the
-    // helper may take it for a friend and back off. The roll depends on
-    // the charisma gap between target and the ally being defended.
-    let familiar = world.get::<mud_world::Familiar>(attacker).is_some();
-    let backs_off = familiar && familiarity_stops_assist(world, attacker, defender);
     for helper in helpers {
-        if backs_off {
-            let helper_name = name_of(world, helper);
-            send_rendered(
+        if crate::mob_ai::mob_can_act(world, helper) {
+            mob_assist(
                 world,
-                attacker,
-                &format!(
-                    "{helper_name} moves to join the fight, but gets a good look at you and stops, confused.\r\n"
-                ),
-            );
-            broadcast_room_except_rendered(
-                world,
+                helper,
                 room,
-                &[attacker],
-                &format!(
-                    "{helper_name} moves to join the fight, but gets a good look at {attacker_name} and stops, confused.\r\n"
-                ),
+                [(defender, attacker), (attacker, defender)],
             );
-            continue;
         }
-        try_insert(world, helper, Fighting(attacker));
-        let helper_name = name_of(world, helper);
-        send_rendered(
-            world,
-            attacker,
-            &format!("{helper_name} leaps to {defender_name}'s defense!\r\n"),
-        );
-        broadcast_room_except_rendered(
-            world,
-            room,
-            &[attacker],
-            &format!(
-                "{helper_name} leaps to {defender_name}'s defense against {attacker_name}!\r\n"
-            ),
-        );
     }
 }
 

@@ -307,7 +307,7 @@ pub fn apply_object_to_wearer(world: &mut World, item: Entity, wearer: Entity) {
 /// else the row's `strength` (importer data: 3 minor, 6 major; the column
 /// defaults to 1, which is not a circle), else the effect's
 /// `default_params.maxCircle`, else 3.
-fn globe_circle(grant: &ObjectGrantedEffect, default_params: &serde_json::Value) -> i32 {
+pub(crate) fn globe_circle(grant: &ObjectGrantedEffect, default_params: &serde_json::Value) -> i32 {
     let from = |v: &serde_json::Value| {
         v.get("maxCircle")
             .and_then(serde_json::Value::as_i64)

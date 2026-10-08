@@ -10062,7 +10062,7 @@ fn drain_coin_pile(world: &mut World, container: Entity, player: Entity) -> Opti
 /// If `item` is a loose pile of coins (an `Item` carrying a
 /// `CoinPile`, e.g. what a decayed corpse leaves on the floor), add
 /// it to `player`'s `Wealth`, remove the pile, and return the amount.
-fn take_loose_coins(world: &mut World, player: Entity, item: Entity) -> Option<i64> {
+pub(crate) fn take_loose_coins(world: &mut World, player: Entity, item: Entity) -> Option<i64> {
     world.get::<Item>(item)?;
     let amount = world.get::<CoinPile>(item)?.0;
     if amount > 0 {
