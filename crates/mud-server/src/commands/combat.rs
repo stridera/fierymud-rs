@@ -273,11 +273,12 @@ inventory::submit! {
     category: Category::Combat,
     help: Help {
         usage: "roar",
-        summary: "Intimidate every mob in the room with a fear effect.",
-        long: "Costs 8 stamina. Spawns a `fear` EffectInstance on \
-               each mob currently in your room (skipping any \
-               already feared) for 20s. Doesn't damage anyone, \
-               doesn't engage. Players are not targeted.",
+        summary: "Terrify everyone in the room into running.",
+        long: "Costs 8 stamina. Each enemy in the room that fails \
+               its saving throw panics: it flees, trips over its \
+               own feet, or (if asleep) may be jolted awake. Aware \
+               and no-summon mobs, and mobs immune to fear, ignore \
+               it. Group members are not affected.",
     },
     run: cmd_roar,
     }
@@ -2139,10 +2140,8 @@ pub(crate) fn cmd_roar(world: &mut World, player: Entity, _args: &str) {
     // RoomEnemies scope handles per-ability target expansion (every
     // mob in the room minus group members) plus per-target
     // dispatch with the first call carrying the description box and
-    // the rest using `aoe_repeat = true`. Already-feared targets
-    // get re-applied — `fear` effect-type stacks duration which is
-    // the right behavior for a player roaring repeatedly.
-    invoke_ability_aoe(
+    // the rest using `aoe_repeat = true`.
+    let landed = invoke_ability_aoe(
         world,
         player,
         mud_db::abilities::AbilityKind::Skill,
@@ -2151,6 +2150,23 @@ pub(crate) fn cmd_roar(world: &mut World, player: Entity, _args: &str) {
         AoeScope::RoomEnemies,
         "There's nothing here to roar at.\r\n",
     );
+    if !landed {
+        return;
+    }
+    // Legacy `do_roar`: the roar itself leaves nothing behind; each
+    // victim that fails its saves panics (flees, trips or wakes).
+    let Some(room) = world.get::<Located>(player).map(|l| l.0) else {
+        return;
+    };
+    let victims: Vec<Entity> =
+        super::aoe_targets_in_room(world, player, room, AoeScope::RoomEnemies)
+            .into_iter()
+            .map(|(e, _)| e)
+            .filter(|t| super::attack_ok::attack_ok(world, player, *t, false))
+            .collect();
+    for victim in victims {
+        crate::fear::roar_target(world, player, victim, crate::fear::RoarRolls::random());
+    }
 }
 pub(crate) fn cmd_rend(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "rend") {

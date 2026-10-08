@@ -15,7 +15,7 @@ pub use components::{
     Camping, CastTarget, Casting, CharacterAchievements, Charges, ClanMembership, ClientWidth,
     CoinPile, CombatStats, Contents, Cooldowns, CoreStats, Corpse, CorpseDecay, CorpseOriginLevel,
     DeathTrap, Description, DetectInvis, Drunkenness, EffectInstance, EffectSource, Empowered,
-    EntryRestriction, EquippedSlot, ExamineText, ExitData, Exits, Fighting, Flying, Focus,
+    EntryRestriction, EquippedSlot, ExamineText, ExitData, Exits, Feared, Fighting, Flying, Focus,
     Follower, FromMobReset, FromObjectReset, Frozen, Ghost, GodZone, GrantedByItem, GroupInvite,
     Guarding, GuildhallRoom, Haste, Health, HouseExitEntry, HouseGuestEntry, HouseItem,
     HouseItemEntry, HouseRoom, HouseRoomEntry, HouseSummary, Hunger, Identified, IgnoreList,

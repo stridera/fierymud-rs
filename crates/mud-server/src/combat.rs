@@ -376,8 +376,8 @@ pub(crate) fn remember_attacker(world: &mut World, mob: Entity, attacker: Entity
 /// No-op if the room has no open exits — the swing path falls
 /// through and the mob takes the next hit normally. Drops the
 /// mob's `Fighting` so attackers will auto-disengage on the room
-/// mismatch in the next combat tick.
-pub(crate) fn mob_flee(world: &mut World, mob: Entity, from_room: Entity) {
+/// mismatch in the next combat tick. Returns whether the mob moved.
+pub(crate) fn mob_flee(world: &mut World, mob: Entity, from_room: Entity) -> bool {
     let candidates: Vec<(mud_db::enums::Direction, Entity)> = world
         .get::<Exits>(from_room)
         .map(|e| {
@@ -395,7 +395,7 @@ pub(crate) fn mob_flee(world: &mut World, mob: Entity, from_room: Entity) {
     let mut candidates = candidates;
     crate::room_access::retain_admitted(world, &[mob], &mut candidates);
     if candidates.is_empty() {
-        return;
+        return false;
     }
     let pick = rand::random_range(0..candidates.len());
     let (dir, target_room) = candidates[pick];
@@ -418,6 +418,7 @@ pub(crate) fn mob_flee(world: &mut World, mob: Entity, from_room: Entity) {
         &[mob],
         &format!("{mob_capped} arrives, panting, from {arrival_dir}.\r\n"),
     );
+    true
 }
 
 /// One swing's outcome from the d100 roll. Crit and Miss are
@@ -680,7 +681,11 @@ pub fn combat_tick(world: &mut World) {
     // damage loop on the corpse.
     let to_reengage: Vec<(Entity, Entity)> = {
         let mut q =
-            world.query_filtered::<(Entity, &Located, &HateList), (With<Mob>, Without<Fighting>)>();
+            world.query_filtered::<(Entity, &Located, &HateList), (
+                With<Mob>,
+                Without<Fighting>,
+                Without<mud_world::Feared>,
+            )>();
         q.iter(world)
             .filter_map(|(mob, loc, hate)| {
                 hate.0
@@ -717,6 +722,10 @@ pub fn combat_tick(world: &mut World) {
             );
         }
     }
+
+    // Feared mobs try to run instead of swinging; one that can't get
+    // away (no open exit) is cornered and fights on.
+    crate::fear::feared_mobs_flee(world);
 
     // Pre-pass: collect all entities currently affected by `berserk`
     // so the swing snapshot can apply a +50% damage bonus without a

@@ -11,6 +11,7 @@ mod effects;
 mod entity_vars;
 mod equip_apply;
 mod events;
+mod fear;
 mod idle;
 mod item_decay;
 mod layout;

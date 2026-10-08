@@ -17140,6 +17140,33 @@ pub(crate) fn invoke_ability_with(
                 });
             }
             _ => {
+                // Read the effect's `flag` field — that's the schema
+                // field most status-type abilities use to declare
+                // which marker / mechanical hook the runtime should
+                // attach (e.g. `flag: "fly"`, `flag: "hidden"`). Some
+                // spells include override-only flags; others sit on
+                // the effect default. Override wins.
+                let flag = spec
+                    .override_params
+                    .as_ref()
+                    .and_then(|v| v.get("flag"))
+                    .and_then(serde_json::Value::as_str)
+                    .or_else(|| {
+                        spec.default_params
+                            .get("flag")
+                            .and_then(serde_json::Value::as_str)
+                    })
+                    .map(str::to_ascii_lowercase)
+                    .unwrap_or_default();
+                // A mob whose proto lists `fear: 0` in its resistances
+                // (builder-editable) cannot be frightened at all.
+                if crate::fear::is_fear_flag(&flag)
+                    && target_entity != player
+                    && crate::fear::is_fear_immune(world, target_entity)
+                {
+                    applied_msgs.push(format!("{pretty} (immune to fear)"));
+                    continue;
+                }
                 let mut dur_secs = resolve_effect_duration(
                     spec.override_params.as_ref(),
                     Some(&spec.default_params),
@@ -17167,24 +17194,6 @@ pub(crate) fn invoke_ability_with(
                     AppliedTo(target_entity),
                 ));
                 spawn_count += 1;
-                // Read the effect's `flag` field — that's the schema
-                // field most status-type abilities use to declare
-                // which marker / mechanical hook the runtime should
-                // attach (e.g. `flag: "fly"`, `flag: "hidden"`). Some
-                // spells include override-only flags; others sit on
-                // the effect default. Override wins.
-                let flag = spec
-                    .override_params
-                    .as_ref()
-                    .and_then(|v| v.get("flag"))
-                    .and_then(serde_json::Value::as_str)
-                    .or_else(|| {
-                        spec.default_params
-                            .get("flag")
-                            .and_then(serde_json::Value::as_str)
-                    })
-                    .map(str::to_ascii_lowercase)
-                    .unwrap_or_default();
                 // Stealth-flag status effects (HIDE, SNEAK, CONCEAL,
                 // and a few buff spells) install the `Stealth` marker
                 // on the target so existing visibility gates fire. The
@@ -17201,6 +17210,17 @@ pub(crate) fn invoke_ability_with(
                 // when the last backing instance fades. The mapping is
                 // shared with `MobDefaultEffects`.
                 mud_world::mob_effects::install_flag_marker(world, target_entity, &flag);
+                // Fear: the victim panics and flees at once (legacy
+                // `inflict_fear` flee branch, `chant_ivory_symphony`).
+                // Area abilities keep the chant's extra gates.
+                if crate::fear::is_fear_flag(&flag) && target_entity != player {
+                    crate::fear::on_fear_applied(
+                        world,
+                        player,
+                        target_entity,
+                        def.is_area.then_some(formula_ctx.skill),
+                    );
+                }
                 // Empowered-flag status effects (HARNESS) install
                 // the `Empowered` marker. The damage arm in
                 // `invoke_ability_with` checks this on the caster
@@ -20993,6 +21013,7 @@ pub(crate) fn try_engage_remembered_mob(world: &mut World, player: Entity, room:
                     && can_see_player(world, *e, player)
                     && !attack_ok::is_servant(world, *e)
                     && !wimpy_mob_is_scared(world, *e)
+                    && !crate::fear::is_feared(world, *e)
             })
             .map(|(e, _, _)| e)
     };
@@ -21020,12 +21041,13 @@ pub(crate) fn wimpy_mob_is_scared(world: &World, mob: Entity) -> bool {
 /// line never starts one (`mobact.cpp:277`), and a wimpy mob is only
 /// willing to attack a target that is asleep (`is_aggr_to`,
 /// `ai_utils.cpp:513` — `MOB_WIMPY && AWAKE(tch)`), unless it is a
-/// protector or peacekeeper. Non-wimpy mobs are unaffected.
+/// protector or peacekeeper. A feared mob never starts one. Other mobs are
+/// unaffected.
 pub(crate) fn mob_will_start_fight(world: &World, mob: Entity, target: Entity) -> bool {
     use mud_db::enums::MobBehavior;
     // A pet or charmed mob never opens hostilities (not even against
     // its own master): it fights when its master does.
-    if attack_ok::is_servant(world, mob) {
+    if attack_ok::is_servant(world, mob) || crate::fear::is_feared(world, mob) {
         return false;
     }
     let Some(behaviors) = world.get::<mud_world::MobBehaviors>(mob) else {

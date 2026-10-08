@@ -99,6 +99,9 @@ pub fn effects_tick(world: &mut World) {
         return;
     }
 
+    // Drop fear markers whose backing effect expired or was removed.
+    crate::fear::sync_markers(world);
+
     // Pre-pass: fire `on_apply` hooks for any EffectInstance that
     // hasn't been seen yet, then mark it `EffectInstanceApplied`.
     // Spawn sites are too scattered to thread the hook through;

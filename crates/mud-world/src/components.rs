@@ -1441,6 +1441,15 @@ pub struct Sanctuary;
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Haste;
 
+/// Marker: the bearer is under a `feared` status effect (FEAR, HYSTERIA,
+/// DOOM, TERROR, `IVORY_SYMPHONY`). A feared mob does not start or resume
+/// a fight and tries to flee instead of swinging each combat round.
+/// Installed by the spell `status` arm; `fear::sync_markers` (run from
+/// `effects_tick`) drops it once no backing `feared` instance is left,
+/// whether it expired, was dispelled or was cleansed.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Feared;
+
 /// Marker on a Room entity: the room is magically lit (ILLUMINATION,
 /// `MAGIC_TORCH`). `room_is_dark` returns false while the marker is
 /// present; `room_has_light` returns true. Installed by the room-
