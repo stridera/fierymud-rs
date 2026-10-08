@@ -1620,29 +1620,20 @@ pub(crate) struct DamagedBy {
     pub at: std::time::Instant,
 }
 
-/// The Player a damage source is credited to: a Player is itself, a
-/// pet (a mob following a player, charmed or not) is its master.
-/// Anything else (a wild mob) earns no kill credit.
-fn credited_player(world: &World, source: Entity) -> Option<Entity> {
-    if world.get::<Player>(source).is_some() {
-        Some(source)
-    } else {
-        crate::commands::pet_owner(world, source)
-    }
-}
-
-/// Record the Player behind `attacker` (the attacker itself, or a pet's
-/// master) as the most recent damage source of `victim`. Only Players
-/// are credited with kills, so other sources are ignored.
+/// Record `attacker` as the most recent damage source of `victim`.
+/// Only Players are credited with kills (legacy `disburse_kill_exp`
+/// credits the actual attacker, so an ungrouped pet's kill credits
+/// nobody and a pet's hit never displaces a player's credit), so other
+/// sources are ignored.
 pub(crate) fn record_damager(world: &mut World, victim: Entity, attacker: Entity) {
-    let Some(credit) = credited_player(world, attacker) else {
+    if world.get::<Player>(attacker).is_none() {
         return;
-    };
+    }
     try_insert(
         world,
         victim,
         DamagedBy {
-            attacker: credit,
+            attacker,
             at: std::time::Instant::now(),
         },
     );
@@ -1739,7 +1730,8 @@ fn victim_aggro_alignment(world: &mut World, victim: Entity) -> (bool, bool) {
 /// Shift the alignment of everyone credited with killing `victim`,
 /// mirroring legacy `receive_kill_credit` -> `change_alignment`: it runs
 /// for every group member in the killer's room, on mob and player
-/// victims alike, and not in arena rooms. A mob victim flagged
+/// victims alike. It is skipped in arena rooms, for a linkdead player
+/// victim and for an illusory mob. A mob victim flagged
 /// `AGGR_GOOD` looks 100 eviler to a good member (and `AGGR_EVIL` 100
 /// better to an evil one). Only the killer of a player is told about
 /// the shift.
@@ -1751,6 +1743,18 @@ fn apply_kill_alignment(world: &mut World, killer: Entity, victim: Entity) {
         return;
     }
     let victim_is_player = world.get::<Player>(victim).is_some();
+    // Legacy `disburse_kill_exp` returns early for a linkdead player
+    // victim and for an illusory mob: no credit, no alignment shift.
+    let no_credit = if victim_is_player {
+        world.get::<crate::commands::Linkdead>(victim).is_some()
+    } else {
+        world
+            .get::<mud_world::MobTraits>(victim)
+            .is_some_and(|t| t.has(mud_db::enums::MobTrait::Illusion))
+    };
+    if no_credit {
+        return;
+    }
     let victim_alignment = world.get::<CombatStats>(victim).map_or(0, |c| c.alignment);
     let victim_level = world
         .get::<mud_world::Profile>(victim)
@@ -1803,11 +1807,11 @@ fn apply_kill_alignment(world: &mut World, killer: Entity, victim: Entity) {
 }
 
 /// Resolve who gets credit for `victim`'s death: the most recent
-/// recorded damager's Player (recent, still present and in `room`; a
-/// pet's damage is its master's), otherwise a Player, or a pet whose
-/// master is in `room`, currently `Fighting` the victim. Resolved once
-/// per death so XP, coin, loot-claim, autoloot and the alignment shift
-/// all agree on a single killer.
+/// recorded Player damager (recent, still present and in `room`),
+/// otherwise a Player currently `Fighting` the victim. Pets are never
+/// credited (legacy credits the attacker itself). Resolved once per
+/// death so XP, coin, loot-claim, autoloot and the alignment shift all
+/// agree on a single killer.
 fn resolve_killer(world: &mut World, victim: Entity, room: Entity) -> Option<Entity> {
     if let Some(d) = world.get::<DamagedBy>(victim).copied()
         && d.attacker != victim
@@ -1817,25 +1821,10 @@ fn resolve_killer(world: &mut World, victim: Entity, room: Entity) -> Option<Ent
     {
         return Some(d.attacker);
     }
-    let fighters: Vec<Entity> = {
-        let mut q = world.query::<(Entity, &Fighting)>();
-        q.iter(world)
-            .filter(|(e, f)| f.0 == victim && *e != victim)
-            .map(|(e, _)| e)
-            .collect()
-    };
-    fighters
-        .iter()
-        .copied()
-        .find(|e| world.get::<Player>(*e).is_some())
-        .or_else(|| {
-            fighters.iter().find_map(|e| {
-                crate::commands::pet_owner(world, *e).filter(|owner| {
-                    *owner != victim
-                        && world.get::<mud_world::Located>(*owner).map(|l| l.0) == Some(room)
-                })
-            })
-        })
+    let mut q = world.query_filtered::<(Entity, &Fighting), With<Player>>();
+    q.iter(world)
+        .find(|(e, f)| f.0 == victim && *e != victim)
+        .map(|(e, _)| e)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -4880,7 +4869,9 @@ mod tests {
     }
 
     #[test]
-    fn pet_only_kill_credits_the_master() {
+    fn ungrouped_pet_only_kill_credits_nobody() {
+        // Legacy `disburse_kill_exp(pet, victim)`: no XP, coin claim,
+        // autoloot, loot-claim or alignment shift reaches the master.
         let mut world = World::new();
         let room = make_room(&mut world);
         let goblin = credit_goblin(&mut world, room, -800, None);
@@ -4894,9 +4885,9 @@ mod tests {
             ))
             .id();
         let master = credit_player(&mut world, room, "Master", 0);
-        // The master's own settings drive loot: autoloot on, autogold off.
         world.entity_mut(master).insert(mud_world::PlayerFlags(vec![
             mud_db::enums::PlayerFlag::AutoLoot,
+            mud_db::enums::PlayerFlag::AutoGold,
         ]));
         let _pet = credit_pet(&mut world, room, master, goblin);
 
@@ -4906,72 +4897,68 @@ mod tests {
             world.get_entity(goblin).is_err(),
             "the pet killed the goblin"
         );
-        assert!(xp_of(&world, master) > 0, "master gets the kill XP");
-        assert_eq!(
+        assert_eq!(xp_of(&world, master), 0, "no XP");
+        assert!(
+            world.get::<Wealth>(master).is_none_or(|w| w.0 == 0),
+            "no coin"
+        );
+        assert_eq!(alignment_of(&world, master), 0, "no alignment shift");
+        assert_ne!(
             world.get::<Located>(item).map(|l| l.0),
             Some(master),
-            "master's autoloot pulls the item"
+            "no autoloot"
         );
-        assert_eq!(alignment_of(&world, master), 4, "master's alignment shifts");
-        let coin = world
-            .query_filtered::<&mud_world::CoinPile, With<Corpse>>()
+        let (claim_owner, coin) = world
+            .query_filtered::<(Option<&mud_world::LootClaim>, &mud_world::CoinPile), With<Corpse>>()
             .iter(&world)
-            .map(|p| p.0)
-            .next();
-        assert_eq!(coin, Some(75), "no autogold: coin waits on the corpse");
+            .map(|(c, p)| (c.map(|c| c.owner), p.0))
+            .next()
+            .expect("corpse with the unclaimed coin");
+        assert_eq!(claim_owner, None, "no loot claim");
+        assert_eq!(coin, 75, "coin waits on the corpse");
     }
 
     #[test]
-    fn pet_only_kill_pays_the_masters_autogold() {
+    fn pet_damage_is_not_recorded_and_cannot_steal_a_kill() {
         let mut world = World::new();
         let room = make_room(&mut world);
         let goblin = credit_goblin(&mut world, room, 0, None);
-        let master = credit_player(&mut world, room, "Master", 0);
-        world.entity_mut(master).insert(mud_world::PlayerFlags(vec![
-            mud_db::enums::PlayerFlag::AutoGold,
-        ]));
-        let _pet = credit_pet(&mut world, room, master, goblin);
-
-        run_combat_tick(&mut world);
-
-        assert!(world.get_entity(goblin).is_err());
-        assert!(world.get::<Wealth>(master).is_some_and(|w| w.0 > 0));
-    }
-
-    #[test]
-    fn pet_damage_is_recorded_as_the_masters() {
-        let mut world = World::new();
-        let room = make_room(&mut world);
-        let goblin = credit_goblin(&mut world, room, 0, None);
+        let b = credit_player(&mut world, room, "B", 0);
         let master = credit_player(&mut world, room, "Master", 0);
         let pet = world
             .spawn((Mob, Located(room), mud_world::Follower(master)))
             .id();
-        let wild = world.spawn((Mob, Located(room))).id();
 
-        record_damager(&mut world, goblin, wild);
+        record_damager(&mut world, goblin, pet);
         assert!(
             world.get::<DamagedBy>(goblin).is_none(),
-            "wild mobs earn no credit"
+            "pet earns no credit"
         );
+
+        record_damager(&mut world, goblin, b);
+        // The pet's last hit lands after B did the damage.
         record_damager(&mut world, goblin, pet);
-        assert_eq!(world.get::<DamagedBy>(goblin).unwrap().attacker, master);
-        assert_eq!(resolve_killer(&mut world, goblin, room), Some(master));
+        assert_eq!(world.get::<DamagedBy>(goblin).unwrap().attacker, b);
+        assert_eq!(resolve_killer(&mut world, goblin, room), Some(b));
     }
 
     #[test]
-    fn pet_whose_master_left_the_room_credits_nobody() {
+    fn pet_finishing_a_players_kill_leaves_the_credit_with_the_player() {
         let mut world = World::new();
         let room = make_room(&mut world);
-        let elsewhere = make_room(&mut world);
-        let goblin = credit_goblin(&mut world, room, 0, None);
-        let master = credit_player(&mut world, elsewhere, "Master", 0);
+        let goblin = credit_goblin(&mut world, room, -800, None);
+        let b = credit_player(&mut world, room, "B", 0);
+        let master = credit_player(&mut world, room, "Master", 0);
+        record_damager(&mut world, goblin, b);
         let _pet = credit_pet(&mut world, room, master, goblin);
 
         run_combat_tick(&mut world);
 
         assert!(world.get_entity(goblin).is_err());
+        assert!(xp_of(&world, b) > 0, "B keeps the kill");
+        assert_eq!(alignment_of(&world, b), 4);
         assert_eq!(xp_of(&world, master), 0);
+        assert_eq!(alignment_of(&world, master), 0);
     }
 
     #[test]
@@ -5063,7 +5050,7 @@ mod tests {
     }
 
     #[test]
-    fn pvp_kill_by_a_pet_is_the_masters_pvp_kill() {
+    fn pvp_kill_by_a_pet_shifts_nobodys_alignment() {
         let mut world = World::new();
         let room = make_room(&mut world);
         world.insert_resource(TickCount(0));
@@ -5074,29 +5061,62 @@ mod tests {
         });
         let master = credit_player(&mut world, room, "Master", 0);
         let pet = credit_pet(&mut world, room, master, victim);
-        // The pet landed the blow; the damage record names its master.
         record_damager(&mut world, victim, pet);
 
         super::handle_death(&mut world, victim, "Victim", room);
 
-        assert_eq!(alignment_of(&world, master), 4);
+        assert_eq!(alignment_of(&world, master), 0);
     }
 
     #[test]
-    fn pvp_kill_by_a_fighting_pet_without_a_damage_record_credits_the_master() {
-        let mut world = World::new();
-        let room = make_room(&mut world);
-        world.insert_resource(TickCount(0));
-        let victim = spawn_dying_player(&mut world, room, "Victim", 0);
-        world.entity_mut(victim).insert(CombatStats {
-            alignment: 800,
-            ..Default::default()
-        });
-        let master = credit_player(&mut world, room, "Master", 0);
-        let _pet = credit_pet(&mut world, room, master, victim);
+    fn linkdead_player_victim_shifts_no_alignment() {
+        for (linkdead, expected) in [(false, 4), (true, 0)] {
+            let mut world = World::new();
+            let room = make_room(&mut world);
+            world.insert_resource(TickCount(0));
+            let victim = spawn_dying_player(&mut world, room, "Victim", 0);
+            world.entity_mut(victim).insert(CombatStats {
+                alignment: -800,
+                ..Default::default()
+            });
+            if linkdead {
+                world
+                    .entity_mut(victim)
+                    .insert(crate::commands::Linkdead { since_tick: 0 });
+            }
+            let killer = credit_player(&mut world, room, "Killer", 0);
+            world.entity_mut(killer).insert(Fighting(victim));
 
-        super::handle_death(&mut world, victim, "Victim", room);
+            super::handle_death(&mut world, victim, "Victim", room);
 
-        assert_eq!(alignment_of(&world, master), -4);
+            assert_eq!(
+                alignment_of(&world, killer),
+                expected,
+                "linkdead {linkdead}"
+            );
+        }
+    }
+
+    #[test]
+    fn illusory_mob_kill_shifts_no_alignment() {
+        for (illusory, expected) in [(false, 4), (true, 0)] {
+            let mut world = World::new();
+            let room = make_room(&mut world);
+            let goblin = credit_goblin(&mut world, room, -800, None);
+            if illusory {
+                world.entity_mut(goblin).insert(mud_world::MobTraits(vec![
+                    mud_db::enums::MobTrait::Illusion,
+                ]));
+            }
+            let killer = credit_player(&mut world, room, "Killer", 0);
+            world.entity_mut(killer).insert(Fighting(goblin));
+            run_combat_tick(&mut world);
+            assert!(world.get_entity(goblin).is_err());
+            assert_eq!(
+                alignment_of(&world, killer),
+                expected,
+                "illusory {illusory}"
+            );
+        }
     }
 }

@@ -56,7 +56,7 @@ pub(crate) fn is_servant(world: &World, mob: Entity) -> bool {
 /// The player a pet belongs to: any mob following a player, whether it is
 /// charmed or just a shop pet / summoned follower. A pet's attack is judged as
 /// its owner's attack, and an attack on it as an attack on the owner.
-pub(crate) fn pet_owner(world: &World, entity: Entity) -> Option<Entity> {
+pub(super) fn pet_owner(world: &World, entity: Entity) -> Option<Entity> {
     world.get::<Mob>(entity)?;
     let master = world.get::<Follower>(entity).map(|f| f.0)?;
     world.get::<Player>(master).is_some().then_some(master)

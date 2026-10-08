@@ -371,7 +371,7 @@ pub(crate) use admin_reload::shutdown_poll;
 mod admin_world;
 #[path = "commands/attack_ok.rs"]
 mod attack_ok;
-pub(crate) use attack_ok::{is_servant, pet_owner};
+pub(crate) use attack_ok::is_servant;
 #[path = "commands/balance.rs"]
 mod balance;
 #[path = "commands/banish.rs"]
