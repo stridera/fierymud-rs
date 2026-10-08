@@ -293,21 +293,20 @@ pub fn posture_evasion_penalty(p: PostureKind) -> i32 {
     }
 }
 
-/// `Ability.id` for the DODGE skill in the current `fierydev`
-/// import. Hardcoded so the swing path doesn't need to scan the
-/// catalog by name on every hit. Pinned to 288.
-const DODGE_ABILITY_ID: i32 = 288;
-/// `Ability.id` for the PARRY skill. Pinned to 287.
-const PARRY_ABILITY_ID: i32 = 287;
+/// Percent chance (0..=25) that a defender with `prof` proficiency in an
+/// evasion skill (Dodge / Parry) evades one incoming hit: `prof / 50`
+/// clipped to 25. Proficiency is 0..=1000, so a mastered skill gives 20%
+/// and a 100-prof apprentice 2%.
+fn evasion_chance(prof: i32) -> i32 {
+    (prof / 50).min(25)
+}
 
-/// Roll a defender's evasion abilities (Dodge / Parry) against
-/// an incoming hit. Returns the name of the ability that evaded
-/// (`"dodge"` / `"parry"`) when one fires, or None to let the hit
-/// through. Standing-only — a non-standing defender can't reset
-/// their stance to evade. Proficiency 0..=1000+; chance is
-/// `prof / 50` clipped to 25 (so a fully-mastered Dodge gives a
-/// 20% miss-the-swing roll, and a junior 100-prof apprentice
-/// dodges 2%).
+/// Roll a defender's evasion abilities (Dodge / Parry, ids resolved by name
+/// into [`mud_world::CoreAbilities`] at boot) against an incoming hit.
+/// Returns the name of the ability that evaded (`"dodge"` / `"parry"`) when
+/// one fires, or None to let the hit through. Standing-only — a non-standing
+/// defender can't reset their stance to evade. Chance per skill is
+/// [`evasion_chance`]. An ability missing from the catalog never fires.
 fn roll_evasion(world: &World, defender: Entity) -> Option<&'static str> {
     if !matches!(
         world.get::<Posture>(defender).map(|p| p.0),
@@ -315,8 +314,10 @@ fn roll_evasion(world: &World, defender: Entity) -> Option<&'static str> {
     ) {
         return None;
     }
+    let core = world.get_resource::<mud_world::CoreAbilities>()?;
     let known = world.get::<KnownAbilities>(defender)?;
-    for (id, kind) in [(DODGE_ABILITY_ID, "dodge"), (PARRY_ABILITY_ID, "parry")] {
+    for (id, kind) in [(core.dodge, "dodge"), (core.parry, "parry")] {
+        let Some(id) = id else { continue };
         let prof = known
             .entries
             .iter()
@@ -325,8 +326,7 @@ fn roll_evasion(world: &World, defender: Entity) -> Option<&'static str> {
         if prof <= 0 {
             continue;
         }
-        let chance = (prof / 50).min(25);
-        if rand::random_range(0..100) < chance {
+        if rand::random_range(0..100) < evasion_chance(prof) {
             return Some(kind);
         }
     }
@@ -5633,5 +5633,86 @@ mod tests {
                 .count();
             assert_eq!(corpses > 0, expect_corpse, "illusory {illusory}: corpse");
         }
+    }
+
+    // ---- Dodge / Parry resolve by name ----
+
+    /// Roll `trials` evasions and count how many fired `kind`.
+    fn evasions(world: &World, defender: Entity, kind: &str, trials: u32) -> usize {
+        (0..trials)
+            .filter(|_| roll_evasion(world, defender) == Some(kind))
+            .count()
+    }
+
+    fn defender_knowing(world: &mut World, entries: Vec<(i32, i32, bool)>) -> Entity {
+        world.spawn(KnownAbilities { entries }).id()
+    }
+
+    #[test]
+    fn evasion_chance_is_prof_over_fifty_capped() {
+        assert_eq!(evasion_chance(100), 2);
+        assert_eq!(evasion_chance(500), 10);
+        assert_eq!(evasion_chance(1000), 20);
+        assert_eq!(evasion_chance(5000), 25);
+    }
+
+    #[test]
+    fn dodge_proficiency_resolved_by_name_evades() {
+        let mut world = World::new();
+        let core = crate::commands::test_support::install_core_abilities(&mut world);
+        let dodge = core.dodge.expect("Dodge resolves");
+        assert_ne!(dodge, 288, "fixture must not reuse the retired id");
+        let d = defender_knowing(&mut world, vec![(dodge, 1000, true)]);
+        let hits = evasions(&world, d, "dodge", 4000);
+        // 20% of 4000 = 800; wide band keeps this non-flaky.
+        assert!((600..1000).contains(&hits), "dodge fired {hits}/4000");
+        assert_eq!(evasions(&world, d, "parry", 500), 0);
+    }
+
+    #[test]
+    fn parry_proficiency_resolved_by_name_evades() {
+        let mut world = World::new();
+        let core = crate::commands::test_support::install_core_abilities(&mut world);
+        let parry = core.parry.expect("Parry resolves");
+        assert_ne!(parry, 287, "fixture must not reuse the retired id");
+        let d = defender_knowing(&mut world, vec![(parry, 1000, true)]);
+        let hits = evasions(&world, d, "parry", 4000);
+        assert!((600..1000).contains(&hits), "parry fired {hits}/4000");
+        assert_eq!(evasions(&world, d, "dodge", 500), 0);
+    }
+
+    #[test]
+    fn retired_hardcoded_ids_no_longer_evade() {
+        let mut world = World::new();
+        crate::commands::test_support::install_core_abilities(&mut world);
+        // 288 / 287 are Regeneration / Reduce in this catalog.
+        let d = defender_knowing(&mut world, vec![(287, 1000, true), (288, 1000, true)]);
+        assert_eq!(evasions(&world, d, "dodge", 2000), 0);
+        assert_eq!(evasions(&world, d, "parry", 2000), 0);
+    }
+
+    #[test]
+    fn unresolved_or_unlearned_evasion_never_fires() {
+        let mut world = World::new();
+        let d = defender_knowing(&mut world, vec![(108, 1000, true), (260, 1000, true)]);
+        // No CoreAbilities resource at all.
+        assert_eq!(roll_evasion(&world, d), None);
+        // Resource present but names missing from the catalog.
+        world.insert_resource(mud_world::CoreAbilities::default());
+        assert_eq!(evasions(&world, d, "dodge", 2000), 0);
+        assert_eq!(evasions(&world, d, "parry", 2000), 0);
+        // Resolved, but the defender has no proficiency.
+        crate::commands::test_support::install_core_abilities(&mut world);
+        let novice = defender_knowing(&mut world, vec![(108, 0, true)]);
+        assert_eq!(roll_evasion(&world, novice), None);
+    }
+
+    #[test]
+    fn non_standing_defender_cannot_evade() {
+        let mut world = World::new();
+        let core = crate::commands::test_support::install_core_abilities(&mut world);
+        let d = defender_knowing(&mut world, vec![(core.dodge.unwrap(), 1250, true)]);
+        world.entity_mut(d).insert(Posture(PostureKind::Sitting));
+        assert_eq!(evasions(&world, d, "dodge", 1000), 0);
     }
 }

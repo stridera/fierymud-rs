@@ -1029,9 +1029,8 @@ fn mob_switch_skill(world: &World, mob: Entity) -> i32 {
         return 0;
     };
     let Some(ability_id) = world
-        .get_resource::<mud_world::AbilityCatalog>()
-        .and_then(|c| c.by_name.get("switch"))
-        .map(|def| def.id)
+        .get_resource::<mud_world::CoreAbilities>()
+        .and_then(|c| c.switch)
     else {
         return 0;
     };
@@ -1063,14 +1062,14 @@ fn try_switch_opponent(world: &mut World, player: Entity, old: Entity, roll: i32
         mob_switch_skill(world, player)
     } else {
         world
-            .get_resource::<mud_world::AbilityCatalog>()
-            .and_then(|c| c.by_name.get("switch"))
-            .and_then(|def| {
+            .get_resource::<mud_world::CoreAbilities>()
+            .and_then(|c| c.switch)
+            .and_then(|switch| {
                 world
                     .get::<mud_world::KnownAbilities>(player)?
                     .entries
                     .iter()
-                    .find(|(id, _, known)| *id == def.id && *known)
+                    .find(|(id, _, known)| *id == switch && *known)
                     .map(|(_, prof, _)| (prof / 10).clamp(0, 100))
             })
             .unwrap_or(0)
@@ -3406,6 +3405,7 @@ mod attack_while_fighting_tests {
             "switch".to_string(),
             ability_def(SWITCH, "Switch", AbilityKind::Skill),
         );
+        world.insert_resource(mud_world::CoreAbilities::resolve_quiet(&catalog));
         world.insert_resource(catalog);
         world.entity_mut(p).insert(KnownAbilities {
             entries: vec![(SWITCH, proficiency, true)],
@@ -3518,6 +3518,7 @@ mod attack_while_fighting_tests {
             "switch".to_string(),
             ability_def(SWITCH, "Switch", AbilityKind::Skill),
         );
+        world.insert_resource(mud_world::CoreAbilities::resolve_quiet(&catalog));
         world.insert_resource(catalog);
         let mut skills = mud_world::ClassSkillsData::default();
         if let Some(min) = switch_min_level {

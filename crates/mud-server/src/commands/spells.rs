@@ -256,11 +256,19 @@ pub(crate) fn cmd_pick(world: &mut World, player: Entity, args: &str) {
         return;
     }
 
-    // PICK_LOCK ability id 272.
+    // Pick Lock's id is resolved by name into `CoreAbilities`; a catalog
+    // without it leaves the skill unusable.
     let proficiency = world
-        .get::<KnownAbilities>(player)
-        .and_then(|k| k.entries.iter().find(|(id, _, _)| *id == 272).copied())
-        .map(|(_, p, _)| p);
+        .get_resource::<mud_world::CoreAbilities>()
+        .and_then(|c| c.pick_lock)
+        .and_then(|pick| {
+            world
+                .get::<KnownAbilities>(player)?
+                .entries
+                .iter()
+                .find(|(id, _, _)| *id == pick)
+                .map(|(_, p, _)| *p)
+        });
     let Some(proficiency) = proficiency else {
         send_to(world, player, "You don't know how to pick locks.\r\n");
         return;
@@ -581,4 +589,76 @@ pub(crate) fn cmd_perform(world: &mut World, player: Entity, args: &str) {
         mud_db::abilities::AbilityKind::Song,
         "perform",
     );
+}
+
+#[cfg(test)]
+mod pick_tests {
+    use super::*;
+    use crate::commands::test_support::{drain, install_core_abilities, player_in};
+    use mud_db::enums::Direction;
+    use mud_world::{ExitData, Stamina};
+
+    fn locked_north_door(world: &mut World) -> (Entity, Entity) {
+        let far = world.spawn(Exits::default()).id();
+        let mut exits = Exits::default();
+        exits.0.insert(
+            Direction::North,
+            ExitData {
+                to: Some(far),
+                state: ExitState::Locked,
+                key: Some((1, 1)),
+                description: None,
+                keywords: Vec::new(),
+                is_hidden: false,
+                is_pickproof: false,
+                is_bashable: false,
+                hit_points: None,
+            },
+        );
+        let room = world.spawn(exits).id();
+        (room, far)
+    }
+
+    #[test]
+    fn pick_lock_resolved_by_name_opens_the_door() {
+        let mut world = World::new();
+        let core = install_core_abilities(&mut world);
+        let (room, _far) = locked_north_door(&mut world);
+        let (p, mut rx) = player_in(&mut world, room);
+        let pick = core.pick_lock.expect("Pick Lock resolves");
+        // Proficiency 1000 is a 100% chance.
+        world.entity_mut(p).insert((
+            KnownAbilities {
+                entries: vec![(pick, 1000, true)],
+            },
+            Stamina {
+                current: 50,
+                max: 50,
+            },
+        ));
+        cmd_pick(&mut world, p, "north");
+        let out = drain(&mut rx);
+        assert!(!out.contains("don't know how"), "{out}");
+        let state = world.get::<Exits>(room).unwrap().0[&Direction::North].state;
+        assert_eq!(state, ExitState::Closed, "{out}");
+    }
+
+    #[test]
+    fn the_retired_pick_lock_id_does_not_count() {
+        let mut world = World::new();
+        install_core_abilities(&mut world);
+        let (room, _far) = locked_north_door(&mut world);
+        let (p, mut rx) = player_in(&mut world, room);
+        world.entity_mut(p).insert((
+            KnownAbilities {
+                entries: vec![(272, 1000, true)],
+            },
+            Stamina {
+                current: 50,
+                max: 50,
+            },
+        ));
+        cmd_pick(&mut world, p, "north");
+        assert!(drain(&mut rx).contains("don't know how"));
+    }
 }

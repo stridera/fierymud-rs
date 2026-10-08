@@ -457,6 +457,7 @@ async fn cmd_reloadallzones(
 /// Replace the live ability and effect catalogs. Split out so the swap is
 /// testable without a database.
 fn swap_ability_catalogs(world: &mut World, abilities: AbilityCatalog, effects: EffectCatalog) {
+    world.insert_resource(mud_world::CoreAbilities::resolve(&abilities));
     world.insert_resource(abilities);
     world.insert_resource(effects);
 }
@@ -1585,6 +1586,103 @@ mod tests {
         );
         assert!(world.resource::<AbilityCatalog>().by_name.is_empty());
         assert!(world.resource::<EffectCatalog>().by_id.is_empty());
+    }
+
+    #[test]
+    fn swap_ability_catalogs_re_resolves_core_abilities() {
+        let mut world = World::new();
+        let cat = crate::commands::test_support::core_ability_catalog();
+        swap_ability_catalogs(&mut world, cat, EffectCatalog::default());
+        let core = *world.resource::<mud_world::CoreAbilities>();
+        assert_eq!(core.dodge, Some(108));
+        assert_eq!(core.parry, Some(260));
+        assert_eq!(core.safefall, Some(302));
+        assert_eq!(core.pick_lock, Some(266));
+        assert_eq!(core.switch, Some(359));
+        assert!(core.missing().is_empty());
+        // Reloading a catalog that lost the names turns the features off.
+        swap_ability_catalogs(
+            &mut world,
+            AbilityCatalog::default(),
+            EffectCatalog::default(),
+        );
+        assert_eq!(
+            *world.resource::<mud_world::CoreAbilities>(),
+            mud_world::CoreAbilities::default()
+        );
+    }
+
+    #[test]
+    fn core_abilities_match_names_case_insensitively() {
+        let mut cat = AbilityCatalog::default();
+        // Production rows carry upper-case, underscored plain names.
+        let def = crate::commands::test_support::ability_def(
+            272,
+            "PICK_LOCK",
+            mud_db::abilities::AbilityKind::Skill,
+        );
+        cat.by_name.insert("pick_lock".into(), def);
+        let def = crate::commands::test_support::ability_def(
+            7,
+            "dOdGe",
+            mud_db::abilities::AbilityKind::Skill,
+        );
+        cat.by_name.insert("dodge".into(), def);
+        let core = mud_world::CoreAbilities::resolve_quiet(&cat);
+        assert_eq!(core.pick_lock, Some(272));
+        assert_eq!(core.dodge, Some(7));
+        assert_eq!(core.parry, None);
+    }
+
+    /// Writer that appends into a shared buffer for log assertions.
+    #[derive(Clone, Default)]
+    struct LogBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for LogBuf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn boot_with_missing_ability_names_warns_and_does_not_panic() {
+        let buf = LogBuf::default();
+        let sink = buf.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || sink.clone())
+            .with_ansi(false)
+            .finish();
+        // Only Dodge and Parry exist; Safefall, Pick Lock and Switch do not.
+        let mut cat = AbilityCatalog::default();
+        for (id, name) in [(108, "Dodge"), (260, "Parry")] {
+            let def = crate::commands::test_support::ability_def(
+                id,
+                name,
+                mud_db::abilities::AbilityKind::Skill,
+            );
+            cat.by_name.insert(name.to_ascii_lowercase(), def);
+        }
+        let core = tracing::subscriber::with_default(subscriber, || {
+            mud_world::CoreAbilities::resolve(&cat)
+        });
+        assert_eq!(core.dodge, Some(108));
+        assert_eq!(core.parry, Some(260));
+        assert_eq!(core.safefall, None);
+        assert_eq!(core.missing(), vec!["Safefall", "Pick Lock", "Switch"]);
+        let log = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        for name in ["Safefall", "Pick Lock", "Switch"] {
+            assert!(log.contains(name), "no warning for {name}: {log}");
+        }
+        assert!(log.contains("WARN"), "{log}");
+        assert!(!log.contains("ability=Dodge"), "{log}");
+        // The runtime features stay inert with a partial resource.
+        let mut world = World::new();
+        world.insert_resource(core);
+        let e = world.spawn_empty().id();
+        assert!(world.get::<mud_world::KnownAbilities>(e).is_none());
     }
 
     #[test]

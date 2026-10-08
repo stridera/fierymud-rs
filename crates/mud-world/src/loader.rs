@@ -788,6 +788,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     world.insert_resource(effect_catalog);
     world.insert_resource(load_mob_default_effect_catalog(pool).await?);
     world.insert_resource(social_registry);
+    world.insert_resource(crate::resources::CoreAbilities::resolve(&ability_catalog));
     world.insert_resource(ability_catalog);
     world.insert_resource(class_catalog);
     world.insert_resource(object_ability_catalog);

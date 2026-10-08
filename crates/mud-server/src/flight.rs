@@ -35,8 +35,6 @@ use crate::commands::{
 const LVL_IMMORT: i32 = 100;
 /// Legacy `MAXIMUM_FLIGHT_LOAD`: `950 * CAN_CARRY_W / 1000`.
 const FLIGHT_LOAD_FRACTION: f64 = 0.95;
-/// `Ability.id` of the monk Safefall skill (legacy `SKILL_SAFEFALL`).
-const SAFEFALL_ABILITY_ID: i32 = 302;
 /// Ticks between steps of a fall (legacy: 2 pulses, 4 under feather fall).
 const FALL_STEP_TICKS: u64 = 2;
 /// A fall that has dropped this many rooms ends where it is. The start-room
@@ -96,12 +94,18 @@ fn has_feather_fall(world: &mut World, e: Entity) -> bool {
         .any(|n| has_effect_named(world, e, n))
 }
 
+/// Knows the monk Safefall skill (legacy `SKILL_SAFEFALL`), whose id is
+/// resolved by name into `CoreAbilities`.
 fn safefall_skill(world: &World, e: Entity) -> bool {
-    world.get::<KnownAbilities>(e).is_some_and(|k| {
-        k.entries
-            .iter()
-            .any(|(id, p, _)| *id == SAFEFALL_ABILITY_ID && *p > 0)
-    })
+    let Some(safefall) = world
+        .get_resource::<mud_world::CoreAbilities>()
+        .and_then(|c| c.safefall)
+    else {
+        return false;
+    };
+    world
+        .get::<KnownAbilities>(e)
+        .is_some_and(|k| k.entries.iter().any(|(id, p, _)| *id == safefall && *p > 0))
 }
 
 fn gender_of(world: &World, e: Entity) -> String {

@@ -99,6 +99,38 @@ pub(crate) fn object_proto(zone: i32, id: i32, kind: ObjectType) -> ObjectProto 
     }
 }
 
+/// Catalog holding the five well-known abilities under dev-like ids that
+/// differ from the old hard-coded ones (Dodge 108, Parry 260, Safefall 302,
+/// Pick Lock 266, Switch 359), plus decoys sitting on the retired ids
+/// (Regeneration 288, Reduce 287).
+pub(crate) fn core_ability_catalog() -> mud_world::AbilityCatalog {
+    let mut catalog = mud_world::AbilityCatalog::default();
+    for (id, name, kind) in [
+        (108, "Dodge", AbilityKind::Skill),
+        (260, "Parry", AbilityKind::Skill),
+        (302, "Safefall", AbilityKind::Skill),
+        (266, "Pick Lock", AbilityKind::Skill),
+        (359, "Switch", AbilityKind::Skill),
+        (288, "Regeneration", AbilityKind::Chant),
+        (287, "Reduce", AbilityKind::Spell),
+    ] {
+        catalog
+            .by_name
+            .insert(name.to_ascii_lowercase(), ability_def(id, name, kind));
+    }
+    catalog
+}
+
+/// Install [`core_ability_catalog`] and the `CoreAbilities` resolved from it,
+/// as boot does. Returns the resolved ids.
+pub(crate) fn install_core_abilities(world: &mut World) -> mud_world::CoreAbilities {
+    let catalog = core_ability_catalog();
+    let core = mud_world::CoreAbilities::resolve_quiet(&catalog);
+    world.insert_resource(core);
+    world.insert_resource(catalog);
+    core
+}
+
 pub(crate) fn ability_def(id: i32, name: &str, kind: AbilityKind) -> AbilityDef {
     AbilityDef {
         id,

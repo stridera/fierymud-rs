@@ -63,6 +63,7 @@ fn fx() -> Fx {
     world.insert_resource(TickCount(0));
     world.insert_resource(ObjectPrototypes::default());
     world.insert_resource(mud_world::WeatherCatalog::default());
+    crate::commands::test_support::install_core_abilities(&mut world);
     let ground = room(&mut world, "The ground", Sector::Field);
     let sky2 = room(&mut world, "Lower sky", Sector::Air);
     let sky1 = room(&mut world, "Upper sky", Sector::Air);
@@ -422,4 +423,50 @@ fn fall_damage_follows_the_legacy_formula() {
     assert_eq!(fall_damage(5, 2, 100, false, true), 0);
     assert_eq!(fall_damage(10, 2, 100, false, true), 40);
     assert_eq!(fall_damage(15, 2, 100, false, true), 90);
+}
+
+#[test]
+fn safefall_resolved_by_name_zeroes_a_short_fall() {
+    let mut f = fx();
+    let safefall = f
+        .world
+        .resource::<mud_world::CoreAbilities>()
+        .safefall
+        .expect("Safefall resolves");
+    f.world.entity_mut(f.p).insert((
+        Flying,
+        mud_world::KnownAbilities {
+            entries: vec![(safefall, 500, true)],
+        },
+    ));
+    let fly = effect(&mut f.world, f.p, "fly", EffectSource::Spell);
+    f.world.despawn(fly);
+    crate::effects::teardown_markers_after_removal(&mut f.world, f.p, "fly");
+    run_falls(&mut f.world);
+    // Two rooms with Safefall: no damage (vs 12 HP without, see above).
+    assert_eq!(f.world.get::<Health>(f.p).unwrap().hp, 100);
+    let out = drain(&mut f.rx);
+    assert!(out.contains("tuck and roll"), "{out}");
+}
+
+#[test]
+fn old_hardcoded_safefall_id_does_not_count() {
+    let mut f = fx();
+    // Any id other than the one resolved from the catalog is not Safefall.
+    let resolved = f
+        .world
+        .resource::<mud_world::CoreAbilities>()
+        .safefall
+        .unwrap();
+    f.world.entity_mut(f.p).insert((
+        Flying,
+        mud_world::KnownAbilities {
+            entries: vec![(resolved + 1, 1000, true)],
+        },
+    ));
+    let fly = effect(&mut f.world, f.p, "fly", EffectSource::Spell);
+    f.world.despawn(fly);
+    crate::effects::teardown_markers_after_removal(&mut f.world, f.p, "fly");
+    run_falls(&mut f.world);
+    assert_eq!(f.world.get::<Health>(f.p).unwrap().hp, 88);
 }

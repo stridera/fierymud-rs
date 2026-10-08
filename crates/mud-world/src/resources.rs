@@ -2175,6 +2175,78 @@ impl AbilityCatalog {
     }
 }
 
+/// Well-known abilities the runtime reaches by role (evasion rolls, fall
+/// damage, lock picking, fight switching), resolved by canonical name from
+/// the [`AbilityCatalog`] at boot (and again on `areload`). Ability ids are
+/// per-database serial values and differ between dev and prod, so none is
+/// ever hard-coded. A role whose name is missing from the catalog is `None`:
+/// a warning is logged once at resolve time and the feature stays off.
+/// `Default` is all-`None`, so a world that never resolves the resource just
+/// has these features disabled.
+#[derive(Resource, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CoreAbilities {
+    pub dodge: Option<i32>,
+    pub parry: Option<i32>,
+    pub safefall: Option<i32>,
+    pub pick_lock: Option<i32>,
+    pub switch: Option<i32>,
+}
+
+impl CoreAbilities {
+    /// Canonical `Ability.plain_name` (matched case-insensitively, `_` and
+    /// space interchangeable) for each role, in the order of the fields.
+    pub const NAMES: [&'static str; 5] = ["Dodge", "Parry", "Safefall", "Pick Lock", "Switch"];
+
+    /// Resolve every role against `catalog`, warning on each missing name.
+    #[must_use]
+    pub fn resolve(catalog: &AbilityCatalog) -> Self {
+        let found = Self::resolve_quiet(catalog);
+        for name in found.missing() {
+            tracing::warn!(
+                ability = name,
+                "core ability missing from the abilities catalog; the feature that depends on it is disabled"
+            );
+        }
+        found
+    }
+
+    /// [`Self::resolve`] without the logging.
+    #[must_use]
+    pub fn resolve_quiet(catalog: &AbilityCatalog) -> Self {
+        let find = |canonical: &str| {
+            let want = canonical.to_ascii_lowercase();
+            catalog
+                .by_name
+                .values()
+                .find(|d| d.plain_name.to_ascii_lowercase().replace('_', " ") == want)
+                .map(|d| d.id)
+        };
+        Self {
+            dodge: find(Self::NAMES[0]),
+            parry: find(Self::NAMES[1]),
+            safefall: find(Self::NAMES[2]),
+            pick_lock: find(Self::NAMES[3]),
+            switch: find(Self::NAMES[4]),
+        }
+    }
+
+    /// Canonical names of the roles that did not resolve.
+    #[must_use]
+    pub fn missing(&self) -> Vec<&'static str> {
+        [
+            self.dodge,
+            self.parry,
+            self.safefall,
+            self.pick_lock,
+            self.switch,
+        ]
+        .iter()
+        .zip(Self::NAMES)
+        .filter_map(|(id, name)| id.is_none().then_some(name))
+        .collect()
+    }
+}
+
 /// One row from the schema's `AbilityComponent` table. The
 /// `object_id` is the legacy zone-less id; runtime carrier-check
 /// matches on `WorldKey.id` regardless of zone, mirroring the
