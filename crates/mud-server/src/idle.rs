@@ -60,7 +60,14 @@ pub fn idle_kick_tick(world: &mut World) {
     let to_kick: Vec<Entity> = {
         let mut q = world.query_filtered::<
             (Entity, Option<&LastInputAt>, Option<&LoggedInAt>, &Account),
-            (With<Player>, With<Online>),
+            // Linkdead characters keep `Online` but have no connection to
+            // kick; `drain_linkdead` retires them, so marking them here
+            // only yields an orphaned marker every check.
+            (
+                With<Player>,
+                With<Online>,
+                Without<crate::commands::Linkdead>,
+            ),
         >();
         q.iter(world)
             // Staff (any rank above Player) never idle out. `Account.role`
@@ -174,5 +181,20 @@ mod tests {
         assert!(world.get::<IdleKickPending>(l100).is_none());
         assert!(world.get::<IdleKickPending>(l105).is_none());
         assert!(world.get::<IdleKickPending>(linked).is_none());
+    }
+
+    #[test]
+    fn linkdead_characters_are_not_marked_for_idle_kick() {
+        let mut world = World::new();
+        world.insert_resource(TickCount(IDLE_CHECK_PERIOD_TICKS));
+        world.insert_resource(mud_world::RuntimeConfig::default());
+        let connected = spawn_idle(&mut world, 10, UserRole::Player);
+        let linkdead = spawn_idle(&mut world, 10, UserRole::Player);
+        world
+            .entity_mut(linkdead)
+            .insert(crate::commands::Linkdead { since_tick: 0 });
+        idle_kick_tick(&mut world);
+        assert!(world.get::<IdleKickPending>(connected).is_some());
+        assert!(world.get::<IdleKickPending>(linkdead).is_none());
     }
 }
