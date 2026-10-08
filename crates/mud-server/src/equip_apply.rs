@@ -31,7 +31,7 @@
 //! `fierylib/scripts/migrate_object_affects.py`.
 
 use bevy_ecs::prelude::*;
-use mud_world::mob_effects::{WORN_ITEM_EFFECT_SOURCE, is_display_only_flag, row_flags};
+use mud_world::mob_effects::{WORN_ITEM_EFFECT_SOURCE, is_instance_only_flag, row_flags};
 use mud_world::{
     AppliedTo, CoreStats, EffectInstance, EffectSource, EquippedSlot, GrantedByItem, Health,
     ObjectGrantedEffect, ObjectPrototypes, Resistances, Stamina, WorldKey,
@@ -255,7 +255,7 @@ pub fn apply_object_to_wearer(world: &mut World, item: Entity, wearer: Entity) {
         }
         for flag in flags {
             let marked = mud_world::mob_effects::install_flag_marker(world, wearer, &flag);
-            if !marked && !is_display_only_flag(&flag) {
+            if !marked && !is_instance_only_flag(&flag) {
                 tracing::debug!(
                     proto_zone = proto.zone_id,
                     proto_id = proto.id,
@@ -268,7 +268,7 @@ pub fn apply_object_to_wearer(world: &mut World, item: Entity, wearer: Entity) {
                 .spawn((
                     EffectInstance {
                         kind: def.id,
-                        name: flag,
+                        name: flag.clone(),
                         strength: grant.strength.max(1),
                         // Permanent: lasts as long as the item is worn.
                         // Unequip despawns it; effects_tick never
@@ -281,6 +281,7 @@ pub fn apply_object_to_wearer(world: &mut World, item: Entity, wearer: Entity) {
                     GrantedByItem(item),
                 ))
                 .id();
+            mud_world::mob_effects::tag_flag_instance(world, entity, &flag);
             spawned_effect_entities.push(entity);
         }
     }
@@ -433,7 +434,7 @@ pub fn describe_item_grants(world: &World, proto: &mud_world::ObjectProto) -> It
         } else if def.effect_type == "status" {
             for flag in row_flags(&g.modifier_data, &def.default_params) {
                 if mud_world::mob_effects::install_flag_marker_known(&flag)
-                    || is_display_only_flag(&flag)
+                    || is_instance_only_flag(&flag)
                 {
                     out.provides.push(format!("{}{at}", flag.replace('_', " ")));
                 }

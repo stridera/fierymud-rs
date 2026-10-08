@@ -7,43 +7,242 @@ use bevy_ecs::prelude::*;
 use crate::components::{AppliedTo, EffectInstance, EffectSource};
 use crate::resources::{EffectCatalog, MobDefaultEffectCatalog, RaceEffectCatalog};
 
+/// One row of the effect-flag -> marker-component table. Every path that
+/// grants a status flag (spell `status` arm, `MobDefaultEffects`,
+/// `RaceEffects`, worn `ObjectEffects`, login restore of a saved spell)
+/// installs through [`install_flag_marker`], and every teardown (expiry,
+/// dispel, unequip) removes through [`teardown_flag_marker`], so the
+/// table below is the one place a flag's component is named.
+struct FlagMarker {
+    /// Effect flags (lowercase) that all stand for this one component.
+    flags: &'static [&'static str],
+    insert: fn(&mut EntityWorldMut),
+    /// How the component comes off once no instance backs it. `None`:
+    /// the teardown has side effects of its own (the "fades back into
+    /// view" broadcast) and lives with the caller.
+    remove: Option<fn(&mut EntityWorldMut)>,
+    /// Backing that is not an instance named after one of `flags`
+    /// (a spell-granted instance carrying a companion tag).
+    tag_backed: Option<fn(&mut World, Entity) -> bool>,
+}
+
+fn protect_evil_tag_backed(world: &mut World, target: Entity) -> bool {
+    alignment_tag_backed(
+        world,
+        target,
+        crate::components::AlignmentProtectionTag::Evil,
+    )
+}
+
+fn protect_good_tag_backed(world: &mut World, target: Entity) -> bool {
+    alignment_tag_backed(
+        world,
+        target,
+        crate::components::AlignmentProtectionTag::Good,
+    )
+}
+
+/// A `PROT_FROM_EVIL` / `PROT_FROM_GOOD` spell instance is named
+/// `resistance` and tagged with the alignment it guards against.
+fn alignment_tag_backed(
+    world: &mut World,
+    target: Entity,
+    want: crate::components::AlignmentProtectionTag,
+) -> bool {
+    use crate::components::AlignmentProtectionTag as Tag;
+    let mut q = world.query::<(&AppliedTo, &Tag)>();
+    q.iter(world).any(|(a, t)| {
+        a.0 == target && matches!((*t, want), (Tag::Evil, Tag::Evil) | (Tag::Good, Tag::Good))
+    })
+}
+
+/// An `InvisibleSource`-tagged instance (`INVISIBLE` / `MASS_INVIS`, a
+/// permanent `invisible` flag) is what keeps `Invisible` on.
+fn invisible_tag_backed(world: &mut World, target: Entity) -> bool {
+    let mut q = world.query_filtered::<&AppliedTo, With<crate::components::InvisibleSource>>();
+    q.iter(world).any(|a| a.0 == target)
+}
+
+const FLAG_MARKERS: &[FlagMarker] = &[
+    FlagMarker {
+        flags: &["hidden", "sneak", "concealment"],
+        insert: |e| {
+            e.insert(crate::components::Stealth);
+        },
+        remove: Some(|e| {
+            e.remove::<crate::components::Stealth>();
+        }),
+        tag_backed: None,
+    },
+    FlagMarker {
+        flags: &["fly"],
+        insert: |e| {
+            e.insert(crate::components::Flying);
+        },
+        remove: Some(|e| {
+            e.remove::<crate::components::Flying>();
+        }),
+        tag_backed: None,
+    },
+    FlagMarker {
+        flags: &["bless"],
+        insert: |e| {
+            e.insert(crate::components::Bless);
+        },
+        remove: Some(|e| {
+            e.remove::<crate::components::Bless>();
+        }),
+        tag_backed: None,
+    },
+    FlagMarker {
+        flags: &["sanctuary"],
+        insert: |e| {
+            e.insert(crate::components::Sanctuary);
+        },
+        remove: Some(|e| {
+            e.remove::<crate::components::Sanctuary>();
+        }),
+        tag_backed: None,
+    },
+    FlagMarker {
+        flags: &["detect_invisible"],
+        insert: |e| {
+            e.insert(crate::components::DetectInvis);
+        },
+        remove: Some(|e| {
+            e.remove::<crate::components::DetectInvis>();
+        }),
+        tag_backed: None,
+    },
+    FlagMarker {
+        flags: &["haste"],
+        insert: |e| {
+            e.insert(crate::components::Haste);
+        },
+        remove: Some(|e| {
+            e.remove::<crate::components::Haste>();
+        }),
+        tag_backed: None,
+    },
+    FlagMarker {
+        flags: &["protect_evil"],
+        insert: |e| {
+            e.insert(crate::components::ProtectFromEvil);
+        },
+        remove: Some(|e| {
+            e.remove::<crate::components::ProtectFromEvil>();
+        }),
+        tag_backed: Some(protect_evil_tag_backed),
+    },
+    FlagMarker {
+        flags: &["protect_good"],
+        insert: |e| {
+            e.insert(crate::components::ProtectFromGood);
+        },
+        remove: Some(|e| {
+            e.remove::<crate::components::ProtectFromGood>();
+        }),
+        tag_backed: Some(protect_good_tag_backed),
+    },
+    // `Invisible` is torn down by the caller (`invisibility_faded`), and
+    // the instance must be tagged `InvisibleSource` ([`tag_flag_instance`])
+    // so `break_invisibility` strips it when the bearer attacks.
+    FlagMarker {
+        flags: &["invisible"],
+        insert: |e| {
+            e.insert(crate::components::Invisible);
+        },
+        remove: None,
+        tag_backed: Some(invisible_tag_backed),
+    },
+];
+
+/// Flags with no marker component whose behaviour reads the
+/// `EffectInstance` itself by name: `detect_magic` (look auras that need
+/// detect magic, the duration colours in `effects`) and
+/// `fireshield` / `coldshield` (their `EffectAura` flavour lines). The
+/// spell path spawns the instance anyway; for mobs, races and worn items
+/// the instance is the whole effect.
+const NAME_BEHAVIOUR_FLAGS: &[&str] = &["detect_magic", "fireshield", "coldshield"];
+
+/// True for a flag whose only runtime behaviour is its named
+/// `EffectInstance` (see [`NAME_BEHAVIOUR_FLAGS`]).
+#[must_use]
+pub fn is_name_behaviour_flag(flag: &str) -> bool {
+    NAME_BEHAVIOUR_FLAGS.contains(&flag)
+}
+
+fn marker_for(flag: &str) -> Option<&'static FlagMarker> {
+    FLAG_MARKERS.iter().find(|m| m.flags.contains(&flag))
+}
+
 /// Install the marker component a `status` effect's `flag` stands for.
 /// Returns true when `flag` maps to a plain marker. Flags that need
-/// extra data (resistance, empowered) are handled by the cast path
-/// itself; flags with no marker component yet (the detect_* family
-/// other than `detect_invisible`, vision, debuffs, elemental shields,
-/// ...) return false.
+/// extra data (resistance, empowered, globe) are handled by the cast
+/// path itself; flags with no marker component (vision and the other
+/// detect_* flags, language, debuffs, ...) return false.
 pub fn install_flag_marker(world: &mut World, target: Entity, flag: &str) -> bool {
+    let Some(marker) = marker_for(flag) else {
+        return false;
+    };
     let Ok(mut em) = world.get_entity_mut(target) else {
         return false;
     };
-    match flag {
-        "hidden" | "sneak" | "concealment" => em.insert(crate::components::Stealth),
-        "fly" => em.insert(crate::components::Flying),
-        "bless" => em.insert(crate::components::Bless),
-        "sanctuary" => em.insert(crate::components::Sanctuary),
-        "detect_invisible" => em.insert(crate::components::DetectInvis),
-        "haste" => em.insert(crate::components::Haste),
-        _ => return false,
-    };
+    (marker.insert)(&mut em);
     true
 }
 
+/// Tag the `EffectInstance` `effect` just spawned for `flag` with any
+/// companion component the flag's behaviour needs. Call it right after
+/// spawning an instance (alongside [`install_flag_marker`]); a no-op for
+/// flags that need none. `invisible` gets `InvisibleSource`: the tag
+/// keeps `Invisible` alive past other effects' expiry and lets
+/// `break_invisibility` strip it when the bearer attacks.
+pub fn tag_flag_instance(world: &mut World, effect: Entity, flag: &str) {
+    if flag == "invisible"
+        && let Ok(mut em) = world.get_entity_mut(effect)
+    {
+        em.insert(crate::components::InvisibleSource);
+    }
+}
+
 /// True when [`install_flag_marker`] has a marker component for `flag`
-/// (kept in step with its match arms).
+/// (kept in step with the table by construction).
 #[must_use]
 pub fn install_flag_marker_known(flag: &str) -> bool {
-    matches!(
-        flag,
-        "hidden"
-            | "sneak"
-            | "concealment"
-            | "fly"
-            | "bless"
-            | "sanctuary"
-            | "detect_invisible"
-            | "haste"
-    )
+    marker_for(flag).is_some()
+}
+
+/// Drop the marker a just-removed instance named `name` backed, unless
+/// another instance (any name sharing the marker, or a tagged spell
+/// instance) still backs it. Shared by expiry, dispel / cleanse and
+/// unequip. Returns true when the component was removed.
+pub fn teardown_flag_marker(world: &mut World, target: Entity, name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    let Some(marker) = marker_for(&name) else {
+        return false;
+    };
+    let Some(remove) = marker.remove else {
+        return false;
+    };
+    let named_backing = {
+        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+        q.iter(world).any(|(eff, applied)| {
+            applied.0 == target
+                && marker
+                    .flags
+                    .iter()
+                    .any(|f| eff.name.eq_ignore_ascii_case(f))
+        })
+    };
+    if named_backing || marker.tag_backed.is_some_and(|b| b(world, target)) {
+        return false;
+    }
+    let Ok(mut em) = world.get_entity_mut(target) else {
+        return false;
+    };
+    remove(&mut em);
+    true
 }
 
 /// The effect flags a `MobDefaultEffects` row carries: the importer's
@@ -88,11 +287,12 @@ pub fn row_flags(
 /// [`install_flag_marker`] the spell `status` arm uses.
 ///
 /// * `invisible` installs `Invisible` and tags the instance
-///   `InvisibleSource`, so `break_invisibility` strips it when the mob
-///   attacks. Legacy `aggro_lose_spells` removes `EFF_INVISIBLE` from
-///   mobs too, innate or not, so this matches legacy: the mob stays
-///   visible until it respawns.
-/// * Flags with no marker component (permanent debuffs such as
+///   `InvisibleSource` ([`tag_flag_instance`]), so `break_invisibility`
+///   strips it when the mob attacks. Legacy `aggro_lose_spells` removes
+///   `EFF_INVISIBLE` from mobs too, innate or not, so this matches
+///   legacy: the mob stays visible until it respawns.
+/// * Flags with neither a marker component nor an instance-read
+///   behaviour ([`is_name_behaviour_flag`]) (permanent debuffs such as
 ///   `blinded` / `poisoned` / `sleeping`, vision and the other detect_*
 ///   flags) are skipped with a debug log and spawn nothing, so no
 ///   source-less poison tick or fight with the mob's position can
@@ -122,13 +322,7 @@ pub fn apply_mob_default_effects(world: &mut World, mob: Entity, proto_key: (i32
             continue;
         };
         for flag in row_flags(&row.modifier_data, &def.default_params) {
-            let invisible = flag == "invisible";
-            let installed = if invisible {
-                world.entity_mut(mob).insert(crate::components::Invisible);
-                true
-            } else {
-                install_flag_marker(world, mob, &flag)
-            };
+            let installed = install_flag_marker(world, mob, &flag) || is_name_behaviour_flag(&flag);
             if !installed {
                 tracing::debug!(
                     zone = proto_key.0,
@@ -138,20 +332,20 @@ pub fn apply_mob_default_effects(world: &mut World, mob: Entity, proto_key: (i32
                 );
                 continue;
             }
-            let mut em = world.spawn((
-                EffectInstance {
-                    kind: def.id,
-                    name: flag,
-                    strength: row.strength.max(1),
-                    remaining_secs: -1,
-                    source: EffectSource::Other("mob_default".to_string()),
-                    ability_id: None,
-                },
-                AppliedTo(mob),
-            ));
-            if invisible {
-                em.insert(crate::components::InvisibleSource);
-            }
+            let effect = world
+                .spawn((
+                    EffectInstance {
+                        kind: def.id,
+                        name: flag.clone(),
+                        strength: row.strength.max(1),
+                        remaining_secs: -1,
+                        source: EffectSource::Other("mob_default".to_string()),
+                        ability_id: None,
+                    },
+                    AppliedTo(mob),
+                ))
+                .id();
+            tag_flag_instance(world, effect, &flag);
         }
     }
 }
@@ -187,25 +381,26 @@ pub fn is_innate_effect(source: &EffectSource) -> bool {
     is_race_effect(source) || is_worn_item_effect(source)
 }
 
-/// True when `flag` is a passive perception flag that has no marker
-/// component yet but is still shown as a permanent effect.
+/// True when `flag` has no marker component but is still carried as a
+/// permanent `EffectInstance` by races and worn items: the passive
+/// perception flags shown for display, and the flags whose behaviour
+/// reads the instance by name ([`is_name_behaviour_flag`]).
 #[must_use]
-pub fn is_display_only_flag(flag: &str) -> bool {
-    DISPLAY_ONLY_FLAGS.contains(&flag)
+pub fn is_instance_only_flag(flag: &str) -> bool {
+    DISPLAY_ONLY_FLAGS.contains(&flag) || is_name_behaviour_flag(flag)
 }
 
-/// Passive perception flags with no marker component yet: a race still
-/// carries them as a permanent, display-only `EffectInstance` so
-/// `effects` / `score` show the innate ("infravision (permanent)").
-/// Anything else without a marker (permanent debuffs such as
-/// `poisoned`) is skipped, as for mobs.
+/// Passive perception flags with no marker component and no behaviour
+/// yet: a race (or worn item) still carries them as a permanent,
+/// display-only `EffectInstance` so `effects` / `score` show the innate
+/// ("infravision (permanent)"). Anything else without a marker
+/// (permanent debuffs such as `poisoned`) is skipped, as for mobs.
 const DISPLAY_ONLY_FLAGS: &[&str] = &[
     "infravision",
     "ultravision",
     "detect_poison",
     "detect_life",
     "detect_align",
-    "detect_magic",
     "detect_hidden",
 ];
 
@@ -264,21 +459,24 @@ pub fn apply_race_effects(world: &mut World, entity: Entity, race: &str) {
                 continue;
             }
             let marked = install_flag_marker(world, entity, &flag);
-            if !marked && !DISPLAY_ONLY_FLAGS.contains(&flag.as_str()) {
+            if !marked && !is_instance_only_flag(&flag) {
                 tracing::debug!(race, flag = %flag, "RaceEffects flag has no marker component; ignored");
                 continue;
             }
-            world.spawn((
-                EffectInstance {
-                    kind: def.id,
-                    name: flag,
-                    strength: row.strength.max(1),
-                    remaining_secs: -1,
-                    source: EffectSource::Other(RACE_EFFECT_SOURCE.to_string()),
-                    ability_id: None,
-                },
-                AppliedTo(entity),
-            ));
+            let effect = world
+                .spawn((
+                    EffectInstance {
+                        kind: def.id,
+                        name: flag.clone(),
+                        strength: row.strength.max(1),
+                        remaining_secs: -1,
+                        source: EffectSource::Other(RACE_EFFECT_SOURCE.to_string()),
+                        ability_id: None,
+                    },
+                    AppliedTo(entity),
+                ))
+                .id();
+            tag_flag_instance(world, effect, &flag);
         }
     }
 }
@@ -287,31 +485,64 @@ pub fn apply_race_effects(world: &mut World, entity: Entity, race: &str) {
 mod tests {
     use super::*;
 
-    /// `install_flag_marker_known` must list exactly the flags
-    /// `install_flag_marker` installs a marker for.
+    /// Every flag the table maps installs its component, and every flag
+    /// it leaves out (no component and no behaviour anywhere) stays
+    /// unmapped.
+    type Has = fn(&World, Entity) -> bool;
+
     #[test]
-    fn known_marker_flags_match_the_installer() {
+    fn marker_table_installs_exactly_the_mapped_flags() {
+        use crate::components::*;
         let mut world = World::new();
+        let mapped: &[(&str, Has)] = &[
+            ("hidden", |w, e| w.get::<Stealth>(e).is_some()),
+            ("sneak", |w, e| w.get::<Stealth>(e).is_some()),
+            ("concealment", |w, e| w.get::<Stealth>(e).is_some()),
+            ("fly", |w, e| w.get::<Flying>(e).is_some()),
+            ("bless", |w, e| w.get::<Bless>(e).is_some()),
+            ("sanctuary", |w, e| w.get::<Sanctuary>(e).is_some()),
+            ("detect_invisible", |w, e| w.get::<DetectInvis>(e).is_some()),
+            ("haste", |w, e| w.get::<Haste>(e).is_some()),
+            ("protect_evil", |w, e| w.get::<ProtectFromEvil>(e).is_some()),
+            ("protect_good", |w, e| w.get::<ProtectFromGood>(e).is_some()),
+            ("invisible", |w, e| w.get::<Invisible>(e).is_some()),
+        ];
+        for (flag, has) in mapped {
+            let target = world.spawn_empty().id();
+            assert!(install_flag_marker(&mut world, target, flag), "{flag}");
+            assert!(install_flag_marker_known(flag), "{flag}");
+            assert!(has(&world, target), "{flag} marker installed");
+        }
         for flag in [
-            "hidden",
-            "sneak",
-            "concealment",
-            "fly",
-            "bless",
-            "sanctuary",
-            "detect_invisible",
-            "haste",
+            "waterwalk",
             "infravision",
+            "detect_life",
+            "detect_hidden",
+            "detect_magic",
+            "detect_align",
+            "blur",
+            "fireshield",
+            "coldshield",
+            "language_fluency",
+            "familiarity",
             "poisoned",
-            "invisible",
+            "blinded",
             "",
         ] {
             let target = world.spawn_empty().id();
-            assert_eq!(
-                install_flag_marker(&mut world, target, flag),
-                install_flag_marker_known(flag),
-                "flag {flag:?}"
-            );
+            assert!(!install_flag_marker(&mut world, target, flag), "{flag:?}");
+            assert!(!install_flag_marker_known(flag), "{flag:?}");
+        }
+    }
+
+    #[test]
+    fn name_behaviour_flags_are_instance_only() {
+        for flag in ["detect_magic", "fireshield", "coldshield"] {
+            assert!(is_name_behaviour_flag(flag) && is_instance_only_flag(flag));
+            assert!(!install_flag_marker_known(flag));
+        }
+        for flag in ["waterwalk", "blur", "language_fluency", "familiarity"] {
+            assert!(!is_instance_only_flag(flag), "{flag} has no behaviour");
         }
     }
 

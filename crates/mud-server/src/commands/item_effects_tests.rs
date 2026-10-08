@@ -860,3 +860,327 @@ fn a_globe_row_reads_its_circle_from_modifier_data_then_strength_then_the_effect
         "effect default_params.maxCircle"
     );
 }
+
+// ---- Marker table: every path that grants a flag installs the same
+// component, and a save round trip keeps what a spell had installed. ----
+
+fn effect_names(world: &mut World, p: Entity) -> Vec<String> {
+    effects_on(world, p).into_iter().map(|(n, _)| n).collect()
+}
+
+#[test]
+fn newly_mapped_marker_flags_install_on_wear_and_clear_on_remove() {
+    type Has = fn(&World, Entity) -> bool;
+    let cases: [(&str, Has); 3] = [
+        ("protect_evil", |w, e| {
+            w.get::<mud_world::ProtectFromEvil>(e).is_some()
+        }),
+        ("protect_good", |w, e| {
+            w.get::<mud_world::ProtectFromGood>(e).is_some()
+        }),
+        ("invisible", |w, e| {
+            w.get::<mud_world::Invisible>(e).is_some()
+        }),
+    ];
+    for (i, (flag, has)) in cases.into_iter().enumerate() {
+        let (mut world, p, mut rx) = setup();
+        let id = 300 + i32::try_from(i).unwrap();
+        ring(&mut world, p, id, "mark", vec![status(&[flag])]);
+        wear(&mut world, p, &mut rx, "mark");
+        assert!(has(&world, p), "{flag}: marker installed on wear");
+        assert_eq!(effect_names(&mut world, p), vec![flag.to_string()]);
+        remove(&mut world, p, &mut rx, "mark");
+        assert!(!has(&world, p), "{flag}: marker cleared on remove");
+        assert!(effects_on(&mut world, p).is_empty());
+    }
+}
+
+#[test]
+fn a_worn_invisible_item_is_stripped_by_attacking_like_the_mob_default() {
+    let (mut world, p, mut rx) = setup();
+    ring(&mut world, p, 310, "veil", vec![status(&["invisible"])]);
+    wear(&mut world, p, &mut rx, "veil");
+    assert!(world.get::<mud_world::Invisible>(p).is_some());
+    // Tagged so the next effects tick does not read it as a faded spell.
+    let tagged = {
+        let mut q = world.query_filtered::<&AppliedTo, With<mud_world::InvisibleSource>>();
+        q.iter(&world).filter(|a| a.0 == p).count()
+    };
+    assert_eq!(tagged, 1);
+    super::break_invisibility(&mut world, p);
+    assert!(world.get::<mud_world::Invisible>(p).is_none());
+    assert!(effects_on(&mut world, p).is_empty());
+    // Taking the already-stripped ring off is harmless.
+    remove(&mut world, p, &mut rx, "veil");
+    assert!(world.get::<mud_world::Invisible>(p).is_none());
+}
+
+#[test]
+fn a_worn_protect_evil_survives_the_spell_expiring_and_vice_versa() {
+    let (mut world, p, mut rx) = setup();
+    // The spell shape: name "resistance", tagged with the alignment.
+    let spell = world
+        .spawn((
+            EffectInstance {
+                kind: STATUS,
+                name: "resistance".into(),
+                strength: 1,
+                remaining_secs: 1,
+                source: EffectSource::Spell,
+                ability_id: None,
+            },
+            AppliedTo(p),
+            mud_world::AlignmentProtectionTag::Evil,
+        ))
+        .id();
+    world.entity_mut(p).insert(mud_world::ProtectFromEvil);
+    ring(&mut world, p, 311, "ward", vec![status(&["protect_evil"])]);
+    wear(&mut world, p, &mut rx, "ward");
+    world.insert_resource(crate::TickCount(10));
+    crate::effects::effects_tick(&mut world);
+    assert!(world.get_entity(spell).is_err(), "the spell expired");
+    assert!(
+        world.get::<mud_world::ProtectFromEvil>(p).is_some(),
+        "the worn ring still backs it"
+    );
+    remove(&mut world, p, &mut rx, "ward");
+    assert!(world.get::<mud_world::ProtectFromEvil>(p).is_none());
+}
+
+#[test]
+fn instance_only_flags_become_one_worn_instance_and_no_marker() {
+    for flag in [
+        "fireshield",
+        "coldshield",
+        "detect_magic",
+        "infravision",
+        "detect_life",
+        "detect_hidden",
+        "detect_align",
+    ] {
+        let (mut world, p, mut rx) = setup();
+        ring(&mut world, p, 320, "seer", vec![status(&[flag])]);
+        wear(&mut world, p, &mut rx, "seer");
+        assert_eq!(
+            effect_names(&mut world, p),
+            vec![flag.to_string()],
+            "{flag}"
+        );
+        remove(&mut world, p, &mut rx, "seer");
+        assert!(effects_on(&mut world, p).is_empty(), "{flag}");
+    }
+}
+
+#[test]
+fn flags_with_no_runtime_behaviour_stay_unmapped() {
+    for flag in ["waterwalk", "blur", "language_fluency", "familiarity"] {
+        let (mut world, p, mut rx) = setup();
+        ring(&mut world, p, 330, "idle", vec![status(&[flag])]);
+        wear(&mut world, p, &mut rx, "idle");
+        assert!(effects_on(&mut world, p).is_empty(), "{flag}");
+        assert!(world.get::<Bless>(p).is_none(), "{flag}");
+    }
+}
+
+fn aura_catalog() -> mud_world::EffectAuraCatalog {
+    let aura = |key: &str, text: &str, magic: bool| mud_world::EffectAura {
+        keys: vec![key.to_string()],
+        text: text.to_string(),
+        needs_detect_magic: magic,
+        exclusive_group: None,
+        min_alignment: None,
+        max_alignment: None,
+    };
+    mud_world::EffectAuraCatalog {
+        auras: vec![
+            aura("fireshield", "FIRE-AURA", false),
+            aura("coldshield", "COLD-AURA", false),
+            aura("bless", "BLESS-AURA", true),
+        ],
+    }
+}
+
+#[test]
+fn worn_fireshield_and_detect_magic_work_through_the_instance_name() {
+    let (mut world, p, mut rx) = setup();
+    world.insert_resource(aura_catalog());
+    let room = world.get::<Located>(p).unwrap().0;
+    let (other, _orx) = player_in(&mut world, room);
+    world.entity_mut(other).insert(Profile {
+        level: 10,
+        class_id: None,
+        race: "HUMAN".into(),
+        experience: 0,
+        gender: "male".into(),
+    });
+    spell_instance(&mut world, other, "bless", 1);
+    // The viewer sees the other's bless only with detect magic.
+    let lines = super::look_auras::aura_lines(&mut world, p, other);
+    assert!(!lines.contains("BLESS-AURA"), "{lines}");
+    ring(&mut world, p, 340, "sage", vec![status(&["detect_magic"])]);
+    wear(&mut world, p, &mut rx, "sage");
+    let lines = super::look_auras::aura_lines(&mut world, p, other);
+    assert!(lines.contains("BLESS-AURA"), "worn detect_magic: {lines}");
+    // A worn fireshield shows on the wearer to everyone.
+    ring(&mut world, p, 341, "ember", vec![status(&["fireshield"])]);
+    wear(&mut world, p, &mut rx, "ember");
+    let lines = super::look_auras::aura_lines(&mut world, other, p);
+    assert!(lines.contains("FIRE-AURA"), "worn fireshield: {lines}");
+}
+
+fn saved_effects(world: &mut World, p: Entity) -> crate::login::PersistedEffects {
+    let snap = crate::login::snapshot_player(world, p, 1).expect("snapshot");
+    serde_json::from_value(snap.effect_instances_json.expect("effects saved")).unwrap()
+}
+
+#[test]
+fn a_relogged_fly_spell_is_flying_again_and_expires_clean() {
+    let (mut world, p, _rx) = setup();
+    spell_instance(&mut world, p, "fly", 1);
+    world.entity_mut(p).insert(Flying);
+    let saved = saved_effects(&mut world, p);
+    let (mut world2, p2, _rx2) = setup();
+    assert!(world2.get::<Flying>(p2).is_none());
+    crate::login::restore_persisted_effects(&mut world2, p2, saved);
+    assert!(world2.get::<Flying>(p2).is_some(), "marker re-installed");
+    assert_eq!(effect_names(&mut world2, p2), vec!["fly".to_string()]);
+    // When the spell runs out the marker goes with it.
+    {
+        let mut q = world2.query::<&mut EffectInstance>();
+        for mut i in q.iter_mut(&mut world2) {
+            i.remaining_secs = 1;
+        }
+    }
+    world2.insert_resource(crate::TickCount(10));
+    crate::effects::effects_tick(&mut world2);
+    assert!(world2.get::<Flying>(p2).is_none());
+}
+
+#[test]
+fn a_relogged_status_row_without_a_flag_override_uses_the_effect_default_flag() {
+    let (mut world, p, _rx) = setup();
+    // Name = the effect's own ("status"); its default flag is bless.
+    spell_instance(&mut world, p, "status", 1);
+    let saved = saved_effects(&mut world, p);
+    let (mut world2, p2, _rx2) = setup();
+    crate::login::restore_persisted_effects(&mut world2, p2, saved);
+    assert!(world2.get::<Bless>(p2).is_some());
+}
+
+#[test]
+fn a_relogged_stat_spell_is_not_doubled_and_still_unwinds_on_expiry() {
+    let (mut world, p, _rx) = setup();
+    // Cast: +4 strength, delta recorded on the instance.
+    assert!(crate::commands::apply_modify_delta(
+        &mut world,
+        p,
+        "str_bonus",
+        4
+    ));
+    world.spawn((
+        EffectInstance {
+            kind: MODIFY,
+            name: "str".into(),
+            strength: 4,
+            remaining_secs: 600,
+            source: EffectSource::Spell,
+            ability_id: None,
+        },
+        AppliedTo(p),
+        mud_world::ModifyDelta {
+            target: "str_bonus".into(),
+            amount: 4,
+        },
+    ));
+    assert_eq!(strength(&world, p), 17);
+    // What the save writes: the core stats (spell included) and the row.
+    let saved_stats = base_core_stats(&world, p).unwrap();
+    assert_eq!(saved_stats.strength, 17);
+    let saved = saved_effects(&mut world, p);
+
+    let (mut world2, p2, _rx2) = setup();
+    *world2.get_mut::<CoreStats>(p2).unwrap() = saved_stats;
+    crate::login::restore_persisted_effects(&mut world2, p2, saved);
+    assert_eq!(strength(&world2, p2), 17, "not doubled to 21");
+    assert_eq!(effect_names(&mut world2, p2), vec!["str".to_string()]);
+    {
+        let mut q = world2.query::<&mut EffectInstance>();
+        for mut i in q.iter_mut(&mut world2) {
+            i.remaining_secs = 1;
+        }
+    }
+    world2.insert_resource(crate::TickCount(10));
+    crate::effects::effects_tick(&mut world2);
+    assert_eq!(
+        strength(&world2, p2),
+        13,
+        "expiry gives back exactly the +4"
+    );
+}
+
+#[test]
+fn a_relogged_globe_empowered_and_resistance_spells_come_back_whole() {
+    use mud_db::enums::ElementType;
+    let (mut world, p, _rx) = setup();
+    let spawn = |world: &mut World, name: &str, strength: i32| {
+        world
+            .spawn((
+                EffectInstance {
+                    kind: STATUS,
+                    name: name.into(),
+                    strength,
+                    remaining_secs: 600,
+                    source: EffectSource::Spell,
+                    ability_id: None,
+                },
+                AppliedTo(p),
+            ))
+            .id()
+    };
+    spawn(&mut world, "globe", 6);
+    spawn(&mut world, "empowered", 1);
+    let fire = spawn(&mut world, "resistance", 1);
+    world
+        .entity_mut(fire)
+        .insert(mud_world::SpellResistanceDelta {
+            element: ElementType::Fire,
+            percent: 25,
+        });
+    let evil = spawn(&mut world, "resistance", 1);
+    world
+        .entity_mut(evil)
+        .insert(mud_world::AlignmentProtectionTag::Evil);
+    let veil = spawn(&mut world, "evasion", 1);
+    world.entity_mut(veil).insert(mud_world::InvisibleSource);
+    let saved = saved_effects(&mut world, p);
+
+    let (mut world2, p2, _rx2) = setup();
+    crate::login::restore_persisted_effects(&mut world2, p2, saved);
+    assert_eq!(circle(&world2, p2), Some(6), "globe");
+    assert!(world2.get::<mud_world::Empowered>(p2).is_some());
+    assert_eq!(
+        world2
+            .get::<mud_world::Resistances>(p2)
+            .and_then(|r| r.0.get(&ElementType::Fire).copied()),
+        Some(25)
+    );
+    assert!(world2.get::<mud_world::ProtectFromEvil>(p2).is_some());
+    assert!(world2.get::<mud_world::ProtectFromGood>(p2).is_none());
+    assert!(world2.get::<mud_world::Invisible>(p2).is_some());
+    // The resistance unwinds with its instance, exactly once.
+    {
+        let mut q = world2.query::<(&mut EffectInstance, Has<mud_world::SpellResistanceDelta>)>();
+        for (mut i, tagged) in q.iter_mut(&mut world2) {
+            if tagged {
+                i.remaining_secs = 1;
+            }
+        }
+    }
+    world2.insert_resource(crate::TickCount(10));
+    crate::effects::effects_tick(&mut world2);
+    assert!(
+        world2
+            .get::<mud_world::Resistances>(p2)
+            .is_none_or(|r| !r.0.contains_key(&ElementType::Fire))
+    );
+}

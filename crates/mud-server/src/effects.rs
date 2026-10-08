@@ -1,7 +1,6 @@
 use bevy_ecs::prelude::*;
 use mud_world::{
-    AbilityCatalog, AppliedTo, EffectCatalog, EffectInstance, Item, Located, ModifyDelta, Stealth,
-    Stunned,
+    AbilityCatalog, AppliedTo, EffectCatalog, EffectInstance, Item, Located, ModifyDelta, Stunned,
 };
 use tracing::{info, warn};
 
@@ -265,68 +264,25 @@ const BLEED_DPS: i32 = 2;
 /// removals so a dispelled `fly` / `bless` / ... cannot leave its marker
 /// without backing.
 pub(crate) fn teardown_markers_after_removal(world: &mut World, target: Entity, name: &str) {
-    // Stealth marker mirrors the stun pattern: it outlives only
-    // as long as at least one `hidden` / `sneak` EffectInstance
-    // is on the target. Manually-toggled `hide` / `visible`
-    // commands install/remove Stealth directly without a
-    // backing effect, so a target with manual stealth + no
-    // status effects is unaffected by this branch.
-    if name.eq_ignore_ascii_case("hidden") || name.eq_ignore_ascii_case("sneak") {
-        let still_hidden = {
-            let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-            q.iter(world).any(|(eff, applied)| {
-                applied.0 == target
-                    && (eff.name.eq_ignore_ascii_case("hidden")
-                        || eff.name.eq_ignore_ascii_case("sneak"))
-            })
+    // Flag markers (stealth, fly, bless, sanctuary, haste, detect
+    // invisible, protect evil / good, ...): alive only while at least
+    // one backing instance remains, race innates and worn items
+    // included. The flag -> component table lives in
+    // `mob_effects::FLAG_MARKERS`. Manually-toggled `hide` / `visible`
+    // install / remove Stealth directly without a backing effect, so a
+    // target with manual stealth and no status effects is unaffected.
+    mud_world::mob_effects::teardown_flag_marker(world, target, name);
+    // Invisible: the backing is any `InvisibleSource`-tagged instance
+    // (INVISIBLE / MASS_INVIS, a permanent `invisible` flag), whatever
+    // it is named; the fade message and aggro recheck live in
+    // `invisibility_faded`.
+    if name.eq_ignore_ascii_case("invisible") {
+        let still_invisible = {
+            let mut q = world.query::<(&mud_world::InvisibleSource, &AppliedTo)>();
+            q.iter(world).any(|(_, applied)| applied.0 == target)
         };
-        if !still_hidden {
-            try_remove::<Stealth>(world, target);
-        }
-    }
-    // Flying marker mirrors the Stealth pattern — alive only
-    // while at least one backing effect (FLY, WINGS_OF_*) is
-    // on the target, race innates included (they are permanent
-    // instances).
-    if name.eq_ignore_ascii_case("fly") {
-        let still_flying = {
-            let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-            q.iter(world)
-                .any(|(eff, applied)| applied.0 == target && eff.name.eq_ignore_ascii_case("fly"))
-        };
-        if !still_flying {
-            try_remove::<mud_world::Flying>(world, target);
-        }
-    }
-    if name.eq_ignore_ascii_case("bless") {
-        let still_blessed = {
-            let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-            q.iter(world)
-                .any(|(eff, applied)| applied.0 == target && eff.name.eq_ignore_ascii_case("bless"))
-        };
-        if !still_blessed {
-            try_remove::<mud_world::Bless>(world, target);
-        }
-    }
-    if name.eq_ignore_ascii_case("sanctuary") {
-        let still_sanctified = {
-            let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-            q.iter(world).any(|(eff, applied)| {
-                applied.0 == target && eff.name.eq_ignore_ascii_case("sanctuary")
-            })
-        };
-        if !still_sanctified {
-            try_remove::<mud_world::Sanctuary>(world, target);
-        }
-    }
-    if name.eq_ignore_ascii_case("haste") {
-        let still_hasted = {
-            let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-            q.iter(world)
-                .any(|(eff, applied)| applied.0 == target && eff.name.eq_ignore_ascii_case("haste"))
-        };
-        if !still_hasted {
-            try_remove::<mud_world::Haste>(world, target);
+        if !still_invisible {
+            crate::commands::invisibility_faded(world, target);
         }
     }
     if name.eq_ignore_ascii_case("empowered") {
@@ -363,20 +319,6 @@ pub(crate) fn teardown_markers_after_removal(world: &mut World, target: Entity, 
             _ => {
                 try_remove::<mud_world::MaxAbsorbCircle>(world, target);
             }
-        }
-    }
-    // DetectInvis teardown — flag-based effect with name
-    // "detect_invisible" (the data carries it as a status
-    // effect with that name).
-    if name.eq_ignore_ascii_case("detect_invisible") {
-        let still_seeing = {
-            let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-            q.iter(world).any(|(eff, applied)| {
-                applied.0 == target && eff.name.eq_ignore_ascii_case("detect_invisible")
-            })
-        };
-        if !still_seeing {
-            try_remove::<mud_world::DetectInvis>(world, target);
         }
     }
 }
@@ -539,6 +481,9 @@ pub fn effects_tick(world: &mut World) {
             // require a mid-session re-rent and re-consume) cleanly
             // unwind one at a time.
             crate::rest::unwind_refreshed_bonus(world, eff_entity, target);
+            let align_tag = world
+                .get::<mud_world::AlignmentProtectionTag>(eff_entity)
+                .copied();
             // Reverse a `SpellResistanceDelta` companion the same way
             // ModifyDelta unwinds. Stacked PROT_*/STONE_SKIN cleanly
             // peel back to whatever the underlying item-resistance
@@ -576,50 +521,18 @@ pub fn effects_tick(world: &mut World) {
                 e.despawn();
             }
             teardown_markers_after_removal(world, target, &name);
-            // J2 alignment-protect teardown — PROT_FROM_EVIL /
-            // PROT_FROM_GOOD spawn instances with name="resistance"
-            // (shared with element-resistance flavors) but tag the
-            // backing EffectInstance entity with
-            // `AlignmentProtectionTag(Evil|Good)`. When *this*
-            // expiring entity carries that tag, drop the marker only
-            // when no remaining EffectInstance shares the same tag —
-            // mirrors the bless/sanctuary refcount pattern.
-            if let Some(tag) = world
-                .get::<mud_world::AlignmentProtectionTag>(eff_entity)
-                .copied()
-            {
-                let still_protected = {
-                    let mut q = world.query::<(
-                        Entity,
-                        &EffectInstance,
-                        &AppliedTo,
-                        &mud_world::AlignmentProtectionTag,
-                    )>();
-                    q.iter(world).any(|(e, _, applied, t)| {
-                        e != eff_entity
-                            && applied.0 == target
-                            && matches!(
-                                (*t, tag),
-                                (
-                                    mud_world::AlignmentProtectionTag::Evil,
-                                    mud_world::AlignmentProtectionTag::Evil
-                                ) | (
-                                    mud_world::AlignmentProtectionTag::Good,
-                                    mud_world::AlignmentProtectionTag::Good
-                                )
-                            )
-                    })
+            // J2 alignment-protect teardown: PROT_FROM_EVIL /
+            // PROT_FROM_GOOD spawn instances named "resistance" (shared
+            // with element-resistance flavors), tagged with the
+            // alignment they guard against. The tag was read before the
+            // instance despawned; the marker drops only when no other
+            // tagged instance and no worn `protect_*` flag still backs it.
+            if let Some(tag) = align_tag {
+                let flag = match tag {
+                    mud_world::AlignmentProtectionTag::Evil => "protect_evil",
+                    mud_world::AlignmentProtectionTag::Good => "protect_good",
                 };
-                if !still_protected {
-                    match tag {
-                        mud_world::AlignmentProtectionTag::Evil => {
-                            try_remove::<mud_world::ProtectFromEvil>(world, target);
-                        }
-                        mud_world::AlignmentProtectionTag::Good => {
-                            try_remove::<mud_world::ProtectFromGood>(world, target);
-                        }
-                    }
-                }
+                mud_world::mob_effects::teardown_flag_marker(world, target, flag);
             }
             // L3 summon teardown — conjuration spells spawn an
             // EffectInstance with name="summoned-{mobType}" pointing

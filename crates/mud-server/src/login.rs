@@ -580,6 +580,20 @@ pub(crate) struct PersistedEffectInstance {
     /// modifying buff). Captured as a 2-tuple to keep the JSON shape
     /// shallow: (`target_label`, amount).
     modify_delta: Option<(String, i32)>,
+    /// Present iff the effect entity carried a `SpellResistanceDelta`
+    /// (`PROT_FROM_FIRE` / `STONE_SKIN`, ...): `(element, percent)`. A
+    /// player's `Resistances` are rebuilt from race / class / gear at
+    /// login, so a restored spell has to re-apply the bump.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resistance: Option<(mud_db::enums::ElementType, i32)>,
+    /// `"evil"` / `"good"` for a `PROT_FROM_EVIL` / `PROT_FROM_GOOD`
+    /// instance (its `AlignmentProtectionTag`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    align_protect: Option<String>,
+    /// The instance carried `InvisibleSource` (`INVISIBLE` / `MASS_INVIS`,
+    /// an `invisible` status flag).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    invisible_source: bool,
 }
 
 /// Persisted shape of the active-effects blob. Wraps the per-entry
@@ -746,6 +760,81 @@ pub(crate) fn apply_player_race_effects(world: &mut World, entity: Entity) {
     mud_world::mob_effects::apply_race_effects(world, entity, &race);
 }
 
+/// The status flag a saved instance stands for. A spell's instance is
+/// named after its `flag` (`fly`, `bless`, ...); a status row with no
+/// per-ability flag keeps the effect's own name and takes the effect's
+/// default flag, which is what the cast path reads too.
+fn restored_flag(world: &World, kind: i32, name: &str) -> String {
+    let lower = name.to_ascii_lowercase();
+    if mud_world::mob_effects::install_flag_marker_known(&lower) {
+        return lower;
+    }
+    world
+        .get_resource::<mud_world::EffectCatalog>()
+        .and_then(|c| c.by_id.get(&kind))
+        .filter(|d| d.effect_type == "status" && d.name.eq_ignore_ascii_case(name))
+        .and_then(|d| d.default_params.get("flag"))
+        .and_then(serde_json::Value::as_str)
+        .map_or(lower, str::to_ascii_lowercase)
+}
+
+/// Put back the live state a restored spell instance stood for: the flag
+/// marker through [`mud_world::mob_effects::install_flag_marker`] (the
+/// path casting, wearing and mob / race effects use), plus the per-arm
+/// state the cast path adds on top: the `Empowered` charge and the
+/// `MaxAbsorbCircle` of a globe (max-wins, like casting over a worn globe).
+/// Stat deltas are NOT handled here: [`restore_persisted_effects`] already
+/// decides per target whether the saved row bakes them in.
+fn reinstall_effect_state(
+    world: &mut World,
+    entity: Entity,
+    effect: Entity,
+    flag: &str,
+    name: &str,
+    strength: i32,
+) {
+    if mud_world::mob_effects::install_flag_marker(world, entity, flag) {
+        mud_world::mob_effects::tag_flag_instance(world, effect, flag);
+    }
+    if flag == "empowered" {
+        world.entity_mut(entity).insert(mud_world::Empowered);
+    }
+    if name.eq_ignore_ascii_case("globe") && strength > 0 {
+        let existing = world
+            .get::<mud_world::MaxAbsorbCircle>(entity)
+            .map_or(0, |m| m.0);
+        world
+            .entity_mut(entity)
+            .insert(mud_world::MaxAbsorbCircle(existing.max(strength)));
+    }
+}
+
+/// Re-apply a saved resistance spell's bump to the player's `Resistances`
+/// (rebuilt from race / class / gear at login, so it is not in there yet)
+/// and tag the instance so its expiry reverses exactly this delta.
+fn restore_spell_resistance(
+    world: &mut World,
+    entity: Entity,
+    effect: Entity,
+    element: mud_db::enums::ElementType,
+    percent: i32,
+) {
+    if percent == 0 {
+        return;
+    }
+    if let Some(mut r) = world.get_mut::<mud_world::Resistances>(entity) {
+        let slot = r.0.entry(element).or_insert(0);
+        *slot = slot.saturating_add(percent);
+    } else {
+        let mut map = std::collections::HashMap::new();
+        map.insert(element, percent);
+        world.entity_mut(entity).insert(mud_world::Resistances(map));
+    }
+    world
+        .entity_mut(effect)
+        .insert(mud_world::SpellResistanceDelta { element, percent });
+}
+
 /// Shared restore logic: spawn one effect entity per persisted entry,
 /// dropping non-Admin entries past the disconnect cap and adjusting
 /// `remaining_secs` for elapsed time. Used by both the telnet login
@@ -796,6 +885,7 @@ pub(crate) fn restore_persisted_effects(
         if let Some(d) = eff.modify_delta.as_ref().filter(|d| !baked(d)) {
             crate::commands::apply_modify_delta(world, entity, &d.0, d.1);
         }
+        let flag = restored_flag(world, eff.kind, &eff.name);
         let mut effect_entity = world.spawn((
             mud_world::EffectInstance {
                 kind: eff.kind,
@@ -810,7 +900,27 @@ pub(crate) fn restore_persisted_effects(
         if let Some((target, amount)) = eff.modify_delta {
             effect_entity.insert(mud_world::ModifyDelta { target, amount });
         }
+        let effect = effect_entity.id();
+        reinstall_effect_state(world, entity, effect, &flag, &eff.name, eff.strength);
+        if let Some((element, percent)) = eff.resistance {
+            restore_spell_resistance(world, entity, effect, element, percent);
+        }
+        let aligned = match eff.align_protect.as_deref() {
+            Some("evil") => Some((mud_world::AlignmentProtectionTag::Evil, "protect_evil")),
+            Some("good") => Some((mud_world::AlignmentProtectionTag::Good, "protect_good")),
+            _ => None,
+        };
+        if let Some((tag, marker_flag)) = aligned {
+            world.entity_mut(effect).insert(tag);
+            mud_world::mob_effects::install_flag_marker(world, entity, marker_flag);
+        }
+        if eff.invisible_source {
+            mud_world::mob_effects::install_flag_marker(world, entity, "invisible");
+            world.entity_mut(effect).insert(mud_world::InvisibleSource);
+        }
     }
+    // Paralysis / stun markers follow their backing instances.
+    crate::effects::sync_stunned(world, entity);
     if let Some(hp) = hp
         && let Some(mut h) = world.get_mut::<Health>(entity)
     {
@@ -4866,21 +4976,35 @@ pub(crate) fn snapshot_player(
             &mud_world::EffectInstance,
             &mud_world::AppliedTo,
             Option<&mud_world::ModifyDelta>,
+            Option<&mud_world::SpellResistanceDelta>,
+            Option<&mud_world::AlignmentProtectionTag>,
+            Has<mud_world::InvisibleSource>,
         )>();
         let effects: Vec<PersistedEffectInstance> = q
             .iter(world)
-            .filter(|(_, applied, _)| applied.0 == entity)
+            .filter(|(_, applied, ..)| applied.0 == entity)
             // Race innates are rebuilt from `RaceEffects` at login.
-            .filter(|(inst, _, _)| !mud_world::mob_effects::is_innate_effect(&inst.source))
-            .map(|(inst, _, modd)| PersistedEffectInstance {
-                kind: inst.kind,
-                name: inst.name.clone(),
-                strength: inst.strength,
-                remaining_secs: inst.remaining_secs,
-                source: inst.source.clone(),
-                ability_id: inst.ability_id,
-                modify_delta: modd.map(|m| (m.target.clone(), m.amount)),
-            })
+            .filter(|(inst, ..)| !mud_world::mob_effects::is_innate_effect(&inst.source))
+            .map(
+                |(inst, _, modd, resist, align, invisible)| PersistedEffectInstance {
+                    kind: inst.kind,
+                    name: inst.name.clone(),
+                    strength: inst.strength,
+                    remaining_secs: inst.remaining_secs,
+                    source: inst.source.clone(),
+                    ability_id: inst.ability_id,
+                    modify_delta: modd.map(|m| (m.target.clone(), m.amount)),
+                    resistance: resist.map(|r| (r.element, r.percent)),
+                    align_protect: align.map(|a| {
+                        match a {
+                            mud_world::AlignmentProtectionTag::Evil => "evil",
+                            mud_world::AlignmentProtectionTag::Good => "good",
+                        }
+                        .to_string()
+                    }),
+                    invisible_source: invisible,
+                },
+            )
             .collect();
         if effects.is_empty() {
             None

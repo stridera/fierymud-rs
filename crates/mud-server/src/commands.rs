@@ -17644,17 +17644,19 @@ pub(crate) fn invoke_ability_with(
                 if upgraded.is_some() {
                     refresh_existing_effect(world, target_entity, &instance_name, def.id);
                 }
-                world.spawn((
-                    EffectInstance {
-                        kind: spec.id,
-                        name: instance_name,
-                        strength: 1,
-                        remaining_secs: dur_secs,
-                        source: EffectSource::Spell,
-                        ability_id: Some(def.id),
-                    },
-                    AppliedTo(target_entity),
-                ));
+                let status_effect = world
+                    .spawn((
+                        EffectInstance {
+                            kind: spec.id,
+                            name: instance_name,
+                            strength: 1,
+                            remaining_secs: dur_secs,
+                            source: EffectSource::Spell,
+                            ability_id: Some(def.id),
+                        },
+                        AppliedTo(target_entity),
+                    ))
+                    .id();
                 spawn_count += 1;
                 // Stealth-flag status effects (HIDE, SNEAK, CONCEAL,
                 // and a few buff spells) install the `Stealth` marker
@@ -17666,12 +17668,19 @@ pub(crate) fn invoke_ability_with(
                     try_insert(world, target_entity, mud_world::Stealth);
                 }
                 // Marker flags (fly, bless, sanctuary, detect_invisible,
-                // haste) install their marker component so the
+                // haste, protect_evil / protect_good, invisible)
+                // install their marker component so the
                 // movement / combat / visibility gates see the target
                 // as flying, blessed, etc. Auto-removed by effects_tick
                 // when the last backing instance fades. The mapping is
                 // shared with `MobDefaultEffects`.
                 mud_world::mob_effects::install_flag_marker(world, target_entity, &flag);
+                mud_world::mob_effects::tag_flag_instance(world, status_effect, &flag);
+                if flag == "invisible"
+                    && let Some(room) = world.get::<Located>(target_entity).map(|l| l.0)
+                {
+                    refresh_room_players(world, room);
+                }
                 // Paralysis holds its bearer like a stun: no swinging, no
                 // fleeing (legacy `perform_violence` / `attack_ok`).
                 if crate::effects::is_stun_name(&flag) {
