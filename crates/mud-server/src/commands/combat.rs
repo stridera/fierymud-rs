@@ -981,25 +981,64 @@ fn stamp_reengage(world: &mut World, actor: Entity, opponent: Option<Entity>) {
     try_insert(world, actor, lag);
 }
 
-/// A mob's Switch percent. Legacy `roll_mob_skill` (chars.cpp:247)
-/// gives an NPC `random(50,100)` plus `random(5,15)` per level above
-/// the first, capped at 1000, and `GET_SKILL` divides by 10. Rust mobs
-/// carry no stored skill rows, so this is that roll's mean,
-/// `75 + 10 * (level - 1)` tenths, as a percent.
-fn mob_switch_skill(level: i32) -> i32 {
+/// A mob's Switch percent at `level` once it has the skill. Legacy
+/// `roll_mob_skill` (chars.cpp:247) gives an NPC `random(50,100)` plus
+/// `random(5,15)` per level above the first, capped at 1000, and
+/// `GET_SKILL` divides by 10. Rust mobs carry no stored skill rows, so
+/// this is that roll's mean, `75 + 10 * (level - 1)` tenths, as a
+/// percent.
+fn mob_switch_percent(level: i32) -> i32 {
     let tenths = 75 + 10 * (level.max(1) - 1);
     (tenths / 10).clamp(0, 100)
 }
 
+/// A mob's Switch percent, 0 when it lacks the skill. Legacy
+/// `init_char_skills` (skills.cpp:255-275) only calls `roll_mob_skill`
+/// for skills the mob's class learns at or below its level
+/// (`skill_assign` rows, class.cpp); everything else is zeroed, and
+/// `switch_ok` refuses at skill 0. Here that is the mob prototype's
+/// `class_id` against `ClassSkillsData` for the `switch` ability.
+fn mob_switch_skill(world: &World, mob: Entity) -> i32 {
+    let Some(class_id) = world
+        .get::<mud_world::WorldKey>(mob)
+        .and_then(|wk| {
+            world
+                .get_resource::<mud_world::MobPrototypes>()?
+                .by_key
+                .get(&(wk.zone, wk.id))
+        })
+        .and_then(|p| p.class_id)
+    else {
+        return 0;
+    };
+    let Some(ability_id) = world
+        .get_resource::<mud_world::AbilityCatalog>()
+        .and_then(|c| c.by_name.get("switch"))
+        .map(|def| def.id)
+    else {
+        return 0;
+    };
+    let level = mud_world::effective_level(world, mob);
+    let learned = world
+        .get_resource::<mud_world::ClassSkillsData>()
+        .and_then(|d| d.min_level_for(class_id, ability_id))
+        .is_some_and(|min| min <= level);
+    if learned {
+        mob_switch_percent(level)
+    } else {
+        0
+    }
+}
+
 /// Legacy `switch_ok`: moving to a new opponent mid-fight needs the
-/// `Switch` skill (mobs use `mob_switch_skill` of their level). No
+/// `Switch` skill (mobs: `mob_switch_skill`, class-gated). No
 /// skill refuses outright; a failed roll (`roll`
 /// is 1..=101 against the skill percent) drops the current fight
 /// without starting a new one; success drops it so the caller can
 /// engage the new target. Returns true when the caller may proceed.
 fn try_switch_opponent(world: &mut World, player: Entity, old: Entity, roll: i32) -> bool {
     let skill = if world.get::<Mob>(player).is_some() {
-        mob_switch_skill(mud_world::effective_level(world, player))
+        mob_switch_skill(world, player)
     } else {
         world
             .get_resource::<mud_world::AbilityCatalog>()
@@ -3341,28 +3380,84 @@ mod attack_while_fighting_tests {
     }
 
     #[test]
-    fn mob_switch_skill_follows_the_legacy_mob_roll_mean() {
+    fn mob_switch_percent_follows_the_legacy_mob_roll_mean() {
         // 75 + 10 per level above the first, in tenths of a percent.
-        assert_eq!(mob_switch_skill(1), 7);
-        assert_eq!(mob_switch_skill(10), 16);
-        assert_eq!(mob_switch_skill(50), 56);
-        assert_eq!(mob_switch_skill(94), 100);
-        assert_eq!(mob_switch_skill(200), 100);
-        assert_eq!(mob_switch_skill(0), 7, "level floors at 1");
+        assert_eq!(mob_switch_percent(1), 7);
+        assert_eq!(mob_switch_percent(10), 16);
+        assert_eq!(mob_switch_percent(50), 56);
+        assert_eq!(mob_switch_percent(94), 100);
+        assert_eq!(mob_switch_percent(200), 100);
+        assert_eq!(mob_switch_percent(0), 7, "level floors at 1");
     }
 
-    /// Give the ogre (setup mob) a prototype of `level` so
-    /// `effective_level` finds it.
-    fn with_mob_level(world: &mut World, mob: Entity, level: i32) {
+    const MOB_CLASS: i32 = 3;
+
+    /// Give the ogre (setup mob) a prototype of `level` and `class_id`,
+    /// plus a `ClassSkills` row for `switch` on `MOB_CLASS` (when
+    /// `switch_min_level` is `Some`), so `mob_switch_skill` finds them.
+    fn with_mob_class(
+        world: &mut World,
+        mob: Entity,
+        level: i32,
+        class_id: Option<i32>,
+        switch_min_level: Option<i32>,
+    ) {
         use crate::commands::test_support::mob_proto;
         let mut protos = mud_world::MobPrototypes::default();
         let mut proto = mob_proto(9, 9, mud_db::enums::MobProfession::Trainer);
         proto.level = level;
+        proto.class_id = class_id;
         protos.by_key.insert((9, 9), proto);
         world.insert_resource(protos);
         world
             .entity_mut(mob)
             .insert(mud_world::WorldKey { zone: 9, id: 9 });
+        let mut catalog = AbilityCatalog::default();
+        catalog.by_name.insert(
+            "switch".to_string(),
+            ability_def(SWITCH, "Switch", AbilityKind::Skill),
+        );
+        world.insert_resource(catalog);
+        let mut skills = mud_world::ClassSkillsData::default();
+        if let Some(min) = switch_min_level {
+            skills.min_level.insert((MOB_CLASS, SWITCH), min);
+        }
+        world.insert_resource(skills);
+    }
+
+    /// A mob whose class learns Switch at level 1.
+    fn with_mob_level(world: &mut World, mob: Entity, level: i32) {
+        with_mob_class(world, mob, level, Some(MOB_CLASS), Some(1));
+    }
+
+    #[test]
+    fn mob_switch_skill_needs_a_class_that_learns_it() {
+        let (mut world, _p, ogre, _rat, _rx) = setup();
+        with_mob_class(&mut world, ogre, 60, Some(MOB_CLASS), Some(1));
+        assert_eq!(mob_switch_skill(&world, ogre), 66);
+        // Classless mob.
+        with_mob_class(&mut world, ogre, 60, None, Some(1));
+        assert_eq!(mob_switch_skill(&world, ogre), 0);
+        // Class without a Switch row.
+        with_mob_class(&mut world, ogre, 60, Some(MOB_CLASS), None);
+        assert_eq!(mob_switch_skill(&world, ogre), 0);
+        // Class learns it later than the mob's level.
+        with_mob_class(&mut world, ogre, 9, Some(MOB_CLASS), Some(10));
+        assert_eq!(mob_switch_skill(&world, ogre), 0);
+        with_mob_class(&mut world, ogre, 10, Some(MOB_CLASS), Some(10));
+        assert_eq!(mob_switch_skill(&world, ogre), 16);
+    }
+
+    #[test]
+    fn mob_without_the_class_skill_never_switches() {
+        let (mut world, p, ogre, _rat, _rx) = setup();
+        with_mob_class(&mut world, ogre, 60, Some(MOB_CLASS), None);
+        attack_with_switch_roll(&mut world, ogre, "rat", 1);
+        assert_eq!(
+            world.get::<Fighting>(ogre).map(|f| f.0),
+            Some(p),
+            "refused outright: still fighting the player"
+        );
     }
 
     #[test]
@@ -3557,6 +3652,8 @@ mod attack_while_fighting_tests {
                 Health { hp: 100, max: 100 },
             ))
             .id();
+        // A class that learns Switch, so the mob has the skill at all.
+        with_mob_class(&mut world, pet, 1, Some(MOB_CLASS), Some(1));
         cmd_attack(&mut world, pet, "ogre");
         assert_eq!(hp(&world, ogre), 99);
         for _ in 0..3 {
