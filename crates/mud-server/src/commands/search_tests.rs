@@ -3,7 +3,7 @@
 use bevy_ecs::prelude::*;
 use mud_db::enums::{Direction, ExitState, UserRole, effective_rank};
 use mud_world::{
-    Account, ExitData, Exits, Located, Named, Online, Player, Profile, Room, WorldKey,
+    Account, CoreStats, ExitData, Exits, Located, Named, Online, Player, Profile, Room, WorldKey,
     WorldKeyIndex, Zone,
 };
 
@@ -129,7 +129,11 @@ fn search_reveals_hidden_exit_in_exits_and_allows_walking() {
     dispatch(&mut world, p, "east");
     assert!(drain(&mut rx).contains("can't go that way"));
 
-    dispatch(&mut world, p, "search");
+    world.entity_mut(p).insert(CoreStats {
+        intelligence: 100,
+        ..CoreStats::default()
+    });
+    super::info::search_with_roll(&mut world, p, "", &mut |_| 50);
     let out = drain(&mut rx);
     assert!(
         out.contains("You have found a hidden monolith to the east."),
@@ -178,4 +182,92 @@ fn search_by_keyword_reveals_closed_hidden_door_then_open_works() {
     dispatch(&mut world, p, "east");
     drain(&mut rx);
     assert_eq!(world.get::<Located>(p).unwrap().0, ice);
+}
+
+fn searcher_with_int(world: &mut World, room: Entity, int: i32) -> (Entity, Rx) {
+    let (p, rx) = player(world, room);
+    world.entity_mut(p).insert(CoreStats {
+        intelligence: int,
+        ..CoreStats::default()
+    });
+    (p, rx)
+}
+
+fn revealed(world: &World, p: Entity, room: Entity, dir: Direction) -> bool {
+    world
+        .get::<mud_world::RevealedExits>(p)
+        .is_some_and(|r| r.set.contains(&(room, dir)))
+}
+
+#[test]
+fn search_roll_is_int_against_random_0_to_200() {
+    let (mut world, tunnel, ice) = world_with_rooms();
+    world
+        .get_mut::<Exits>(tunnel)
+        .unwrap()
+        .0
+        .insert(Direction::East, hidden_door(ice, ExitState::Open));
+    let (p, mut rx) = searcher_with_int(&mut world, tunnel, 50);
+
+    // INT must strictly beat the roll: 50 > 50 fails, 50 > 49 passes.
+    let mut seen = Vec::new();
+    super::info::search_with_roll(&mut world, p, "", &mut |hi| {
+        seen.push(hi);
+        50
+    });
+    assert!(drain(&mut rx).contains("You find nothing of interest."));
+    assert!(!revealed(&world, p, tunnel, Direction::East));
+    assert_eq!(seen, vec![200]);
+
+    super::info::search_with_roll(&mut world, p, "", &mut |_| 49);
+    assert!(drain(&mut rx).contains("You have found a hidden monolith"));
+    assert!(revealed(&world, p, tunnel, Direction::East));
+}
+
+#[test]
+fn search_keyword_match_always_reveals_without_rolling() {
+    let (mut world, tunnel, ice) = world_with_rooms();
+    world
+        .get_mut::<Exits>(tunnel)
+        .unwrap()
+        .0
+        .insert(Direction::East, hidden_door(ice, ExitState::Closed));
+    let (p, mut rx) = searcher_with_int(&mut world, tunnel, 0);
+
+    // A wrong keyword falls back to the (failing) roll.
+    super::info::search_with_roll(&mut world, p, "portal", &mut |_| 200);
+    assert!(!revealed(&world, p, tunnel, Direction::East));
+    // A keyword prefix reveals even with INT 0 and a hopeless roll.
+    super::info::search_with_roll(&mut world, p, "mono", &mut |_| panic!("no roll on a match"));
+    assert!(drain(&mut rx).contains("You have found a hidden monolith to the east."));
+    assert!(revealed(&world, p, tunnel, Direction::East));
+}
+
+#[test]
+fn search_rolls_per_hidden_exit_and_reveals_only_the_first_found() {
+    let (mut world, tunnel, ice) = world_with_rooms();
+    {
+        let mut exits = world.get_mut::<Exits>(tunnel).unwrap();
+        exits
+            .0
+            .insert(Direction::North, hidden_door(ice, ExitState::Open));
+        exits
+            .0
+            .insert(Direction::East, hidden_door(ice, ExitState::Open));
+    }
+    let (p, mut rx) = searcher_with_int(&mut world, tunnel, 100);
+
+    // North fails (150), east passes (10): only east is found.
+    let mut rolls = [150, 10].into_iter();
+    super::info::search_with_roll(&mut world, p, "", &mut |_| rolls.next().unwrap());
+    drain(&mut rx);
+    assert!(!revealed(&world, p, tunnel, Direction::North));
+    assert!(revealed(&world, p, tunnel, Direction::East));
+
+    // Both would pass: legacy stops at the first, so north (visited
+    // before east) is found and the search ends.
+    let (q, _rx) = searcher_with_int(&mut world, tunnel, 100);
+    super::info::search_with_roll(&mut world, q, "", &mut |_| 0);
+    assert!(revealed(&world, q, tunnel, Direction::North));
+    assert!(!revealed(&world, q, tunnel, Direction::East));
 }

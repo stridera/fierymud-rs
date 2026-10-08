@@ -5638,11 +5638,13 @@ inventory::submit! {
         required_perm: None,
         category: Category::Info,
         help: Help {
-            usage: "search",
+            usage: "search [<keyword>]",
             summary: "Search the area for hidden exits.",
-            long: "Refuses while fighting. Inspects every exit on \
-                   the current room and reveals any tagged HIDDEN \
-                   that you haven't already found. Reveals are \
+            long: "Refuses while fighting. Each hidden exit you \
+                   haven't found is checked in turn: naming its \
+                   keyword (`search monolith`) always finds it, \
+                   otherwise your Intelligence is rolled against \
+                   0-200. The first exit found is revealed. Reveals are \
                    per-character and session-scoped — a fresh \
                    login starts back at zero known hidden exits, \
                    matching the legacy contract until a persistent \
@@ -5653,13 +5655,49 @@ inventory::submit! {
     }
 }
 
-/// `search`: scan the current room for hidden exits and add any
-/// found to the player's `RevealedExits` set. Today every hidden
-/// exit reveals on first search — no perception roll yet — but
-/// the per-(`room`, `direction`) reveal granularity is already
-/// in place so a difficulty model can layer in without breaking
-/// the rendering contract.
-pub(crate) fn cmd_search(world: &mut World, player: Entity, _args: &str) {
+/// `search [<keyword>]`: look for hidden exits and add the find to the
+/// player's `RevealedExits` set. Legacy `search_for_doors`
+/// (act.informative.cpp:933) walks the hidden exits in N/E/S/W/U/D
+/// order and reveals the first one that either matches the keyword
+/// argument or passes `INT > random(0, 200)`, then stops; the roll is
+/// not made for a keyword match.
+pub(crate) fn cmd_search(world: &mut World, player: Entity, args: &str) {
+    search_with_roll(world, player, args, &mut |hi| rand::random_range(0..=hi));
+}
+
+/// Legacy `search_for_doors` visits directions in this order; the
+/// diagonals and `in`/`out` (absent from legacy) follow.
+const SEARCH_ORDER: [Direction; 12] = [
+    Direction::North,
+    Direction::East,
+    Direction::South,
+    Direction::West,
+    Direction::Up,
+    Direction::Down,
+    Direction::Northeast,
+    Direction::Northwest,
+    Direction::Southeast,
+    Direction::Southwest,
+    Direction::In,
+    Direction::Out,
+];
+
+/// Legacy `isname(arg, keywords)`: the argument prefixes a keyword word.
+fn exit_keyword_matches(keywords: &[String], arg: &str) -> bool {
+    !arg.is_empty()
+        && keywords.iter().flat_map(|k| k.split_whitespace()).any(|w| {
+            w.len() >= arg.len() && w.as_bytes()[..arg.len()].eq_ignore_ascii_case(arg.as_bytes())
+        })
+}
+
+/// `cmd_search` with the `random(0, 200)` roll injected: `roll(200)`
+/// is called once per hidden exit that did not match the keyword.
+pub(crate) fn search_with_roll(
+    world: &mut World,
+    player: Entity,
+    args: &str,
+    roll: &mut dyn FnMut(i32) -> i32,
+) {
     if world.get::<Fighting>(player).is_some() {
         send_to(world, player, "You're too busy fighting to search!\r\n");
         return;
@@ -5678,16 +5716,19 @@ pub(crate) fn cmd_search(world: &mut World, player: Entity, _args: &str) {
         &format!("{player_name} searches the area.\r\n"),
     );
 
-    let hidden_dirs: Vec<Direction> = world
+    let arg = args.split_whitespace().next().unwrap_or("");
+    let hidden: Vec<(Direction, bool)> = world
         .get::<Exits>(room)
         .map(|e| {
-            e.0.iter()
+            SEARCH_ORDER
+                .iter()
+                .filter_map(|d| e.0.get(d).map(|ed| (*d, ed)))
                 .filter(|(_, ed)| ed.is_hidden)
-                .map(|(d, _)| *d)
+                .map(|(d, ed)| (d, exit_keyword_matches(&ed.keywords, arg)))
                 .collect()
         })
         .unwrap_or_default();
-    if hidden_dirs.is_empty() {
+    if hidden.is_empty() {
         send_to(world, player, "You find nothing of interest.\r\n");
         return;
     }
@@ -5695,14 +5736,24 @@ pub(crate) fn cmd_search(world: &mut World, player: Entity, _args: &str) {
         .get::<RevealedExits>(player)
         .map(|r| r.set.clone())
         .unwrap_or_default();
-    let newly: Vec<Direction> = hidden_dirs
+    let candidates: Vec<(Direction, bool)> = hidden
         .into_iter()
-        .filter(|d| !already.contains(&(room, *d)))
+        .filter(|(d, _)| !already.contains(&(room, *d)))
         .collect();
-    if newly.is_empty() {
+    if candidates.is_empty() {
         send_to(world, player, "You find nothing new.\r\n");
         return;
     }
+    let intelligence = world.get::<CoreStats>(player).map_or(0, |s| s.intelligence);
+    let found = candidates
+        .into_iter()
+        .find(|(_, keyword_hit)| *keyword_hit || intelligence > roll(200))
+        .map(|(d, _)| d);
+    let Some(found) = found else {
+        send_to(world, player, "You find nothing of interest.\r\n");
+        return;
+    };
+    let newly = [found];
     let mut next = already;
     for dir in &newly {
         next.insert((room, *dir));

@@ -265,7 +265,7 @@ fn hidden_exits_are_filtered_from_room_info() {
     assert!(v["exits"].get("east").is_none());
     assert!(v["exit_details"].get("east").is_none());
 
-    dispatch(&mut fx.world, p, "search");
+    dispatch(&mut fx.world, p, "search monolith");
     drain_bytes(&mut rx);
     super::send_prompt(&mut fx.world, p);
     let fr = frames(&drain_bytes(&mut rx));
