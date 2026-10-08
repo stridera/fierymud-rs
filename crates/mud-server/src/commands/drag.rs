@@ -279,7 +279,7 @@ pub(crate) fn cmd_drag(world: &mut World, player: Entity, args: &str) {
         .get::<Located>(subject)
         .is_some_and(|l| l.0 == to_room);
     if !already_there && world.get::<Located>(subject).is_some() {
-        world.entity_mut(subject).insert(Located(to_room));
+        crate::combat::relocate(world, subject, to_room);
         if matches!(dragged, Dragged::Object(_)) {
             crate::corpses::queue_set_room(world, subject, to_room);
         }

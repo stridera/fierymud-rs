@@ -373,13 +373,45 @@ pub(crate) fn remember_attacker(world: &mut World, mob: Entity, attacker: Entity
     }
 }
 
+/// Legacy `char_from_room`: leaving a room ends the mover's own fight and
+/// every fight against them (`stop_fighting` + `stop_attackers`). Without
+/// this the stale `Fighting` links survive until the next combat tick, so a
+/// target that walked back in before the tick would resume the fight.
+/// `ReengageLag` is deliberately left alone.
+pub(crate) fn stop_fighting_both_ways(world: &mut World, who: Entity) {
+    try_remove::<Fighting>(world, who);
+    let attackers: Vec<Entity> = {
+        let mut q = world.query::<(Entity, &Fighting)>();
+        q.iter(world)
+            .filter(|(_, f)| f.0 == who)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for a in attackers {
+        try_remove::<Fighting>(world, a);
+    }
+}
+
+/// Move a located entity to `dest`, ending its fights first when the room
+/// actually changes (see [`stop_fighting_both_ways`]). The one place
+/// characters change rooms: `cmd_move`, flee/retreat, `mob_flee`, wander,
+/// teleport/goto/transfer/recall/summon, drag. An entity with no `Located`
+/// is left untouched.
+pub(crate) fn relocate(world: &mut World, who: Entity, dest: Entity) {
+    let Some(here) = world.get::<Located>(who).map(|l| l.0) else {
+        return;
+    };
+    if here != dest {
+        stop_fighting_both_ways(world, who);
+    }
+    world.entity_mut(who).insert(Located(dest));
+}
+
 /// A rider that moves takes its mount along (the mount's own movement is
 /// locked), as normal movement and legacy `do_flee` -> `do_simple_move` do.
 pub(crate) fn carry_mount(world: &mut World, rider: Entity, dest: Entity) {
-    if let Some(mud_world::Mounted(mount)) = world.get::<mud_world::Mounted>(rider).copied()
-        && world.get::<Located>(mount).is_some()
-    {
-        world.entity_mut(mount).insert(Located(dest));
+    if let Some(mud_world::Mounted(mount)) = world.get::<mud_world::Mounted>(rider).copied() {
+        relocate(world, mount, dest);
     }
 }
 
@@ -419,9 +451,7 @@ pub(crate) fn mob_flee(world: &mut World, mob: Entity, from_room: Entity) -> boo
         &format!("{mob_capped} panics and flees {}!\r\n", direction_name(dir)),
     );
     try_remove::<Fighting>(world, mob);
-    if world.get::<Located>(mob).is_some() {
-        world.entity_mut(mob).insert(Located(target_room));
-    }
+    crate::combat::relocate(world, mob, target_room);
     carry_mount(world, mob, target_room);
     let arrival_dir = arrival_from(dir);
     broadcast_room_except_players_rendered(
@@ -3959,6 +3989,53 @@ mod tests {
             hurt_mob_under_attack(&mut world, vec![mud_db::enums::MobBehavior::Wimpy], 28);
         run_combat_tick(&mut world);
         assert_eq!(world.get::<Located>(mob).map(|l| l.0), Some(room_b));
+        assert!(world.get::<Fighting>(mob).is_none());
+    }
+
+    #[test]
+    fn mob_flee_stops_its_attackers_at_once_and_return_does_not_resume() {
+        let mut world = World::new();
+        let (room_a, room_b, mob) = hurt_mob_under_attack(&mut world, vec![], 60);
+        let attacker = world.get::<Fighting>(mob).unwrap().0;
+        world.entity_mut(attacker).insert(Fighting(mob));
+        assert!(mob_flee(&mut world, mob, room_a));
+        assert_eq!(world.get::<Located>(mob).map(|l| l.0), Some(room_b));
+        // No combat tick has run: both links are already gone.
+        assert!(world.get::<Fighting>(mob).is_none());
+        assert!(world.get::<Fighting>(attacker).is_none());
+        // Walking straight back in before the tick must not revive the fight.
+        relocate(&mut world, mob, room_a);
+        assert!(world.get::<Fighting>(mob).is_none());
+        assert!(world.get::<Fighting>(attacker).is_none());
+    }
+
+    #[test]
+    fn relocating_to_the_same_room_keeps_the_fight() {
+        let mut world = World::new();
+        let (room_a, _b, mob) = hurt_mob_under_attack(&mut world, vec![], 60);
+        let attacker = world.get::<Fighting>(mob).unwrap().0;
+        relocate(&mut world, mob, room_a);
+        assert_eq!(world.get::<Fighting>(mob).map(|f| f.0), Some(attacker));
+    }
+
+    #[test]
+    fn player_flee_stops_every_attacker_and_return_does_not_resume() {
+        let mut world = World::new();
+        let (room_a, room_b, mob) = hurt_mob_under_attack(&mut world, vec![], 60);
+        let ally = make_attacker(&mut world, room_a, mob, 1);
+        let player = credit_player(&mut world, room_a, "Fleer", 0);
+        world.entity_mut(player).insert(Fighting(mob));
+        world.entity_mut(mob).insert(Fighting(player));
+        world.entity_mut(ally).insert(Fighting(player));
+        // The only exit leads to room_b.
+        crate::commands::cmd_flee(&mut world, player, "");
+        assert_eq!(world.get::<Located>(player).map(|l| l.0), Some(room_b));
+        assert!(world.get::<Fighting>(player).is_none());
+        assert!(world.get::<Fighting>(mob).is_none());
+        assert!(world.get::<Fighting>(ally).is_none());
+        // Return before any combat tick: still not fighting.
+        relocate(&mut world, player, room_a);
+        assert!(world.get::<Fighting>(player).is_none());
         assert!(world.get::<Fighting>(mob).is_none());
     }
 

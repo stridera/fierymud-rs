@@ -1768,12 +1768,10 @@ pub(crate) fn cmd_gretreat(world: &mut World, player: Entity, _args: &str) {
             &same_room,
             &format!("{capped} retreats with the group {dir_name}!\r\n"),
         );
-        // Each retreating member drops their own Fighting; the
-        // combat tick auto-disengages attackers on next pass.
+        // Each retreating member drops their own Fighting; `relocate`
+        // also stops everyone fighting them.
         try_remove::<Fighting>(world, *m);
-        if world.get::<Located>(*m).is_some() {
-            world.entity_mut(*m).insert(Located(target));
-        }
+        crate::combat::relocate(world, *m, target);
         crate::combat::carry_mount(world, *m, target);
     }
     let arrival_dir = opposite(dir).map_or("nearby".to_string(), |d| {
@@ -1844,14 +1842,11 @@ pub(crate) fn cmd_flee(world: &mut World, player: Entity, _args: &str) {
         &format!("{mover_capped} panics and flees {dir_name}!\r\n"),
     );
 
-    // Drop our own Fighting; combat_tick auto-disengages attackers on
-    // the next 1Hz pass via the room-mismatch check.
+    // Moving ends the fight both ways (`relocate`, legacy `char_from_room`).
     try_remove::<Fighting>(world, player);
 
     // Move + announce arrival + auto-look.
-    if world.get::<Located>(player).is_some() {
-        world.entity_mut(player).insert(Located(target));
-    }
+    crate::combat::relocate(world, player, target);
     crate::combat::carry_mount(world, player, target);
     let arrival_dir = opposite(dir).map_or("nearby".to_string(), |d| {
         format!("the {}", direction_name(d))
@@ -2751,9 +2746,7 @@ pub(crate) fn cmd_retreat(world: &mut World, player: Entity, args: &str) {
         &format!("{mover_name} retreats {dir_name}!\r\n"),
     );
     try_remove::<Fighting>(world, player);
-    if world.get::<Located>(player).is_some() {
-        world.entity_mut(player).insert(Located(target));
-    }
+    crate::combat::relocate(world, player, target);
     crate::combat::carry_mount(world, player, target);
     let arrival_dir = opposite(dir).map_or("nearby".to_string(), |d| {
         format!("the {}", direction_name(d))

@@ -2551,9 +2551,7 @@ pub(crate) fn cmd_transfer(world: &mut World, player: Entity, args: &str) {
     }
 
     // Move the target.
-    if world.get::<Located>(target).is_some() {
-        world.entity_mut(target).insert(Located(dest_loc.0));
-    }
+    crate::combat::relocate(world, target, dest_loc.0);
 
     // Destination-room bystanders (everyone but admin and the just-arrived target).
     let dest_bystanders: Vec<Entity> = {
@@ -2648,13 +2646,9 @@ pub(crate) fn cmd_teleport(world: &mut World, player: Entity, args: &str) {
         );
     }
 
-    if world.get::<Located>(target).is_some() {
-        world.entity_mut(target).insert(Located(dest));
-    }
-    if let Some(mount) = mount
-        && world.get::<Located>(mount).is_some()
-    {
-        world.entity_mut(mount).insert(Located(dest));
+    crate::combat::relocate(world, target, dest);
+    if let Some(mount) = mount {
+        crate::combat::relocate(world, mount, dest);
     }
 
     let dest_bystanders: Vec<Entity> = {
@@ -2830,6 +2824,7 @@ pub(crate) fn cmd_goto(world: &mut World, player: Entity, args: &str) {
             &[player],
             &format!("{line}\r\n"),
         );
+        crate::combat::stop_fighting_both_ways(world, player);
         world.entity_mut(player).insert(Located(target));
     }
     // Bring the mount along on goto / recall — otherwise the mount
@@ -2846,7 +2841,7 @@ pub(crate) fn cmd_goto(world: &mut World, player: Entity, args: &str) {
     for pet in pets {
         if world.get::<Located>(pet).is_some() && crate::commands::attack_ok::is_servant(world, pet)
         {
-            world.entity_mut(pet).insert(Located(target));
+            crate::combat::relocate(world, pet, target);
         }
     }
     if origin.is_some() {

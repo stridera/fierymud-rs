@@ -175,9 +175,7 @@ pub fn wander_tick(world: &mut World) {
                 direction_name(dir),
             ),
         );
-        if world.get::<Located>(mob).is_some() {
-            world.entity_mut(mob).insert(Located(target_room));
-        }
+        crate::combat::relocate(world, mob, target_room);
         let arrival_dir = arrival_from(dir);
         broadcast_room_except_players_rendered(
             world,

@@ -13064,8 +13064,8 @@ pub(crate) fn cmd_accept(world: &mut World, player: Entity, _args: &str) {
         }
         let cur_room = world.get::<Located>(player).map(|l| l.0);
         let actually_moved = cur_room != Some(summon.dest_room);
-        if actually_moved && world.get::<Located>(player).is_some() {
-            world.entity_mut(player).insert(Located(summon.dest_room));
+        if actually_moved {
+            crate::combat::relocate(world, player, summon.dest_room);
         }
         let tname = world
             .get::<Named>(player)
@@ -14044,9 +14044,7 @@ pub(crate) fn cmd_home(world: &mut World, player: Entity, _args: &str) {
         return;
     };
 
-    if world.get::<Located>(player).is_some() {
-        world.entity_mut(player).insert(Located(foyer));
-    }
+    crate::combat::relocate(world, player, foyer);
     send_to(world, player, "You return home.\r\n");
     cmd_look(world, player, "");
 }

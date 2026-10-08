@@ -6,7 +6,7 @@
 
 use bevy_ecs::prelude::*;
 use mud_db::enums::UserRole;
-use mud_world::{Account, HouseSummary, HousingIndex, Located, WorldKey};
+use mud_world::{Account, HouseSummary, HousingIndex, WorldKey};
 
 use crate::commands::{AsyncCommand, Category, Command, Help, cmd_look, cmd_mail_stub, send_to};
 
@@ -189,9 +189,7 @@ async fn cmd_visit(world: &mut World, player: Entity, pool: &mud_db::sqlx::PgPoo
         send_to(world, player, "Couldn't resolve the house foyer.\r\n");
         return;
     };
-    if world.get::<Located>(player).is_some() {
-        world.entity_mut(player).insert(Located(foyer_entity));
-    }
+    crate::combat::relocate(world, player, foyer_entity);
     send_to(
         world,
         player,

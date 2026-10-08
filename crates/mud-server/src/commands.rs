@@ -16051,9 +16051,7 @@ pub(crate) fn invoke_ability_with(
                     applied_msgs.push(format!("{pretty} (refused: entry restricted)"));
                     continue;
                 }
-                if world.get::<Located>(target_entity).is_some() {
-                    world.entity_mut(target_entity).insert(Located(dest_room));
-                }
+                crate::combat::relocate(world, target_entity, dest_room);
                 // Defer the auto-look until after the cast
                 // confirmation prints — otherwise the room description
                 // appears mid-cast between "You read aloud from
@@ -20866,14 +20864,10 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         .filter_map(|m| world.get::<mud_world::Mounted>(*m).map(|x| x.0))
         .collect();
     for &mover in &movers {
-        if world.get::<Located>(mover).is_some() {
-            world.entity_mut(mover).insert(Located(target));
-        }
+        crate::combat::relocate(world, mover, target);
     }
     for mount in mounts {
-        if world.get::<Located>(mount).is_some() {
-            world.entity_mut(mount).insert(Located(target));
-        }
+        crate::combat::relocate(world, mount, target);
     }
     // Zone-clear tracking: each player mover now occupies `target`.
     // Followers who happen to be NPCs are filtered inside the helper.

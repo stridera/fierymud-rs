@@ -395,17 +395,7 @@ fn send_home(world: &mut World, caster: Entity, victim: Entity, from: Entity) ->
         try_remove::<Mounted>(world, rider);
     }
     // char_from_room stops the victim's fight and everyone fighting them.
-    try_remove::<Fighting>(world, victim);
-    let attackers: Vec<Entity> = {
-        let mut q = world.query::<(Entity, &Fighting)>();
-        q.iter(world)
-            .filter(|(_, f)| f.0 == victim)
-            .map(|(e, _)| e)
-            .collect()
-    };
-    for a in attackers {
-        try_remove::<Fighting>(world, a);
-    }
+    crate::combat::stop_fighting_both_ways(world, victim);
 
     send_to(world, victim, "<b:black>You are banished!</>\r\n");
     broadcast_room_visual(
