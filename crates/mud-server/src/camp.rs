@@ -13,7 +13,7 @@
 
 use bevy_ecs::prelude::*;
 use mud_db::enums::{RestSource, Sector};
-use mud_world::{Camping, Fighting, Item, Located, PendingWakeAttachments, Profile, RestState};
+use mud_world::{Camping, Item, Located, PendingWakeAttachments, Profile, RestState};
 
 use crate::TickCount;
 use crate::commands::{Camped, Quitting, send_rendered};
@@ -106,7 +106,7 @@ pub fn camp_tick(world: &mut World) {
     };
     for (entity, camp) in snapshot {
         // Combat-cancel: mid-camp ambush wakes you up.
-        if world.get::<Fighting>(entity).is_some() {
+        if crate::commands::in_combat(world, entity) {
             cancel(
                 world,
                 entity,
@@ -187,7 +187,7 @@ fn complete(world: &mut World, entity: Entity, camp: Camping) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mud_world::{Health, Named, Player};
+    use mud_world::{Fighting, Health, Named, Player};
 
     fn camper_in(world: &mut World, room: Entity, since_tick: u64) -> Entity {
         world

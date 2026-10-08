@@ -251,8 +251,8 @@ fn spawn_wake_rows(world: &mut World, entity: Entity, rows: Vec<WakeRow>) {
 /// current room in the boot-loaded [`WakeEffectCatalog`], filtered by
 /// tier. Spec says the room where the player logged off — for v1 we
 /// use `Located` (the current room), which is the same room since
-/// `pick_rest_starting_room` lands INN-sourced players back where
-/// they rented. Pure in-memory read: this runs inside ECS systems on
+/// login spawns every player back where they logged off (INN-sourced
+/// ones included). Pure in-memory read: this runs inside ECS systems on
 /// a current-thread runtime and must never block on the DB.
 fn apply_inn_wake_attachments(world: &mut World, entity: Entity, rest_tier: i32) {
     let room_key = world

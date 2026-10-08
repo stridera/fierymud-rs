@@ -8,7 +8,7 @@ use mud_db::{characters, characters::CharacterRow, sqlx::PgPool, users, users::U
 use mud_net::{ConnId, Outbound};
 use mud_world::{
     Account, AccountSummary, AttachedTriggers, BankWealth, BoardLink, CombatStats, CoreStats,
-    Description, EquippedSlot, Fighting, Follower, Ghost, Health, Item, Keywords, KnownAbilities,
+    Description, EquippedSlot, Follower, Ghost, Health, Item, Keywords, KnownAbilities,
     LiquidContainer, Located, LoggedInAt, Mob, MobPrototypes, Named, ObjectPrototypes, Online,
     Player, PlayerFlags, Posture, PostureKind, Profile, Prompt, RecallPoint, Slot, Stamina, Title,
     TriggerCatalog, Wealth, WearableIn, WorldKey, WorldKeyIndex, wear_flags_primary_slot,
@@ -943,8 +943,8 @@ fn reprompt_identifier(ctx: &mut LoginCtx, world: &World) {
 /// A socket drop leaves the character in the world only when it is
 /// mid-fight and alive; quitting players, ghosts, and everyone out of
 /// combat are saved and despawned as before.
-fn goes_linkdead(world: &World, entity: Entity) -> bool {
-    world.get::<Fighting>(entity).is_some()
+fn goes_linkdead(world: &mut World, entity: Entity) -> bool {
+    commands::in_combat(world, entity)
         && world.get::<Health>(entity).is_some_and(|h| h.hp > 0)
         && world.get::<Ghost>(entity).is_none()
         && world.get::<commands::Quitting>(entity).is_none()
@@ -1254,7 +1254,7 @@ impl ConnRouter {
         };
         for (entity, since) in linkdead {
             if world.get::<Ghost>(entity).is_none() {
-                if world.get::<Fighting>(entity).is_some() {
+                if commands::in_combat(world, entity) {
                     if let Some(mut l) = world.get_mut::<commands::Linkdead>(entity) {
                         l.since_tick = now;
                     }
@@ -6979,6 +6979,63 @@ mod tests {
         commands::send_to(&world, fighter, "nobody hears this\r\n");
         // The autosave / shutdown save still covers it.
         assert!(router.online_entities(&mut world).contains(&fighter));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stunned_player_dropping_link_stays_linkdead() {
+        let mut world = World::new();
+        world.insert_resource(mud_world::SocialRegistry::default());
+        world.insert_resource(SaveCoordinator::default());
+        world.insert_resource(crate::TickCount(0));
+        let pool = failing_pool();
+        let mut router = ConnRouter::new();
+        let room = world.spawn(mud_world::Room).id();
+        let (victim, foe, _rx) = fighter_in(&mut router, &mut world, room, 1);
+        // Combat clears a stunned player's own target; the mob still swings.
+        world.entity_mut(victim).remove::<mud_world::Fighting>();
+        world.entity_mut(foe).insert(mud_world::Fighting(victim));
+
+        router.on_disconnect(&mut world, 1, &pool).await;
+
+        assert!(world.get::<commands::Linkdead>(victim).is_some());
+        assert_eq!(world.resource::<SaveCoordinator>().pending(), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn linkdead_player_still_attacked_by_another_holds_the_timer() {
+        let mut world = World::new();
+        world.insert_resource(mud_world::SocialRegistry::default());
+        world.insert_resource(SaveCoordinator::default());
+        world.insert_resource(crate::TickCount(0));
+        let pool = failing_pool();
+        let mut router = ConnRouter::new();
+        let room = world.spawn(mud_world::Room).id();
+        let (player, target_a, _rx) = fighter_in(&mut router, &mut world, room, 1);
+        let attacker_b = world
+            .spawn((mud_world::Mob, Located(room), Health { hp: 50, max: 50 }))
+            .id();
+        router.on_disconnect(&mut world, 1, &pool).await;
+        // Target A dies (player's own Fighting cleared, no retarget); B keeps
+        // swinging at the player.
+        world.despawn(target_a);
+        world.entity_mut(player).remove::<mud_world::Fighting>();
+        world
+            .entity_mut(attacker_b)
+            .insert(mud_world::Fighting(player));
+
+        world.insert_resource(crate::TickCount(LINKDEAD_TIMEOUT_TICKS + 5));
+        router.drain_linkdead(&mut world, &pool).await;
+        assert!(world.get_entity(player).is_ok(), "held while B swings");
+        assert_eq!(
+            world.get::<commands::Linkdead>(player).unwrap().since_tick,
+            LINKDEAD_TIMEOUT_TICKS + 5
+        );
+
+        // B stops: after the timeout from the last round, the player goes.
+        world.entity_mut(attacker_b).remove::<mud_world::Fighting>();
+        world.insert_resource(crate::TickCount(2 * LINKDEAD_TIMEOUT_TICKS + 5));
+        router.drain_linkdead(&mut world, &pool).await;
+        assert!(world.get_entity(player).is_err());
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -6766,7 +6766,7 @@ pub(crate) fn cmd_camp(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "You're already setting up camp.\r\n");
         return;
     }
-    if world.get::<Fighting>(player).is_some() {
+    if crate::commands::in_combat(world, player) {
         send_to(world, player, "You are too busy to do this!\r\n");
         return;
     }
@@ -7638,7 +7638,7 @@ pub(crate) fn begin_quit(world: &mut World, player: Entity, farewell: &str) -> b
     let is_staff = world
         .get::<mud_world::Account>(player)
         .is_some_and(|a| a.role.rank() > mud_db::enums::UserRole::Player.rank());
-    if !is_staff && world.get::<Fighting>(player).is_some() {
+    if !is_staff && crate::commands::in_combat(world, player) {
         send_to(world, player, "No way!  You're fighting for your life!\r\n");
         return false;
     }

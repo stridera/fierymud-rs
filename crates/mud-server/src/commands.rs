@@ -727,6 +727,21 @@ pub(crate) enum ComposeStep {
 #[derive(Component)]
 pub(crate) struct Quitting;
 
+/// True while `entity` is in a fight: it has its own `Fighting` target, or
+/// something in its room is swinging at it. Combat clears the player's own
+/// `Fighting` on stun and when their target dies while another attacker
+/// keeps going, so the own-component check alone misses live fights.
+pub(crate) fn in_combat(world: &mut World, entity: Entity) -> bool {
+    if world.get::<Fighting>(entity).is_some() {
+        return true;
+    }
+    let Some(room) = world.get::<Located>(entity).map(|l| l.0) else {
+        return false;
+    };
+    let mut q = world.query::<(&Fighting, &Located)>();
+    q.iter(world).any(|(f, l)| f.0 == entity && l.0 == room)
+}
+
 /// Companion to [`Quitting`] set by a completed `camp`: picks the camp
 /// departure line instead of the `quit` one.
 #[derive(Component)]
