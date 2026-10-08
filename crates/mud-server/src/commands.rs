@@ -12769,8 +12769,15 @@ pub(crate) fn find_actor_in_room(
     sort_newest_first(world, room, &mut hits, |e| *e);
     // `look` renders the mob lines first and the "Also here:" player block
     // after them, each newest first; the stable sort keeps that inner order.
-    hits.sort_by_key(|e| world.get::<Player>(*e).is_some());
+    hits.sort_by_key(|e| mobs_before_players_key(world, *e));
     hits.get(index - 1).copied()
+}
+
+/// Sort key shared by every `N.name` actor disambiguator: mobs (and items)
+/// sort before players, matching the order `look` renders them. Use with a
+/// stable sort over a newest-first list so the inner order is preserved.
+pub(crate) fn mobs_before_players_key(world: &World, e: Entity) -> bool {
+    world.get::<Player>(e).is_some()
 }
 
 /// Locate any online player by name across the whole world. Returns
@@ -20836,14 +20843,20 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         let leader = movers[idx];
         idx += 1;
         let new_followers: Vec<Entity> = {
-            // Legacy `do_simple_move` only drags along followers that are not
-            // fighting; a follower in a fight stays behind.
-            let mut q = world.query::<(Entity, &Located, &Follower, Has<Fighting>)>();
+            // Legacy `do_simple_move` only drags along followers that are
+            // standing and not fighting; a follower who is sitting, resting,
+            // sleeping or in a fight stays behind.
+            let mut q =
+                world.query::<(Entity, &Located, &Follower, Has<Fighting>, Option<&Posture>)>();
             q.iter(world)
-                .filter(|(e, l, f, fighting)| {
-                    f.0 == leader && l.0 == from_room && !fighting && !movers.contains(e)
+                .filter(|(e, l, f, fighting, posture)| {
+                    f.0 == leader
+                        && l.0 == from_room
+                        && !fighting
+                        && posture.is_none_or(|p| p.0 == PostureKind::Standing)
+                        && !movers.contains(e)
                 })
-                .map(|(e, _, _, _)| e)
+                .map(|(e, _, _, _, _)| e)
                 .collect()
         };
         for f in new_followers {

@@ -357,3 +357,54 @@ fn anywhere_search_checks_equipment_before_inventory_like_generic_find() {
         Some(packed)
     );
 }
+
+#[test]
+fn examine_indexed_actor_matches_look_mobs_before_players() {
+    let (mut world, room, p, mut rx) = setup();
+    let spawn_player = |w: &mut World, name: &str| {
+        w.spawn((
+            mud_world::Player,
+            Named { name: name.into() },
+            Located(room),
+        ))
+        .id()
+    };
+    spawn_player(&mut world, "Bobby");
+    spawn_mob(&mut world, room, "a bobby rat");
+    spawn_player(&mut world, "Bobbo");
+    let _ = drain(&mut rx);
+    // Mobs first, then players newest first: bobby rat, Bobbo, Bobby.
+    dispatch(&mut world, p, "examine bob");
+    let first = drain(&mut rx);
+    assert!(first.contains("bobby rat"), "{first}");
+    dispatch(&mut world, p, "examine 2.bob");
+    let second = drain(&mut rx);
+    assert!(second.contains("Bobbo"), "{second}");
+    assert!(!second.contains("bobby rat"), "{second}");
+    dispatch(&mut world, p, "examine 3.bob");
+    let third = drain(&mut rx);
+    assert!(third.contains("Bobby"), "{third}");
+    assert!(!third.contains("Bobbo"), "{third}");
+}
+
+#[test]
+fn remove_all_strips_in_equipment_slot_order() {
+    use mud_world::{EquippedSlot, Slot};
+    let (mut world, _room, p, mut rx) = setup();
+    // Spawn in reverse slot order so query / arrival order differs.
+    let right = spawn_item(&mut world, p, "a silver ring", "ring", 2);
+    let left = spawn_item(&mut world, p, "a gold ring", "ring", 1);
+    world
+        .entity_mut(right)
+        .insert(EquippedSlot(Slot::RightFinger));
+    world
+        .entity_mut(left)
+        .insert(EquippedSlot(Slot::LeftFinger));
+    dispatch(&mut world, p, "remove all");
+    assert_in_order(
+        &drain(&mut rx),
+        &["You remove a gold ring", "You remove a silver ring"],
+    );
+    assert!(world.get::<EquippedSlot>(left).is_none());
+    assert!(world.get::<EquippedSlot>(right).is_none());
+}

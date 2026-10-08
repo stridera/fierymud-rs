@@ -3363,7 +3363,12 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
             .and_then(|m| m.get(&e))
             .copied()
             .unwrap_or(usize::MAX);
-        (in_inv, rank)
+        // Mobs before players, as `look` and `find_actor_in_room` order them.
+        (
+            in_inv,
+            crate::commands::mobs_before_players_key(world, e),
+            rank,
+        )
     });
     let target = if remaining <= entity_matches.len() {
         Some(entity_matches[remaining - 1])
@@ -12186,14 +12191,23 @@ pub(crate) fn cmd_remove(world: &mut World, player: Entity, args: &str) {
     }
     // `remove all` — strip every equipped item.
     if target_word.eq_ignore_ascii_case("all") {
-        let items: Vec<(Entity, String)> = {
+        let mut worn: Vec<(Entity, String, Slot)> = {
             let mut q =
                 world.query_filtered::<(Entity, &Located, &Named, &EquippedSlot), With<Item>>();
             q.iter(world)
                 .filter(|(_, l, _, _)| l.0 == player)
-                .map(|(e, _, n, _)| (e, n.name.clone()))
+                .map(|(e, _, n, eq)| (e, n.name.clone(), eq.0))
                 .collect()
         };
+        // Legacy `do_remove` walks `where = 0..NUM_WEARS`, so the strip
+        // (and its messages) follow equipment slot order, not query order.
+        worn.sort_by_key(|(_, _, s)| {
+            Slot::ORDER
+                .iter()
+                .position(|x| x == s)
+                .unwrap_or(usize::MAX)
+        });
+        let items: Vec<(Entity, String)> = worn.into_iter().map(|(e, n, _)| (e, n)).collect();
         if items.is_empty() {
             send_to(world, player, "You aren't wearing anything.\r\n");
             return;

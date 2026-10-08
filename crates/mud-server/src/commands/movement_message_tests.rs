@@ -169,3 +169,35 @@ fn a_fighting_follower_stays_behind_when_the_leader_moves() {
         Some(foe)
     );
 }
+
+/// Legacy `do_simple_move` requires `GET_POS(follower) >= POS_STANDING`:
+/// sitting, resting and sleeping followers stay behind.
+#[test]
+fn a_non_standing_follower_stays_behind_when_the_leader_moves() {
+    use mud_world::{Posture, PostureKind};
+    let (mut world, leader, _mrx, _brx, _crx) = setup(Direction::North, ExitState::Open, &[]);
+    let from = world.get::<mud_world::Located>(leader).unwrap().0;
+    let (standing, _srx) = player_in(&mut world, from);
+    let mut sitters = Vec::new();
+    for kind in [
+        PostureKind::Sitting,
+        PostureKind::Resting,
+        PostureKind::Sleeping,
+    ] {
+        let (f, rx) = player_in(&mut world, from);
+        world
+            .entity_mut(f)
+            .insert((account(), mud_world::Follower(leader), Posture(kind)));
+        sitters.push((f, rx));
+    }
+    world
+        .entity_mut(standing)
+        .insert((account(), mud_world::Follower(leader)));
+    cmd_move(&mut world, leader, Direction::North);
+    let to = world.get::<mud_world::Located>(leader).unwrap().0;
+    assert_ne!(to, from);
+    assert_eq!(world.get::<mud_world::Located>(standing).unwrap().0, to);
+    for (f, _) in &sitters {
+        assert_eq!(world.get::<mud_world::Located>(*f).unwrap().0, from);
+    }
+}
