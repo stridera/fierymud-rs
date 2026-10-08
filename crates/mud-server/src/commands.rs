@@ -12724,7 +12724,8 @@ pub(crate) fn find_in_room(world: &mut World, needle: &str, room: Entity) -> Opt
 }
 
 /// Find a non-Item entity in `room` (player or mob) for give/attack-style
-/// targeting.
+/// targeting. `N.` indexes the order `look` renders them: mob lines first,
+/// then the visible players ("Also here:"), each newest arrival first.
 pub(crate) fn find_actor_in_room(
     world: &mut World,
     needle: &str,
@@ -12748,6 +12749,9 @@ pub(crate) fn find_actor_in_room(
         .map(|(e, _, _, _, _)| e)
         .collect();
     sort_newest_first(world, room, &mut hits, |e| *e);
+    // `look` renders the mob lines first and the "Also here:" player block
+    // after them, each newest first; the stable sort keeps that inner order.
+    hits.sort_by_key(|e| world.get::<Player>(*e).is_some());
     hits.get(index - 1).copied()
 }
 
