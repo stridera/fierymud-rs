@@ -13284,6 +13284,12 @@ pub(crate) fn invoke_ability_aoe(
             return false;
         }
     }
+    if matches!(scope, AoeScope::RoomEnemies)
+        && !filter_aoe_by_alignment_rules(world, caster, kind, ability_name, &mut targets)
+    {
+        send_to(world, caster, refusal_when_empty);
+        return false;
+    }
     // Per-target dispatch always passes `aoe_repeat = true` so the
     // recursive `invoke_ability_with` call doesn't re-trigger the
     // is_area AOE branch (infinite loop). Side effect: the
@@ -13306,6 +13312,64 @@ pub(crate) fn invoke_ability_aoe(
         );
     }
     true
+}
+
+/// Legacy `SPELL_HOLY_WORD` / `SPELL_UNHOLY_WORD` (`mag_areas`): the
+/// room sweep silently skips everyone on the wrong side of the
+/// alignment line, and the caster's own alignment is checked once, not
+/// once per victim. Reads the ability's `alignment` restriction rules
+/// (`target: "victim"` filters `targets` in place; a failing
+/// `target: "caster"` rule sends its message and returns `false`).
+/// Returns `false` when the cast must stop (message already sent for the
+/// caster case; the caller sends the empty-room refusal otherwise).
+fn filter_aoe_by_alignment_rules(
+    world: &mut World,
+    caster: Entity,
+    kind: mud_db::abilities::AbilityKind,
+    ability_name: &str,
+    targets: &mut Vec<(Entity, String)>,
+) -> bool {
+    let needle = ability_name.to_ascii_lowercase().replace(' ', "_");
+    let rules: Vec<serde_json::Value> = {
+        let catalog = world.resource::<AbilityCatalog>();
+        catalog
+            .find_by_prefix(&needle, Some(kind), None)
+            .and_then(|d| catalog.restriction_rules.get(&d.id))
+            .cloned()
+            .unwrap_or_default()
+    };
+    let alignment_rules = |side: &'static str| {
+        rules
+            .iter()
+            .filter(move |r| {
+                r.get("type").and_then(serde_json::Value::as_str) == Some("alignment")
+                    && r.get("target").and_then(serde_json::Value::as_str) == Some(side)
+            })
+            .collect::<Vec<_>>()
+    };
+    if let Some(failed) = alignment_rules("caster")
+        .into_iter()
+        .find(|r| !check_rule_alignment(world, caster, r))
+    {
+        let msg = failed
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Your alignment forbids it.");
+        send_to(world, caster, format!("{msg}\r\n"));
+        // Cast spent, nothing to say about the room.
+        targets.clear();
+        return true;
+    }
+    let victim_rules = alignment_rules("victim");
+    if victim_rules.is_empty() {
+        return true;
+    }
+    targets.retain(|(t, _)| {
+        victim_rules
+            .iter()
+            .all(|r| check_rule_alignment(world, *t, r))
+    });
+    !targets.is_empty()
 }
 
 /// What a room-wide cast says when nobody is there to hit / reach.

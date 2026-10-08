@@ -1752,6 +1752,87 @@ mod tests {
         }
     }
 
+    /// `zap` carrying the Holy Word alignment rules: only evil victims,
+    /// only a good caster.
+    fn holy_zap_world(caster_alignment: i32) -> (World, Entity, Entity, Entity) {
+        let (mut world, room) = world_with_zap();
+        world.resource_mut::<AbilityCatalog>().restriction_rules.insert(
+            ZAP,
+            vec![
+                serde_json::json!({"type": "alignment", "value": "evil", "target": "victim",
+                    "message": "Your soul is not pure enough to invoke holy power!", "required": true}),
+                serde_json::json!({"type": "alignment", "value": "good", "target": "caster",
+                    "message": "Your soul is not pure enough to invoke holy power!", "required": true}),
+            ],
+        );
+        let (caster, rx) = player_in(&mut world, room);
+        std::mem::forget(rx);
+        world.entity_mut(caster).insert((
+            Health { hp: 50, max: 50 },
+            KnownAbilities {
+                entries: vec![(ZAP, 500, true)],
+            },
+            mud_world::CombatStats {
+                alignment: caster_alignment,
+                ..Default::default()
+            },
+        ));
+        let (evil, _) = goblin_with_loot(&mut world, room);
+        world.entity_mut(evil).insert(mud_world::CombatStats {
+            alignment: -800,
+            ..Default::default()
+        });
+        let (neutral, _) = goblin_with_loot(&mut world, room);
+        (world, caster, evil, neutral)
+    }
+
+    fn sweep_room(world: &mut World, caster: Entity) -> bool {
+        crate::commands::invoke_ability_aoe(
+            world,
+            caster,
+            AbilityKind::Spell,
+            "cast",
+            "zap",
+            crate::commands::AoeScope::RoomEnemies,
+            "Nothing here.\r\n",
+        )
+    }
+
+    #[test]
+    fn alignment_area_spell_hits_only_the_evil_in_the_room() {
+        // Issue #81 / legacy mag_areas: Holy Word sweeps the room but
+        // skips everyone who is not evil.
+        let (mut world, caster, evil, neutral) = holy_zap_world(800);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+        world
+            .entity_mut(caster)
+            .insert(crate::commands::Connection(tx));
+        assert!(sweep_room(&mut world, caster));
+        let out = drain(&mut rx);
+        assert!(
+            !out.contains("not pure enough"),
+            "the neutral goblin is skipped silently: {out}"
+        );
+        assert!(world.get_entity(evil).is_err(), "evil goblin was smitten");
+        assert!(
+            world.get_entity(neutral).is_ok(),
+            "neutral goblin untouched"
+        );
+    }
+
+    #[test]
+    fn alignment_area_spell_refuses_a_caster_on_the_wrong_side_once() {
+        let (mut world, caster, evil, neutral) = holy_zap_world(-800);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+        world
+            .entity_mut(caster)
+            .insert(crate::commands::Connection(tx));
+        sweep_room(&mut world, caster);
+        let out = drain(&mut rx);
+        assert_eq!(out.matches("not pure enough").count(), 1, "{out}");
+        assert!(world.get_entity(evil).is_ok() && world.get_entity(neutral).is_ok());
+    }
+
     #[test]
     fn stale_damage_source_does_not_claim_a_later_kill() {
         // A recorded damager from a different room is not credited.
