@@ -4832,41 +4832,14 @@ pub(crate) fn cmd_hire(world: &mut World, player: Entity, args: &str) {
     // reconnect under the 1h cap).
     let player_name = name_of(world, player);
     let pet_name = format!("{player_name}'s {}", proto.name);
-    let hp = proto.rolled_hp();
-    let pet_entity = world
-        .spawn((
-            Mob,
-            Named {
-                name: pet_name.clone(),
-            },
-            Keywords(proto.keywords.clone()),
-            Description(proto.room_description.clone()),
-            WorldKey {
-                zone: proto.zone_id,
-                id: proto.id,
-            },
-            Located(located.0),
-            Health { hp, max: hp },
-            proto.derived_combat_stats(),
+    let pet_entity = mud_world::spawn_mob_from_proto(world, &proto, located.0, None);
+    if let Ok(mut em) = world.get_entity_mut(pet_entity) {
+        em.insert((
+            Named { name: pet_name },
             Posture(PostureKind::Standing),
             Follower(player),
             mud_world::PersistentPet,
-            mud_world::NaturalDamage {
-                num: proto.damage_dice_num,
-                size: proto.damage_dice_size,
-                bonus: proto.damage_dice_bonus,
-            },
-        ))
-        .id();
-    if !proto.examine_description.trim().is_empty()
-        && let Ok(mut em) = world.get_entity_mut(pet_entity)
-    {
-        em.insert(mud_world::ExamineText(proto.examine_description.clone()));
-    }
-    if proto.is_mountable()
-        && let Ok(mut em) = world.get_entity_mut(pet_entity)
-    {
-        em.insert(mud_world::Mountable);
+        ));
     }
     let price_str = format_wealth(price_copper).unwrap_or_else(|| "free".to_string());
     send_rendered(
@@ -6720,30 +6693,15 @@ pub(crate) fn cmd_summonmount(world: &mut World, player: Entity, _args: &str) {
         .get(&(zone, id))
         .cloned();
     let Some(proto) = proto else { return };
-    let hp = proto.rolled_hp();
     let player_name = name_of(world, player);
-    let mount_entity = world
-        .spawn((
-            Mob,
-            Named {
-                name: proto.name.clone(),
-            },
-            Keywords(proto.keywords.clone()),
-            Description(proto.room_description.clone()),
-            WorldKey { zone, id },
-            Located(room),
-            Health { hp, max: hp },
-            proto.derived_combat_stats(),
+    let mount_entity = mud_world::spawn_mob_from_proto(world, &proto, room, None);
+    if let Ok(mut em) = world.get_entity_mut(mount_entity) {
+        em.insert((
             Posture(PostureKind::Standing),
             mud_world::Mountable,
             Follower(player),
-            mud_world::NaturalDamage {
-                num: proto.damage_dice_num,
-                size: proto.damage_dice_size,
-                bonus: proto.damage_dice_bonus,
-            },
-        ))
-        .id();
+        ));
+    }
     let mount_name = name_of(world, mount_entity);
     send_rendered(
         world,

@@ -477,6 +477,9 @@ mod setrecall;
 mod shop_tests;
 #[path = "commands/skills_extra.rs"]
 mod skills_extra;
+#[cfg(test)]
+#[path = "commands/spawn_effects_tests.rs"]
+mod spawn_effects_tests;
 #[path = "commands/spells.rs"]
 mod spells;
 #[path = "commands/status_lists.rs"]
@@ -11186,6 +11189,28 @@ pub(crate) fn recheck_aggro_in_room(world: &mut World, player: Entity) {
     }
 }
 
+/// Run the room-entry aggro check for every online player standing in
+/// `room`. Called after a hostile-capable mob is placed there by
+/// something other than a player walking in (zone respawn, Lua / admin
+/// spawn): same [`recheck_aggro_in_room`] gating (grudge first, then the
+/// alignment / formula rule, `can_see_player`, wimpy rules, staff and
+/// already-fighting players excluded), so a spawned mob behaves exactly
+/// like one the player walked in on. Not for follower spawns (pets,
+/// mounts, summoned or animated allies), which must not turn on the room.
+pub(crate) fn aggro_room_players(world: &mut World, room: Entity) {
+    let players: Vec<Entity> = {
+        let mut q =
+            world.query_filtered::<(Entity, &Located), (With<Player>, With<mud_world::Online>)>();
+        q.iter(world)
+            .filter(|(_, l)| l.0 == room)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for player in players {
+        recheck_aggro_in_room(world, player);
+    }
+}
+
 /// True if anyone in `room` (any actor, plus loose items on the
 /// floor and items worn or carried by actors in the room) has a lit
 /// light source ([`mud_world::is_lit`]: lit by the `light` command, or
@@ -17182,41 +17207,21 @@ pub(crate) fn invoke_ability_with(
                     mob_keywords = proto.keywords.clone();
                     mob_description = proto.room_description.clone();
                 }
-                let spawn_posture = Posture::from_default_position(proto.default_position);
-                let mob = world
-                    .spawn((
-                        Mob,
+                // Shared proto builder (latent components, default
+                // effects, ...); then the summon-specific identity:
+                // mirrored name / keywords / description for
+                // CLONE / SIMULACRUM, scaled HP, and the caster as
+                // leader.
+                let mob = mud_world::spawn_mob_from_proto(world, &proto, caster_room, None);
+                if let Ok(mut em) = world.get_entity_mut(mob) {
+                    em.insert((
                         Named {
                             name: mob_name.clone(),
                         },
                         Keywords(mob_keywords),
                         Description(mob_description),
-                        WorldKey {
-                            zone: proto.zone_id,
-                            id: proto.id,
-                        },
-                        Located(caster_room),
                         Health { hp, max: hp },
-                        proto.derived_combat_stats(),
-                        Posture(spawn_posture),
-                        mud_world::NaturalDamage {
-                            num: proto.damage_dice_num,
-                            size: proto.damage_dice_size,
-                            bonus: proto.damage_dice_bonus,
-                        },
                         Follower(player),
-                    ))
-                    .id();
-                // Mob latent parity — same set the loader / cmd_summon
-                // path attaches. Without this, latent gates that look
-                // for these components silently disable.
-                if let Ok(mut em) = world.get_entity_mut(mob) {
-                    em.insert((
-                        mud_world::Sized(proto.size),
-                        mud_world::LifeForceTag(proto.life_force),
-                        mud_world::NaturalAttackType(proto.damage_type),
-                        mud_world::MobTraits(proto.traits.clone()),
-                        mud_world::MovementModeTag(proto.default_movement_mode),
                     ));
                 }
                 let mut dur_secs = resolve_effect_duration(

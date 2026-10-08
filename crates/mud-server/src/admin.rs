@@ -33,8 +33,8 @@ use mud_net::Outbound;
 use mud_world::{
     Account, AppliedTo, AttachedTriggers, BoardLink, ClassCatalog, CombatStats, Description,
     EffectInstance, Exits, Health, Item, Keywords, LastInputAt, LiquidContainer, Located,
-    LoggedInAt, Mob, MobPrototypes, Named, ObjectPrototypes, Online, Player, Posture, PostureKind,
-    Profile, Stamina, TriggerCatalog, WearableIn, WorldKey, WorldKeyIndex, wear_flags_primary_slot,
+    LoggedInAt, Mob, MobPrototypes, Named, ObjectPrototypes, Online, Player, Posture, Profile,
+    Stamina, TriggerCatalog, WearableIn, WorldKey, WorldKeyIndex, wear_flags_primary_slot,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -2051,7 +2051,7 @@ fn teleport(world: &mut World, name: &str, zone_id: i32, room_id: i32) -> AdminR
 /// respawn since `FromMobReset` / `FromObjectReset` aren't
 /// attached.
 #[allow(clippy::too_many_lines)]
-fn spawn_into(
+pub(crate) fn spawn_into(
     world: &mut World,
     kind: &str,
     zone_id: i32,
@@ -2083,40 +2083,8 @@ fn spawn_into(
                     format!("no mob prototype ({zone_id}, {id})"),
                 ));
             };
-            let hp = proto.rolled_hp();
-            let trigger_keys = world
-                .resource::<TriggerCatalog>()
-                .mob_attachments
-                .get(&(zone_id, id))
-                .cloned();
-            let mut em = world.spawn((
-                Mob,
-                Named {
-                    name: proto.name.clone(),
-                },
-                Keywords(proto.keywords.clone()),
-                Description(proto.room_description.clone()),
-                WorldKey {
-                    zone: proto.zone_id,
-                    id: proto.id,
-                },
-                Located(room_entity),
-                Health { hp, max: hp },
-                proto.derived_combat_stats(),
-                Posture(PostureKind::Standing),
-                mud_world::NaturalDamage {
-                    num: proto.damage_dice_num,
-                    size: proto.damage_dice_size,
-                    bonus: proto.damage_dice_bonus,
-                },
-            ));
-            if let Some(keys) = trigger_keys {
-                em.insert(AttachedTriggers(keys));
-            }
-            if !proto.examine_description.trim().is_empty() {
-                em.insert(mud_world::ExamineText(proto.examine_description.clone()));
-            }
-            let entity = em.id();
+            let entity = mud_world::spawn_mob_from_proto(world, &proto, room_entity, None);
+            crate::commands::aggro_room_players(world, room_entity);
             Ok(json!({
                 "success": true,
                 "kind": "mob",

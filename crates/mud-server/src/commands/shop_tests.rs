@@ -373,3 +373,24 @@ fn inspect_pet_shows_stats_with_unified_numbering() {
     assert!(out.contains("Name: a kitten"), "{out}");
     assert!(out.contains("Level: 1"), "{out}");
 }
+
+#[test]
+fn hired_pet_gets_its_protos_default_effects() {
+    let pets = vec![ShopPetOffering {
+        mob_zone_id: 30,
+        mob_id: 90,
+        amount: -1,
+        price: 0,
+    }];
+    let (mut world, player, mut rx) = world_with_shop(shop_def(Vec::new(), pets), 1_000);
+    super::test_support::grant_default_flags(&mut world, (30, 90), &["haste"]);
+
+    cmd_buy(&mut world, player, "kitten");
+    assert!(drain(&mut rx).contains("You hire a kitten"));
+    let followers = followers_of(&mut world, player);
+    assert_eq!(followers.len(), 1);
+    assert!(
+        world.get::<mud_world::Haste>(followers[0]).is_some(),
+        "a hired pet is a normal mob loaded from its prototype"
+    );
+}

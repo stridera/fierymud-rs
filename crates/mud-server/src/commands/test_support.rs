@@ -172,3 +172,61 @@ pub(crate) fn mob_proto(zone: i32, id: i32, profession: MobProfession) -> mud_wo
         aggression_formula: None,
     }
 }
+
+/// Give mob proto `key` a `MobDefaultEffects` row carrying `flags`
+/// (importer `modifier_data.flags` shape), installing the minimal
+/// `status` effect row it points at.
+pub(crate) fn grant_default_flags(world: &mut World, key: (i32, i32), flags: &[&str]) {
+    use mud_world::{EffectCatalog, EffectDef, MobDefaultEffect, MobDefaultEffectCatalog};
+    world
+        .get_resource_or_insert_with(EffectCatalog::default)
+        .by_id
+        .insert(
+            4,
+            EffectDef {
+                id: 4,
+                name: "status".into(),
+                description: None,
+                effect_type: "status".into(),
+                tags: vec![],
+                presence_override: None,
+                default_params: serde_json::json!({}),
+                prevents_speaking: false,
+                prevents_casting: false,
+                prevents_movement: false,
+                on_apply: None,
+                on_tick: None,
+                on_remove: None,
+            },
+        );
+    world
+        .get_resource_or_insert_with(MobDefaultEffectCatalog::default)
+        .by_key
+        .insert(
+            key,
+            vec![MobDefaultEffect {
+                effect_id: 4,
+                strength: 1,
+                modifier_data: serde_json::json!({ "flags": flags }),
+            }],
+        );
+}
+
+/// Make `player` an ordinary online, awake, idle player: the kind of
+/// target an aggressive mob may pick.
+pub(crate) fn make_aggro_target(world: &mut World, player: Entity) {
+    use mud_db::enums::UserRole;
+    world.entity_mut(player).insert((
+        mud_world::Online,
+        mud_world::CombatStats::default(),
+        mud_world::Health { hp: 100, max: 100 },
+        mud_world::Posture(mud_world::PostureKind::Standing),
+        mud_world::Account {
+            user_id: "u".into(),
+            character_id: "c".into(),
+            role: UserRole::Player,
+            account_role: UserRole::Player,
+            perms: vec![],
+        },
+    ));
+}

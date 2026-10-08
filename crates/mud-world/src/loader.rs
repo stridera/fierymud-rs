@@ -17,9 +17,8 @@ use crate::reset_gear::{
 };
 
 use crate::components::{
-    AttachedTriggers, BoardLink, Description, ExitData, Exits, FromMobReset, FromObjectReset,
-    Health, Item, Keywords, LiquidContainer, Located, Mob, Mountable, Named, Posture, Room,
-    RoomSector, Shopkeeper, WorldKey, Zone, ZoneClimate,
+    AttachedTriggers, BoardLink, Description, ExitData, Exits, FromObjectReset, Item, Keywords,
+    LiquidContainer, Located, Named, Room, RoomSector, WorldKey, Zone, ZoneClimate,
 };
 use crate::resources::{
     AbilityCatalog, AbilityDef, AbilityMessageSet, BoardCatalog, BoardSummary, ClassCatalog,
@@ -1021,98 +1020,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         if current >= r.max_instances.max(1) {
             continue;
         }
-        let hp = proto.rolled_hp();
-        let shop_key = world
-            .resource::<ShopCatalog>()
-            .keeper_index
-            .get(&proto_key)
-            .copied();
-        let trigger_keys = world
-            .resource::<TriggerCatalog>()
-            .mob_attachments
-            .get(&proto_key)
-            .cloned();
-        // Derive spawn posture from the proto's `default_position`.
-        // Helper handles the SLEEPING / RESTING / SITTING / STANDING
-        // mapping; legacy DEAD / GHOST / MORTALLY_WOUNDED /
-        // INCAPACITATED / STUNNED values fall back to Standing
-        // (those aren't valid spawn postures).
-        let spawn_posture = Posture::from_default_position(proto.default_position);
-        let mut em = world.spawn((
-            Mob,
-            Named {
-                name: proto.name.clone(),
-            },
-            Keywords(proto.keywords.clone()),
-            Description(proto.room_description.clone()),
-            WorldKey {
-                zone: proto.zone_id,
-                id: proto.id,
-            },
-            Located(room_entity),
-            Health { hp, max: hp },
-            // Derive accuracy/evasion/armor_pct/etc. from the
-            // legacy mob columns per combat.md migration plan.
-            // No more raw hit_roll / armor_class on the entity.
-            proto.derived_combat_stats(),
-            Posture(spawn_posture),
-            FromMobReset(r.id),
-            // Natural-attack dice for the per-swing roll. Bonus
-            // collapses into the dice tuple here so combat.rs can
-            // pull a single component to do `roll_dice(num, size,
-            // bonus)`. Mobs whose proto has zero dice (placeholder
-            // / non-combat NPC) still get the component but it
-            // resolves to zero damage at swing time.
-            crate::components::NaturalDamage {
-                num: proto.damage_dice_num,
-                size: proto.damage_dice_size,
-                bonus: proto.damage_dice_bonus,
-            },
-        ));
-        // Mob latent parity (Wave 2.L): size / lifeForce / damageType /
-        // movementMode / traits land on every spawned mob so the
-        // bash / detect-undead / attack-message / wander pipelines
-        // can read them off the entity without re-resolving the proto.
-        em.insert((
-            crate::components::Sized(proto.size),
-            crate::components::LifeForceTag(proto.life_force),
-            crate::components::NaturalAttackType(proto.damage_type),
-            crate::components::MobTraits(proto.traits.clone()),
-            crate::components::MovementModeTag(proto.default_movement_mode),
-        ));
-        // Movement-point pool: only mobs with a non-zero proto value
-        // carry the component. Zero = "unconstrained" per legacy.
-        if proto.move_points > 0 {
-            em.insert(crate::components::MovementPoints {
-                current: proto.move_points,
-                max: proto.move_points,
-            });
-        }
-        if let Some((shop_zone_id, shop_id)) = shop_key {
-            em.insert(Shopkeeper {
-                shop_zone_id,
-                shop_id,
-            });
-        }
-        if let Some(ref keys) = trigger_keys {
-            em.insert(AttachedTriggers(keys.clone()));
-        }
-        if !proto.behaviors.is_empty() {
-            em.insert(crate::components::MobBehaviors(proto.behaviors.clone()));
-        }
-        if !proto.examine_description.trim().is_empty() {
-            em.insert(crate::ExamineText(proto.examine_description.clone()));
-        }
-        // Mountable inference: MOUNT-traited mobs are mountable by
-        // design. Otherwise fall back to the legacy keyword heuristic
-        // for un-tagged content (horse/warhorse/donkey/etc.) so the
-        // imported world still surfaces mounts even before content
-        // authors have tagged every horse with MobTrait::Mount.
-        if proto.is_mountable() {
-            em.insert(Mountable);
-        }
-        let e = em.id();
-        crate::mob_effects::apply_mob_default_effects(world, e, proto_key);
+        let e = crate::mob_spawn::spawn_mob_from_proto(world, &proto, room_entity, Some(r.id));
         mobs_by_reset.insert(r.id, vec![e]);
         *mob_world_count.entry(proto_key).or_insert(0) += 1;
         stats.mob_resets_spawned += 1;

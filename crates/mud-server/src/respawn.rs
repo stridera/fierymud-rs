@@ -14,10 +14,9 @@ use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
 use mud_world::{
-    AttachedTriggers, Description, Health, Item, Keywords, LiquidContainer, Located, Mob,
-    MobGearCatalog, MobPrototypes, MobResetCatalog, Mountable, Named, ObjectPrototypes,
-    ObjectResetCatalog, Posture, ShopCatalog, Shopkeeper, TriggerCatalog, WorldKey, fill_container,
-    object_world_counts, outfit_mob,
+    AttachedTriggers, Description, Item, Keywords, LiquidContainer, Located, Mob, MobGearCatalog,
+    MobPrototypes, MobResetCatalog, Named, ObjectPrototypes, ObjectResetCatalog, TriggerCatalog,
+    WorldKey, fill_container, object_world_counts, outfit_mob,
 };
 use mud_world::{FromMobReset, FromObjectReset};
 use tracing::info;
@@ -97,8 +96,7 @@ pub fn respawn_tick(world: &mut World) {
     // post-loop, we look for a player in that room and start
     // hostilities. Reuses the same threshold the on-entry check
     // does so look / consider / spawn-engage all flip together.
-    let mut aggro_queue: Vec<(Entity, Entity)> = Vec::new();
-    let aggro_threshold = crate::commands::aggro_alignment(world);
+    let mut aggro_rooms: Vec<Entity> = Vec::new();
     // Read the configurable per-row respawn delay once. Negative or
     // zero means "no delay" — useful for tests and for staff-tuned
     // dungeons that need snappy refills.
@@ -145,91 +143,26 @@ pub fn respawn_tick(world: &mut World) {
             .get(&proto_key)
             .cloned();
         let Some(proto) = proto else { continue };
-        let hp = proto.rolled_hp();
-        let shop_key = world
-            .resource::<ShopCatalog>()
-            .keeper_index
-            .get(&proto_key)
-            .copied();
-        let trigger_keys = world
-            .resource::<TriggerCatalog>()
-            .mob_attachments
-            .get(&proto_key)
-            .cloned();
         // One spawn per reset row (only when the cap allows). The
         // running `world_counts` is incremented locally so subsequent
         // reset rows for the same proto see the new count and stop
-        // when full.
-        let spawn_posture = Posture::from_default_position(proto.default_position);
-        let mut em = world.spawn((
-            Mob,
-            Named {
-                name: proto.name.clone(),
-            },
-            Keywords(proto.keywords.clone()),
-            Description(proto.room_description.clone()),
-            WorldKey {
-                zone: proto.zone_id,
-                id: proto.id,
-            },
-            Located(entry.room_entity),
-            Health { hp, max: hp },
-            proto.derived_combat_stats(),
-            Posture(spawn_posture),
-            FromMobReset(entry.reset_id),
-            mud_world::NaturalDamage {
-                num: proto.damage_dice_num,
-                size: proto.damage_dice_size,
-                bonus: proto.damage_dice_bonus,
-            },
-        ));
-        // Mob latent parity (Wave 2.L) — same set the loader attaches.
-        em.insert((
-            mud_world::Sized(proto.size),
-            mud_world::LifeForceTag(proto.life_force),
-            mud_world::NaturalAttackType(proto.damage_type),
-            mud_world::MobTraits(proto.traits.clone()),
-            mud_world::MovementModeTag(proto.default_movement_mode),
-        ));
-        if proto.move_points > 0 {
-            em.insert(mud_world::MovementPoints {
-                current: proto.move_points,
-                max: proto.move_points,
-            });
-        }
-        if let Some((shop_zone_id, shop_id)) = shop_key {
-            em.insert(Shopkeeper {
-                shop_zone_id,
-                shop_id,
-            });
-        }
-        if let Some(ref keys) = trigger_keys {
-            em.insert(AttachedTriggers(keys.clone()));
-            load_fire_queue.push(em.id());
-        }
-        if !proto.behaviors.is_empty() {
-            em.insert(mud_world::MobBehaviors(proto.behaviors.clone()));
-        }
-        if !proto.examine_description.trim().is_empty() {
-            em.insert(mud_world::ExamineText(proto.examine_description.clone()));
-        }
-        if proto.is_mountable() {
-            em.insert(Mountable);
+        // when full. Same builder every other spawn path uses, so the
+        // proto's default effects land here too.
+        let new_mob =
+            mud_world::spawn_mob_from_proto(world, &proto, entry.room_entity, Some(entry.reset_id));
+        if world.get::<AttachedTriggers>(new_mob).is_some() {
+            load_fire_queue.push(new_mob);
         }
         reset_id_alive.insert(entry.reset_id);
-        spawned_mobs.push(em.id());
+        spawned_mobs.push(new_mob);
         *world_counts.entry(proto_key).or_insert(0) += 1;
         announce_queue.push((entry.room_entity, proto.name.clone()));
-        if proto.alignment <= aggro_threshold {
-            aggro_queue.push((em.id(), entry.room_entity));
-        }
+        aggro_rooms.push(entry.room_entity);
         refilled += 1;
         // Re-run the reset's E / G commands (legacy `reset_zone`
         // re-equips on every reset): same function the boot loader
         // uses, so the respawn matches the original outfit, minus any
         // item whose world-wide cap is already met.
-        let new_mob = em.id();
-        mud_world::mob_effects::apply_mob_default_effects(world, new_mob, proto_key);
         let has_gear = world
             .get_resource::<MobGearCatalog>()
             .is_some_and(|c| c.by_reset.contains_key(&entry.reset_id));
@@ -262,34 +195,15 @@ pub fn respawn_tick(world: &mut World) {
         );
     }
 
-    // Aggro pass: any hostile mob that just respawned tries to grab
-    // a non-admin, non-fighting player in the same room. Same
-    // threshold as the on-entry attack — and same one-attacker
-    // semantic, since each respawn iteration owns at most one mob.
-    for (mob, room) in aggro_queue {
-        let defender: Option<Entity> = {
-            let mut q = world.query_filtered::<(
-                Entity,
-                &Located,
-                Option<&mud_world::Account>,
-                Option<&mud_world::Fighting>,
-            ), (With<mud_world::Player>, With<mud_world::Online>)>();
-            q.iter(world)
-                .filter(|(e, l, account, fighting)| {
-                    l.0 == room
-                        && crate::commands::can_see_player(world, mob, *e)
-                        && crate::commands::mob_will_start_fight(world, mob, *e)
-                        && fighting.is_none()
-                        && account.is_some_and(|a| {
-                            a.role.rank() <= mud_db::enums::UserRole::Player.rank()
-                        })
-                })
-                .map(|(e, _, _, _)| e)
-                .next()
-        };
-        if let Some(defender) = defender {
-            crate::commands::engage_combat(world, mob, defender, room);
-        }
+    // Aggro pass: a respawned mob attacks a player already in its room
+    // through the same check a player walking in gets
+    // (`recheck_aggro_in_room`: grudge, alignment / formula rule,
+    // visibility, wimpy gating, staff exempt), so respawn and room
+    // entry can't drift apart.
+    aggro_rooms.sort_unstable();
+    aggro_rooms.dedup();
+    for room in aggro_rooms {
+        crate::commands::aggro_room_players(world, room);
     }
 
     // Fire LOAD triggers for the just-spawned mobs. The respawn loop
@@ -411,7 +325,7 @@ mod tests {
     use mud_db::object_reset_contents::ObjectResetContent;
     use mud_world::{
         ContentEntry, LightFuelProto, MobResetEntry, ObjectContentsCatalog, ObjectResetEntry,
-        RuntimeConfig,
+        RuntimeConfig, ShopCatalog,
     };
 
     const MOB_KEY: (i32, i32) = (1, 1);
@@ -817,5 +731,99 @@ mod tests {
         // Further cycles do not mint more while the cap is met.
         run_respawn(&mut world, 12000);
         assert_eq!(gems(&mut world), 3);
+    }
+
+    // -- aggro on respawn: same path as room entry -------------------------
+
+    /// A reset row for an evil mob with `behaviors`, plus an online,
+    /// idle player standing in the room.
+    fn aggro_world(
+        behaviors: Vec<mud_db::enums::MobBehavior>,
+    ) -> (World, Entity, Entity, crate::commands::test_support::Rx) {
+        let (mut world, room) = base_world();
+        let mut proto = mob_proto(1, 1, MobProfession::Trainer);
+        proto.alignment = -1000;
+        proto.behaviors = behaviors;
+        world
+            .resource_mut::<MobPrototypes>()
+            .by_key
+            .insert(MOB_KEY, proto);
+        add_mob_reset(&mut world, room, 1, &[]);
+        let (player, rx) = crate::commands::test_support::player_in(&mut world, room);
+        crate::commands::test_support::make_aggro_target(&mut world, player);
+        (world, room, player, rx)
+    }
+
+    fn fighting_target(world: &World, mob: Entity) -> Option<Entity> {
+        world.get::<mud_world::Fighting>(mob).map(|f| f.0)
+    }
+
+    #[test]
+    fn respawned_mob_gets_default_effects() {
+        let (mut world, room) = base_world();
+        add_mob_reset(&mut world, room, 1, &[]);
+        crate::commands::test_support::grant_default_flags(&mut world, MOB_KEY, &["haste"]);
+        run_respawn(&mut world, 6000);
+        let mob = mob_of(&mut world, 1).expect("respawned");
+        assert!(world.get::<mud_world::Haste>(mob).is_some());
+    }
+
+    #[test]
+    fn respawned_aggressive_mob_attacks_an_awake_visible_player() {
+        let (mut world, _room, player, _rx) = aggro_world(vec![]);
+        run_respawn(&mut world, 6000);
+        let mob = mob_of(&mut world, 1).expect("respawned");
+        assert_eq!(fighting_target(&world, mob), Some(player));
+    }
+
+    #[test]
+    fn respawned_mob_does_not_attack_a_player_it_cannot_see() {
+        let (mut world, _room, player, _rx) = aggro_world(vec![]);
+        world.entity_mut(player).insert(mud_world::Invisible);
+        run_respawn(&mut world, 6000);
+        let mob = mob_of(&mut world, 1).expect("respawned");
+        assert_eq!(fighting_target(&world, mob), None);
+    }
+
+    #[test]
+    fn respawned_mob_with_detect_invisible_default_attacks_an_invisible_player() {
+        // The default effects are installed before the aggro pass.
+        let (mut world, _room, player, _rx) = aggro_world(vec![]);
+        world.entity_mut(player).insert(mud_world::Invisible);
+        crate::commands::test_support::grant_default_flags(
+            &mut world,
+            MOB_KEY,
+            &["detect_invisible"],
+        );
+        run_respawn(&mut world, 6000);
+        let mob = mob_of(&mut world, 1).expect("respawned");
+        assert_eq!(fighting_target(&world, mob), Some(player));
+    }
+
+    #[test]
+    fn respawned_wimpy_mob_leaves_an_awake_player_alone_but_hits_a_sleeper() {
+        use mud_db::enums::MobBehavior;
+        let (mut world, _room, _player, _rx) = aggro_world(vec![MobBehavior::Wimpy]);
+        run_respawn(&mut world, 6000);
+        let mob = mob_of(&mut world, 1).expect("respawned");
+        assert_eq!(fighting_target(&world, mob), None, "awake player");
+
+        let (mut world, _room, player, _rx) = aggro_world(vec![MobBehavior::Wimpy]);
+        world
+            .entity_mut(player)
+            .insert(mud_world::Posture(mud_world::PostureKind::Sleeping));
+        run_respawn(&mut world, 6000);
+        let mob = mob_of(&mut world, 1).expect("respawned");
+        assert_eq!(fighting_target(&world, mob), Some(player), "sleeping");
+    }
+
+    #[test]
+    fn respawned_mob_spares_staff() {
+        let (mut world, _room, player, _rx) = aggro_world(vec![]);
+        world.get_mut::<mud_world::Account>(player).unwrap().role =
+            mud_db::enums::UserRole::Immortal;
+        run_respawn(&mut world, 6000);
+        let mob = mob_of(&mut world, 1).expect("respawned");
+        assert_eq!(fighting_target(&world, mob), None);
     }
 }

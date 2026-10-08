@@ -9,7 +9,7 @@ use mud_db::enums::UserRole;
 use mud_world::{
     Account, AppliedTo, Description, EffectCatalog, EffectInstance, EffectSource, Fighting, Frozen,
     Health, Item, Keywords, Located, Mob, MobPrototypes, Named, ObjectPrototypes, Online, Player,
-    PlayerFlags, Posture, Profile, Stamina, Wealth, WearableIn, WorldKey, WorldKeyIndex,
+    PlayerFlags, Profile, Stamina, Wealth, WearableIn, WorldKey, WorldKeyIndex,
 };
 use tracing::info;
 
@@ -1360,74 +1360,10 @@ pub(crate) fn cmd_summon(world: &mut World, player: Entity, args: &str) {
         return;
     }
 
-    let hp = proto.rolled_hp();
+    let mob_entity = mud_world::spawn_mob_from_proto(world, &proto, room, None);
+    let hp = world.get::<Health>(mob_entity).map_or(0, |h| h.max);
     let dmg = proto.avg_damage();
     let proto_name = proto.name.clone();
-    let proto_keywords = proto.keywords.clone();
-    let proto_room_desc = proto.room_description.clone();
-    let proto_examine_desc = proto.examine_description.clone();
-    let proto_dmg_dice_num = proto.damage_dice_num;
-    let proto_dmg_dice_size = proto.damage_dice_size;
-    let proto_dmg_dice_bonus = proto.damage_dice_bonus;
-    let derived_combat = proto.derived_combat_stats();
-    // Derive spawn posture from the proto's `default_position`,
-    // matching the loader path. Keeps `summon` and the boot-time
-    // reset-pass spawn behavior in sync.
-    let spawn_posture = Posture::from_default_position(proto.default_position);
-    let proto_size = proto.size;
-    let proto_life_force = proto.life_force;
-    let proto_damage_type = proto.damage_type;
-    let proto_traits = proto.traits.clone();
-    let proto_default_movement = proto.default_movement_mode;
-    let proto_move_points = proto.move_points;
-    let mount_via_trait = proto
-        .traits
-        .iter()
-        .any(|t| matches!(t, mud_db::enums::MobTrait::Mount));
-
-    let mob_entity = world
-        .spawn((
-            Mob,
-            Named {
-                name: proto_name.clone(),
-            },
-            Keywords(proto_keywords),
-            Description(proto_room_desc),
-            Located(room),
-            Health { hp, max: hp },
-            derived_combat,
-            Posture(spawn_posture),
-            mud_world::NaturalDamage {
-                num: proto_dmg_dice_num,
-                size: proto_dmg_dice_size,
-                bonus: proto_dmg_dice_bonus,
-            },
-        ))
-        .id();
-    // Mob latent parity (Wave 2.L) — same set the loader attaches.
-    if let Ok(mut em) = world.get_entity_mut(mob_entity) {
-        em.insert((
-            mud_world::Sized(proto_size),
-            mud_world::LifeForceTag(proto_life_force),
-            mud_world::NaturalAttackType(proto_damage_type),
-            mud_world::MobTraits(proto_traits),
-            mud_world::MovementModeTag(proto_default_movement),
-        ));
-        if proto_move_points > 0 {
-            em.insert(mud_world::MovementPoints {
-                current: proto_move_points,
-                max: proto_move_points,
-            });
-        }
-        if mount_via_trait {
-            em.insert(mud_world::Mountable);
-        }
-    }
-    if !proto_examine_desc.trim().is_empty()
-        && let Ok(mut em) = world.get_entity_mut(mob_entity)
-    {
-        em.insert(mud_world::ExamineText(proto_examine_desc));
-    }
 
     send_rendered(
         world,
@@ -1441,6 +1377,8 @@ pub(crate) fn cmd_summon(world: &mut World, player: Entity, args: &str) {
         &[player],
         &format!("{player_name} summons {proto_name} from thin air.\r\n"),
     );
+    // The new mob may be hostile to anyone else standing here.
+    crate::commands::aggro_room_players(world, room);
 }
 pub(crate) fn cmd_switch(world: &mut World, player: Entity, args: &str) {
     use mud_world::{SwitchedFrom, SwitchedInto};

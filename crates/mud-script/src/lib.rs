@@ -4859,9 +4859,12 @@ impl UserData for LuaProto {
 
 /// Materialize a Mob entity from `MobPrototypes` into `room` and
 /// return a `LuaActor` wrapping it. Returns nil if the proto isn't
-/// in the catalog. Mirrors the loader's Pass 5 mob spawn but skips
-/// reset / shop / mountable bookkeeping (script-spawned mobs don't
-/// participate in the reset cycle).
+/// in the catalog. Goes through [`mud_world::spawn_mob_from_proto`]
+/// like every other spawn path (so the proto's default effects
+/// apply) but skips reset bookkeeping: script-spawned mobs don't
+/// participate in the reset cycle. The room is queued on
+/// `DeferredSpawnAggro` so aggressive mobs get their on-arrival
+/// attack once the Lua frame has unwound.
 fn spawn_mob_proto(lua: &Lua, room: Entity, zone: i32, id: i32) -> mlua::Result<Value> {
     let entity = world_mut_from_lua(lua, |world| -> Option<Entity> {
         let proto = world
@@ -4869,37 +4872,12 @@ fn spawn_mob_proto(lua: &Lua, room: Entity, zone: i32, id: i32) -> mlua::Result<
             .by_key
             .get(&(zone, id))
             .cloned()?;
-        let trigger_keys = world
-            .resource::<TriggerCatalog>()
-            .mob_attachments
-            .get(&(zone, id))
-            .cloned();
-        let hp = proto.rolled_hp();
-        let mut em = world.spawn((
-            Mob,
-            Named {
-                name: proto.name.clone(),
-            },
-            Keywords(proto.keywords.clone()),
-            Description(proto.room_description.clone()),
-            WorldKey { zone, id },
-            Located(room),
-            Health { hp, max: hp },
-            proto.derived_combat_stats(),
-            Posture(PostureKind::Standing),
-            mud_world::NaturalDamage {
-                num: proto.damage_dice_num,
-                size: proto.damage_dice_size,
-                bonus: proto.damage_dice_bonus,
-            },
-        ));
-        if let Some(keys) = trigger_keys {
-            em.insert(AttachedTriggers(keys));
-        }
-        if !proto.examine_description.trim().is_empty() {
-            em.insert(mud_world::ExamineText(proto.examine_description.clone()));
-        }
-        Some(em.id())
+        let mob = mud_world::spawn_mob_from_proto(world, &proto, room, None);
+        world
+            .get_resource_or_insert_with(mud_world::DeferredSpawnAggro::default)
+            .rooms
+            .push(room);
+        Some(mob)
     })?;
     match entity {
         Some(e) => Ok(Value::UserData(

@@ -1,6 +1,7 @@
 pub mod components;
 pub mod loader;
 pub mod mob_effects;
+pub mod mob_spawn;
 pub mod reset_gear;
 pub mod resources;
 pub mod targeting;
@@ -41,6 +42,7 @@ pub use loader::{
     LoadStats, ReloadStats, default_weather_for_climate, load_ability_catalog, load_effect_catalog,
     load_from_db, load_trigger_catalog, merge_prototypes, reload_zones, wear_flags_primary_slot,
 };
+pub use mob_spawn::spawn_mob_from_proto;
 pub use reset_gear::{
     ContentEntry, GearStats, MobGearCatalog, MobGearEntry, ObjectContentsCatalog, fill_container,
     gear_cap, object_world_counts, outfit_mob,
@@ -50,18 +52,18 @@ pub use resources::{
     AchievementDef, BoardCatalog, BoardSummary, CIRCLE_RECOVER_TIME, ChannelEntry, ChannelHistory,
     ClassCatalog, ClassDef, ClassSkillsData, ConfigValue, ConsumableEffectBinding,
     ConsumableEffectCatalog, DamageComponent, DeferredRoomTriggerFire, DeferredRoomTriggerFires,
-    DiscordConfigCatalog, EffectCatalog, EffectDef, EntityVariableCache, HelpCatalog, HelpEntry,
-    HelpLookup, HousingIndex, LevelRow, LevelTable, LightFuelProto, LiquidCatalog, LiquidDef,
-    LiquidIndex, LiquidProto, LoginMessages, LuaOutbox, MobDefaultEffect, MobDefaultEffectCatalog,
-    MobProto, MobPrototypes, MobResetCatalog, MobResetEntry, MudClock, ObjectAbilityBinding,
-    ObjectAbilityCatalog, ObjectGrantedEffect, ObjectProto, ObjectPrototypes, ObjectResetCatalog,
-    ObjectResetEntry, PendingDiscordLink, PendingDiscordLinks, PrecipKind, QuestVariableCache,
-    RaceCatalog, RaceDef, RaceDefaults, RaceStatCaps, RecallRooms, RoomEnvironmentalEffects,
-    RuntimeConfig, SavingThrow, ScriptError, ScriptErrorLog, Season, ShopAcceptRule, ShopCatalog,
-    ShopDef, ShopOffering, ShopPetOffering, SocialDef, SocialRegistry, SpellSlotData,
-    SystemTextEntry, SystemTexts, TargetingRule, TempBand, TriggerAttach, TriggerCatalog,
-    TriggerDef, TriggerEvent, TriggerHistoryEntry, TriggerHistoryLog, WeatherCatalog,
-    WeatherDriftLocks, WeatherState, WizLock, WorldKeyIndex, effective_level, effective_race,
-    parse_resistance_json,
+    DeferredSpawnAggro, DiscordConfigCatalog, EffectCatalog, EffectDef, EntityVariableCache,
+    HelpCatalog, HelpEntry, HelpLookup, HousingIndex, LevelRow, LevelTable, LightFuelProto,
+    LiquidCatalog, LiquidDef, LiquidIndex, LiquidProto, LoginMessages, LuaOutbox, MobDefaultEffect,
+    MobDefaultEffectCatalog, MobProto, MobPrototypes, MobResetCatalog, MobResetEntry, MudClock,
+    ObjectAbilityBinding, ObjectAbilityCatalog, ObjectGrantedEffect, ObjectProto, ObjectPrototypes,
+    ObjectResetCatalog, ObjectResetEntry, PendingDiscordLink, PendingDiscordLinks, PrecipKind,
+    QuestVariableCache, RaceCatalog, RaceDef, RaceDefaults, RaceStatCaps, RecallRooms,
+    RoomEnvironmentalEffects, RuntimeConfig, SavingThrow, ScriptError, ScriptErrorLog, Season,
+    ShopAcceptRule, ShopCatalog, ShopDef, ShopOffering, ShopPetOffering, SocialDef, SocialRegistry,
+    SpellSlotData, SystemTextEntry, SystemTexts, TargetingRule, TempBand, TriggerAttach,
+    TriggerCatalog, TriggerDef, TriggerEvent, TriggerHistoryEntry, TriggerHistoryLog,
+    WeatherCatalog, WeatherDriftLocks, WeatherState, WizLock, WorldKeyIndex, effective_level,
+    effective_race, parse_resistance_json,
 };
 pub use resources::{class_exp_factor, exp_to_reach, is_starstar, scale_exp, stars_for_name};
