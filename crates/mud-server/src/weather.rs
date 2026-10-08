@@ -562,4 +562,32 @@ mod tests {
         }
         assert!(changed, "a temperate zone should drift within 500 ticks");
     }
+
+    #[test]
+    fn room_description_has_no_weather_line() {
+        let mut w = world();
+        let field = room(&mut w, ZONE, 1, Sector::Field);
+        w.resource_mut::<WeatherCatalog>().by_zone.insert(
+            ZONE,
+            WeatherState {
+                temp: TempBand::Warm,
+                precip: PrecipKind::Rain,
+            },
+        );
+        let (p, mut rx) = player(&mut w, field, PostureKind::Standing);
+        w.entity_mut(p).insert(mud_world::Account {
+            user_id: "u".into(),
+            character_id: "c".into(),
+            role: mud_db::enums::UserRole::Player,
+            account_role: mud_db::enums::UserRole::Player,
+            perms: vec![],
+        });
+        crate::commands::dispatch(&mut w, p, "look");
+        let out = drain(&mut rx);
+        assert!(out.contains("Room 1"), "{out}");
+        assert!(!out.contains("It is "), "{out}");
+        // The explicit commands still report it.
+        crate::commands::dispatch(&mut w, p, "look sky");
+        assert!(drain(&mut rx).contains("It is "));
+    }
 }

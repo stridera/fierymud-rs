@@ -2563,8 +2563,7 @@ impl PrecipKind {
 }
 
 /// Live weather state for one zone. Updated per `weather_tick`;
-/// surfaced via the `weather` command and (eventually) outdoor
-/// room descriptions.
+/// surfaced via the `weather` command and `look sky`.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct WeatherState {
     pub temp: TempBand,

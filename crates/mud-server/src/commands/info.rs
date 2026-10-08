@@ -6173,32 +6173,11 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
             ));
         }
     }
-    // Weather hint for outdoor rooms — drawn from the per-zone live
-    // WeatherCatalog. Skipped for STRUCTURE / CAVE / UNDERWATER /
-    // UNDERDARK / planes where the sky isn't visible. BRIEF mode
-    // also suppresses to keep the terse output truly terse.
-    // IndoorRoom: builder-flagged shelter overrides the sector
-    // heuristic — an outdoor-sector room marked `is_indoors = true`
-    // (covered market, awning, tent interior) suppresses the sky
-    // description.
-    if !has_flag(world, player, PlayerFlag::Brief)
-        && world.get::<mud_world::IndoorRoom>(room).is_none()
-        && let Some(sector) = world.get::<RoomSector>(room).map(|s| s.0)
-        && sector_is_outdoor_for_weather(sector)
-        && let Some(zone_id) = world.get::<WorldKey>(room).map(|k| k.zone)
-        && let Some(state) = world
-            .resource::<mud_world::WeatherCatalog>()
-            .by_zone
-            .get(&zone_id)
-            .copied()
-    {
-        out.push_str(&format!("{}\r\n", crate::weather::describe(state)));
-    }
-    // Wall sentences, one per walled direction. Rendered between
-    // the weather line and the mob block so the player sees
-    // active barriers as part of the room's atmosphere rather
-    // than having to type `exits` to discover them. Skipped when
-    // the room has no walls (the common case).
+    // Wall sentences, one per walled direction. Rendered ahead of
+    // the mob block so the player sees active barriers as part of
+    // the room's atmosphere rather than having to type `exits` to
+    // discover them. Skipped when the room has no walls (the common
+    // case).
     if let Some(walls) = world.get::<mud_world::RoomBlockedExits>(room) {
         let mut entries: Vec<(mud_db::enums::Direction, mud_world::RoomBlockedExit)> = walls
             .by_direction
