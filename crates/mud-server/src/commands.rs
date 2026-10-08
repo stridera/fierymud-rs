@@ -465,6 +465,9 @@ mod item_effects_tests;
 #[path = "commands/look_mob_tests.rs"]
 mod look_mob_tests;
 #[cfg(test)]
+#[path = "commands/look_self_tests.rs"]
+mod look_self_tests;
+#[cfg(test)]
 #[path = "commands/movement_message_tests.rs"]
 mod movement_message_tests;
 #[cfg(test)]

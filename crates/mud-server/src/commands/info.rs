@@ -3235,8 +3235,9 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
     // Dark-room gate (matches cmd_look). Self-target is allowed —
     // you can always introspect yourself even in pitch black.
     // Anything else fails until there's a light source in the room.
-    if needle != "me"
-        && needle != "self"
+    let own_name = name_of(world, player);
+    let self_word = crate::commands::matches_self(&own_name, &needle);
+    if !self_word
         && room_is_dark(world, room)
         && !room_has_light(world, room)
         && !crate::commands::player_can_see_in_dark(world, player)
@@ -3244,55 +3245,9 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "It is too dark to make anything out.\r\n");
         return;
     }
-
-    // Self-target. Surfaces the same state lines as examining
-    // another player would — Stealth (only visible to self anyway),
-    // Flying, Mounted — so a player can confirm their state without
-    // running multiple commands.
-    if needle == "me" || needle == "self" {
-        let name = name_of(world, player);
-        let mut out = format!("\r\nYou look at yourself: <b:cyan>{name}</>.\r\n");
-        // Self-Description: lets the player confirm what other
-        // players would see when examining them. Set with the
-        // `description` command. Empty / unset → skipped silently
-        // so the line doesn't add noise for players who haven't
-        // bothered.
-        if let Some(d) = world.get::<Description>(player)
-            && !d.0.trim().is_empty()
-        {
-            let mode = color_mode_for(world, player);
-            out.push_str(&format!("{}\r\n", render_color_tags(d.0.trim_end(), mode),));
-        }
-        if world.get::<mud_world::Flying>(player).is_some() {
-            out.push_str("<cyan>You're hovering in mid-air.</>\r\n");
-        }
-        if world.get::<Stealth>(player).is_some() {
-            out.push_str("<dim>You are hidden.</>\r\n");
-        }
-        if let Some(mud_world::Mounted(mount)) = world.get::<mud_world::Mounted>(player).copied() {
-            let mount_name = name_or(world, mount, "(unknown)");
-            out.push_str(&format!("You're riding <cyan>{mount_name}</>.\r\n"));
-        }
-        let hunger = world.get::<mud_world::Hunger>(player).map_or(0, |h| h.0);
-        let thirst = world.get::<mud_world::Thirst>(player).map_or(0, |t| t.0);
-        // Same active-effect query the score sheet uses, so
-        // examine-self surfaces nourished/refreshed alongside
-        // hungry/thirsty when condition_summary picks them up.
-        let self_effects: Vec<String> = {
-            let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-            q.iter(world)
-                .filter(|(_, a)| a.0 == player)
-                .map(|(inst, _)| inst.name.clone())
-                .collect()
-        };
-        if let Some(c) = condition_summary(hunger, thirst, &self_effects) {
-            let open = condition_color_tag(hunger, thirst).unwrap_or("");
-            let close = if open.is_empty() { "" } else { "</>" };
-            out.push_str(&format!("You feel {open}{c}{close}.\r\n"));
-        }
-        send_to(world, player, out);
-        return;
-    }
+    // `me` / `self` always resolve to the looker (legacy `generic_find`);
+    // the player's own name resolves through the normal search below.
+    let literal_self = remaining == 1 && matches!(needle.as_str(), "me" | "self");
 
     // Search the room — mobs and players are equally examinable; items too,
     // both on the ground and on the player's person. Indexed-needle
@@ -3317,9 +3272,6 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
         )>();
         q.iter(world)
             .filter(|(e, l, n, kw, flags)| {
-                if *e == player {
-                    return false;
-                }
                 if !(l.0 == room || l.0 == player) {
                     return false;
                 }
@@ -3363,14 +3315,18 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
             .and_then(|m| m.get(&e))
             .copied()
             .unwrap_or(usize::MAX);
-        // Mobs before players, as `look` and `find_actor_in_room` order them.
+        // Mobs before players, as `look` and `find_actor_in_room` order them;
+        // the looker themself only after everyone else a name matches.
         (
             in_inv,
             crate::commands::mobs_before_players_key(world, e),
+            e == player,
             rank,
         )
     });
-    let target = if remaining <= entity_matches.len() {
+    let target = if literal_self {
+        Some(player)
+    } else if remaining <= entity_matches.len() {
         Some(entity_matches[remaining - 1])
     } else {
         remaining -= entity_matches.len();
@@ -3460,7 +3416,11 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
     // Bold-cyan name as the headline, matching identify's title.
     // Builder-authored color tags on the name still flow through
     // — render_color_tags handles nested layers correctly.
-    let mut out = format!("\r\nYou look at <b:cyan>{name_rendered}</>.\r\n");
+    let mut out = if target == player {
+        format!("\r\nYou look at yourself: <b:cyan>{name_rendered}</>.\r\n")
+    } else {
+        format!("\r\nYou look at <b:cyan>{name_rendered}</>.\r\n")
+    };
     if !description.trim().is_empty() {
         let width = crate::layout::wrap_width(world, player);
         out.push_str(&format!(
@@ -3737,6 +3697,24 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
             .and_then(|c| c.by_id.get(&board_id))
             .cloned()
     {
+    if target == player {
+        // Self-only — hunger / thirst, same effect query the score sheet
+        // uses so nourished / refreshed read alongside hungry / thirsty.
+        let hunger = world.get::<mud_world::Hunger>(player).map_or(0, |h| h.0);
+        let thirst = world.get::<mud_world::Thirst>(player).map_or(0, |t| t.0);
+        let self_effects: Vec<String> = {
+            let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+            q.iter(world)
+                .filter(|(_, a)| a.0 == player)
+                .map(|(inst, _)| inst.name.clone())
+                .collect()
+        };
+        if let Some(c) = condition_summary(hunger, thirst, &self_effects) {
+            let open = condition_color_tag(hunger, thirst).unwrap_or("");
+            let close = if open.is_empty() { "" } else { "</>" };
+            out.push_str(&format!("You feel {open}{c}{close}.\r\n"));
+        }
+    }
         let lock = if summary.locked { " (locked)" } else { "" };
         // Many board titles already end in "Board"; avoid the awkward
         // "Mortal Board board".
