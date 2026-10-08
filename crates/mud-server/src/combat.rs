@@ -1808,9 +1808,15 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
         let victim_level = world
             .get::<mud_world::Profile>(victim)
             .map_or(1, |p| p.level);
+        let owner_id = world
+            .get::<mud_world::Account>(victim)
+            .map(|a| a.character_id.clone());
         if let Ok(mut em) = world.get_entity_mut(corpse) {
             em.insert(mud_world::PlayerCorpse);
             em.insert(mud_world::CorpseOriginLevel(victim_level));
+            if let Some(owner) = &owner_id {
+                em.insert(crate::corpses::PlayerCorpseOwner(owner.clone()));
+            }
         }
         for (it, bound) in owned_items {
             if bound {
@@ -3454,6 +3460,57 @@ mod tests {
             other,
             "nothing goes into a persisted corpse"
         );
+    }
+
+    #[test]
+    fn a_ghost_cannot_release_before_the_death_commits() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        world.insert_resource(TickCount(0));
+        world.insert_resource(mud_world::WorldKeyIndex::default());
+        let player = spawn_dying_player(&mut world, room, "Tester", 0);
+        super::handle_death(&mut world, player, "Tester", room);
+        let corpse = player_corpse_in(&mut world, room);
+
+        crate::commands::release::cmd_release(&mut world, player, "");
+        assert!(
+            world.get::<Ghost>(player).is_some(),
+            "still a ghost: the first corpse must commit before a second death is possible"
+        );
+        assert_eq!(
+            world.get::<crate::corpses::PendingDeath>(player).unwrap().0,
+            corpse
+        );
+
+        // Once the death has committed the same command works.
+        world
+            .entity_mut(player)
+            .remove::<crate::corpses::PendingDeath>();
+        world
+            .resource_mut::<mud_world::WorldKeyIndex>()
+            .rooms
+            .insert((0, 0), room);
+        crate::commands::release::cmd_release(&mut world, player, "");
+        assert!(world.get::<Ghost>(player).is_none());
+    }
+
+    #[test]
+    fn nothing_can_be_taken_from_a_corpse_whose_rows_are_being_deleted() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        world.insert_resource(TickCount(0));
+        world.insert_resource(ObjectPrototypes::default());
+        world.insert_resource(mud_world::WorldKeyIndex::default());
+        let owner = spawn_dying_player(&mut world, room, "Tester", 40);
+        super::handle_death(&mut world, owner, "Tester", room);
+        let corpse = player_corpse_in(&mut world, room);
+        world
+            .entity_mut(corpse)
+            .insert((mud_world::PlayerCorpseId(5), crate::corpses::DecayDeleting));
+
+        crate::commands::info::cmd_get(&mut world, owner, "all corpse");
+        assert_eq!(world.get::<mud_world::CoinPile>(corpse).unwrap().0, 40);
+        assert_eq!(world.get::<Wealth>(owner).unwrap().0, 0);
     }
 
     #[test]

@@ -46,6 +46,23 @@ pub(crate) struct PendingDeath(pub(crate) Entity);
 #[derive(Component, Debug, Clone, Default)]
 pub(crate) struct PendingCorpseCoinTakes(pub(crate) Vec<(i32, i64)>);
 
+/// Character id of the dead player a player corpse belongs to, so
+/// resurrection finds exactly their corpse (never a name look-alike).
+#[derive(Component, Debug, Clone)]
+pub(crate) struct PlayerCorpseOwner(pub(crate) String);
+
+/// Corpses a resurrected player has taken everything from and that must
+/// be deleted in that player's next save (`PlayerCorpses.id`s), in the
+/// same transaction that re-homes the items and credits the coins.
+#[derive(Component, Debug, Clone, Default)]
+pub(crate) struct PendingCorpseRetire(pub(crate) Vec<i32>);
+
+/// The in-world corpse was emptied by a resurrection: its rows are
+/// deleted by the revived player's save, not by the despawn observer
+/// (which would cascade-delete items the save hasn't re-homed yet).
+#[derive(Component, Debug, Clone, Copy)]
+pub(crate) struct RetiredCorpse;
+
 /// Decay has deleted (or is deleting) the corpse's database rows; the
 /// in-world corpse waits for that to commit before releasing its contents.
 #[derive(Component, Debug, Clone, Copy)]
@@ -152,6 +169,100 @@ pub(crate) fn settle_coin_takes(world: &mut World, player: Entity, committed: &[
     }
 }
 
+/// Subtract the retirements a save just committed.
+pub(crate) fn settle_retired(world: &mut World, player: Entity, committed: &[i32]) {
+    if committed.is_empty() {
+        return;
+    }
+    let Ok(mut em) = world.get_entity_mut(player) else {
+        return;
+    };
+    let Some(mut pending) = em.take::<PendingCorpseRetire>().map(|p| p.0) else {
+        return;
+    };
+    pending.retain(|id| !committed.contains(id));
+    if !pending.is_empty() {
+        em.insert(PendingCorpseRetire(pending));
+    }
+}
+
+/// The player corpses that belong to `owner`, by character id (corpses
+/// restored or created without an owner id fall back to the exact
+/// `the corpse of <name>` title). Corpses already being decayed away are
+/// not offered.
+pub(crate) fn corpses_of(world: &mut World, owner: Entity) -> Vec<Entity> {
+    let owner_id = world
+        .get::<mud_world::Account>(owner)
+        .map(|a| a.character_id.clone());
+    let title = world
+        .get::<Named>(owner)
+        .map(|n| format!("the corpse of {}", n.name));
+    let mut q = world.query_filtered::<(
+        Entity,
+        &Named,
+        Option<&PlayerCorpseOwner>,
+    ), (With<PlayerCorpse>, Without<DecayDeleting>)>();
+    q.iter(world)
+        .filter(|(_, named, corpse_owner)| match (corpse_owner, &owner_id) {
+            (Some(o), Some(id)) => &o.0 == id,
+            (Some(_), None) => false,
+            (None, _) => title
+                .as_deref()
+                .is_some_and(|t| named.name.eq_ignore_ascii_case(t)),
+        })
+        .map(|(e, _, _)| e)
+        .collect()
+}
+
+/// Resurrection: give `player` everything in `corpse` (items with their
+/// nesting, coins) and remove the corpse. Persists exactly like an owner
+/// loot: the items' rows are re-homed by `player`'s next save, the coins
+/// are debited from the corpse in that save's transaction and the now
+/// empty corpse row is deleted there too. Returns how many items moved.
+/// The corpse must be settled (see [`is_unsettled`]).
+pub(crate) fn hand_over(world: &mut World, player: Entity, corpse: Entity) -> usize {
+    let items: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located), With<Item>>();
+        q.iter(world)
+            .filter(|(_, l)| l.0 == corpse)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for &it in &items {
+        if let Ok(mut em) = world.get_entity_mut(it) {
+            em.insert(Located(player));
+            em.remove::<mud_world::EquippedSlot>();
+        }
+    }
+    let coins = world
+        .get::<mud_world::CoinPile>(corpse)
+        .map_or(0, |p| p.0.max(0));
+    if coins > 0 {
+        let held = world.get::<mud_world::Wealth>(player).map_or(0, |w| w.0);
+        if let Ok(mut em) = world.get_entity_mut(player) {
+            em.insert(mud_world::Wealth(held.saturating_add(coins)));
+        }
+        note_coin_take(world, player, corpse, coins);
+    }
+    if let Some(id) = world.get::<PlayerCorpseId>(corpse).map(|c| c.0) {
+        if let Ok(mut em) = world.get_entity_mut(player) {
+            let mut pending = em.take::<PendingCorpseRetire>().unwrap_or_default().0;
+            pending.push(id);
+            em.insert(PendingCorpseRetire(pending));
+        }
+        if let Ok(mut em) = world.get_entity_mut(corpse) {
+            em.insert(RetiredCorpse);
+        }
+    }
+    if let Ok(mut em) = world.get_entity_mut(corpse) {
+        em.remove::<mud_world::CoinPile>();
+    }
+    if let Ok(em) = world.get_entity_mut(corpse) {
+        em.despawn();
+    }
+    items.len()
+}
+
 // ---------------------------------------------------------------------
 // Ordered corpse-row writes (drag, decay, despawn)
 // ---------------------------------------------------------------------
@@ -233,8 +344,12 @@ impl CorpseDb {
 /// bring it back.
 pub(crate) fn register_observers(world: &mut World) {
     world.add_observer(
-        |on: On<Remove, PlayerCorpseId>, ids: Query<&PlayerCorpseId>, db: Option<Res<CorpseDb>>| {
-            if let (Ok(id), Some(db)) = (ids.get(on.entity), db) {
+        |on: On<Remove, PlayerCorpseId>,
+         ids: Query<(&PlayerCorpseId, Has<RetiredCorpse>)>,
+         db: Option<Res<CorpseDb>>| {
+            if let (Ok((id, retired)), Some(db)) = (ids.get(on.entity), db)
+                && !retired
+            {
                 let _ = db.tx.send(Op::Delete {
                     id: id.0,
                     waiting: None,
@@ -349,15 +464,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) {
                 continue;
             }
         };
-        let corpse = spawn_corpse(
-            world,
-            room_entity,
-            &row.owner_name,
-            row.owner_level,
-            row.remaining_secs,
-            row.coins,
-            row.id,
-        );
+        let corpse = spawn_corpse(world, room_entity, &row);
         restored_items += crate::login::spawn_inventory(world, corpse, &item_rows);
         restored += 1;
     }
@@ -373,12 +480,9 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) {
 fn spawn_corpse(
     world: &mut World,
     room: Entity,
-    owner_name: &str,
-    owner_level: i32,
-    remaining_secs: i32,
-    coins: i64,
-    corpse_id: i32,
+    row: &mud_db::player_corpses::PlayerCorpseRow,
 ) -> Entity {
+    let owner_name = &row.owner_name;
     let corpse = world
         .spawn((
             Item,
@@ -389,16 +493,17 @@ fn spawn_corpse(
             Keywords(vec!["corpse".to_string(), owner_name.to_ascii_lowercase()]),
             Located(room),
             CorpseDecay {
-                remaining_secs: remaining_secs.max(1),
+                remaining_secs: row.remaining_secs.max(1),
             },
         ))
         .id();
     if let Ok(mut em) = world.get_entity_mut(corpse) {
         em.insert(PlayerCorpse);
-        em.insert(PlayerCorpseId(corpse_id));
-        em.insert(CorpseOriginLevel(owner_level.max(1)));
-        if coins > 0 {
-            em.insert(mud_world::CoinPile(coins));
+        em.insert(PlayerCorpseId(row.id));
+        em.insert(PlayerCorpseOwner(row.owner_id.clone()));
+        em.insert(CorpseOriginLevel(row.owner_level.max(1)));
+        if row.coins > 0 {
+            em.insert(mud_world::CoinPile(row.coins));
         }
     }
     corpse
@@ -977,6 +1082,133 @@ mod tests {
             "sword, bag and the coin pile drop to the room"
         );
         cleanup(&pool, &[&cid]).await;
+    }
+
+    #[tokio::test]
+    async fn resurrection_hands_over_the_exact_owners_corpse_and_loses_nothing() {
+        let Some((pool, _lock)) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let Some(keys) = object_keys(&pool).await else {
+            eprintln!("skipping: no Objects rows");
+            return;
+        };
+        let (bob_id, bob) = temp_char(&pool, "rez").await;
+        // A look-alike whose name merely starts with Bob's.
+        let bobby = format!("{bob}by");
+        let bobby_id = format!("{bob_id}-by");
+        mud_db::sqlx::query(
+            "INSERT INTO \"Characters\" (id, name, updated_at) VALUES ($1, $2, NOW())",
+        )
+        .bind(&bobby_id)
+        .bind(&bobby)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (mut world, room) = live_world(&[keys.0, keys.1]);
+        register_observers(&mut world);
+        world.insert_resource(CorpseDb::spawn(pool.clone()));
+        let bob_e = spawn_player(&mut world, &bob_id, &bob, room, UserRole::Player, 500);
+        let bobby_e = spawn_player(&mut world, &bobby_id, &bobby, room, UserRole::Player, 70);
+        let kit = equip_and_save(&mut world, &pool, bob_e, keys).await;
+        equip_and_save(&mut world, &pool, bobby_e, keys).await;
+        for (id, coins) in [(&bob_id, 500), (&bobby_id, 70)] {
+            mud_db::sqlx::query("UPDATE \"Characters\" SET wealth = $2 WHERE id = $1")
+                .bind(id)
+                .bind(coins)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        crate::combat::handle_death(&mut world, bob_e, &bob, room);
+        crate::combat::handle_death(&mut world, bobby_e, &bobby, room);
+        assert!(save_player(&mut world, bob_e, &pool).await.committed);
+        assert!(save_player(&mut world, bobby_e, &pool).await.committed);
+        let bob_corpse = corpse_of(&mut world, &bob);
+
+        // Exactly Bob's corpse, not Bobby's.
+        assert_eq!(corpses_of(&mut world, bob_e), vec![bob_corpse]);
+
+        let moved = hand_over(&mut world, bob_e, bob_corpse);
+        assert_eq!(moved, 2, "sword and bag (the gem stays inside the bag)");
+        assert!(world.get_entity(bob_corpse).is_err());
+        assert_eq!(world.get::<Wealth>(bob_e).unwrap().0, 500);
+        assert_eq!(world.get::<Located>(kit.gem).unwrap().0, kit.bag);
+        // The despawn must not have cascade-deleted anything yet.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(item_rows(&pool, &bob_id).await.len(), 3);
+        assert_eq!(corpse_rows(&pool, &bob_id).await.len(), 1);
+
+        let out = save_player(&mut world, bob_e, &pool).await;
+        assert!(out.committed, "{:?}", out.error);
+        let rows = item_rows(&pool, &bob_id).await;
+        assert_eq!(rows.len(), 3, "no row lost");
+        assert!(rows.iter().all(|r| r.3.is_none()));
+        let sword_id = world
+            .get::<mud_world::PersistedItemId>(kit.sword)
+            .unwrap()
+            .0;
+        assert_eq!(
+            rows.iter().find(|r| r.0 == sword_id).unwrap().4.as_deref(),
+            Some("Fancy"),
+            "instance fields survive the resurrection"
+        );
+        assert_eq!(wealth_of(&pool, &bob_id).await, 500, "coins credited");
+        assert!(
+            corpse_rows(&pool, &bob_id).await.is_empty(),
+            "corpse row retired"
+        );
+        assert!(world.get::<PendingCorpseRetire>(bob_e).is_none());
+        assert!(world.get::<PendingCorpseCoinTakes>(bob_e).is_none());
+        // Bobby's corpse and gear were never touched.
+        assert_eq!(corpse_rows(&pool, &bobby_id).await.len(), 1);
+        let theirs = item_rows(&pool, &bobby_id).await;
+        assert_eq!(theirs.len(), 3);
+        assert!(theirs.iter().all(|r| r.3.is_some()));
+        assert_eq!(corpse_rows(&pool, &bobby_id).await[0].1, 70);
+        cleanup(&pool, &[&bob_id, &bobby_id]).await;
+    }
+
+    #[test]
+    fn corpses_of_matches_the_exact_owner_only() {
+        let mut world = World::new();
+        let room = world.spawn_empty().id();
+        let named = |world: &mut World, name: &str| {
+            world
+                .spawn((
+                    Player,
+                    Named {
+                        name: name.to_string(),
+                    },
+                    Located(room),
+                ))
+                .id()
+        };
+        let bob = named(&mut world, "Bob");
+        let bobby = named(&mut world, "Bobby");
+        let corpse = |world: &mut World, title: &str| {
+            world
+                .spawn((
+                    Item,
+                    Corpse,
+                    PlayerCorpse,
+                    Named {
+                        name: title.to_string(),
+                    },
+                    Located(room),
+                ))
+                .id()
+        };
+        let c_bob = corpse(&mut world, "the corpse of Bob");
+        let c_bobby = corpse(&mut world, "the corpse of Bobby");
+        assert_eq!(corpses_of(&mut world, bob), vec![c_bob]);
+        assert_eq!(corpses_of(&mut world, bobby), vec![c_bobby]);
+        // An owner id on the corpse wins over the title.
+        world
+            .entity_mut(c_bob)
+            .insert(PlayerCorpseOwner("x".into()));
+        assert!(corpses_of(&mut world, bob).is_empty());
     }
 
     #[test]

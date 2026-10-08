@@ -4446,13 +4446,16 @@ pub(crate) struct PlayerSaveSnapshot {
     /// The player died and the corpse is not committed yet: this write
     /// inserts the `PlayerCorpses` row and files the moved items under it
     /// in the same transaction as the rest of the save.
-    death: Option<crate::corpses::DeathPersist>,
+    pub(crate) death: Option<crate::corpses::DeathPersist>,
     /// Coins taken from player corpses since the last committed save,
     /// debited from those corpses in this write's transaction.
     corpse_coin_takes: Vec<(i32, i64)>,
+    /// Corpses a resurrection emptied into this player: deleted in this
+    /// write's transaction, after their items are re-homed.
+    retired_corpses: Vec<i32>,
     /// `PlayerCorpses.id` the death transaction inserted (0 = none).
     /// Set once the transaction commits; [`apply_commit`] reads it.
-    committed_corpse_id: std::sync::atomic::AtomicI32,
+    pub(crate) committed_corpse_id: std::sync::atomic::AtomicI32,
 }
 
 /// Capture a player's save payload from the ECS without any I/O. Returns
@@ -4898,6 +4901,10 @@ pub(crate) fn snapshot_player(
             .get::<crate::corpses::PendingCorpseCoinTakes>(entity)
             .map(|t| t.0.clone())
             .unwrap_or_default(),
+        retired_corpses: world
+            .get::<crate::corpses::PendingCorpseRetire>(entity)
+            .map(|p| p.0.clone())
+            .unwrap_or_default(),
         committed_corpse_id: std::sync::atomic::AtomicI32::new(0),
     })
 }
@@ -5249,6 +5256,7 @@ async fn reload_character_row(
 /// on the entities (via [`apply_commit`]) only AFTER commit so a
 /// rolled-back save can't leave entities pointing at row ids that don't
 /// exist.
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn write_snapshot(
     pool: &PgPool,
     snap: &PlayerSaveSnapshot,
@@ -5306,6 +5314,9 @@ pub(crate) async fn write_snapshot(
     // very commit that credits their wealth (written above).
     for (taken_from, amount) in &snap.corpse_coin_takes {
         mud_db::player_corpses::take_coins(&mut tx, *taken_from, *amount).await?;
+    }
+    for id in &snap.retired_corpses {
+        mud_db::player_corpses::delete_in(&mut tx, *id).await?;
     }
     mud_db::characters::save_drunkenness(&mut *tx, cid, snap.drunk).await?;
     mud_db::characters::save_script_vars(&mut *tx, cid, snap.script_vars_json.as_ref()).await?;
@@ -5429,6 +5440,7 @@ pub(crate) fn apply_commit(
         }
     }
     crate::corpses::settle_coin_takes(world, snap.entity, &snap.corpse_coin_takes);
+    crate::corpses::settle_retired(world, snap.entity, &snap.retired_corpses);
     if let Some(t) = snap.new_time_played
         && let Ok(mut em) = world.get_entity_mut(snap.entity)
     {

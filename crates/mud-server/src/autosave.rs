@@ -103,6 +103,9 @@ struct Completion {
     snapshot: Arc<PlayerSaveSnapshot>,
     slot: Arc<Slot>,
     outcome: Outcome,
+    /// Background writes own the slot's `in_flight` flag; a quit-save
+    /// retry does not, so its completion must not clear it.
+    owns_in_flight: bool,
 }
 
 /// Per-character save state.
@@ -232,6 +235,7 @@ impl TaskGuard {
                 snapshot: Arc::clone(&self.snapshot),
                 slot: Arc::clone(&self.slot),
                 outcome,
+                owns_in_flight: true,
             });
     }
 }
@@ -319,7 +323,9 @@ impl SaveCoordinator {
                     }
                 }
             }
-            c.slot.in_flight.store(false, Ordering::SeqCst);
+            if c.owns_in_flight {
+                c.slot.in_flight.store(false, Ordering::SeqCst);
+            }
         }
     }
 
@@ -418,10 +424,20 @@ impl SaveCoordinator {
                     }
                     let _permit = shared.writers.acquire().await;
                     match writer(Arc::clone(&snap)).await {
-                        Ok(_) => {
+                        Ok(assigned) => {
                             *last_committed = snap.generation;
                             info!(character_id = %snap.character_id, attempt,
                                 "save retry succeeded");
+                            // Fold the commit into the world on the next
+                            // tick even though the player is gone: a death
+                            // committed here still has to give its corpse
+                            // entity its `PlayerCorpseId`.
+                            shared.done.lock().expect("done lock").push(Completion {
+                                snapshot: Arc::clone(&snap),
+                                slot: Arc::clone(&slot),
+                                outcome: Outcome::Committed(assigned),
+                                owns_in_flight: false,
+                            });
                             return;
                         }
                         Err(e) => {
@@ -961,5 +977,45 @@ mod tests {
         // Slots of characters that went offline are pruned.
         let _ = c.autosave_due(&["a".to_string()], Duration::from_secs(100), 2);
         assert_eq!(c.0.slots.lock().unwrap().len(), 1);
+    }
+
+    /// A death committed by the quit-save retry (the player is gone by
+    /// then) still gives the in-world corpse its `PlayerCorpseId`, so it
+    /// can be looted and drags and decays through the database.
+    #[tokio::test(flavor = "current_thread")]
+    async fn retry_committed_death_stamps_the_corpse_entity() {
+        const NO_RETRIES: &[Duration] = &[];
+        let c = SaveCoordinator::new(2);
+        let mut world = World::new();
+        let e = player(&mut world, "char-dead");
+        let room = world.get::<Located>(e).unwrap().0;
+        let corpse = world
+            .spawn((
+                Item,
+                mud_world::Corpse,
+                mud_world::PlayerCorpse,
+                Located(room),
+            ))
+            .id();
+        world
+            .entity_mut(e)
+            .insert(crate::corpses::PendingDeath(corpse));
+        let snap = snapshot_player(&mut world, e, 5).expect("snapshot");
+        assert!(snap.death.is_some());
+        world.entity_mut(e).despawn();
+        c.retry_failed_snapshot(
+            snap,
+            |snap| async move {
+                snap.committed_corpse_id
+                    .store(77, std::sync::atomic::Ordering::SeqCst);
+                Ok(HashMap::new())
+            },
+            NO_RETRIES,
+        );
+        assert!(c.flush(&mut world, Duration::from_secs(5)).await);
+        assert_eq!(
+            world.get::<mud_world::PlayerCorpseId>(corpse).map(|i| i.0),
+            Some(77)
+        );
     }
 }

@@ -10385,7 +10385,12 @@ fn get_from_container_inner(
     // A corpse whose death write hasn't committed holds items the
     // database doesn't know about yet; looting them now could persist the
     // looter's copy while the corpse's rows survive a crash.
-    if is_pc && crate::corpses::is_unsettled(world, container) {
+    if is_pc
+        && (crate::corpses::is_unsettled(world, container)
+            || world
+                .get::<crate::corpses::DecayDeleting>(container)
+                .is_some())
+    {
         send_to(
             world,
             player,

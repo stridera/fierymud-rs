@@ -468,7 +468,7 @@ mod quest_runtime_tests;
 #[path = "commands/rank_tests.rs"]
 mod rank_tests;
 #[path = "commands/release.rs"]
-mod release;
+pub(crate) mod release;
 #[path = "commands/room_chat.rs"]
 mod room_chat;
 #[path = "commands/save.rs"]
@@ -16508,6 +16508,25 @@ pub(crate) fn invoke_ability_with(
                     applied_msgs.push(format!("{pretty} (target not dead)"));
                     continue;
                 }
+                // A corpse whose death write hasn't committed holds gear
+                // the database doesn't know about yet: wait for it.
+                let corpses_to_return = crate::corpses::corpses_of(world, target_entity);
+                if corpses_to_return
+                    .iter()
+                    .any(|c| crate::corpses::is_unsettled(world, *c))
+                {
+                    let target_name = name_or(world, target_entity, "(unknown)");
+                    send_to(
+                        world,
+                        player,
+                        format!(
+                            "{}'s body is still settling; try again in a moment.\r\n",
+                            cap_sentence_start(&target_name)
+                        ),
+                    );
+                    applied_msgs.push(format!("{pretty} (body settling)"));
+                    continue;
+                }
                 let target_max = world
                     .get::<Health>(target_entity)
                     .map_or(1, |h| h.max)
@@ -16524,40 +16543,18 @@ pub(crate) fn invoke_ability_with(
                     world.entity_mut(target_entity).insert(Located(caster_room));
                 }
                 let target_name = name_or(world, target_entity, "(unknown)");
-                // Corpse-equipment transfer. Walk every Item-Corpse
-                // entity whose Named ends with the target's name
-                // (corpses are named "the corpse of {victim_name}"),
-                // pull each item Located in that corpse onto the
-                // revived player as inventory, strip EquippedSlot,
-                // then despawn the (now-empty) corpse.
-                let target_name_lower = target_name.to_ascii_lowercase();
-                let corpses: Vec<Entity> = {
-                    let mut q = world.query_filtered::<(Entity, &Named), With<mud_world::Corpse>>();
-                    q.iter(world)
-                        .filter(|(_, n)| n.name.to_ascii_lowercase().contains(&target_name_lower))
-                        .map(|(e, _)| e)
-                        .collect()
-                };
+                // Corpse-equipment transfer: hand the target everything
+                // in their own corpse(s) (matched by owner, never by a
+                // name look-alike): items land in the pack with their
+                // nesting, EquippedSlot stripped, coins in the purse.
+                // The target's next save re-homes the very same item rows
+                // and retires the corpse row (see `corpses::hand_over`).
                 let mut items_returned = 0;
-                for corpse_e in corpses {
-                    let items_in_corpse: Vec<Entity> = {
-                        let mut q = world.query_filtered::<(Entity, &Located), With<Item>>();
-                        q.iter(world)
-                            .filter(|(_, l)| l.0 == corpse_e)
-                            .map(|(e, _)| e)
-                            .collect()
-                    };
-                    for it in items_in_corpse {
-                        if world.get::<Located>(it).is_some() {
-                            world.entity_mut(it).insert(Located(target_entity));
-                        }
-                        try_remove::<mud_world::EquippedSlot>(world, it);
-                        items_returned += 1;
-                    }
-                    // Despawn the empty corpse.
-                    if let Ok(em) = world.get_entity_mut(corpse_e) {
-                        em.despawn();
-                    }
+                for corpse_e in corpses_to_return {
+                    items_returned += crate::corpses::hand_over(world, target_entity, corpse_e);
+                }
+                if world.get::<mud_world::Account>(target_entity).is_some() {
+                    crate::quest_progress::save_player_soon(world, target_entity);
                 }
                 send_to(
                     world,

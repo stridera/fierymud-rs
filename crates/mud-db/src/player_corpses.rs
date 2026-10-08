@@ -119,3 +119,13 @@ pub async fn delete(pool: &PgPool, corpse_id: i32) -> sqlx::Result<()> {
         .await?;
     Ok(())
 }
+
+/// [`delete`] inside the caller's transaction: a resurrected player's
+/// save retires the corpse in the same commit that re-homes its items
+/// and credits its coins.
+pub async fn delete_in(conn: &mut PgConnection, corpse_id: i32) -> sqlx::Result<()> {
+    sqlx::query!(r#"DELETE FROM "PlayerCorpses" WHERE id = $1"#, corpse_id)
+        .execute(conn)
+        .await?;
+    Ok(())
+}

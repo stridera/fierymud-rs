@@ -27,9 +27,20 @@ inventory::submit! {
     }
 }
 
-fn cmd_release(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_release(world: &mut World, player: Entity, _args: &str) {
     if world.get::<Ghost>(player).is_none() {
         send_to(world, player, "You aren't dead. Nothing to release.\r\n");
+        return;
+    }
+    // The corpse is still being committed to the database. Releasing now
+    // would let a second death overwrite that pending commit, so the spirit
+    // waits until the first one lands.
+    if world.get::<crate::corpses::PendingDeath>(player).is_some() {
+        send_to(
+            world,
+            player,
+            "Your body is still settling; try again in a moment.\r\n",
+        );
         return;
     }
     // Stamina is intentionally left at whatever it was when they died —
