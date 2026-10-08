@@ -283,6 +283,43 @@ fn persisted_mount_is_rideable_after_relog() {
     assert!(out.contains("You mount"), "{out}");
 }
 
+#[test]
+fn restored_pet_gets_its_protos_default_effects_and_keeps_following() {
+    let (mut world, player, _rx) = world_with_shop(shop_def(Vec::new(), Vec::new()), 0);
+    super::test_support::grant_default_flags(&mut world, (30, 81), &["haste"]);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let persisted: crate::login::PersistedPets = serde_json::from_value(serde_json::json!({
+        "saved_at_unix": now,
+        "pets": [{
+            "proto_zone_id": 30, "proto_id": 81,
+            "name": "Tester's a stout mare", "hp": 4, "max_hp": 10
+        }]
+    }))
+    .unwrap();
+    crate::login::restore_persisted_pets(&mut world, player, persisted);
+    let pets = followers_of(&mut world, player);
+    assert_eq!(pets.len(), 1);
+    let pet = pets[0];
+    assert!(
+        world.get::<mud_world::Haste>(pet).is_some(),
+        "a restored pet is a normal mob loaded from its prototype"
+    );
+    assert!(world.get::<mud_world::PersistentPet>(pet).is_some());
+    let health = world.get::<mud_world::Health>(pet).unwrap();
+    assert_eq!((health.hp, health.max), (4, 10));
+    assert_eq!(
+        world.get::<mud_world::Named>(pet).unwrap().name,
+        "Tester's a stout mare"
+    );
+    assert!(matches!(
+        world.get::<mud_world::Posture>(pet),
+        Some(mud_world::Posture(mud_world::PostureKind::Standing))
+    ));
+}
+
 fn sword_shop() -> ShopDef {
     shop_def(
         vec![ShopOffering {

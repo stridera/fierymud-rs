@@ -606,8 +606,8 @@ pub(crate) struct PersistedPets {
 /// entry, dropping all entries past the disconnect cap (no staff-
 /// exception equivalent for pets — they're player-owned investments,
 /// not staff rewards). Located next to the player; HP restored
-/// verbatim (a wounded pet stays wounded). Pulls cosmetic /
-/// combat-stat fields from the proto.
+/// verbatim (a wounded pet stays wounded). Everything else comes
+/// from the proto via `mud_world::spawn_mob_from_proto`.
 pub(crate) fn restore_persisted_pets(world: &mut World, player: Entity, persisted: PersistedPets) {
     let now_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -635,37 +635,26 @@ pub(crate) fn restore_persisted_pets(world: &mut World, player: Entity, persiste
             );
             continue;
         };
-        let mut pet_entity = world.spawn((
-            Mob,
-            Named {
-                name: pet.name.clone(),
-            },
-            Keywords(proto.keywords.clone()),
-            Description(proto.room_description.clone()),
-            WorldKey {
-                zone: proto.zone_id,
-                id: proto.id,
-            },
-            Located(player_room),
-            Health {
-                hp: pet.hp,
-                max: pet.max_hp,
-            },
-            proto.derived_combat_stats(),
-            Posture(PostureKind::Standing),
-            Follower(player),
-            mud_world::PersistentPet,
-            mud_world::NaturalDamage {
-                num: proto.damage_dice_num,
-                size: proto.damage_dice_size,
-                bonus: proto.damage_dice_bonus,
-            },
-        ));
-        if !proto.examine_description.trim().is_empty() {
-            pet_entity.insert(mud_world::ExamineText(proto.examine_description.clone()));
-        }
-        if proto.is_mountable() {
-            pet_entity.insert(mud_world::Mountable);
+        // Same constructor as hire / mount summons so the pet carries
+        // every proto-derived component (default effects, shop and
+        // trigger markers, natural attack, ...). No aggro or LOAD
+        // trigger runs here: pets are servants, not fresh spawns.
+        let pet_entity = mud_world::spawn_mob_from_proto(world, &proto, player_room, None);
+        if let Ok(mut em) = world.get_entity_mut(pet_entity) {
+            // Persisted state goes on top; the proto's rolled HP is
+            // replaced so a wounded pet stays wounded.
+            em.insert((
+                Named {
+                    name: pet.name.clone(),
+                },
+                Health {
+                    hp: pet.hp,
+                    max: pet.max_hp,
+                },
+                Posture(PostureKind::Standing),
+                Follower(player),
+                mud_world::PersistentPet,
+            ));
         }
     }
 }
