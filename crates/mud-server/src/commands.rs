@@ -2704,13 +2704,15 @@ pub(crate) fn merge_stack(stack: &[StyleLayer]) -> StyleLayer {
 #[cfg(test)]
 mod tests {
     use super::{
-        ColorMode, FormulaCtx, amount_from_blob, apply_damage, apply_heal_hp, apply_heal_stamina,
-        apply_knockdown_posture, check_ability_restrictions, check_target_type, condition_label,
-        direction_name, duration_from_blob, evaluate_formula, evaluate_simple_formula, format_idle,
-        has_effect_named, is_being_attacked, is_immobilized, normalize_dice_notation,
-        parse_direction, remove_effect_named, render_color_tags, resolve_dispel_filter,
-        resolve_dispel_scope, resolve_effect_conditions, resolve_effect_resource,
-        resolve_knockdown_posture, resolve_redirect_aggro, sector_movement_cost, status_upgrade,
+        ColorMode, FormulaCtx, amount_from_blob, apply_caster_class_multiplier, apply_damage,
+        apply_heal_hp, apply_heal_stamina, apply_knockdown_posture,
+        caster_class_multiplier_from_blob, check_ability_restrictions, check_target_type,
+        condition_label, direction_name, duration_from_blob, evaluate_formula,
+        evaluate_simple_formula, evaluate_simple_formula_ctx, format_idle, has_effect_named,
+        is_being_attacked, is_immobilized, normalize_dice_notation, parse_direction,
+        remove_effect_named, render_color_tags, resolve_dispel_filter, resolve_dispel_scope,
+        resolve_effect_conditions, resolve_effect_resource, resolve_knockdown_posture,
+        resolve_redirect_aggro, sector_movement_cost, status_upgrade,
     };
     use bevy_ecs::prelude::*;
     use mud_db::enums::Sector;
@@ -4858,6 +4860,75 @@ mod tests {
         assert_eq!(evaluate_formula(holy_expr, &undead, &mut zero), Some(1500));
         assert_eq!(evaluate_formula(holy_expr, &angel, &mut zero), Some(500));
         assert_eq!(evaluate_formula(holy_expr, &neutral, &mut zero), Some(1000));
+    }
+
+    /// Legacy `SPELL_HOLY_WORD`: priests and paladins deal 1.25x. The
+    /// bonus is data (`casterClassMultiplier` in the effect params), keyed
+    /// by lowercased `Class.plain_name`, matched along the caster's chain.
+    #[test]
+    fn caster_class_multiplier_scales_listed_classes_only() {
+        let params = serde_json::json!({
+            "amount": "base_damage + (pow(skill, 2) * 33) / 2000",
+            "casterClassMultiplier": {"priest": 1.25, "Paladin": 1.25}
+        });
+        let names = |v: &[&str]| v.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        // Same formula, same inputs: only the class differs.
+        let ctx = FormulaCtx {
+            skill: 100,
+            base_damage: 40,
+            ..FormulaCtx::default()
+        };
+        let base = evaluate_simple_formula_ctx("base_damage + (pow(skill, 2) * 33) / 2000", &ctx)
+            .expect("formula");
+        assert_eq!(base, 205);
+        let p = Some(&params);
+        assert_eq!(
+            apply_caster_class_multiplier(base, p, &names(&["priest"])),
+            256
+        );
+        assert_eq!(
+            apply_caster_class_multiplier(base, p, &names(&["paladin"])),
+            256
+        );
+        assert_eq!(
+            apply_caster_class_multiplier(base, p, &names(&["cleric"])),
+            base
+        );
+        // A subclass inherits via its parent when it has no entry itself.
+        assert_eq!(
+            apply_caster_class_multiplier(base, p, &names(&["templar", "priest"])),
+            256
+        );
+        // Classless caster, absent key, absent params, malformed entries.
+        assert_eq!(apply_caster_class_multiplier(base, p, &[]), base);
+        assert_eq!(
+            apply_caster_class_multiplier(base, None, &names(&["priest"])),
+            base
+        );
+        let none = serde_json::json!({"amount": 5});
+        assert_eq!(
+            apply_caster_class_multiplier(base, Some(&none), &names(&["priest"])),
+            base
+        );
+        let bad = serde_json::json!({"casterClassMultiplier": {"priest": "lots", "paladin": -1}});
+        assert_eq!(
+            apply_caster_class_multiplier(base, Some(&bad), &names(&["priest"])),
+            base
+        );
+        assert_eq!(
+            apply_caster_class_multiplier(base, Some(&bad), &names(&["paladin"])),
+            base
+        );
+        let not_map = serde_json::json!({"casterClassMultiplier": 1.25});
+        assert_eq!(
+            caster_class_multiplier_from_blob(Some(&not_map), &names(&["priest"])),
+            None
+        );
+        // The params parse and expose the exact factor.
+        assert_eq!(
+            caster_class_multiplier_from_blob(p, &names(&["priest"])),
+            Some(1.25)
+        );
     }
 
     /// I2 partial (b): pow accepts an integer expression as the
@@ -14679,6 +14750,22 @@ pub(crate) fn invoke_ability_with(
     // base_damage as zero, which matches the data: their formulas
     // fall back to `weapon_damage`-based math instead.
     let caster_class_id = world.get::<Profile>(player).and_then(|p| p.class_id);
+    // Lowercased `Class.plain_name`s of the caster's class chain (subclass
+    // first, then ancestors) for the `casterClassMultiplier` damage key.
+    let caster_class_names: Vec<String> = world
+        .get_resource::<mud_world::ClassCatalog>()
+        .map(|classes| {
+            let mut names = Vec::new();
+            let mut class = caster_class_id.and_then(|id| classes.by_id.get(&id));
+            // Bounded in case of cyclic parent data.
+            for _ in 0..4 {
+                let Some(c) = class else { break };
+                names.push(c.plain_name.to_ascii_lowercase());
+                class = c.parent_class_id.and_then(|id| classes.by_id.get(&id));
+            }
+            names
+        })
+        .unwrap_or_default();
     let spell_circle = caster_class_id
         .and_then(|cid| {
             world
@@ -15234,6 +15321,13 @@ pub(crate) fn invoke_ability_with(
                         amount = scaled.max(0);
                     }
                 }
+                // Builder-editable per-caster-class bonus (legacy
+                // `if (GET_CLASS(ch) == CLASS_PRIEST ...) dam *= 1.25`).
+                amount = apply_caster_class_multiplier(
+                    amount,
+                    spec.override_params.as_ref(),
+                    &caster_class_names,
+                );
                 let raw_amount = amount;
                 let mut post_sp = amount;
                 let mut post_reagent = amount;
@@ -19391,6 +19485,43 @@ pub(crate) fn bonus_if_hidden_from_blob(
     let p = params?;
     let v = p.get("bonusIfHidden")?;
     numeric_or_formula(v, ctx)
+}
+
+/// Pull the `casterClassMultiplier` map from an effect's params:
+/// `{"priest": 1.25, "paladin": 1.25}`. Keys are `Class.plain_name`
+/// (any case). `class_names` is the caster's class chain, lowercased,
+/// most specific first; the first chain entry with a valid (finite,
+/// non-negative) entry wins. `None` when the key is absent, malformed,
+/// or no class matches, so the amount is left untouched.
+pub(crate) fn caster_class_multiplier_from_blob(
+    params: Option<&serde_json::Value>,
+    class_names: &[String],
+) -> Option<f64> {
+    let map = params?.get("casterClassMultiplier")?.as_object()?;
+    class_names.iter().find_map(|name| {
+        map.iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .and_then(|(_, v)| v.as_f64())
+            .filter(|f| f.is_finite() && *f >= 0.0)
+    })
+}
+
+/// Scale `amount` by the caster's class entry in `casterClassMultiplier`
+/// (rounded to the nearest point); unchanged when there is none.
+pub(crate) fn apply_caster_class_multiplier(
+    amount: i32,
+    params: Option<&serde_json::Value>,
+    class_names: &[String],
+) -> i32 {
+    let Some(factor) = caster_class_multiplier_from_blob(params, class_names) else {
+        return amount;
+    };
+    #[allow(clippy::cast_possible_truncation)]
+    let scaled = (f64::from(amount) * factor).round() as i64;
+    #[allow(clippy::cast_possible_truncation)]
+    {
+        scaled.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+    }
 }
 
 /// Shared parser for amount-shaped JSON fields: integer literal,
