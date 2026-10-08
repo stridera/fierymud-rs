@@ -5,8 +5,8 @@
 use bevy_ecs::prelude::*;
 use mud_db::enums::{UserRole, effective_rank};
 use mud_world::{
-    Account, Exits, Located, Mob, Named, NoTeleportRoom, Online, Player, Poofs, Profile,
-    RecallPoint, Room, WorldKey, WorldKeyIndex,
+    Account, Exits, Follower, Located, Mob, Mounted, Named, NoTeleportRoom, Online, Player, Poofs,
+    Profile, RecallPoint, Room, WorldKey, WorldKeyIndex,
 };
 
 use super::dispatch;
@@ -163,4 +163,48 @@ fn goto_uses_the_staffs_own_poofin_and_poofout() {
     let own = drain(&mut own);
     assert!(!own.contains("trailing sparks"), "{own}");
     assert!(own.contains("Room 2"), "{own}");
+}
+
+#[test]
+fn goto_brings_the_staffs_pets_but_not_strangers_or_others_pets() {
+    let mut w = world();
+    let (from, to) = (room(&mut w, 1), room(&mut w, 2));
+    let (god, _g) = person(&mut w, "Strider", 104, from);
+    let (other, _o) = person(&mut w, "Other", 10, from);
+    let mob = |w: &mut World, name: &str, master: Option<Entity>| {
+        let e = w
+            .spawn((Mob, Named { name: name.into() }, Located(from)))
+            .id();
+        if let Some(m) = master {
+            w.entity_mut(e).insert(Follower(m));
+        }
+        e
+    };
+    let pet = mob(&mut w, "a loyal hound", Some(god));
+    let stranger = mob(&mut w, "a bystander", None);
+    let others_pet = mob(&mut w, "a cat", Some(other));
+    dispatch(&mut w, god, "goto 2");
+    assert_eq!(where_is(&w, god), to);
+    assert_eq!(where_is(&w, pet), to, "pet follows the staff member");
+    assert_eq!(where_is(&w, stranger), from);
+    assert_eq!(where_is(&w, others_pet), from);
+}
+
+#[test]
+fn goto_brings_the_mount_along() {
+    let mut w = world();
+    let (from, to) = (room(&mut w, 1), room(&mut w, 2));
+    let (god, _g) = person(&mut w, "Strider", 104, from);
+    let horse = w
+        .spawn((
+            Mob,
+            Named {
+                name: "a horse".into(),
+            },
+            Located(from),
+        ))
+        .id();
+    w.entity_mut(god).insert(Mounted(horse));
+    dispatch(&mut w, god, "goto 2");
+    assert_eq!(where_is(&w, horse), to);
 }

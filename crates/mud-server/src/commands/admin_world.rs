@@ -2809,7 +2809,6 @@ pub(crate) fn cmd_goto(world: &mut World, player: Entity, args: &str) {
         );
         return;
     }
-    let mount = world.get::<mud_world::Mounted>(player).map(|m| m.0);
     let origin = world.get::<Located>(player).map(|l| l.0);
     let (poof_in, poof_out) = world
         .get::<mud_world::Poofs>(player)
@@ -2835,10 +2834,20 @@ pub(crate) fn cmd_goto(world: &mut World, player: Entity, args: &str) {
     }
     // Bring the mount along on goto / recall — otherwise the mount
     // is orphaned in the old room with a stale RiddenBy link.
-    if let Some(mount) = mount
-        && world.get::<Located>(mount).is_some()
-    {
-        world.entity_mut(mount).insert(Located(target));
+    crate::combat::carry_mount(world, player, target);
+    // Legacy do_goto also brings the staff member's pets (servant followers).
+    let pets: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &mud_world::Follower), With<mud_world::Mob>>();
+        q.iter(world)
+            .filter(|(_, f)| f.0 == player)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for pet in pets {
+        if world.get::<Located>(pet).is_some() && crate::commands::attack_ok::is_servant(world, pet)
+        {
+            world.entity_mut(pet).insert(Located(target));
+        }
     }
     if origin.is_some() {
         let line = poof_line(poof_in, "$n appears with an ear-splitting bang.");
