@@ -9164,7 +9164,10 @@ mod tests {
             return;
         };
         let (_user, c) = temp_unlinked_char(&pool, "lo2").await;
-        let now_unix = chrono::Utc::now().timestamp();
+        // Sampled *after* the row is read back each time: the logout stamp is
+        // written during the save, so a clock read taken before it can land a
+        // second earlier than the stamp and under-count by 1 s.
+        let now_secs = || chrono::Utc::now().timestamp();
         let load = |pool: PgPool, name: String| async move {
             mud_db::characters::find_by_name(&pool, &name)
                 .await
@@ -9175,7 +9178,7 @@ mod tests {
         // NULL last_logout (first login after deploy) -> nothing.
         let r = load(pool.clone(), c.name.clone()).await;
         assert_eq!(r.last_logout, None);
-        assert_eq!(offline_elapsed_secs(r.last_logout, now_unix), 0);
+        assert_eq!(offline_elapsed_secs(r.last_logout, now_secs()), 0);
 
         let mut world = World::new();
         world.insert_resource(SaveCoordinator::default());
@@ -9186,7 +9189,7 @@ mod tests {
 
         // Just quit and relogged: ~0 offline.
         let r = load(pool.clone(), c.name.clone()).await;
-        assert!(offline_elapsed_secs(r.last_logout, now_unix) <= 5);
+        assert!(offline_elapsed_secs(r.last_logout, now_secs()) <= 5);
 
         mud_db::sqlx::query(
             "UPDATE \"Characters\" SET last_logout = last_logout - interval '4 hours' WHERE id = $1",
@@ -9196,7 +9199,7 @@ mod tests {
         .await
         .unwrap();
         let r = load(pool.clone(), c.name.clone()).await;
-        let elapsed = offline_elapsed_secs(r.last_logout, now_unix);
+        let elapsed = offline_elapsed_secs(r.last_logout, now_secs());
         assert!((4 * HOUR..=4 * HOUR + 5).contains(&elapsed), "{elapsed}");
         assert_eq!(accrue_l10(0, 1, elapsed), accrue_l10(0, 1, 40 * HOUR));
         temp_cleanup(&pool, &[], &[&c.id], &[]).await;
