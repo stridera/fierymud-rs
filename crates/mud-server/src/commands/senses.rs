@@ -119,7 +119,7 @@ pub(crate) fn dark_room_lines(world: &mut World, viewer: Entity, room: Entity) -
     out
 }
 
-/// In a lit room, the count of living players `viewer` cannot see
+/// In a lit room, the count of living characters (players and mobs) `viewer` cannot see
 /// (magically invisible) but senses. Empty without `detect_life`.
 pub(crate) fn lit_room_lines(world: &mut World, viewer: Entity, room: Entity) -> String {
     if world.get::<SenseLife>(viewer).is_none() {
@@ -127,11 +127,7 @@ pub(crate) fn lit_room_lines(world: &mut World, viewer: Entity, room: Entity) ->
     }
     let sensed = others_in(world, viewer, room)
         .into_iter()
-        .filter(|e| {
-            world.get::<Player>(*e).is_some()
-                && hidden_by_magic_from(world, viewer, *e)
-                && is_living(world, *e)
-        })
+        .filter(|e| hidden_by_magic_from(world, viewer, *e) && is_living(world, *e))
         .count();
     life_sensed_line(sensed).to_string()
 }

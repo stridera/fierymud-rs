@@ -166,6 +166,23 @@ fn detect_life_counts_what_the_dark_hides_and_the_invisible() {
 }
 
 #[test]
+fn detect_life_senses_invisible_mobs_in_a_lit_room() {
+    let (mut fx, p, mut rx) = caster_with_flag_spell("detect_life");
+    cast(&mut fx, p);
+    let imp = mob_in(&mut fx, "a gutter imp", 0);
+    fx.world.entity_mut(imp).insert(Invisible);
+    let lit = look(&mut fx, p, &mut rx);
+    assert!(lit.contains("You sense a hidden lifeform."), "{lit}");
+    assert!(!lit.contains("gutter imp"), "identity stays hidden: {lit}");
+    // Undead carry no life force to sense.
+    fx.world
+        .entity_mut(imp)
+        .insert(mud_world::LifeForceTag(mud_db::enums::LifeForce::Undead));
+    let lit = look(&mut fx, p, &mut rx);
+    assert!(!lit.contains("hidden lifeform"), "{lit}");
+}
+
+#[test]
 fn detect_align_tags_evil_and_good_actors() {
     let (mut fx, p, mut rx) = caster_with_flag_spell("detect_align");
     let _imp = mob_in(&mut fx, "a gutter imp", -600);
@@ -195,4 +212,42 @@ fn familiarity_keeps_aggressive_mobs_from_starting_a_fight() {
     assert!(!mob_will_start_fight(&fx.world, wolf, p), "friend after");
     super::remove_effect_named(&mut fx.world, p, "familiarity");
     assert!(mob_will_start_fight(&fx.world, wolf, p), "hostile again");
+}
+
+/// Run `mob_helpers_engage` with the familiarity roll pinned to `roll`
+/// and report whether the helper joined the fight, plus what `p` saw.
+fn helper_joins(familiar: bool, roll: i32) -> (bool, String) {
+    let (mut fx, p, mut rx) = caster_with_flag_spell("familiarity");
+    if familiar {
+        fx.world.entity_mut(p).insert(mud_world::Familiar);
+    }
+    let victim = mob_in(&mut fx, "a hapless cityguard", 0);
+    let helper = mob_in(&mut fx, "a loyal deputy", 0);
+    fx.world
+        .entity_mut(helper)
+        .insert(mud_world::MobBehaviors(vec![
+            mud_db::enums::MobBehavior::Helper,
+        ]));
+    let room = fx.a;
+    let _ = drain(&mut rx);
+    super::FORCED_FAMILIARITY_ROLL.with(|c| c.set(Some(roll)));
+    super::mob_helpers_engage(&mut fx.world, victim, p, room);
+    super::FORCED_FAMILIARITY_ROLL.with(|c| c.set(None));
+    let joined = fx.world.get::<mud_world::Fighting>(helper).map(|f| f.0) == Some(p);
+    (joined, drain(&mut rx))
+}
+
+#[test]
+fn familiarity_can_make_a_helper_mob_back_off() {
+    // Roll under 50: the helper takes the target for a friend.
+    let (joined, seen) = helper_joins(true, 49);
+    assert!(!joined, "helper stopped");
+    assert!(seen.contains("gets a good look at you and stops"), "{seen}");
+    // Roll of 50 or more: it assists as usual.
+    let (joined, seen) = helper_joins(true, 50);
+    assert!(joined, "helper joined");
+    assert!(seen.contains("leaps to"), "{seen}");
+    // Without familiarity the roll never matters.
+    let (joined, _) = helper_joins(false, 1);
+    assert!(joined, "no Familiar, no back-off");
 }

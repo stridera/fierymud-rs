@@ -7702,13 +7702,16 @@ pub(crate) fn send_room_mobs(world: &mut World, viewer: Entity, force: bool) {
     // happens here rather than per-mob below so professions and
     // hostility on hidden mobs never leak into the frame.
     let room_seen = gmcp::viewer_sees_room(world, viewer, room);
-    let candidates: Vec<Entity> = {
+    let mut candidates: Vec<Entity> = {
         let mut q = world.query_filtered::<(Entity, &Located), With<Mob>>();
         q.iter(world)
             .filter(|(_, l)| l.0 == room)
             .map(|(e, _)| e)
             .collect()
     };
+    // Query order shifts when unrelated components change; sort by the
+    // entity id (the frame's own `id`) so the change-gate hash is stable.
+    candidates.sort_by_key(|e| e.to_bits());
     let candidates: Vec<(Entity, gmcp::Perceived)> = candidates
         .into_iter()
         .map(|mob| (mob, gmcp::perceives(world, viewer, mob, room_seen)))
@@ -21278,6 +21281,34 @@ pub(crate) fn require_alert_posture(world: &mut World, player: Entity, action: &
     }
 }
 
+thread_local! {
+    /// Test hook: pins the familiarity roll (per test thread) so the
+    /// back-off outcome is deterministic.
+    static FORCED_FAMILIARITY_ROLL: std::cell::Cell<Option<i32>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Charisma on the 0..100 stat scale; mobs carry no `CoreStats`, so they
+/// count as average.
+fn charisma_of(world: &World, e: Entity) -> i32 {
+    world
+        .get::<mud_world::CoreStats>(e)
+        .map_or(50, |c| c.charisma)
+}
+
+/// Legacy `mob_assist` familiarity check: a mob moving to defend `ally`
+/// against a `Familiar` `target` stops when
+/// `random(1, 100 + cha(target) - cha(ally)) < 50`.
+fn familiarity_stops_assist(world: &World, target: Entity, ally: Entity) -> bool {
+    let roll = FORCED_FAMILIARITY_ROLL
+        .with(std::cell::Cell::get)
+        .unwrap_or_else(|| {
+            let hi = 100 + charisma_of(world, target) - charisma_of(world, ally);
+            rand::random_range(1..=hi.max(1))
+        });
+    roll < 50
+}
+
 /// Mob HELPER behavior: every mob in `room` (other than attacker /
 /// defender) carrying the `Helper` `MobBehavior` auto-engages the
 /// attacker. Mirrors `auto_assist_followers_of` for mobs and
@@ -21321,7 +21352,31 @@ pub(crate) fn mob_helpers_engage(
     }
     let defender_name = name_of(world, defender);
     let attacker_name = name_of(world, attacker);
+    // Legacy `mob_assist`: against a target under `EFF_FAMILIARITY` the
+    // helper may take it for a friend and back off. The roll depends on
+    // the charisma gap between target and the ally being defended.
+    let familiar = world.get::<mud_world::Familiar>(attacker).is_some();
+    let backs_off = familiar && familiarity_stops_assist(world, attacker, defender);
     for helper in helpers {
+        if backs_off {
+            let helper_name = name_of(world, helper);
+            send_rendered(
+                world,
+                attacker,
+                &format!(
+                    "{helper_name} moves to join the fight, but gets a good look at you and stops, confused.\r\n"
+                ),
+            );
+            broadcast_room_except_rendered(
+                world,
+                room,
+                &[attacker],
+                &format!(
+                    "{helper_name} moves to join the fight, but gets a good look at {attacker_name} and stops, confused.\r\n"
+                ),
+            );
+            continue;
+        }
         try_insert(world, helper, Fighting(attacker));
         let helper_name = name_of(world, helper);
         send_rendered(

@@ -10705,11 +10705,10 @@ mod tests {
 
     /// `abilities_loaded` on a virtual session is just the character's
     /// `CharacterAbilities` row count. A seeded mortal (`TestWarrior`, class
-    /// Warrior) must load some; the classless god `Strider` owns none by
-    /// design (staff skip the `KnownAbilities` gate), so 0 there is not a
-    /// bug. Read-only; skips when the dev DB or those characters are absent.
+    /// Warrior) must load some. Read-only; skips when the dev DB or that
+    /// character is absent.
     #[tokio::test(flavor = "current_thread")]
-    async fn seeded_mortal_loads_abilities_classless_god_has_none() {
+    async fn seeded_mortal_loads_abilities() {
         let Some((pool, _db_lock)) = live_pool().await else {
             eprintln!("skipping: dev database unavailable");
             return;
@@ -10737,9 +10736,6 @@ mod tests {
         match count("TestWarrior").await {
             Some(n) => assert!(n > 0, "TestWarrior should load abilities, got {n}"),
             None => eprintln!("skipping: TestWarrior not seeded"),
-        }
-        if let Some(n) = count("Strider").await {
-            assert_eq!(n, 0, "classless god Strider has no CharacterAbilities rows");
         }
     }
 

@@ -949,6 +949,12 @@ pub fn combat_tick(world: &mut World) {
             if !has_extra_pass(world, s.attacker) {
                 continue;
             }
+            // The first swing (or an earlier pass) ended the fight, e.g.
+            // the target slipped away: no further swings, no repeat of
+            // the disengage message.
+            if world.get::<Fighting>(s.attacker).is_none() {
+                continue;
+            }
             // Skip the extra swing if the first dropped the target
             // (zero HP) — let death broadcast settle in this tick.
             let target_dead = world
@@ -3224,6 +3230,33 @@ mod tests {
             "attacker disengaged after room mismatch"
         );
         assert_eq!(world.get::<Health>(target).unwrap().hp, 50);
+    }
+
+    /// A hasted and blurred attacker whose target slipped away gets one
+    /// "slipped away" message, not one per extra swing pass.
+    #[test]
+    fn slipped_away_is_sent_once_despite_extra_passes() {
+        let mut world = World::new();
+        let room_a = make_room(&mut world);
+        let room_b = make_room(&mut world);
+        let target = make_target(&mut world, room_b, 50);
+        let attacker = make_attacker(&mut world, room_a, target, 7);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+        world.entity_mut(attacker).insert((
+            Player,
+            crate::commands::Connection(tx),
+            mud_world::Haste,
+            mud_world::Blur,
+        ));
+
+        run_combat_tick(&mut world);
+
+        let mut out = String::new();
+        while let Ok(bytes) = rx.try_recv() {
+            out.push_str(&String::from_utf8_lossy(&bytes));
+        }
+        assert_eq!(out.matches("slipped away").count(), 1, "{out}");
+        assert!(world.get::<Fighting>(attacker).is_none());
     }
 
     #[test]

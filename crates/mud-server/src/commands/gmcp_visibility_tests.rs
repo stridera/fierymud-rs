@@ -213,3 +213,30 @@ fn prompt_refreshes_the_panels_when_the_light_goes_out() {
     assert_eq!(of(&fr, "Room.Players"), ["[]"], "{fr:?}");
     assert_eq!(of(&fr, "Room.Info"), ["{}"], "{fr:?}");
 }
+
+#[test]
+fn unrelated_component_changes_do_not_resend_the_room_lists() {
+    #[derive(Component)]
+    struct Marker;
+
+    let mut fx = fixture();
+    let a = fx.a;
+    let (p, mut rx) = player(&mut fx.world, a, "Seeker");
+    let (first, _frx) = player(&mut fx.world, a, "Alpha");
+    let (_second, _srx) = player(&mut fx.world, a, "Zed");
+    let wolf = mob(&mut fx.world, a, "a lurking wolf");
+    let _rat = mob(&mut fx.world, a, "a rat");
+    super::send_prompt(&mut fx.world, p);
+    let fr = frames(&drain_bytes(&mut rx));
+    assert_eq!(of(&fr, "Room.Players").len(), 1, "{fr:?}");
+    assert_eq!(of(&fr, "Room.Mobs").len(), 1, "{fr:?}");
+
+    // Moving entities to a new archetype reorders ECS query results, but
+    // not what the viewer perceives.
+    fx.world.entity_mut(first).insert(Marker);
+    fx.world.entity_mut(wolf).insert(Marker);
+    super::send_prompt(&mut fx.world, p);
+    let fr = frames(&drain_bytes(&mut rx));
+    assert!(of(&fr, "Room.Players").is_empty(), "resent players: {fr:?}");
+    assert!(of(&fr, "Room.Mobs").is_empty(), "resent mobs: {fr:?}");
+}

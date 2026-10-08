@@ -20,10 +20,10 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use bevy_ecs::prelude::*;
-use mud_db::enums::{ExitState, MobBehavior, MobTrait, Sector};
+use mud_db::enums::{ExitState, MobBehavior, MobTrait, ObjectRestriction, Sector};
 use mud_world::{
     AttachedTriggers, Corpse, ExitData, Exits, Fighting, Follower, Item, Located, Mob,
-    MobBehaviors, MobTraits, Named, Player, RiddenBy, RoomSector, WorldKey,
+    MobBehaviors, MobTraits, Named, ObjectRestrictions, Player, RiddenBy, RoomSector, WorldKey,
 };
 
 use crate::TickCount;
@@ -235,9 +235,17 @@ pub fn scavenger_tick(world: &mut World) {
     // inventory and despawned with the mob's next tick.
     let mut floor: HashMap<Entity, VecDeque<Entity>> = HashMap::new();
     {
-        let mut q = world
-            .query_filtered::<(Entity, &Located), (With<Item>, With<Named>, Without<Corpse>)>();
-        for (item, loc) in q.iter(world) {
+        let mut q = world.query_filtered::<(
+            Entity,
+            &Located,
+            Option<&ObjectRestrictions>,
+        ), (With<Item>, With<Named>, Without<Corpse>)>();
+        for (item, loc, restrictions) in q.iter(world) {
+            // Same gate as the `get` command: a !TAKE item is fixed in
+            // place for everyone, mobs included.
+            if restrictions.is_some_and(|r| r.has(ObjectRestriction::NoTake)) {
+                continue;
+            }
             if scavenger_rooms.contains(&loc.0) {
                 floor.entry(loc.0).or_default().push_back(item);
             }
@@ -593,6 +601,35 @@ mod tests {
             q.iter(&world).filter(|l| rooms.contains(&l.0)).count()
         };
         assert_eq!(floor_before - floor_after, expected.len());
+    }
+
+    /// A !TAKE fixture on the floor stays put; a takeable item beside it
+    /// is picked up.
+    #[test]
+    fn scavenger_leaves_untakeable_items_alone() {
+        let mut world = World::new();
+        world.insert_resource(TickCount(SCAVENGER_PERIOD_TICKS));
+        let room = make_room(&mut world);
+        let mob = make_mob(&mut world, room);
+        world
+            .entity_mut(mob)
+            .insert(MobBehaviors(vec![MobBehavior::Scavenger]));
+        let named = |n: &str| Named { name: n.into() };
+        let statue = world
+            .spawn((
+                Item,
+                named("a marble statue"),
+                Located(room),
+                ObjectRestrictions(vec![ObjectRestriction::NoTake]),
+            ))
+            .id();
+        scavenger_tick(&mut world);
+        assert_eq!(world.get::<Located>(statue).map(|l| l.0), Some(room));
+
+        let coin = world.spawn((Item, named("a coin"), Located(room))).id();
+        scavenger_tick(&mut world);
+        assert_eq!(world.get::<Located>(coin).map(|l| l.0), Some(mob));
+        assert_eq!(world.get::<Located>(statue).map(|l| l.0), Some(room));
     }
 
     /// Timing guard at prod scale. Prod saw 138-223 ms per pass with the

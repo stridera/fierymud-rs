@@ -149,12 +149,19 @@ pub(crate) fn build_room_players(world: &mut World, viewer: Entity) -> String {
             .map(|(e, _)| e)
             .collect()
     };
-    let entries: Vec<Value> = here
+    let mut names: Vec<String> = here
         .into_iter()
         .filter_map(|e| {
             let how = perceives(world, viewer, e, room_seen);
-            perceived_name(world, e, how).map(|n| json!({ "name": n, "full_name": n }))
+            perceived_name(world, e, how)
         })
+        .collect();
+    // ECS query order shifts whenever an unrelated component is added or
+    // removed, which would change the hash and resend an identical list.
+    names.sort();
+    let entries: Vec<Value> = names
+        .into_iter()
+        .map(|n| json!({ "name": n, "full_name": n }))
         .collect();
     Value::Array(entries).to_string()
 }
