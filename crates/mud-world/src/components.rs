@@ -995,6 +995,9 @@ pub enum CastTarget {
     Fighting(Entity),
     /// An item that must still be carried (or worn) by the caster.
     Carried(Entity),
+    /// An item lying in the caster's room (`TAR_OBJ_ROOM`); must still
+    /// be there when the wind-up ends.
+    RoomObject(Entity),
 }
 
 /// Marker: this entity is stunned and skips combat swings. Inserted by

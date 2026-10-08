@@ -270,6 +270,12 @@ pub(crate) fn target_still_valid(world: &World, caster: Entity, target: CastTarg
             world.get_entity(item).is_ok()
                 && world.get::<Located>(item).is_some_and(|l| l.0 == caster)
         }
+        CastTarget::RoomObject(item) => {
+            let room = world.get::<Located>(caster).map(|l| l.0);
+            world.get_entity(item).is_ok()
+                && room.is_some()
+                && world.get::<Located>(item).map(|l| l.0) == room
+        }
     }
 }
 
@@ -531,7 +537,7 @@ fn announce_cast_complete(world: &mut World, caster: Entity, snap: &Casting) {
                     format!("stares off at nothing and utters the words, '{spell}'.")
                 }
             }
-            CastTarget::Carried(item) => format!(
+            CastTarget::Carried(item) | CastTarget::RoomObject(item) => format!(
                 "stares at {} and utters the words, '{spell}'.",
                 name_or(world, item, "something"),
             ),

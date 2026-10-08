@@ -2360,8 +2360,20 @@ fn award_kill_coin(
         recipients
     };
     let n = i64::try_from(recipients.len()).unwrap_or(1).max(1);
-    let base_share = (coin / n).max(1);
+    // Split the pile exactly: everyone gets `coin / n`, the remainder goes
+    // to the killer, so the shares never add up to more than the pile
+    // (a 1-copper pile among 3 members is the killer's, not 3 copper).
+    let even_share = coin / n;
+    let remainder = coin % n;
     for r in &recipients {
+        let base_share = if *r == killer {
+            even_share + remainder
+        } else {
+            even_share
+        };
+        if base_share <= 0 {
+            continue;
+        }
         // Per-race coin scaling from `Races.copper_factor` (percent).
         // Default is 75 on the schema — a "neutral" race takes home
         // 75% of the raw take, leaving headroom for outliers. The
@@ -2378,7 +2390,7 @@ fn award_kill_coin(
         let share = if copper_factor == 100 {
             base_share
         } else {
-            (base_share.saturating_mul(i64::from(copper_factor)) / 100).max(1)
+            (base_share.saturating_mul(i64::from(copper_factor)) / 100).clamp(1, base_share)
         };
         if let Some(mut w) = world.get_mut::<Wealth>(*r) {
             w.0 = w.0.saturating_add(share);
@@ -5270,8 +5282,43 @@ mod tests {
         ));
         run_combat_tick(&mut world);
         assert!(world.get_entity(goblin).is_err());
-        assert_eq!(wealth_of(&world, killer), 37);
+        // 75 copper between two: the odd copper stays with the killer.
+        assert_eq!(wealth_of(&world, killer), 38);
         assert_eq!(wealth_of(&world, leader), 37);
+    }
+
+    #[test]
+    fn autosplit_never_creates_coin_from_a_small_pile() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let goblin = credit_goblin(&mut world, room, 0, None);
+        world
+            .resource_mut::<MobPrototypes>()
+            .by_key
+            .get_mut(&(1, 1))
+            .unwrap()
+            .wealth = 2;
+        let leader = credit_player(&mut world, room, "Leader", 0);
+        let killer = credit_player(&mut world, room, "Killer", 0);
+        let third = credit_player(&mut world, room, "Third", 0);
+        for m in [killer, third] {
+            world.entity_mut(m).insert(mud_world::Follower(leader));
+        }
+        world.entity_mut(killer).insert((
+            Fighting(goblin),
+            mud_world::PlayerFlags(vec![
+                mud_db::enums::PlayerFlag::AutoLoot,
+                mud_db::enums::PlayerFlag::AutoSplit,
+            ]),
+        ));
+        run_combat_tick(&mut world);
+        assert!(world.get_entity(goblin).is_err());
+        let total: i64 = [leader, killer, third]
+            .iter()
+            .map(|e| wealth_of(&world, *e))
+            .sum();
+        assert_eq!(total, 2, "2 copper split three ways is still 2 copper");
+        assert_eq!(wealth_of(&world, killer), 2, "remainder to the killer");
     }
 
     #[test]

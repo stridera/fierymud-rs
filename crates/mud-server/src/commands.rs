@@ -13194,7 +13194,8 @@ pub(crate) fn resolve_queued_cast(
         CastTarget::InRoom(e)
         | CastTarget::World(e)
         | CastTarget::Fighting(e)
-        | CastTarget::Carried(e) => Some(e),
+        | CastTarget::Carried(e)
+        | CastTarget::RoomObject(e) => Some(e),
     };
     invoke_ability_with(world, player, args, kind, verb, false, false, true, forced);
 }
@@ -13987,7 +13988,15 @@ fn resolve_and_gate_target(
     let lock = if target_entity == player {
         mud_world::CastTarget::Caster
     } else if world.get::<Item>(target_entity).is_some() {
-        mud_world::CastTarget::Carried(target_entity)
+        // Lying in the room (OBJECT_WORLD) vs. carried / worn: the
+        // wind-up checks a different "still there" condition for each.
+        if world.get::<Located>(target_entity).map(|l| l.0)
+            == world.get::<Located>(player).map(|l| l.0)
+        {
+            mud_world::CastTarget::RoomObject(target_entity)
+        } else {
+            mud_world::CastTarget::Carried(target_entity)
+        }
     } else if default_combat_target.is_some() {
         mud_world::CastTarget::Fighting(target_entity)
     } else if in_caster_room {

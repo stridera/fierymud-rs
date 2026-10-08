@@ -411,6 +411,117 @@ mod tests {
         assert!(!cursed(&world, helm));
     }
 
+    /// Start a real wind-up (`cast_time_rounds` as authored) and tick it
+    /// until it resolves or aborts.
+    fn wind_up_and_finish(world: &mut World, caster: Entity, spell: &str, target: &str) {
+        invoke_ability_with(
+            world,
+            caster,
+            &format!("'{spell}' {target}"),
+            AbilityKind::Spell,
+            "cast",
+            false,
+            false,
+            false,
+            None,
+        );
+        for _ in 0..200 {
+            if world.get::<mud_world::Casting>(caster).is_none() {
+                break;
+            }
+            crate::casting::casting_tick(world);
+        }
+        assert!(world.get::<mud_world::Casting>(caster).is_none());
+    }
+
+    fn real_cast_times(world: &mut World) {
+        let mut cat = world.resource_mut::<AbilityCatalog>();
+        cat.by_name.get_mut("curse").unwrap().cast_time_rounds = 1;
+        cat.by_name
+            .get_mut("remove_curse")
+            .unwrap()
+            .cast_time_rounds = 2;
+    }
+
+    #[test]
+    fn winding_up_curse_on_a_floor_item_lands() {
+        let (mut world, room, caster, mut rx) = world_with_curses();
+        real_cast_times(&mut world);
+        world
+            .entity_mut(caster)
+            .insert(mud_world::Health { hp: 50, max: 50 });
+        let rug = item(&mut world, "a rug", "rug", room);
+        wind_up_and_finish(&mut world, caster, "curse", "rug");
+        assert!(cursed(&world, rug), "{}", drain(&mut rx));
+    }
+
+    #[test]
+    fn winding_up_curse_on_a_carried_item_lands() {
+        let (mut world, _room, caster, _rx) = world_with_curses();
+        real_cast_times(&mut world);
+        world
+            .entity_mut(caster)
+            .insert(mud_world::Health { hp: 50, max: 50 });
+        let helm = item(&mut world, "a helm", "helm", caster);
+        wind_up_and_finish(&mut world, caster, "curse", "helm");
+        assert!(cursed(&world, helm));
+    }
+
+    #[test]
+    fn winding_up_remove_curse_on_floor_and_carried_items_lands() {
+        let (mut world, room, caster, _rx) = world_with_curses();
+        real_cast_times(&mut world);
+        world
+            .entity_mut(caster)
+            .insert(mud_world::Health { hp: 50, max: 50 });
+        let rug = item(&mut world, "a rug", "rug", room);
+        let helm = item(&mut world, "a helm", "helm", caster);
+        for e in [rug, helm] {
+            world
+                .entity_mut(e)
+                .insert(ObjectRestrictions(vec![ObjectRestriction::NoDrop]));
+        }
+        wind_up_and_finish(&mut world, caster, "remove curse", "rug");
+        wind_up_and_finish(&mut world, caster, "remove curse", "helm");
+        assert!(!cursed(&world, rug) && !cursed(&world, helm));
+    }
+
+    #[test]
+    fn floor_item_taken_mid_cast_aborts_the_wind_up() {
+        let (mut world, room, caster, mut rx) = world_with_curses();
+        real_cast_times(&mut world);
+        world
+            .entity_mut(caster)
+            .insert(mud_world::Health { hp: 50, max: 50 });
+        let rug = item(&mut world, "a rug", "rug", room);
+        let thief = world
+            .spawn((
+                Named {
+                    name: "Thief".into(),
+                },
+                Located(room),
+            ))
+            .id();
+        invoke_ability_with(
+            &mut world,
+            caster,
+            "'curse' rug",
+            AbilityKind::Spell,
+            "cast",
+            false,
+            false,
+            false,
+            None,
+        );
+        assert!(world.get::<mud_world::Casting>(caster).is_some());
+        drain(&mut rx);
+        world.entity_mut(rug).insert(Located(thief));
+        crate::casting::casting_tick(&mut world);
+        assert!(world.get::<mud_world::Casting>(caster).is_none());
+        assert!(drain(&mut rx).contains("You stop chanting abruptly!"));
+        assert!(!cursed(&world, rug), "the curse never landed");
+    }
+
     #[test]
     fn restriction_names_parse_from_db_spelling() {
         assert_eq!(
