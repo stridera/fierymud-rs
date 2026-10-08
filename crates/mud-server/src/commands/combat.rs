@@ -22,7 +22,24 @@ use crate::commands::{
 
 inventory::submit! {
     Command {
-    names: &["attack", "kill", "hit", "murder"],
+    names: &["kill"],
+    min_role: UserRole::Player,
+    required_perm: None,
+    category: Category::Combat,
+    help: Help {
+        usage: "kill <target>",
+        summary: "Engage a target in melee combat (staff slay it outright).",
+        long: "For mortals, identical to attack. Staff of Builder rank \
+               and above (legacy LVL_GOD) slay a non-player target on the \
+               spot instead of entering combat.",
+    },
+    run: cmd_kill,
+    }
+}
+
+inventory::submit! {
+    Command {
+    names: &["attack", "hit", "murder"],
     min_role: UserRole::Player,
     required_perm: None,
     category: Category::Combat,
@@ -1097,6 +1114,83 @@ fn try_switch_opponent(world: &mut World, player: Entity, old: Entity, roll: i32
     }
     true
 }
+/// `kill`: legacy `do_kill` (act.offensive.cpp). Everyone is refused in
+/// magical darkness and peaceful rooms; below `LVL_GOD` (here: below
+/// `Builder`, the role levels 101+ map to) or when the line was not typed
+/// by the character, it is plain `attack` (`do_hit`). Staff slay the target
+/// outright with legacy's messages.
+pub(crate) fn cmd_kill(world: &mut World, player: Entity, args: &str) {
+    if !crate::room_access::is_god_level(world, player) {
+        cmd_attack(world, player, args);
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    if world
+        .get::<mud_world::RoomMagicalDarkness>(located.0)
+        .is_some()
+    {
+        send_to(world, player, "It is just too damn dark!\r\n");
+        return;
+    }
+    if world.get::<mud_world::PeacefulRoom>(located.0).is_some() {
+        send_to(
+            world,
+            player,
+            "You feel ashamed trying to disturb the peace of this room.\r\n",
+        );
+        return;
+    }
+    crate::commands::record_admin_action(world, player, "kill", args);
+    let arg = args.trim();
+    if arg.is_empty() {
+        send_to(world, player, "Kill who?\r\n");
+        return;
+    }
+    let self_name = name_of(world, player);
+    if crate::commands::matches_self(&self_name, arg) {
+        send_to(world, player, "Your mother would be so sad.. :(\r\n");
+        return;
+    }
+    let Some(target) = find_actor_in_room(world, arg, located.0, player) else {
+        send_to(world, player, "They aren't here.\r\n");
+        return;
+    };
+    // Legacy refuses LVL_IMPL targets.
+    if world
+        .get::<mud_world::Account>(target)
+        .is_some_and(|a| a.role == UserRole::Implementor)
+    {
+        send_to(world, player, "<red>You dare NOT do that!</>\r\n");
+        return;
+    }
+    // Same safety net as `slay`: players are never killed by a stray `kill`.
+    if world.get::<mud_world::Player>(target).is_some() {
+        send_to(
+            world,
+            player,
+            "Slaying players is not allowed. Use 'restore' if they're in trouble.\r\n",
+        );
+        return;
+    }
+    let target_name = name_or(world, target, "(unknown)");
+    send_rendered(
+        world,
+        player,
+        &format!("You chop {target_name} to pieces!   Ah!   The blood!\r\n"),
+    );
+    broadcast_room_except_players_rendered(
+        world,
+        located.0,
+        &[player],
+        &format!("{self_name} brutally slays {target_name}!\r\n"),
+    );
+    // Credit the kill like `slay` does (handle_death sweeps the Fighting).
+    try_insert(world, player, Fighting(target));
+    crate::combat::handle_death(world, target, &target_name, located.0);
+}
+
 pub(crate) fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
     attack_with_switch_roll(world, player, target_name, rand::random_range(1..=101));
 }

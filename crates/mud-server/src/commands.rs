@@ -498,6 +498,9 @@ mod spawn_effects_tests;
 #[path = "commands/spells.rs"]
 mod spells;
 #[cfg(test)]
+#[path = "commands/staff_access_tests.rs"]
+mod staff_access_tests;
+#[cfg(test)]
 #[path = "commands/staff_move_tests.rs"]
 mod staff_move_tests;
 #[path = "commands/status_lists.rs"]
@@ -1185,7 +1188,7 @@ fn dispatch_line(world: &mut World, player: Entity, line: &str, run: &mut AliasR
 const ARTICLE_VERBS: &[&str] = &[
     "get", "drop", "put", "give", "junk", "wear", "wield", "hold", "remove", "eat", "drink",
     "quaff", "sip", "look", "examine", "sell", "buy", "value", "open", "close", "lock", "unlock",
-    "pick", "use", "recite", "light", "attack", "consider", "assist", "rescue",
+    "pick", "use", "recite", "light", "attack", "kill", "consider", "assist", "rescue",
 ];
 
 fn is_article(tok: &str) -> bool {
@@ -21073,7 +21076,7 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         send_to(world, player, "You can't go that way.\r\n");
         return;
     }
-    if exit.state != ExitState::Open {
+    if exit.state != ExitState::Open && !crate::room_access::can_pass_closed_doors(world, player) {
         let noun = exit_noun_phrase(&exit);
         let verb = match exit.state {
             ExitState::Locked => "locked",

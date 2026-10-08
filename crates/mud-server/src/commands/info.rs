@@ -8811,33 +8811,37 @@ pub(crate) fn cmd_unlock(world: &mut World, player: Entity, args: &str) {
         );
         return;
     }
-    let Some(key_req) = key_req else {
-        send_to(
-            world,
-            player,
-            format!("There's no keyhole {}.\r\n", direction_name(dir)),
-        );
-        return;
-    };
-    // Match a carried item by exact `WorldKey` against the exit's
-    // (zone, id) key composite. The fallback keyword chain we used
-    // for the old text-encoded vnum data isn't needed any more.
-    let has_key = {
-        let mut q = world.query_filtered::<(&Located, &WorldKey), With<Item>>();
-        q.iter(world)
-            .any(|(l, k)| l.0 == player && k.zone == key_req.0 && k.id == key_req.1)
-    };
-    if !has_key {
-        // Don't reveal which key fits — some doors are puzzles and
-        // naming the key short-circuits the hunt. Players see only
-        // that the door is locked, picking up the exit's keyword so
-        // a curtain reads as a curtain.
-        let noun = world
-            .get::<Exits>(room)
-            .and_then(|e| e.0.get(&dir).map(exit_noun_phrase))
-            .unwrap_or_else(|| "The way".to_string());
-        send_to(world, player, format!("{noun} is locked.\r\n"));
-        return;
+    // Legacy rooms.cpp unlock_door: only characters below LVL_IMMORT need
+    // the key (or even a keyhole); staff unlock anything by hand.
+    if !crate::room_access::can_unlock_without_key(world, player) {
+        let Some(key_req) = key_req else {
+            send_to(
+                world,
+                player,
+                format!("There's no keyhole {}.\r\n", direction_name(dir)),
+            );
+            return;
+        };
+        // Match a carried item by exact `WorldKey` against the exit's
+        // (zone, id) key composite. The fallback keyword chain we used
+        // for the old text-encoded vnum data isn't needed any more.
+        let has_key = {
+            let mut q = world.query_filtered::<(&Located, &WorldKey), With<Item>>();
+            q.iter(world)
+                .any(|(l, k)| l.0 == player && k.zone == key_req.0 && k.id == key_req.1)
+        };
+        if !has_key {
+            // Don't reveal which key fits — some doors are puzzles and
+            // naming the key short-circuits the hunt. Players see only
+            // that the door is locked, picking up the exit's keyword so
+            // a curtain reads as a curtain.
+            let noun = world
+                .get::<Exits>(room)
+                .and_then(|e| e.0.get(&dir).map(exit_noun_phrase))
+                .unwrap_or_else(|| "The way".to_string());
+            send_to(world, player, format!("{noun} is locked.\r\n"));
+            return;
+        }
     }
     flip_door_both_sides(world, room, dir, ExitState::Closed);
     send_to(

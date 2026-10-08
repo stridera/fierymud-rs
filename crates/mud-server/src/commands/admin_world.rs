@@ -75,14 +75,16 @@ inventory::submit! {
         required_perm: None,
         category: Category::Admin,
         help: Help {
-            usage: "transfer <player | mob>",
+            usage: "transfer <player | mob | all>",
             summary: "Pull an online player or a mob to your current room.",
             long: "Builder+ command. The target is a player or mob you \
                    can see, by name or keyword; 'N.name' picks the Nth \
                    match and '<zone>:<id>' (or 'N.<zone>:<id>') picks a \
                    spawned instance of that mob prototype. Moves it to \
                    wherever you are (ending any fight it is in). You \
-                   cannot transfer a player of higher level than you.",
+                   cannot transfer a player of higher level than you. \
+                   'transfer all' (level 102+) pulls every online \
+                   player of lower level than you.",
         },
         run: cmd_transfer,
     }
@@ -2836,11 +2838,93 @@ fn resolve_teleport_destination(
     Ok(dest)
 }
 
+/// Legacy `LVL_GRGOD` (102), the rank `transfer all` needs. The role ladder
+/// cannot tell 101 from 102 (both `Builder`), so go by level, or by a
+/// head-builder-or-above role.
+fn may_transfer_all(world: &World, staff: Entity) -> bool {
+    let level = world.get::<Profile>(staff).map_or(0, |p| p.level);
+    let role_ok = world
+        .get::<Account>(staff)
+        .is_some_and(|a| a.role.at_least(mud_db::enums::UserRole::HeadBuilder));
+    level >= 102 || role_ok
+}
+
+/// Move `target` (somewhere else) into `staff`'s room with the transfer
+/// announcements. Shared by `transfer <name>` and `transfer all`.
+fn transfer_to_staff_room(world: &mut World, staff: Entity, target: Entity, dest: Entity) {
+    let Some(src_loc) = world.get::<Located>(target).copied() else {
+        return;
+    };
+    let admin_name = name_of(world, staff);
+    let target_name = cap_sentence_start(&name_of(world, target));
+
+    // Source-room bystanders (everyone but the target).
+    for b in players_in_room_except(world, src_loc.0, &[target]) {
+        send_rendered(
+            world,
+            b,
+            &format!("{target_name} vanishes in a puff of smoke.\r\n"),
+        );
+    }
+
+    // Move the target (clears its fights).
+    crate::combat::relocate(world, target, dest);
+
+    // Destination-room bystanders (everyone but admin and the just-arrived target).
+    for b in players_in_room_except(world, dest, &[staff, target]) {
+        send_rendered(
+            world,
+            b,
+            &format!("{target_name} appears, summoned by {admin_name}.\r\n"),
+        );
+    }
+
+    send_rendered(world, staff, &format!("You summon {target_name}.\r\n"));
+    send_rendered(world, target, &format!("{admin_name} summons you.\r\n"));
+    if world.get::<Player>(target).is_some() {
+        cmd_look(world, target, "");
+    }
+}
+
+/// `transfer all` (legacy `do_trans`, "Trans All" branch): `LVL_GRGOD`+
+/// only ("I think not." otherwise); brings every connected player other
+/// than the caller whose level is strictly below the caller's.
+fn cmd_transfer_all(world: &mut World, player: Entity) {
+    if !may_transfer_all(world, player) {
+        send_to(world, player, "I think not.\r\n");
+        return;
+    }
+    let Some(dest) = world.get::<Located>(player).map(|l| l.0) else {
+        send_to(world, player, "You are nowhere — can't transfer here.\r\n");
+        return;
+    };
+    let my_level = world.get::<Profile>(player).map_or(0, |p| p.level);
+    let victims: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located), (With<Player>, With<Online>)>();
+        q.iter(world)
+            .filter(|(e, l)| *e != player && l.0 != dest)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for victim in victims {
+        let level = world.get::<Profile>(victim).map_or(0, |p| p.level);
+        if level >= my_level {
+            continue;
+        }
+        transfer_to_staff_room(world, player, victim, dest);
+    }
+    send_to(world, player, "Ok.\r\n");
+}
+
 pub(crate) fn cmd_transfer(world: &mut World, player: Entity, args: &str) {
     let Some(first_arg) = args.split_whitespace().next() else {
         send_to(world, player, "Whom do you wish to transfer?\r\n");
         return;
     };
+    if first_arg.eq_ignore_ascii_case("all") {
+        cmd_transfer_all(world, player);
+        return;
+    }
     let Some(target) = find_actor_anywhere(world, player, first_arg) else {
         send_to(world, player, NO_SUCH_ACTOR);
         return;
@@ -2869,36 +2953,7 @@ pub(crate) fn cmd_transfer(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "They're already in your room.\r\n");
         return;
     }
-
-    let admin_name = name_of(world, player);
-    let target_name = cap_sentence_start(&name_of(world, target));
-
-    // Source-room bystanders (everyone but the target).
-    for b in players_in_room_except(world, src_loc.0, &[target]) {
-        send_rendered(
-            world,
-            b,
-            &format!("{target_name} vanishes in a puff of smoke.\r\n"),
-        );
-    }
-
-    // Move the target (clears its fights).
-    crate::combat::relocate(world, target, dest_loc.0);
-
-    // Destination-room bystanders (everyone but admin and the just-arrived target).
-    for b in players_in_room_except(world, dest_loc.0, &[player, target]) {
-        send_rendered(
-            world,
-            b,
-            &format!("{target_name} appears, summoned by {admin_name}.\r\n"),
-        );
-    }
-
-    send_rendered(world, player, &format!("You summon {target_name}.\r\n"));
-    send_rendered(world, target, &format!("{admin_name} summons you.\r\n"));
-    if world.get::<Player>(target).is_some() {
-        cmd_look(world, target, "");
-    }
+    transfer_to_staff_room(world, player, target, dest_loc.0);
 }
 pub(crate) fn cmd_teleport(world: &mut World, player: Entity, args: &str) {
     let parts: Vec<&str> = args.split_whitespace().collect();
