@@ -2113,8 +2113,7 @@ pub(crate) struct StyleLayer {
 /// pushed but contributes nothing). No content in the world uses them.
 ///
 /// Malformed input is tolerated quietly — unterminated `<` swallows
-/// the rest of the string, empty `<>` drops cleanly. Both match the
-/// previous strip-only behavior.
+/// the rest of the string. Empty `<>` is literal text (issue #13).
 pub(crate) fn render_color_tags(s: &str, mode: ColorMode) -> String {
     let mut out = String::with_capacity(s.len() + 16);
     let mut stack: Vec<StyleLayer> = Vec::new();
@@ -2273,9 +2272,10 @@ pub(crate) fn pad_visible(s: &str, width: usize) -> String {
 }
 
 pub(crate) fn is_tag_shaped(tag: &str) -> bool {
-    // `<>` is the empty no-op tag (renderer drops it cleanly).
+    // `<>` is literal text, not a tag: prompt templates like
+    // `<%t> : <%o>` render to `<> : <>` outside combat (issue #13).
     if tag.is_empty() {
-        return true;
+        return false;
     }
     // Closing form: `</>` is full reset; `</name>` requires a known
     // single-modifier name (color or attribute, no `:`-compound).
@@ -3257,8 +3257,8 @@ mod tests {
         // Nested literal-then-tag: the outer `<` is literal, the
         // inner `<yellow>...</>` strips out cleanly.
         assert_eq!(strip("<<yellow>foo</>"), "<foo");
-        // Empty tags drop cleanly.
-        assert_eq!(strip("<>x<>y"), "xy");
+        // Empty `<>` is literal text (issue #13), not a dropped tag.
+        assert_eq!(strip("<>x<>y"), "<>x<>y");
     }
 
     #[test]
@@ -3435,8 +3435,8 @@ mod tests {
     }
 
     #[test]
-    fn render_color_tags_empty_tag_is_dropped() {
-        assert_eq!(ansi("<>x<>y"), "xy");
+    fn render_color_tags_empty_tag_is_literal() {
+        assert_eq!(ansi("<>x<>y"), "<>x<>y");
     }
 
     #[test]

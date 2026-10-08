@@ -935,6 +935,17 @@ mod tests {
     }
 
     #[test]
+    fn issue_13_out_of_combat_tank_target_line_keeps_brackets() {
+        // `<%t> : <%o>` with no tank and no victim must render `<> : <>`
+        // through the real colour pass, not `:` (empty `<>` was dropped).
+        let mut c = ctx();
+        c.victim = None;
+        c.tank = None;
+        let out = plain(&render_prompt("<%t> : <%o>", &c));
+        assert_eq!(out, "<> : <> ");
+    }
+
+    #[test]
     fn identity_codes() {
         assert_eq!(rp("[%n]"), "[Strider] ");
         assert_eq!(rp("[%N]"), "[Strider] ");
