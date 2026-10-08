@@ -2608,7 +2608,7 @@ mod tests {
         has_effect_named, is_being_attacked, is_immobilized, normalize_dice_notation,
         parse_direction, remove_effect_named, render_color_tags, resolve_dispel_filter,
         resolve_dispel_scope, resolve_effect_conditions, resolve_effect_resource,
-        resolve_knockdown_posture, resolve_redirect_aggro, sector_movement_cost,
+        resolve_knockdown_posture, resolve_redirect_aggro, sector_movement_cost, status_upgrade,
     };
     use bevy_ecs::prelude::*;
     use mud_db::enums::Sector;
@@ -6407,6 +6407,72 @@ mod tests {
         let ctx = FormulaCtx::base(1, 0);
         // 2 game-hours × 75 = 150 seconds.
         assert_eq!(duration_from_blob(Some(&blob), &ctx), Some(150));
+    }
+
+    fn entangle_params() -> serde_json::Value {
+        serde_json::json!({
+            "flag": "webbed",
+            "duration": "2 + (skill / 24)",
+            "durationUnit": "hours",
+            "breakOnDamage": true,
+            "upgrade": {
+                "minSkill": 40,
+                "chance": "2 + skill / 14",
+                "flag": "paralyzed",
+                "duration": "2 + skill / 96"
+            }
+        })
+    }
+
+    #[test]
+    fn status_upgrade_hits_only_below_the_legacy_chance() {
+        // Legacy: random_number(0, 100) < 2 + skill / 14. Skill 50 -> 5.
+        let p = entangle_params();
+        let ctx = FormulaCtx::base(30, 50);
+        let up = status_upgrade(Some(&p), None, &ctx, 4).expect("roll 4 < 5 upgrades");
+        assert_eq!(up["flag"], "paralyzed");
+        assert_eq!(up["durationUnit"], "hours", "unlisted params carry over");
+        assert!(up.get("upgrade").is_none());
+        assert!(
+            status_upgrade(Some(&p), None, &ctx, 5).is_none(),
+            "roll 5 is not < 5"
+        );
+        assert!(status_upgrade(Some(&p), None, &ctx, 100).is_none());
+        // Skill 100 -> 2 + 7 = 9.
+        let top = FormulaCtx::base(30, 100);
+        assert!(status_upgrade(Some(&p), None, &top, 8).is_some());
+        assert!(status_upgrade(Some(&p), None, &top, 9).is_none());
+    }
+
+    #[test]
+    fn status_upgrade_needs_the_minimum_skill() {
+        let p = entangle_params();
+        assert!(status_upgrade(Some(&p), None, &FormulaCtx::base(30, 39), 0).is_none());
+        assert!(status_upgrade(Some(&p), None, &FormulaCtx::base(30, 40), 0).is_some());
+    }
+
+    #[test]
+    fn status_upgrade_duration_is_two_hours_plus_one_above_95() {
+        let p = entangle_params();
+        for (skill, hours) in [(40, 2), (95, 2), (96, 3), (100, 3)] {
+            let ctx = FormulaCtx::base(30, skill);
+            let up = status_upgrade(Some(&p), None, &ctx, 0).unwrap();
+            assert_eq!(
+                duration_from_blob(Some(&up), &ctx),
+                Some(hours * 75),
+                "skill {skill}"
+            );
+        }
+    }
+
+    #[test]
+    fn status_upgrade_is_absent_without_the_param_and_reads_defaults() {
+        let plain = serde_json::json!({"flag": "webbed", "duration": 2});
+        let ctx = FormulaCtx::base(30, 100);
+        assert!(status_upgrade(Some(&plain), None, &ctx, 0).is_none());
+        assert!(status_upgrade(None, None, &ctx, 0).is_none());
+        let defaults = entangle_params();
+        assert!(status_upgrade(None, Some(&defaults), &ctx, 0).is_some());
     }
 
     #[test]
@@ -17185,9 +17251,18 @@ pub(crate) fn invoke_ability_with(
                 // attach (e.g. `flag: "fly"`, `flag: "hidden"`). Some
                 // spells include override-only flags; others sit on
                 // the effect default. Override wins.
-                let flag = spec
-                    .override_params
-                    .as_ref()
+                // A status row may carry an `upgrade` (legacy Entangle's
+                // chance of landing Major Paralysis instead of Minor):
+                // when its roll hits, the upgraded flag / duration /
+                // break rules replace the row's own for this cast.
+                let upgraded = status_upgrade(
+                    spec.override_params.as_ref(),
+                    Some(&spec.default_params),
+                    &formula_ctx,
+                    status_upgrade_roll(),
+                );
+                let override_params = upgraded.as_ref().or(spec.override_params.as_ref());
+                let flag = override_params
                     .and_then(|v| v.get("flag"))
                     .and_then(serde_json::Value::as_str)
                     .or_else(|| {
@@ -17197,6 +17272,11 @@ pub(crate) fn invoke_ability_with(
                     })
                     .map(str::to_ascii_lowercase)
                     .unwrap_or_default();
+                let instance_name = if upgraded.is_some() {
+                    flag.clone()
+                } else {
+                    spec.name.clone()
+                };
                 // A mob whose proto lists `fear: 0` in its resistances
                 // (builder-editable) cannot be frightened at all.
                 if crate::fear::is_fear_flag(&flag)
@@ -17207,7 +17287,7 @@ pub(crate) fn invoke_ability_with(
                     continue;
                 }
                 let mut dur_secs = resolve_effect_duration(
-                    spec.override_params.as_ref(),
+                    override_params,
                     Some(&spec.default_params),
                     &formula_ctx,
                 );
@@ -17221,10 +17301,13 @@ pub(crate) fn invoke_ability_with(
                 // the same ability so casting Detect Magic / Bless
                 // twice doesn't pile up duplicate effect-list entries.
                 refresh_existing_effect(world, target_entity, &spec.name, def.id);
+                if upgraded.is_some() {
+                    refresh_existing_effect(world, target_entity, &instance_name, def.id);
+                }
                 world.spawn((
                     EffectInstance {
                         kind: spec.id,
-                        name: spec.name.clone(),
+                        name: instance_name,
                         strength: 1,
                         remaining_secs: dur_secs,
                         source: EffectSource::Spell,
@@ -18902,6 +18985,80 @@ pub(crate) fn normalize_dice_notation(expr: &str) -> String {
         }
     }
     out
+}
+
+/// The d101 (`random_number(0, 100)`) behind a status row's `upgrade`
+/// chance. Production draws from the thread RNG; tests pin it per
+/// thread via `FORCED_UPGRADE_ROLL`.
+fn status_upgrade_roll() -> i32 {
+    #[cfg(test)]
+    if let Some(r) = FORCED_UPGRADE_ROLL.with(std::cell::Cell::get) {
+        return r;
+    }
+    rand::random_range(0..=100)
+}
+
+#[cfg(test)]
+thread_local! {
+    static FORCED_UPGRADE_ROLL: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
+}
+
+/// Pin (or release, with `None`) this test thread's upgrade roll.
+#[cfg(test)]
+pub(crate) fn force_status_upgrade_roll(roll: Option<i32>) {
+    FORCED_UPGRADE_ROLL.with(|c| c.set(roll));
+}
+
+/// A `status` effect row's optional `upgrade` object: a chance that the
+/// cast lands as a different (stronger) status. Legacy `SPELL_ENTANGLE`
+/// (magic.cpp:1935) is the only user: with `skill >= 40` and
+/// `random_number(0, 100) < 2 + skill / 14` it sets Major Paralysis for
+/// `2 + (skill > 95)` hours instead of Minor Paralysis. Shape:
+/// `{"minSkill": 40, "chance": "2 + skill / 14", "flag": "paralyzed",
+/// "duration": "2 + skill / 96"}`; `minSkill`
+/// defaults to 0, and any other key overrides the row's own param of
+/// that name (flag, duration, breakOnDamage, ...). `roll` is the d101,
+/// the upgrade lands when it is strictly below the evaluated `chance`.
+/// Returns the row's params with the upgrade merged in, or `None` when
+/// there is no upgrade or the roll missed. Override params win over the
+/// effect defaults.
+pub(crate) fn status_upgrade(
+    override_params: Option<&serde_json::Value>,
+    default_params: Option<&serde_json::Value>,
+    ctx: &FormulaCtx,
+    roll: i32,
+) -> Option<serde_json::Value> {
+    let upgrade = override_params
+        .and_then(|p| p.get("upgrade"))
+        .or_else(|| default_params.and_then(|p| p.get("upgrade")))?
+        .as_object()?;
+    let min_skill = upgrade
+        .get("minSkill")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+    if i64::from(ctx.skill) < min_skill {
+        return None;
+    }
+    let chance = match upgrade.get("chance")? {
+        serde_json::Value::Number(n) => i32::try_from(n.as_i64()?).ok()?,
+        serde_json::Value::String(f) => evaluate_simple_formula_ctx(f, ctx)?,
+        _ => return None,
+    };
+    if roll >= chance {
+        return None;
+    }
+    let mut merged = override_params
+        .or(default_params)
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    merged.remove("upgrade");
+    for (k, v) in upgrade {
+        if k != "minSkill" && k != "chance" {
+            merged.insert(k.clone(), v.clone());
+        }
+    }
+    Some(serde_json::Value::Object(merged))
 }
 
 /// Try to extract a duration in seconds from one JSONB blob. The

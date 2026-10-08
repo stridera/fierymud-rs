@@ -700,7 +700,7 @@ mod tests {
     use crate::commands::test_support::{Rx, ability_def, drain, player_in};
     use crate::commands::{dispatch, invoke_ability};
     use mud_db::abilities::AbilityKind;
-    use mud_world::{EffectCatalog, EffectDef, Mob, Named, SpellSlots};
+    use mud_world::{AppliedTo, EffectCatalog, EffectDef, EffectInstance, Mob, Named, SpellSlots};
 
     const MEND: i32 = 1;
     const QUICK_CHANT: i32 = 2;
@@ -778,6 +778,137 @@ mod tests {
     fn run_ticks(world: &mut World, n: i32) {
         for _ in 0..n {
             casting_tick(world);
+        }
+    }
+
+    const ENTANGLE: i32 = 20;
+    const STATUS_EFFECT: i32 = 21;
+
+    /// Caster "Druid" (skill `skill` in Entangle, raw tenths = skill * 10)
+    /// and a sleeping mob "rat", with the Entangle status row as authored
+    /// in the data: webbed, breaks on hit, 2% + skill / 14 chance of
+    /// Major Paralysis instead.
+    fn entangle_world(skill: i32) -> (World, Entity, Entity, Rx) {
+        let (mut world, room, _) = world_with_spell(0);
+        let mut def = ability_def(ENTANGLE, "Entangle", AbilityKind::Spell);
+        def.cast_time_rounds = 0;
+        let mut catalog = world.resource_mut::<AbilityCatalog>();
+        catalog.by_name.insert("entangle".to_string(), def);
+        catalog.effects_for.insert(
+            ENTANGLE,
+            vec![(
+                STATUS_EFFECT,
+                Some(serde_json::json!({
+                    "flag": "webbed",
+                    "duration": "2 + (skill / 24)",
+                    "durationUnit": "hours",
+                    "breakOnDamage": true,
+                    "upgrade": {
+                        "minSkill": 40,
+                        "chance": "2 + skill / 14",
+                        "flag": "paralyzed",
+                        "duration": "2 + skill / 96"
+                    }
+                })),
+            )],
+        );
+        world.resource_mut::<EffectCatalog>().by_id.insert(
+            STATUS_EFFECT,
+            EffectDef {
+                id: STATUS_EFFECT,
+                name: "status".to_string(),
+                description: None,
+                effect_type: "status".to_string(),
+                tags: Vec::new(),
+                presence_override: None,
+                default_params: serde_json::json!({}),
+                prevents_speaking: false,
+                prevents_casting: false,
+                prevents_movement: false,
+                on_apply: None,
+                on_tick: None,
+                on_remove: None,
+            },
+        );
+        let (caster, rx) = player_in(&mut world, room);
+        world.entity_mut(caster).insert((
+            Health { hp: 50, max: 50 },
+            KnownAbilities {
+                entries: vec![(ENTANGLE, skill * 10, true)],
+            },
+        ));
+        let rat = world
+            .spawn((
+                Mob,
+                Named {
+                    name: "rat".to_string(),
+                },
+                Located(room),
+                Health { hp: 50, max: 50 },
+                mud_world::CombatStats::default(),
+            ))
+            .id();
+        (world, caster, rat, rx)
+    }
+
+    /// `(name, remaining_secs)` of the single status `rat` ends up with.
+    fn entangle_result(skill: i32, roll: i32) -> Option<(String, i32)> {
+        let (mut world, caster, rat, _rx) = entangle_world(skill);
+        crate::commands::force_status_upgrade_roll(Some(roll));
+        invoke_ability(
+            &mut world,
+            caster,
+            "'entangle' rat",
+            AbilityKind::Spell,
+            "cast",
+        );
+        crate::commands::force_status_upgrade_roll(None);
+        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+        let mut found = q.iter(&world).filter(|(_, a)| a.0 == rat);
+        let first = found
+            .next()
+            .map(|(i, _)| (i.name.clone(), i.remaining_secs));
+        assert!(found.next().is_none(), "exactly one status lands");
+        first
+    }
+
+    #[test]
+    fn entangle_lands_major_paralysis_on_a_low_roll() {
+        // Skill 50: chance 2 + 50 / 14 = 5; roll 4 hits. Duration 2 hours.
+        assert_eq!(entangle_result(50, 4), Some(("paralyzed".into(), 2 * 75)));
+        // Skill 100: 3 hours.
+        assert_eq!(entangle_result(100, 0), Some(("paralyzed".into(), 3 * 75)));
+    }
+
+    #[test]
+    fn entangle_stays_minor_on_a_roll_at_or_above_the_chance() {
+        // Skill 50: webbed for 2 + 50 / 24 = 4 hours.
+        assert_eq!(entangle_result(50, 5), Some(("webbed".into(), 4 * 75)));
+        assert_eq!(entangle_result(50, 100), Some(("webbed".into(), 4 * 75)));
+    }
+
+    #[test]
+    fn entangle_below_skill_40_never_upgrades() {
+        assert_eq!(entangle_result(39, 0), Some(("webbed".into(), 3 * 75)));
+    }
+
+    #[test]
+    fn upgraded_entangle_holds_through_a_hit_but_plain_entangle_breaks() {
+        for (roll, left) in [(0, 1), (100, 0)] {
+            let (mut world, caster, rat, _rx) = entangle_world(50);
+            crate::commands::force_status_upgrade_roll(Some(roll));
+            invoke_ability(
+                &mut world,
+                caster,
+                "'entangle' rat",
+                AbilityKind::Spell,
+                "cast",
+            );
+            crate::commands::force_status_upgrade_roll(None);
+            crate::effects::break_on_hit(&mut world, caster, rat);
+            let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+            let n = q.iter(&world).filter(|(_, a)| a.0 == rat).count();
+            assert_eq!(n, left, "roll {roll}");
         }
     }
 
