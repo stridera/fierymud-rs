@@ -953,10 +953,8 @@ fn instance_only_flags_become_one_worn_instance_and_no_marker() {
         "fireshield",
         "coldshield",
         "detect_magic",
-        "infravision",
-        "detect_life",
+        "ultravision",
         "detect_hidden",
-        "detect_align",
     ] {
         let (mut world, p, mut rx) = setup();
         ring(&mut world, p, 320, "seer", vec![status(&[flag])]);
@@ -973,12 +971,45 @@ fn instance_only_flags_become_one_worn_instance_and_no_marker() {
 
 #[test]
 fn flags_with_no_runtime_behaviour_stay_unmapped() {
-    for flag in ["waterwalk", "blur", "language_fluency", "familiarity"] {
+    for flag in ["waterwalk", "language_fluency"] {
         let (mut world, p, mut rx) = setup();
         ring(&mut world, p, 330, "idle", vec![status(&[flag])]);
         wear(&mut world, p, &mut rx, "idle");
         assert!(effects_on(&mut world, p).is_empty(), "{flag}");
         assert!(world.get::<Bless>(p).is_none(), "{flag}");
+    }
+}
+
+#[test]
+fn perception_and_combat_flags_install_their_marker_while_worn() {
+    type Has = fn(&World, Entity) -> bool;
+    let cases: [(&str, Has); 5] = [
+        ("infravision", |w, e| {
+            w.get::<mud_world::Infravision>(e).is_some()
+        }),
+        ("detect_life", |w, e| {
+            w.get::<mud_world::SenseLife>(e).is_some()
+        }),
+        ("detect_align", |w, e| {
+            w.get::<mud_world::DetectAlign>(e).is_some()
+        }),
+        ("blur", |w, e| w.get::<mud_world::Blur>(e).is_some()),
+        ("familiarity", |w, e| {
+            w.get::<mud_world::Familiar>(e).is_some()
+        }),
+    ];
+    for (flag, has) in cases {
+        let (mut world, p, mut rx) = setup();
+        ring(&mut world, p, 331, "seer", vec![status(&[flag])]);
+        wear(&mut world, p, &mut rx, "seer");
+        assert!(has(&world, p), "{flag}: marker while worn");
+        assert_eq!(
+            effect_names(&mut world, p),
+            vec![flag.to_string()],
+            "{flag}"
+        );
+        remove(&mut world, p, &mut rx, "seer");
+        assert!(!has(&world, p), "{flag}: marker gone once removed");
     }
 }
 

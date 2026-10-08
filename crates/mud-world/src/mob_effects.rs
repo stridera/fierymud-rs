@@ -115,6 +115,56 @@ const FLAG_MARKERS: &[FlagMarker] = &[
         tag_backed: None,
     },
     FlagMarker {
+        flags: &["infravision"],
+        insert: |e| {
+            e.insert(crate::components::Infravision);
+        },
+        remove: Some(|e| {
+            e.remove::<crate::components::Infravision>();
+        }),
+        tag_backed: None,
+    },
+    FlagMarker {
+        flags: &["detect_life"],
+        insert: |e| {
+            e.insert(crate::components::SenseLife);
+        },
+        remove: Some(|e| {
+            e.remove::<crate::components::SenseLife>();
+        }),
+        tag_backed: None,
+    },
+    FlagMarker {
+        flags: &["detect_align"],
+        insert: |e| {
+            e.insert(crate::components::DetectAlign);
+        },
+        remove: Some(|e| {
+            e.remove::<crate::components::DetectAlign>();
+        }),
+        tag_backed: None,
+    },
+    FlagMarker {
+        flags: &["blur"],
+        insert: |e| {
+            e.insert(crate::components::Blur);
+        },
+        remove: Some(|e| {
+            e.remove::<crate::components::Blur>();
+        }),
+        tag_backed: None,
+    },
+    FlagMarker {
+        flags: &["familiarity"],
+        insert: |e| {
+            e.insert(crate::components::Familiar);
+        },
+        remove: Some(|e| {
+            e.remove::<crate::components::Familiar>();
+        }),
+        tag_backed: None,
+    },
+    FlagMarker {
         flags: &["haste"],
         insert: |e| {
             e.insert(crate::components::Haste);
@@ -179,8 +229,8 @@ fn marker_for(flag: &str) -> Option<&'static FlagMarker> {
 /// Install the marker component a `status` effect's `flag` stands for.
 /// Returns true when `flag` maps to a plain marker. Flags that need
 /// extra data (resistance, empowered, globe) are handled by the cast
-/// path itself; flags with no marker component (vision and the other
-/// detect_* flags, language, debuffs, ...) return false.
+/// path itself; flags with no marker component (waterwalk, detect_hidden,
+/// language, debuffs, ...) return false.
 pub fn install_flag_marker(world: &mut World, target: Entity, flag: &str) -> bool {
     let Some(marker) = marker_for(flag) else {
         return false;
@@ -393,16 +443,11 @@ pub fn is_instance_only_flag(flag: &str) -> bool {
 /// Passive perception flags with no marker component and no behaviour
 /// yet: a race (or worn item) still carries them as a permanent,
 /// display-only `EffectInstance` so `effects` / `score` show the innate
-/// ("infravision (permanent)"). Anything else without a marker
+/// ("ultravision (permanent)"). Anything else without a marker
 /// (permanent debuffs such as `poisoned`) is skipped, as for mobs.
-const DISPLAY_ONLY_FLAGS: &[&str] = &[
-    "infravision",
-    "ultravision",
-    "detect_poison",
-    "detect_life",
-    "detect_align",
-    "detect_hidden",
-];
+/// `detect_hidden` stays here: nothing in the runtime hides an actor
+/// from a room listing, so there is nothing for it to detect.
+const DISPLAY_ONLY_FLAGS: &[&str] = &["ultravision", "detect_poison", "detect_hidden"];
 
 /// Give `entity` (a player or a freshly spawned mob) the permanent
 /// innate effects of `race` from [`RaceEffectCatalog`] (`RaceEffects`).
@@ -506,6 +551,11 @@ mod tests {
             ("protect_evil", |w, e| w.get::<ProtectFromEvil>(e).is_some()),
             ("protect_good", |w, e| w.get::<ProtectFromGood>(e).is_some()),
             ("invisible", |w, e| w.get::<Invisible>(e).is_some()),
+            ("infravision", |w, e| w.get::<Infravision>(e).is_some()),
+            ("detect_life", |w, e| w.get::<SenseLife>(e).is_some()),
+            ("detect_align", |w, e| w.get::<DetectAlign>(e).is_some()),
+            ("blur", |w, e| w.get::<Blur>(e).is_some()),
+            ("familiarity", |w, e| w.get::<Familiar>(e).is_some()),
         ];
         for (flag, has) in mapped {
             let target = world.spawn_empty().id();
@@ -515,16 +565,11 @@ mod tests {
         }
         for flag in [
             "waterwalk",
-            "infravision",
-            "detect_life",
             "detect_hidden",
             "detect_magic",
-            "detect_align",
-            "blur",
             "fireshield",
             "coldshield",
             "language_fluency",
-            "familiarity",
             "poisoned",
             "blinded",
             "",
@@ -541,7 +586,7 @@ mod tests {
             assert!(is_name_behaviour_flag(flag) && is_instance_only_flag(flag));
             assert!(!install_flag_marker_known(flag));
         }
-        for flag in ["waterwalk", "blur", "language_fluency", "familiarity"] {
+        for flag in ["waterwalk", "language_fluency"] {
             assert!(!is_instance_only_flag(flag), "{flag} has no behaviour");
         }
     }

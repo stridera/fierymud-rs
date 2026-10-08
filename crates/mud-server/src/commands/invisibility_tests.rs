@@ -465,7 +465,7 @@ fn flags_array_installs_every_mapped_marker_and_ignores_unknown_flags() {
     fx.world.insert_resource(defaults_with(&serde_json::json!([
         "detect_invisible",
         "sanctuary",
-        "infravision",
+        "waterwalk",
         "poisoned",
         "sleeping",
         "not_a_real_flag"

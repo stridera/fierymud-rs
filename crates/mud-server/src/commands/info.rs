@@ -6062,6 +6062,10 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
         if any_hum_dark {
             out.push_str("You hear something humming nearby.\r\n");
         }
+        // Infravision shows living things as red shapes, and sense life
+        // counts what it cannot see; neither reveals the room itself.
+        let senses = crate::commands::senses::dark_room_lines(world, player, room);
+        out.push_str(&render_color_tags(&senses, color_mode_for(world, player)));
         // In pitch black with no dark-vision the player can't see
         // where the room leads, so exits are suppressed entirely —
         // even when AUTO_EXIT is on. (A future search/feel-the-wall
@@ -6101,11 +6105,15 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
             })
             .map(|(e, _, n, posture)| {
                 let p = posture.map_or(PostureKind::Standing, |p| p.0);
-                let line = if p == PostureKind::Standing {
+                let mut line = if p == PostureKind::Standing {
                     n.name.clone()
                 } else {
                     format!("{} (is {} here)", n.name, p.label())
                 };
+                if let Some(aura) = crate::commands::senses::alignment_aura(world, player, e) {
+                    line.push(' ');
+                    line.push_str(aura);
+                }
                 (e, line)
             })
             .collect();
@@ -6140,7 +6148,7 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
             .filter(|(_, l, _, _, _)| l.0 == room)
             .collect();
         crate::commands::sort_newest_first(world, room, &mut mob_rows, |r| r.0);
-        for (_, _, n, desc, stats) in mob_rows {
+        for (mob, _, n, desc, stats) in mob_rows {
             let body = desc
                 .filter(|d| !d.0.trim().is_empty())
                 .map_or_else(|| n.name.clone(), |d| d.0.trim_end().to_string());
@@ -6149,11 +6157,15 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
             // colors are preserved — `colorize_default` only adds
             // hue when the body carries no XML-Lite markup.
             let body = colorize_default(&body, "<yellow>");
-            let line = if stats.is_some_and(|s| s.alignment <= aggro_threshold) {
+            let mut line = if stats.is_some_and(|s| s.alignment <= aggro_threshold) {
                 format!("{body} <red>(HOSTILE)</>")
             } else {
                 body
             };
+            if let Some(aura) = crate::commands::senses::alignment_aura(world, player, mob) {
+                line.push(' ');
+                line.push_str(aura);
+            }
             lines.push(line);
         }
         stack_entries(lines, has_flag(world, player, PlayerFlag::ExpandMobs))
@@ -6327,6 +6339,8 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
         let header = render_color_tags("<cyan>Also here:</>", mode);
         out.push_str(&format!("{header} {}\r\n", rendered.join(", ")));
     }
+    let sensed = crate::commands::senses::lit_room_lines(world, player, room);
+    out.push_str(&render_color_tags(&sensed, mode));
     // One object per line, like the mob lines above (legacy
     // `list_obj_to_char`, SHOW_LONG_DESC): no header, no commas.
     for line in &items {

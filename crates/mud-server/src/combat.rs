@@ -931,27 +931,34 @@ pub fn combat_tick(world: &mut World) {
     for s in &swings {
         apply_swing(world, s);
     }
-    // Haste pass: every attacker with the `Haste` marker gets a
-    // second swing this round, against the same target (when
-    // still alive and still in the same room). Mirrors the classic
-    // "double-attack from speed" feel without needing the swing
-    // scheduler to fire on a faster cadence.
-    for s in &swings {
-        if world.get::<mud_world::Haste>(s.attacker).is_none() {
-            continue;
+    // Haste / Blur passes: every attacker with the `Haste` marker gets
+    // a second swing this round, and one with `Blur` another (legacy
+    // `hits += 1` for each), against the same target (when still alive
+    // and still in the same room). Mirrors the classic "double-attack
+    // from speed" feel without needing the swing scheduler to fire on a
+    // faster cadence.
+    let extra_passes: [fn(&World, Entity) -> bool; 2] = [
+        |w, e| w.get::<mud_world::Haste>(e).is_some(),
+        |w, e| w.get::<mud_world::Blur>(e).is_some(),
+    ];
+    for has_extra_pass in extra_passes {
+        for s in &swings {
+            if world.get_entity(s.attacker).is_err() || world.get_entity(s.target).is_err() {
+                continue;
+            }
+            if !has_extra_pass(world, s.attacker) {
+                continue;
+            }
+            // Skip the extra swing if the first dropped the target
+            // (zero HP) — let death broadcast settle in this tick.
+            let target_dead = world
+                .get::<mud_world::Health>(s.target)
+                .is_none_or(|h| h.hp <= 0);
+            if target_dead {
+                continue;
+            }
+            apply_swing(world, s);
         }
-        if world.get_entity(s.attacker).is_err() || world.get_entity(s.target).is_err() {
-            continue;
-        }
-        // Skip the second swing if the first dropped the target
-        // (zero HP) — let death broadcast settle in this tick.
-        let target_dead = world
-            .get::<mud_world::Health>(s.target)
-            .is_none_or(|h| h.hp <= 0);
-        if target_dead {
-            continue;
-        }
-        apply_swing(world, s);
     }
     // Fire FIGHT triggers on every still-living target after the
     // swing pass. Each fire binds `self` to the target and `actor`
@@ -3080,6 +3087,37 @@ mod tests {
             world.get::<mud_world::Stealth>(attacker).is_none(),
             "Stealth marker dropped after first swing",
         );
+    }
+
+    /// Blur gives one extra swing pass per round, like Haste: summed over
+    /// many rounds (swings vary by +/-25%) a blurred attacker deals about
+    /// twice the damage of an unblurred one, and a blurred and hasted one
+    /// about three times.
+    #[test]
+    fn blur_adds_an_extra_swing_pass() {
+        let hp_lost = |markers: &dyn Fn(&mut World, Entity)| -> i32 {
+            (0..40)
+                .map(|_| {
+                    let mut world = World::new();
+                    let room = make_room(&mut world);
+                    let target = make_target(&mut world, room, 1000);
+                    let attacker = make_attacker(&mut world, room, target, 5);
+                    markers(&mut world, attacker);
+                    run_combat_tick(&mut world);
+                    1000 - world.get::<Health>(target).unwrap().hp
+                })
+                .sum()
+        };
+        let plain = hp_lost(&|_, _| {});
+        assert!(plain > 0, "the baseline swing lands");
+        let blurred = hp_lost(&|w, a| {
+            w.entity_mut(a).insert(mud_world::Blur);
+        });
+        assert!(blurred * 10 >= plain * 17, "{blurred} vs {plain}");
+        let both = hp_lost(&|w, a| {
+            w.entity_mut(a).insert((mud_world::Blur, mud_world::Haste));
+        });
+        assert!(both * 10 >= plain * 25, "{both} vs {plain}");
     }
 
     /// A4: lock the posture penalty ladder so a casual edit

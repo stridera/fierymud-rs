@@ -50,8 +50,8 @@ use mud_world::{
 };
 
 use crate::commands::{
-    Prevent, can_see_player, effect_prevents, name_of, name_or, player_can_see_in_dark,
-    room_has_light, room_is_dark, send_to, settle_slot,
+    Prevent, can_see_player, effect_prevents, name_of, name_or, room_has_light, room_is_dark,
+    sees_characters_in_dark, send_to, settle_slot,
 };
 
 /// One combat round in ticks. Combat round = 4s (per
@@ -406,7 +406,7 @@ fn spoken_name(def: &AbilityDef) -> String {
 /// invisible to them, and the room isn't too dark to see anyone
 /// (`dark` is the room's darkness, computed once; `HOLY_LIGHT` pierces it).
 fn can_make_out(world: &World, observer: Entity, subject: Entity, dark: bool) -> bool {
-    (!dark || player_can_see_in_dark(world, observer)) && can_see_player(world, observer, subject)
+    (!dark || sees_characters_in_dark(world, observer)) && can_see_player(world, observer, subject)
 }
 
 /// True when the caster's room is dark with no light source in it.

@@ -1748,6 +1748,34 @@ pub struct Invisible;
 #[derive(Component, Debug, Clone, Copy)]
 pub struct DetectInvis;
 
+/// Marker: the bearer sees living creatures by their body heat
+/// (`infravision`; legacy `EFF_INFRAVISION`). In a dark room `look`
+/// lists them as red shapes, and their actions are still made out.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Infravision;
+
+/// Marker: the bearer senses living creatures it cannot otherwise see
+/// (`detect_life`; legacy `EFF_SENSE_LIFE`). `look` counts them as
+/// "hidden lifeforms".
+#[derive(Component, Debug, Clone, Copy)]
+pub struct SenseLife;
+
+/// Marker: the bearer reads alignment auras off creatures (`detect_align`;
+/// legacy `EFF_DETECT_ALIGN`). `look` tags evil actors with a red aura and
+/// good ones with a gold aura.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct DetectAlign;
+
+/// Marker: the bearer is blurred with speed (`blur`; legacy `EFF_BLUR`).
+/// Like `Haste`, `combat_tick` gives it one extra swing pass per round.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Blur;
+
+/// Marker: hostile creatures see the bearer as a friend (`familiarity`;
+/// legacy `EFF_FAMILIARITY`). Aggressive mobs never pick a fight with it.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Familiar;
+
 /// Tag component on an `EffectInstance` entity: this effect is
 /// what's keeping its target `Invisible`. Used by `effects_tick`
 /// to decide whether the `Invisible` marker on the target should

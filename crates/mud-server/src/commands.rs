@@ -440,6 +440,8 @@ pub(crate) use gmcp::clear_gmcp_sent;
 pub(crate) mod gmcp_tests;
 #[path = "commands/magic_focus.rs"]
 mod magic_focus;
+#[path = "commands/senses.rs"]
+mod senses;
 pub(crate) use magic_focus::Concentrating;
 #[cfg(test)]
 #[path = "commands/effects_list_tests.rs"]
@@ -447,6 +449,9 @@ mod effects_list_tests;
 #[cfg(test)]
 #[path = "commands/expand_tests.rs"]
 mod expand_tests;
+#[cfg(test)]
+#[path = "commands/flag_behaviour_tests.rs"]
+mod flag_behaviour_tests;
 #[cfg(test)]
 #[path = "commands/god_zone_tests.rs"]
 mod god_zone_tests;
@@ -11151,6 +11156,14 @@ pub(crate) fn player_can_see_in_dark(world: &World, entity: Entity) -> bool {
     has_flag(world, entity, PlayerFlag::HolyLight)
 }
 
+/// True when `entity` still makes out *characters* in a dark room:
+/// whoever [`player_can_see_in_dark`], or by body heat with
+/// `Infravision`. Rooms, items and exits stay dark to infravision.
+#[must_use]
+pub(crate) fn sees_characters_in_dark(world: &World, entity: Entity) -> bool {
+    player_can_see_in_dark(world, entity) || senses::has_infravision(world, entity)
+}
+
 /// True when `observer` perceives through magical invisibility: the
 /// `DetectInvis` marker (spell/flag), `HOLY_LIGHT`, or an Immortal+
 /// account (gods see all). Legacy `INVIS_OK` / `PRF_HOLYLIGHT`.
@@ -20927,7 +20940,7 @@ pub(crate) fn broadcast_room_visual(
             .collect()
     };
     for t in targets {
-        if visible_here || player_can_see_in_dark(world, t) {
+        if visible_here || sees_characters_in_dark(world, t) {
             send_to(world, t, raw_msg);
         }
     }
@@ -22052,11 +22065,13 @@ fn target_is_dead_or_ghost(world: &World, target: Entity) -> bool {
 /// line never starts one (`mobact.cpp:277`), and a wimpy mob is only
 /// willing to attack a target that is asleep (`is_aggr_to`,
 /// `ai_utils.cpp:513` — `MOB_WIMPY && AWAKE(tch)`), unless it is a
-/// protector or peacekeeper. A feared mob never starts one. Other mobs are
-/// unaffected.
+/// protector or peacekeeper. A feared mob never starts one. A target with
+/// `Familiar` (`EFF_FAMILIARITY`) is taken for a friend and never picked
+/// on (`is_aggr_to`, `ai_utils.cpp:515`). Other mobs are unaffected.
 pub(crate) fn mob_will_start_fight(world: &World, mob: Entity, target: Entity) -> bool {
     use mud_db::enums::MobBehavior;
-    if target_is_dead_or_ghost(world, target) {
+    if target_is_dead_or_ghost(world, target) || world.get::<mud_world::Familiar>(target).is_some()
+    {
         return false;
     }
     // A pet or charmed mob never opens hostilities (not even against
