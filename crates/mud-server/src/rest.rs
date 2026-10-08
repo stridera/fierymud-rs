@@ -423,6 +423,111 @@ mod tests {
         assert_eq!(effect_count(&mut world, 2), 1);
     }
 
+    /// Camp to completion (the player is flagged `Quitting`), then return
+    /// what the logout save would persist in `script_vars` and the
+    /// `RestState` row.
+    fn camp_and_log_out(
+        kit: Option<(i32, i32)>,
+    ) -> (Option<serde_json::Value>, RestState, World, Entity) {
+        let (mut world, player) = setup(RestSource::None, 0);
+        world.insert_resource(crate::TickCount(crate::camp::CAMP_DURATION_TICKS));
+        let room = world.get::<Located>(player).unwrap().0;
+        world.entity_mut(player).insert(mud_world::Camping {
+            since_tick: 0,
+            started_in: room,
+            kit_entity: None,
+            kit_world_key: kit,
+            kit_tier_bonus: 0,
+        });
+        crate::camp::camp_tick(&mut world);
+        assert!(world.get::<crate::commands::Quitting>(player).is_some());
+        let saved = crate::login::script_vars_for_save(&world, player);
+        let rest = *world.get::<RestState>(player).unwrap();
+        (saved, rest, world, player)
+    }
+
+    /// Login restore: what `finish_login` does with the persisted row.
+    fn log_back_in(world: &mut World, saved: Option<serde_json::Value>, rest: RestState) -> Entity {
+        let room = world
+            .query_filtered::<Entity, With<WorldKey>>()
+            .single(world)
+            .unwrap();
+        let mut e = world.spawn((
+            Located(room),
+            Profile {
+                level: 5,
+                class_id: None,
+                race: "Human".to_string(),
+                experience: 0,
+                gender: "neutral".to_string(),
+            },
+            rest,
+        ));
+        if let Some(json) = saved {
+            let mut map: std::collections::BTreeMap<String, String> =
+                serde_json::from_value(json).unwrap();
+            if let Some(p) = crate::login::take_pending_wake(&mut map, rest.source) {
+                e.insert(p);
+            }
+            if !map.is_empty() {
+                e.insert(mud_world::ScriptVars(map));
+            }
+        }
+        e.id()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn camp_kit_wake_survives_logout_and_applies_once() {
+        let (saved, rest, mut world, camper) = camp_and_log_out(Some((40, 7)));
+        assert_eq!(rest.source, RestSource::Camp);
+        assert!(saved.is_some(), "kit key persisted with the character");
+        world.despawn(camper);
+
+        let back = log_back_in(&mut world, saved, rest);
+        assert!(world.get::<PendingWakeAttachments>(back).is_some());
+        // The persisted key never leaks into the player's visible vars.
+        assert!(world.get::<mud_world::ScriptVars>(back).is_none());
+        award_experience(&mut world, back, 50);
+        assert_eq!(effect_count(&mut world, 1), 1, "Refreshed");
+        assert_eq!(effect_count(&mut world, 2), 1, "kit wake effect");
+
+        // Consumed: the next save drops the key, so a second login is inert.
+        let resaved = crate::login::script_vars_for_save(&world, back);
+        assert!(resaved.is_none());
+        let rest = *world.get::<RestState>(back).unwrap();
+        world.despawn(back);
+        let again = log_back_in(&mut world, resaved, rest);
+        assert!(world.get::<PendingWakeAttachments>(again).is_none());
+        award_experience(&mut world, again, 50);
+        assert_eq!(effect_count(&mut world, 2), 1, "not reapplied");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn camp_without_kit_persists_no_wake() {
+        let (saved, rest, mut world, camper) = camp_and_log_out(None);
+        assert!(saved.is_none());
+        world.despawn(camper);
+        let back = log_back_in(&mut world, saved, rest);
+        assert!(world.get::<PendingWakeAttachments>(back).is_none());
+        award_experience(&mut world, back, 50);
+        assert_eq!(effect_count(&mut world, 1), 1, "Refreshed still lands");
+        assert_eq!(effect_count(&mut world, 2), 0);
+    }
+
+    #[test]
+    fn stale_wake_key_without_camp_source_is_dropped() {
+        let mut map = std::collections::BTreeMap::from([
+            (
+                mud_world::PENDING_WAKE_KIT_KEY.to_string(),
+                "40:7".to_string(),
+            ),
+            ("keep".to_string(), "1".to_string()),
+        ]);
+        assert!(crate::login::take_pending_wake(&mut map, RestSource::Inn).is_none());
+        assert_eq!(map.len(), 1);
+        assert!(PendingWakeAttachments::from_var("garbage").is_none());
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn missing_wake_catalog_is_not_fatal() {
         let (mut world, player) = setup(RestSource::Inn, 1);

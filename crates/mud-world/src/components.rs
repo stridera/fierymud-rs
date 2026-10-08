@@ -1322,6 +1322,33 @@ pub struct PendingWakeAttachments {
     pub kit_id: i32,
 }
 
+/// `ScriptVars` key persisting a queued [`PendingWakeAttachments`]
+/// across logout (value `"<zone>:<id>"`). Camp completion logs the
+/// player out, so without this the consumed kit's wake bonus would be
+/// lost. Written by the save snapshot while the component is present;
+/// lifted back out into the component (and removed from `ScriptVars`)
+/// at login. Stored in `ScriptVars` so it round-trips through
+/// `Characters.script_vars` with no schema change.
+pub const PENDING_WAKE_KIT_KEY: &str = "rest.pending_wake_kit";
+
+impl PendingWakeAttachments {
+    /// Encode as the [`PENDING_WAKE_KIT_KEY`] value.
+    #[must_use]
+    pub fn to_var(self) -> String {
+        format!("{}:{}", self.kit_zone, self.kit_id)
+    }
+
+    /// Decode a [`PENDING_WAKE_KIT_KEY`] value; `None` when malformed.
+    #[must_use]
+    pub fn from_var(raw: &str) -> Option<Self> {
+        let (zone, id) = raw.split_once(':')?;
+        Some(Self {
+            kit_zone: zone.parse().ok()?,
+            kit_id: id.parse().ok()?,
+        })
+    }
+}
+
 /// Rest / repose: companion to a Refreshed `EffectInstance`. Records
 /// the flat `RegenBonus` delta the wake path stamped onto the
 /// wearer's `RegenBonus` component so the on-remove tick can subtract

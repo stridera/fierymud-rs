@@ -602,6 +602,43 @@ pub(crate) struct PersistedPets {
     pets: Vec<PersistedPet>,
 }
 
+/// `ScriptVars` as persisted: the player's vars plus the queued camp
+/// wake kit (see [`mud_world::PENDING_WAKE_KIT_KEY`]) while one is
+/// pending. Once the wake consumer drops the component, the next save
+/// omits the key, so the bonus applies exactly once.
+pub(crate) fn script_vars_for_save(world: &World, entity: Entity) -> Option<serde_json::Value> {
+    let mut map = world
+        .get::<mud_world::ScriptVars>(entity)
+        .map(|sv| sv.0.clone())
+        .unwrap_or_default();
+    map.remove(mud_world::PENDING_WAKE_KIT_KEY);
+    if let Some(pending) = world.get::<mud_world::PendingWakeAttachments>(entity) {
+        map.insert(
+            mud_world::PENDING_WAKE_KIT_KEY.to_string(),
+            pending.to_var(),
+        );
+    }
+    if map.is_empty() {
+        return None;
+    }
+    serde_json::to_value(&map).ok()
+}
+
+/// Lift the persisted camp wake kit out of the loaded `ScriptVars`. The
+/// key is always removed (it is not a player-visible var); the pending
+/// attachment is only restored while the character is still queued on
+/// a camp rest, which is the only source that consumes it.
+pub(crate) fn take_pending_wake(
+    map: &mut std::collections::BTreeMap<String, String>,
+    rest_source: mud_db::enums::RestSource,
+) -> Option<mud_world::PendingWakeAttachments> {
+    let raw = map.remove(mud_world::PENDING_WAKE_KIT_KEY)?;
+    if rest_source != mud_db::enums::RestSource::Camp {
+        return None;
+    }
+    mud_world::PendingWakeAttachments::from_var(&raw)
+}
+
 /// Shared restore logic: spawn one mob entity per persisted pet
 /// entry, dropping all entries past the disconnect cap (no staff-
 /// exception equivalent for pets — they're player-owned investments,
@@ -3725,11 +3762,15 @@ impl ConnRouter {
             // ScriptVars — JSON object → BTreeMap. Shape was already
             // validated by `check_json` in `load_persisted`.
             if let Some(json) = script_vars_json
-                && let Ok(map) =
+                && let Ok(mut map) =
                     serde_json::from_value::<std::collections::BTreeMap<String, String>>(json)
-                && !map.is_empty()
             {
-                e.insert(mud_world::ScriptVars(map));
+                if let Some(pending) = take_pending_wake(&mut map, char_row.rest_source) {
+                    e.insert(pending);
+                }
+                if !map.is_empty() {
+                    e.insert(mud_world::ScriptVars(map));
+                }
             }
             // Trophy — JSON list → Trophy (validated in `load_persisted`).
             if let Some(json) = trophy_json
@@ -4716,10 +4757,7 @@ pub(crate) fn snapshot_player(
         .get::<mud_world::AccountWealth>(entity)
         .map_or(0, |a| a.0);
     let user_id = account.user_id.clone();
-    let script_vars_json = world
-        .get::<mud_world::ScriptVars>(entity)
-        .filter(|sv| !sv.0.is_empty())
-        .and_then(|sv| serde_json::to_value(&sv.0).ok());
+    let script_vars_json = script_vars_for_save(world, entity);
     let trophy_json = world
         .get::<mud_world::Trophy>(entity)
         .filter(|t| !t.entries.is_empty())
