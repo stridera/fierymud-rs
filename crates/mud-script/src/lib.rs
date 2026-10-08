@@ -2314,7 +2314,14 @@ fn destroy_item(lua: &Lua, actor: Entity, needle: &str) -> mlua::Result<()> {
                 }
             }
         }
+        let release = world
+            .get_resource::<mud_world::GearReleaseHook>()
+            .map(|h| h.0);
         for e in to_remove {
+            // A worn item's bonuses and effects go with it.
+            if let Some(release) = release {
+                release(world, e);
+            }
             if let Ok(em) = world.get_entity_mut(e) {
                 em.despawn();
             }

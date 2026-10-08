@@ -759,12 +759,26 @@ pub(crate) fn restore_persisted_effects(
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
     let elapsed = now_unix.saturating_sub(persisted.saved_at_unix).max(0);
+    // Current hp / stamina were saved as they stood; re-applying a max
+    // buff below must not top them up.
+    let hp = world.get::<Health>(entity).map(|h| h.hp);
+    let stamina = world.get::<Stamina>(entity).map(|s| s.current);
     for eff in persisted.effects {
         if mud_world::mob_effects::is_innate_effect(&eff.source) {
             continue;
         }
         let is_admin = matches!(eff.source, mud_world::EffectSource::Admin);
+        // A stat buff's delta on a core stat is baked into the saved row.
+        // Every other target (accuracy, max hp, ...) is rebuilt from base
+        // columns at login, so a restored buff has to re-apply it for its
+        // later expiry to subtract a delta that is actually there.
+        let baked = |d: &(String, i32)| crate::equip_apply::is_persisted_stat_key(&d.0);
         if !is_admin && elapsed > EFFECT_DISCONNECT_CAP_SECS {
+            // Dropped unrestored: give back a baked-in delta or it is
+            // permanent.
+            if let Some(d) = eff.modify_delta.as_ref().filter(|d| baked(d)) {
+                crate::commands::reverse_modify_delta(world, entity, &d.0, d.1);
+            }
             continue;
         }
         let restored_secs = if eff.remaining_secs < 0 {
@@ -772,10 +786,16 @@ pub(crate) fn restore_persisted_effects(
         } else {
             let after = i64::from(eff.remaining_secs).saturating_sub(elapsed);
             if after <= 0 {
+                if let Some(d) = eff.modify_delta.as_ref().filter(|d| baked(d)) {
+                    crate::commands::reverse_modify_delta(world, entity, &d.0, d.1);
+                }
                 continue;
             }
             i32::try_from(after).unwrap_or(eff.remaining_secs)
         };
+        if let Some(d) = eff.modify_delta.as_ref().filter(|d| !baked(d)) {
+            crate::commands::apply_modify_delta(world, entity, &d.0, d.1);
+        }
         let mut effect_entity = world.spawn((
             mud_world::EffectInstance {
                 kind: eff.kind,
@@ -790,6 +810,16 @@ pub(crate) fn restore_persisted_effects(
         if let Some((target, amount)) = eff.modify_delta {
             effect_entity.insert(mud_world::ModifyDelta { target, amount });
         }
+    }
+    if let Some(hp) = hp
+        && let Some(mut h) = world.get_mut::<Health>(entity)
+    {
+        h.hp = hp.min(h.max);
+    }
+    if let Some(cur) = stamina
+        && let Some(mut s) = world.get_mut::<Stamina>(entity)
+    {
+        s.current = cur.min(s.max);
     }
 }
 
@@ -3679,7 +3709,7 @@ impl ConnRouter {
         // an EquippedSlot. The CombatStats base loaded into
         // spawn_player above is the *unmodified* DB row; this pass
         // stacks the gear-derived deltas on top.
-        crate::equip_apply::recompute_equipped_for(world, entity);
+        crate::equip_apply::recompute_equipped_keeping_vitals(world, entity);
         let known_abilities = KnownAbilities::from_rows(&ability_rows);
         let ability_count = known_abilities.entries.len();
         let aliases = mud_world::Aliases::from_rows(&alias_rows);
@@ -4560,14 +4590,12 @@ pub(crate) fn snapshot_player(
     // character row keeps the values without it (else every relog stacks
     // the bonus again).
     let gear = crate::equip_apply::gear_offsets(world, entity);
-    let hp = crate::equip_apply::base_current(
-        world.get::<Health>(entity).map_or(0, |h| h.hp),
-        gear.max_hp,
-    );
-    let stamina = crate::equip_apply::base_current(
-        world.get::<Stamina>(entity).map_or(0, |s| s.current),
-        gear.max_stamina,
-    );
+    let hp = world.get::<Health>(entity).map_or(0, |h| {
+        crate::equip_apply::base_current(h.hp, h.max, gear.max_hp)
+    });
+    let stamina = world.get::<Stamina>(entity).map_or(0, |s| {
+        crate::equip_apply::base_current(s.current, s.max, gear.max_stamina)
+    });
     let (zone_id, room_id) = world
         .get::<Located>(entity)
         .and_then(|l| world.get::<WorldKey>(l.0).copied())

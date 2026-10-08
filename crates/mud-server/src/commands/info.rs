@@ -5003,9 +5003,7 @@ pub(crate) fn cmd_sell(world: &mut World, player: Entity, args: &str) {
     } else {
         try_insert(world, player, Wealth(pay_copper));
     }
-    if let Ok(e) = world.get_entity_mut(item) {
-        e.despawn();
-    }
+    crate::equip_apply::despawn_item(world, item);
     let pay_str = format_wealth(pay_copper).unwrap_or_else(|| "no coin".to_string());
     send_rendered(
         world,
@@ -10055,9 +10053,7 @@ fn take_loose_coins(world: &mut World, player: Entity, item: Entity) -> Option<i
             try_insert(world, player, Wealth(amount));
         }
     }
-    if let Ok(em) = world.get_entity_mut(item) {
-        em.despawn();
-    }
+    crate::equip_apply::despawn_item(world, item);
     (amount > 0).then_some(amount)
 }
 
@@ -10962,9 +10958,7 @@ pub(crate) fn cmd_junk(world: &mut World, player: Entity, args: &str) {
     let Some(located) = world.get::<Located>(player).copied() else {
         return;
     };
-    if let Ok(e) = world.get_entity_mut(item) {
-        e.despawn();
-    }
+    crate::equip_apply::despawn_item(world, item);
     send_rendered(world, player, &format!("You destroy {item_name}.\r\n"));
     broadcast_room_except_rendered(
         world,

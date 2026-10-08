@@ -31,8 +31,8 @@
 use bevy_ecs::prelude::*;
 use mud_world::mob_effects::{WORN_ITEM_EFFECT_SOURCE, is_display_only_flag, row_flags};
 use mud_world::{
-    AppliedTo, CoreStats, EffectInstance, EffectSource, EquippedSlot, GrantedByItem,
-    ObjectGrantedEffect, ObjectPrototypes, Resistances, WorldKey,
+    AppliedTo, CoreStats, EffectInstance, EffectSource, EquippedSlot, GrantedByItem, Health,
+    ObjectGrantedEffect, ObjectPrototypes, Resistances, Stamina, WorldKey,
 };
 
 use crate::commands::{apply_modify_delta, reverse_modify_delta, try_insert};
@@ -482,17 +482,75 @@ pub fn base_core_stats(world: &World, wearer: Entity) -> Option<CoreStats> {
     Some(stats)
 }
 
-/// A current-points value as it should be saved: a +max item also
-/// granted that many current points on equip and will grant them again
-/// at login, so take them out (never below 1 for a living wearer).
-/// Negative max offsets need no correction: the load-time clamp handles
-/// them.
+/// A current-points value (hp, stamina) as it should be saved: capped at
+/// the gear-less maximum (`max - max_offset`), never below 1 for a living
+/// wearer. Login re-applies the gear WITHOUT topping current points up
+/// (`recompute_equipped_keeping_vitals`), so the saved value comes back
+/// exactly; a wearer at full health returns at the gear-less maximum and
+/// regenerates the rest.
 #[must_use]
-pub fn base_current(current: i32, max_offset: i32) -> i32 {
-    if current > 0 && max_offset > 0 {
-        current.saturating_sub(max_offset).max(1)
-    } else {
-        current
+pub fn base_current(current: i32, max: i32, max_offset: i32) -> i32 {
+    if current <= 0 {
+        return current;
+    }
+    current.min(max.saturating_sub(max_offset)).max(1)
+}
+
+/// Destroy an item entity, reversing its worn-gear effects first. Every
+/// site that despawns an item that might be worn (decay, consumption,
+/// sale, purge, script destroy) goes through this so bonuses and markers
+/// never outlive the item.
+pub fn despawn_item(world: &mut World, item: Entity) {
+    release_gear(world, item);
+    if let Ok(em) = world.get_entity_mut(item) {
+        em.despawn();
+    }
+}
+
+/// True for the apply targets stored in the character row (`CoreStats`).
+/// A stat-buff `ModifyDelta` on one of these is baked into the saved row;
+/// every other target is rebuilt from base columns at login.
+#[must_use]
+pub fn is_persisted_stat_key(key: &str) -> bool {
+    matches!(
+        key,
+        "str"
+            | "strength"
+            | "str_bonus"
+            | "dex"
+            | "dexterity"
+            | "dex_bonus"
+            | "con"
+            | "constitution"
+            | "con_bonus"
+            | "int"
+            | "intelligence"
+            | "int_bonus"
+            | "wis"
+            | "wisdom"
+            | "wis_bonus"
+            | "cha"
+            | "charisma"
+            | "cha_bonus"
+    )
+}
+
+/// `recompute_equipped_for` for a loaded player: the saved current
+/// hp / stamina already are what the player had, so applying the gear
+/// must not top them up the way equipping does.
+pub fn recompute_equipped_keeping_vitals(world: &mut World, wearer: Entity) {
+    let hp = world.get::<Health>(wearer).map(|h| h.hp);
+    let stamina = world.get::<Stamina>(wearer).map(|s| s.current);
+    recompute_equipped_for(world, wearer);
+    if let Some(hp) = hp
+        && let Some(mut h) = world.get_mut::<Health>(wearer)
+    {
+        h.hp = hp.min(h.max);
+    }
+    if let Some(cur) = stamina
+        && let Some(mut s) = world.get_mut::<Stamina>(wearer)
+    {
+        s.current = cur.min(s.max);
     }
 }
 

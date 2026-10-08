@@ -4,6 +4,12 @@ use bevy_ecs::prelude::*;
 
 use mud_db::enums::EntityType;
 
+/// Hook the server installs so crates that destroy items without access to
+/// the equipment code (Lua `destroy_item`) can first reverse a worn item's
+/// bonuses and effects. Absent in worlds that never wear gear.
+#[derive(Resource, Clone, Copy)]
+pub struct GearReleaseHook(pub fn(&mut World, Entity));
+
 /// Authored achievement catalog loaded at boot. Hooks reference
 /// rows by their stable `code` string (e.g. `"first_kill"`,
 /// `"zone_30_cleared"`); the catalog provides id/title/description

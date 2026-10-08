@@ -15,8 +15,8 @@ use mud_world::{
 use super::dispatch;
 use super::test_support::{Rx, drain, object_proto, player_in};
 use crate::equip_apply::{
-    GrantedDeltas, base_core_stats, base_current, gear_offsets, recompute_equipped_for,
-    release_gear,
+    GrantedDeltas, base_core_stats, base_current, despawn_item, gear_offsets,
+    recompute_equipped_for, recompute_equipped_keeping_vitals, release_gear,
 };
 
 const MODIFY: i32 = 3;
@@ -309,7 +309,7 @@ fn relog_with_a_worn_ring_applies_it_once() {
     assert_eq!(saved.strength, 13, "the row keeps the base strength");
     let off = gear_offsets(&world, p);
     assert_eq!(off.max_hp, 25);
-    let saved_hp = base_current(125, off.max_hp);
+    let saved_hp = base_current(125, 125, off.max_hp);
     assert_eq!(saved_hp, 100);
 
     // Fresh login: the character row loads, the worn item respawns, the
@@ -334,25 +334,156 @@ fn relog_with_a_worn_ring_applies_it_once() {
     world2
         .entity_mut(r2)
         .insert(EquippedSlot(mud_world::Slot::LeftFinger));
-    recompute_equipped_for(&mut world2, p2);
+    recompute_equipped_keeping_vitals(&mut world2, p2);
     recompute_equipped_for(&mut world2, p2);
     assert_eq!(strength(&world2, p2), 15, "applied once");
     let hp = world2.get::<Health>(p2).unwrap();
-    assert_eq!((hp.hp, hp.max), (125, 125), "hp never exceeds max");
+    assert_eq!((hp.hp, hp.max), (100, 125), "gear raises max, not current");
     assert!(world2.get::<mud_world::Sanctuary>(p2).is_some());
     assert_eq!(effects_on(&mut world2, p2).len(), 1, "one worn instance");
     assert!(world.get::<GrantedDeltas>(r).is_some());
 }
 
 #[test]
-fn partial_hp_survives_the_round_trip() {
-    // 60/125 with a +25 ring saves as 35 and loads back as 60.
-    assert_eq!(base_current(60, 25), 35);
+fn hurt_wearer_returns_with_exactly_the_hp_they_had() {
+    // 30/150 with a +50 max_hp ring: the old floor saved 1 and returned
+    // at 51.
+    let (mut world, p, mut rx) = setup();
+    ring(&mut world, p, 10, "vital", vec![modify("max_hp", 50)]);
+    dispatch(&mut world, p, "wear vital");
+    let _ = drain(&mut rx);
+    world.get_mut::<Health>(p).unwrap().hp = 30;
+    let off = gear_offsets(&world, p);
+    let max = world.get::<Health>(p).unwrap().max;
+    assert_eq!(max, 150);
+    let saved = base_current(30, max, off.max_hp);
+    assert_eq!(saved, 30);
+
+    let (mut world2, p2, _rx2) = setup();
+    *world2.get_mut::<Health>(p2).unwrap() = Health {
+        hp: saved,
+        max: 100,
+    };
+    let r = ring(&mut world2, p2, 10, "vital", vec![modify("max_hp", 50)]);
+    world2
+        .entity_mut(r)
+        .insert(EquippedSlot(mud_world::Slot::LeftFinger));
+    recompute_equipped_keeping_vitals(&mut world2, p2);
+    let hp = world2.get::<Health>(p2).unwrap();
+    assert_eq!((hp.hp, hp.max), (30, 150));
+}
+
+#[test]
+fn saved_current_points_are_capped_at_the_gearless_max() {
+    assert_eq!(base_current(150, 150, 50), 100);
+    assert_eq!(base_current(60, 125, 25), 60);
     // A cursed -10 ring needs no correction.
-    assert_eq!(base_current(60, -10), 60);
+    assert_eq!(base_current(60, 90, -10), 60);
     // Never saves a living wearer as dead.
-    assert_eq!(base_current(10, 25), 1);
-    assert_eq!(base_current(0, 25), 0);
+    assert_eq!(base_current(10, 5, 25), 1);
+    assert_eq!(base_current(0, 125, 25), 0);
+}
+
+#[test]
+fn a_timed_worn_item_that_decays_takes_its_bonus_with_it() {
+    let (mut world, p, mut rx) = setup();
+    let r = ring(
+        &mut world,
+        p,
+        11,
+        "fading",
+        vec![modify("str_bonus", 2), status(&["detect_invisible"])],
+    );
+    world.entity_mut(r).insert(mud_world::ItemTimer {
+        remaining_secs: 1,
+        decompose_window_secs: 0,
+    });
+    dispatch(&mut world, p, "wear fading");
+    let _ = drain(&mut rx);
+    assert_eq!(strength(&world, p), 15);
+    assert!(world.get::<DetectInvis>(p).is_some());
+    crate::item_decay::item_decay_tick(&mut world);
+    assert!(world.get_entity(r).is_err(), "the ring decayed");
+    assert_eq!(strength(&world, p), 13);
+    assert!(world.get::<DetectInvis>(p).is_none());
+    assert!(effects_on(&mut world, p).is_empty());
+    // What the next save writes is the base value, not a baked bonus.
+    assert_eq!(base_core_stats(&world, p).unwrap().strength, 13);
+    assert_eq!(gear_offsets(&world, p).strength, 0);
+}
+
+#[test]
+fn despawn_item_reverses_a_worn_item_for_sale_purge_and_scripts() {
+    let (mut world, p, mut rx) = setup();
+    let r = ring(&mut world, p, 12, "gone", vec![modify("str_bonus", 4)]);
+    dispatch(&mut world, p, "wear gone");
+    let _ = drain(&mut rx);
+    assert_eq!(strength(&world, p), 17);
+    despawn_item(&mut world, r);
+    assert!(world.get_entity(r).is_err());
+    assert_eq!(strength(&world, p), 13);
+}
+
+fn persisted(effects: &serde_json::Value) -> crate::login::PersistedEffects {
+    serde_json::from_value(serde_json::json!({
+        "saved_at_unix": i64::MAX / 2,
+        "effects": effects,
+    }))
+    .expect("persisted effects shape")
+}
+
+#[test]
+fn a_stat_buff_that_expired_offline_gives_back_the_delta_saved_in_the_row() {
+    let (mut world, p, _rx) = setup();
+    // The row was saved while a +4 str buff was on: strength 17 includes it.
+    world.get_mut::<CoreStats>(p).unwrap().strength = 17;
+    let fx = persisted(&serde_json::json!([{
+        "kind": MODIFY,
+        "name": "str",
+        "strength": 1,
+        "remaining_secs": 0,
+        "source": "Spell",
+        "ability_id": null,
+        "modify_delta": ["str_bonus", 4],
+    }]));
+    crate::login::restore_persisted_effects(&mut world, p, fx);
+    assert_eq!(strength(&world, p), 13, "no permanent inflation");
+    assert!(effects_on(&mut world, p).is_empty());
+}
+
+#[test]
+fn a_live_stat_buff_restores_without_double_counting() {
+    let (mut world, p, _rx) = setup();
+    world.get_mut::<CoreStats>(p).unwrap().strength = 17;
+    let fx = persisted(&serde_json::json!([{
+        "kind": MODIFY,
+        "name": "str",
+        "strength": 1,
+        "remaining_secs": 600,
+        "source": "Spell",
+        "ability_id": null,
+        "modify_delta": ["str_bonus", 4],
+    }]));
+    crate::login::restore_persisted_effects(&mut world, p, fx);
+    assert_eq!(strength(&world, p), 17, "already in the saved row");
+    assert_eq!(effects_on(&mut world, p).len(), 1);
+}
+
+#[test]
+fn a_live_max_hp_buff_is_reapplied_because_the_row_never_saved_it() {
+    let (mut world, p, _rx) = setup();
+    let fx = persisted(&serde_json::json!([{
+        "kind": MODIFY,
+        "name": "max_hp",
+        "strength": 1,
+        "remaining_secs": 600,
+        "source": "Spell",
+        "ability_id": null,
+        "modify_delta": ["max_hp", 20],
+    }]));
+    crate::login::restore_persisted_effects(&mut world, p, fx);
+    let hp = world.get::<Health>(p).unwrap();
+    assert_eq!((hp.hp, hp.max), (100, 120), "max back, current untouched");
 }
 
 #[test]

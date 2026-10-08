@@ -247,6 +247,7 @@ async fn main() {
     };
 
     let mut world = World::new();
+    world.insert_resource(mud_world::GearReleaseHook(equip_apply::release_gear));
     world.insert_resource(TickCount::default());
     world.insert_resource(commands::PromptState::default());
     world.insert_resource(tick_stats::TickStats::default());

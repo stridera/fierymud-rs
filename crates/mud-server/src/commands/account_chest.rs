@@ -304,7 +304,7 @@ async fn cmd_chest_deposit(
     drop(ordered);
     // Despawn the inventory entity. The row in account_items is the
     // sole representation of the item until someone withdraws it.
-    world.despawn(item);
+    crate::equip_apply::despawn_item(world, item);
     send_to(
         world,
         player,

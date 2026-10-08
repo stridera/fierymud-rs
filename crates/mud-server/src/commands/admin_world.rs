@@ -1230,9 +1230,7 @@ pub(crate) fn cmd_purge(world: &mut World, player: Entity, args: &str) {
                 .collect()
         };
         for n in nested {
-            if let Ok(e) = world.get_entity_mut(n) {
-                e.despawn();
-            }
+            crate::equip_apply::despawn_item(world, n);
         }
         if let Ok(e) = world.get_entity_mut(target) {
             e.despawn();
@@ -1279,9 +1277,7 @@ pub(crate) fn cmd_purge(world: &mut World, player: Entity, args: &str) {
         .chain(mobs.into_iter())
         .chain(items.into_iter())
     {
-        if let Ok(em) = world.get_entity_mut(e) {
-            em.despawn();
-        }
+        crate::equip_apply::despawn_item(world, e);
     }
     let mut report =
         format!("Purged {mob_count} mob(s), {item_count} item(s), and {nested_count} nested.");

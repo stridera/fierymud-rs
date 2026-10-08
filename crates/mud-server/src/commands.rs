@@ -12017,9 +12017,7 @@ pub(crate) fn consume_item(
     // Fire CONSUME on the item before despawn so the body can read
     // self.id / self.name and emit a final flavor line.
     crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Consume);
-    if let Ok(e) = world.get_entity_mut(item) {
-        e.despawn();
-    }
+    crate::equip_apply::despawn_item(world, item);
     true
 }
 
@@ -12415,9 +12413,7 @@ pub(crate) fn invoke_object_abilities(
     }
     try_remove::<RecallScrollSource>(world, player);
     if single_use {
-        if let Ok(e) = world.get_entity_mut(item) {
-            e.despawn();
-        }
+        crate::equip_apply::despawn_item(world, item);
     } else if let Some(mut c) = world.get_mut::<mud_world::Charges>(item) {
         if c.0 > 0 {
             c.0 -= 1;
@@ -12425,9 +12421,7 @@ pub(crate) fn invoke_object_abilities(
         let depleted = c.0 == 0;
         if depleted {
             send_rendered(world, player, &format!("{item_name} crumbles to dust.\r\n"));
-            if let Ok(e) = world.get_entity_mut(item) {
-                e.despawn();
-            }
+            crate::equip_apply::despawn_item(world, item);
         }
     }
 }
@@ -18000,9 +17994,7 @@ pub(crate) fn invoke_ability_with(
     if !aoe_repeat && !applied_msgs.is_empty() {
         let count = to_consume.len();
         for item in &to_consume {
-            if let Ok(em) = world.get_entity_mut(*item) {
-                em.despawn();
-            }
+            crate::equip_apply::despawn_item(world, *item);
         }
         if count > 0 {
             send_to(

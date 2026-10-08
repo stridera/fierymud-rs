@@ -151,9 +151,8 @@ pub fn item_decay_tick(world: &mut World) {
             }
         }
         release_contents(world, entity, holder_entity, &holder_kind);
-        if let Ok(em) = world.get_entity_mut(entity) {
-            em.despawn();
-        }
+        // A worn item's bonuses and flag effects go with it.
+        crate::equip_apply::despawn_item(world, entity);
     }
 }
 

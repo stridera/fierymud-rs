@@ -1770,7 +1770,7 @@ fn session_create(
     // an EquippedSlot. Mirrors the recompute pass in
     // login::complete_login so virtual sessions land with the same
     // stat sheet a real-telnet login would.
-    crate::equip_apply::recompute_equipped_for(world, entity);
+    crate::equip_apply::recompute_equipped_keeping_vitals(world, entity);
     // Match login::complete_login: attach KnownAbilities + Aliases +
     // Title + Description so commands that read those (invoke_ability's
     // skill lookup, alias expansion, etc.) work for virtual sessions.
