@@ -1184,6 +1184,40 @@ pub struct MobDefaultEffectCatalog {
     pub by_key: HashMap<(i32, i32), Vec<MobDefaultEffect>>,
 }
 
+/// One `RaceEffects` row: a permanent effect every member of the race
+/// carries.
+#[derive(Debug, Clone)]
+pub struct RaceEffect {
+    pub effect_id: i32,
+    pub strength: i32,
+    pub modifier_data: serde_json::Value,
+}
+
+/// `RaceEffects` rows keyed by lower-cased race (matches
+/// `MobProto.race` / `Profile.race` once lower-cased). Applied to
+/// players at login and to mobs at spawn by
+/// [`crate::mob_effects::apply_race_effects`].
+#[derive(Resource, Default, Debug)]
+pub struct RaceEffectCatalog {
+    pub by_race: HashMap<String, Vec<RaceEffect>>,
+}
+
+impl RaceEffectCatalog {
+    /// Record a row; `race` is the raw enum text in any case.
+    pub fn insert(&mut self, race: &str, effect: RaceEffect) {
+        self.by_race
+            .entry(race.to_ascii_lowercase())
+            .or_default()
+            .push(effect);
+    }
+
+    /// Rows for `race` (any case).
+    #[must_use]
+    pub fn get(&self, race: &str) -> Option<&Vec<RaceEffect>> {
+        self.by_race.get(&race.to_ascii_lowercase())
+    }
+}
+
 /// Per-shop offering: an item the keeper sells, with stock and the
 /// override price (`0` = use the object's base cost).
 #[derive(Debug, Clone, Copy)]

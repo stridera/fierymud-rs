@@ -349,6 +349,22 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     }
     world.insert_resource(race_abilities_data);
 
+    // RaceEffects: permanent race-innate status effects (legacy
+    // `races[race].effect_flags`), applied to players at login and to
+    // mobs at spawn.
+    let mut race_effects = crate::resources::RaceEffectCatalog::default();
+    for r in mud_db::race_effects::list_all(pool).await? {
+        race_effects.insert(
+            &r.race,
+            crate::resources::RaceEffect {
+                effect_id: r.effect_id,
+                strength: r.strength,
+                modifier_data: r.modifier_data,
+            },
+        );
+    }
+    world.insert_resource(race_effects);
+
     // Pass 4c.6: race defaults + full catalog. `RaceDefaults` carries
     // the narrow size + start-room maps that older callers consult.
     // `RaceCatalog` hydrates the full Race row — stat caps,

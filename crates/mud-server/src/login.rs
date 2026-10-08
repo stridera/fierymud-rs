@@ -733,6 +733,19 @@ pub(crate) fn restore_persisted_pets(world: &mut World, player: Entity, persiste
     }
 }
 
+/// Install the permanent `RaceEffects` of the player's race (see
+/// [`mud_world::mob_effects::apply_race_effects`]). Idempotent. Shared
+/// by the telnet login and the admin virtual-session path.
+pub(crate) fn apply_player_race_effects(world: &mut World, entity: Entity) {
+    let Some(race) = world
+        .get::<mud_world::Profile>(entity)
+        .map(|p| p.race.clone())
+    else {
+        return;
+    };
+    mud_world::mob_effects::apply_race_effects(world, entity, &race);
+}
+
 /// Shared restore logic: spawn one effect entity per persisted entry,
 /// dropping non-Admin entries past the disconnect cap and adjusting
 /// `remaining_secs` for elapsed time. Used by both the telnet login
@@ -747,6 +760,9 @@ pub(crate) fn restore_persisted_effects(
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
     let elapsed = now_unix.saturating_sub(persisted.saved_at_unix).max(0);
     for eff in persisted.effects {
+        if mud_world::mob_effects::is_race_effect(&eff.source) {
+            continue;
+        }
         let is_admin = matches!(eff.source, mud_world::EffectSource::Admin);
         if !is_admin && elapsed > EFFECT_DISCONNECT_CAP_SECS {
             continue;
@@ -3898,6 +3914,9 @@ impl ConnRouter {
         {
             restore_persisted_effects(world, entity, persisted);
         }
+        // Race-innate permanent effects (RaceEffects), rebuilt on every
+        // login rather than restored, so relogging never duplicates them.
+        apply_player_race_effects(world, entity);
         // Hired / charmed pets — same 1h cap. Helper drops the
         // whole envelope when elapsed exceeds the cap, otherwise
         // spawns each pet next to the player with HP restored.
@@ -4813,6 +4832,8 @@ pub(crate) fn snapshot_player(
         let effects: Vec<PersistedEffectInstance> = q
             .iter(world)
             .filter(|(_, applied, _)| applied.0 == entity)
+            // Race innates are rebuilt from `RaceEffects` at login.
+            .filter(|(inst, _, _)| !mud_world::mob_effects::is_race_effect(&inst.source))
             .map(|(inst, _, modd)| PersistedEffectInstance {
                 kind: inst.kind,
                 name: inst.name.clone(),

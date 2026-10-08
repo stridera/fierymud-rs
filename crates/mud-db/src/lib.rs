@@ -51,6 +51,7 @@ pub mod player_corpses;
 pub mod quest_objectives;
 pub mod quests;
 pub mod race_abilities;
+pub mod race_effects;
 pub mod races;
 pub mod reports;
 pub mod room_environmental_effects;

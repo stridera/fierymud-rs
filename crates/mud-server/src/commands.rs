@@ -483,6 +483,9 @@ mod prompt_spacing_tests;
 #[path = "commands/quest_runtime_tests.rs"]
 mod quest_runtime_tests;
 #[cfg(test)]
+#[path = "commands/race_effects_tests.rs"]
+mod race_effects_tests;
+#[cfg(test)]
 #[path = "commands/rank_tests.rs"]
 mod rank_tests;
 #[path = "commands/release.rs"]

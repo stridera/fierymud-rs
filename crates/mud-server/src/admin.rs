@@ -1883,6 +1883,7 @@ fn session_create(
     {
         crate::login::restore_persisted_effects(world, entity, persisted);
     }
+    crate::login::apply_player_race_effects(world, entity);
     let mut by_name = world
         .resource::<VirtualSessions>()
         .by_name

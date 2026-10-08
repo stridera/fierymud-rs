@@ -4,7 +4,8 @@
 //! respawn, Lua `spawn_mob_proto`, admin API and in-game spawn, shop
 //! pets, mount summons, summon / animate spells) goes through
 //! [`spawn_mob_from_proto`], so prototype state (combat stats, latent
-//! components, shop / trigger / behavior markers and `MobDefaultEffects`)
+//! components, shop / trigger / behavior markers, `MobDefaultEffects` and
+//! the race's `RaceEffects`)
 //! can not drift between them. Legacy `read_mobile` behaves the same:
 //! every instance is cloned from its prototype, affects included.
 //! Callers layer their own extras (follower link, renamed display
@@ -101,5 +102,6 @@ pub fn spawn_mob_from_proto(
     }
     let mob = em.id();
     crate::mob_effects::apply_mob_default_effects(world, mob, proto_key);
+    crate::mob_effects::apply_race_effects(world, mob, &proto.race);
     mob
 }
