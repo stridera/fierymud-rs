@@ -1809,7 +1809,17 @@ pub(crate) fn cmd_gretreat(world: &mut World, player: Entity, _args: &str) {
     }
 }
 
+/// The `flee` command. Legacy `do_flee` refusals apply
+/// ([`crate::fear::can_flee_now`]).
 pub(crate) fn cmd_flee(world: &mut World, player: Entity, _args: &str) {
+    if crate::fear::can_flee_now(world, player) {
+        flee_through_exit(world, player);
+    }
+}
+
+/// Bolt through a random open exit, ending the fight if it succeeds.
+/// Callers have already passed [`crate::fear::can_flee_now`].
+pub(crate) fn flee_through_exit(world: &mut World, player: Entity) {
     // Panic exit cancels any in-progress cast — no concentration to
     // be had while bolting for the door.
     crate::casting::cancel_own_cast(world, player);

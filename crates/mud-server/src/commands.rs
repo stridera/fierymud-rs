@@ -385,7 +385,9 @@ mod channels;
 mod clan_chat;
 #[path = "commands/combat.rs"]
 mod combat_commands;
+#[cfg(test)]
 pub(crate) use combat_commands::cmd_flee;
+pub(crate) use combat_commands::flee_through_exit;
 #[path = "commands/enter.rs"]
 mod enter;
 #[path = "commands/feedback.rs"]

@@ -19,8 +19,8 @@ const PLAYER_CORPSE_DECAY_SECS: i32 = 7 * 24 * 60 * 60;
 const MOB_CORPSE_DECAY_SECS: i32 = 600;
 use crate::commands::{
     apply_attacker_damage, arrival_from, broadcast_room_except_players_rendered,
-    broadcast_room_except_rendered, cmd_flee, damage_color_tag, direction_name,
-    disengage_attackers_of, drain_stamina, name_of, send_to, try_insert, try_remove,
+    broadcast_room_except_rendered, damage_color_tag, direction_name, disengage_attackers_of,
+    drain_stamina, flee_through_exit, name_of, send_to, try_insert, try_remove,
 };
 
 /// Four real-time seconds per swing (40 ticks at 10Hz) — matches legacy
@@ -1594,16 +1594,22 @@ fn apply_swing(world: &mut World, s: &Swing) {
         && hp.hp > 0
         && hp.hp * 100 < hp.max * wimpy_pct
     {
+        // Same legacy `do_flee` refusals as the flee command: a paralysed,
+        // stunned, sleeping, ridden or berserk player cannot bolt, and a
+        // sitter spends the turn getting to its feet.
+        if !crate::fear::can_flee_now(world, s.target) {
+            return;
+        }
         // Look for any open exit before announcing the panic — otherwise
         // we'd print "You panic!" and then immediately "There's nowhere
-        // to run!" from cmd_flee, which reads as a contradiction.
+        // to run!" from the flee, which reads as a contradiction.
         let has_exit = world.get::<Exits>(room).is_some_and(|e| {
             e.0.values()
                 .any(|ed| ed.state == mud_db::enums::ExitState::Open && ed.to.is_some())
         });
         if has_exit {
             send_to(world, s.target, "You panic!\r\n");
-            cmd_flee(world, s.target, "");
+            flee_through_exit(world, s.target);
         } else {
             send_to(
                 world,
@@ -3988,6 +3994,119 @@ mod tests {
         let attacker = make_attacker(world, room_a, mob, 7);
         try_insert(world, mob, Fighting(attacker));
         (room_a, room_b, mob)
+    }
+
+    /// A WIMPY player at `hp`/100 in a room with one open exit north,
+    /// being hit for 10 by an attacker. Returns `(room_a, room_b, player)`.
+    fn wimpy_player_under_attack(world: &mut World, hp: i32) -> (Entity, Entity, Entity) {
+        world.insert_resource(mud_world::EffectCatalog::default());
+        let (room_a, room_b, mob) = hurt_mob_under_attack(world, vec![], 60);
+        world.entity_mut(mob).despawn();
+        let player = credit_player(world, room_a, "Wimp", 0);
+        world.entity_mut(player).insert((
+            Health { hp, max: 100 },
+            mud_world::PlayerFlags(vec![mud_db::enums::PlayerFlag::Wimpy]),
+        ));
+        let attacker = make_attacker(world, room_a, player, 10);
+        world.entity_mut(attacker).insert(Health {
+            hp: 100_000,
+            max: 100_000,
+        });
+        world.entity_mut(player).insert(Fighting(attacker));
+        (room_a, room_b, player)
+    }
+
+    #[test]
+    fn wimpy_player_below_the_threshold_flees() {
+        let mut world = World::new();
+        let (_a, room_b, player) = wimpy_player_under_attack(&mut world, 30);
+        run_combat_tick(&mut world);
+        assert_eq!(world.get::<Located>(player).map(|l| l.0), Some(room_b));
+        assert!(world.get::<Fighting>(player).is_none());
+    }
+
+    #[test]
+    fn paralysed_wimpy_player_hit_below_the_threshold_does_not_move() {
+        let mut world = World::new();
+        let (room_a, _b, player) = wimpy_player_under_attack(&mut world, 30);
+        world.spawn((
+            mud_world::EffectInstance {
+                kind: 1,
+                name: "paralyzed".into(),
+                strength: 1,
+                remaining_secs: 30,
+                source: mud_world::EffectSource::Spell,
+                ability_id: None,
+            },
+            mud_world::AppliedTo(player),
+        ));
+        run_combat_tick(&mut world);
+        assert!(world.get::<Health>(player).is_some_and(|h| h.hp < 25));
+        assert_eq!(world.get::<Located>(player).map(|l| l.0), Some(room_a));
+        assert!(world.get::<Fighting>(player).is_some());
+    }
+
+    #[test]
+    fn stunned_wimpy_player_hit_below_the_threshold_does_not_move() {
+        let mut world = World::new();
+        let (room_a, _b, player) = wimpy_player_under_attack(&mut world, 30);
+        world.entity_mut(player).insert(mud_world::Stunned);
+        run_combat_tick(&mut world);
+        assert_eq!(world.get::<Located>(player).map(|l| l.0), Some(room_a));
+    }
+
+    #[test]
+    fn sitting_wimpy_player_hit_below_the_threshold_stands_up_but_does_not_move() {
+        let mut world = World::new();
+        let (room_a, _b, player) = wimpy_player_under_attack(&mut world, 30);
+        world
+            .entity_mut(player)
+            .insert(Posture(PostureKind::Sitting));
+        run_combat_tick(&mut world);
+        assert_eq!(world.get::<Located>(player).map(|l| l.0), Some(room_a));
+        assert_eq!(
+            world.get::<Posture>(player).map(|p| p.0),
+            Some(PostureKind::Standing),
+            "legacy do_flee: scrambling to its feet is the whole turn"
+        );
+    }
+
+    #[test]
+    fn berserk_wimpy_player_stays_in_the_fight() {
+        let mut world = World::new();
+        let (room_a, _b, player) = wimpy_player_under_attack(&mut world, 30);
+        world.spawn((
+            mud_world::EffectInstance {
+                kind: 1,
+                name: "berserk".into(),
+                strength: 1,
+                remaining_secs: 30,
+                source: mud_world::EffectSource::Spell,
+                ability_id: None,
+            },
+            mud_world::AppliedTo(player),
+        ));
+        run_combat_tick(&mut world);
+        assert_eq!(world.get::<Located>(player).map(|l| l.0), Some(room_a));
+    }
+
+    #[test]
+    fn paralysed_player_cannot_use_the_flee_command() {
+        let mut world = World::new();
+        let (room_a, _b, player) = wimpy_player_under_attack(&mut world, 30);
+        world.spawn((
+            mud_world::EffectInstance {
+                kind: 1,
+                name: "paralyzed".into(),
+                strength: 1,
+                remaining_secs: 30,
+                source: mud_world::EffectSource::Spell,
+                ability_id: None,
+            },
+            mud_world::AppliedTo(player),
+        ));
+        crate::commands::cmd_flee(&mut world, player, "");
+        assert_eq!(world.get::<Located>(player).map(|l| l.0), Some(room_a));
     }
 
     #[test]

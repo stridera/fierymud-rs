@@ -36,8 +36,9 @@ use mud_world::{
 
 use crate::combat::{mob_flee, remember_attacker};
 use crate::commands::{
-    Prevent, broadcast_room_except_rendered, cap_sentence_start, cmd_flee, effect_prevents,
-    has_effect_named, name_of, name_or, room_is_dark, send_to, try_insert, try_remove,
+    Prevent, broadcast_room_except_rendered, cap_sentence_start, effect_prevents,
+    flee_through_exit, has_effect_named, name_of, name_or, room_is_dark, send_to, try_insert,
+    try_remove,
 };
 use crate::effects::{FREEZE_SOURCE, sync_stunned};
 
@@ -140,55 +141,73 @@ pub(crate) enum Panic {
     Unable,
 }
 
-/// Make `victim` panic: stop its fight and cast, then run through the same
-/// flee primitive the wimpy path (`mob_flee`) and the `flee` command
-/// (`cmd_flee`) use, so movement rules and messages stay consistent.
-/// Mirrors the guards at the top of legacy `do_flee`.
-pub(crate) fn panic_flee(world: &mut World, victim: Entity, source: Option<Entity>) -> Panic {
-    let Some(room) = world.get::<Located>(victim).map(|l| l.0) else {
-        return Panic::Unable;
+/// Legacy `do_flee` refusals, shared by every flee path: the `flee`
+/// command, a wimpy player's auto-flee and [`panic_flee`] (fear).
+///
+/// Returns `true` when `actor` may bolt through an exit right now. When it
+/// returns `false` the turn is spent or refused and `actor` has already been
+/// told why; a sitter is stood up (legacy: scrambling to its feet is the
+/// whole turn). Refuses ghosts, the frozen or stunned, sleepers, anyone held
+/// by a `Prevent::Movement` effect, a ridden mount (it goes where its rider
+/// goes) and a berserker mid-fight.
+pub(crate) fn can_flee_now(world: &mut World, actor: Entity) -> bool {
+    let Some(room) = world.get::<Located>(actor).map(|l| l.0) else {
+        return false;
     };
-    if world.get::<Ghost>(victim).is_some()
-        || world.get::<Frozen>(victim).is_some()
-        || world.get::<Stunned>(victim).is_some()
+    if world.get::<Ghost>(actor).is_some()
+        || world.get::<Frozen>(actor).is_some()
+        || world.get::<Stunned>(actor).is_some()
     {
-        return Panic::Unable;
+        return false;
     }
-    let is_player = world.get::<Player>(victim).is_some();
-    match world.get::<Posture>(victim).map(|p| p.0) {
+    match world.get::<Posture>(actor).map(|p| p.0) {
         None | Some(PostureKind::Standing) => {}
         Some(PostureKind::Sleeping) => {
-            send_to(world, victim, "You dream of fleeing!\r\n");
-            return Panic::Unable;
+            send_to(world, actor, "You dream of fleeing!\r\n");
+            return false;
         }
         Some(_) => {
             // Legacy `do_flee`: a panicked sitter scrambles to its feet
             // and that is the whole turn.
-            crate::casting::cancel_own_cast(world, victim);
-            try_insert(world, victim, Posture(PostureKind::Standing));
-            let name = crate::commands::cap_sentence_start(&name_of(world, victim));
-            send_to(world, victim, "You scramble madly to your feet!\r\n");
+            crate::casting::cancel_own_cast(world, actor);
+            try_insert(world, actor, Posture(PostureKind::Standing));
+            let name = crate::commands::cap_sentence_start(&name_of(world, actor));
+            send_to(world, actor, "You scramble madly to your feet!\r\n");
             broadcast_room_except_rendered(
                 world,
                 room,
-                &[victim],
+                &[actor],
                 &format!("Looking panicked, {name} scrambles madly to their feet!\r\n"),
             );
-            return Panic::Unable;
+            return false;
         }
     }
-    if effect_prevents(world, victim, Prevent::Movement) {
-        send_to(world, victim, "You can't move!\r\n");
+    if effect_prevents(world, actor, Prevent::Movement) {
+        send_to(world, actor, "You can't move!\r\n");
+        return false;
+    }
+    if world.get::<RiddenBy>(actor).is_some() {
+        return false;
+    }
+    if berserk_holds(world, actor) {
+        send_to(world, actor, "You're too angry to leave this fight!\r\n");
+        return false;
+    }
+    true
+}
+
+/// Make `victim` panic: stop its fight and cast, then run through the same
+/// flee primitive the wimpy path (`mob_flee`) and the `flee` command
+/// (`flee_through_exit`) use, so movement rules and messages stay
+/// consistent. Guarded by [`can_flee_now`] (legacy `do_flee`).
+pub(crate) fn panic_flee(world: &mut World, victim: Entity, source: Option<Entity>) -> Panic {
+    let Some(room) = world.get::<Located>(victim).map(|l| l.0) else {
+        return Panic::Unable;
+    };
+    if !can_flee_now(world, victim) {
         return Panic::Unable;
     }
-    if world.get::<RiddenBy>(victim).is_some() {
-        // A ridden mount goes where its rider goes.
-        return Panic::Unable;
-    }
-    if berserk_holds(world, victim) {
-        send_to(world, victim, "You're too angry to leave this fight!\r\n");
-        return Panic::Unable;
-    }
+    let is_player = world.get::<Player>(victim).is_some();
 
     crate::casting::cancel_own_cast(world, victim);
     try_remove::<Fighting>(world, victim);
@@ -198,7 +217,7 @@ pub(crate) fn panic_flee(world: &mut World, victim: Entity, source: Option<Entit
         remember_attacker(world, victim, source);
     }
     let moved = if is_player {
-        cmd_flee(world, victim, "");
+        flee_through_exit(world, victim);
         world.get::<Located>(victim).map(|l| l.0) != Some(room)
     } else {
         mob_flee(world, victim, room)
