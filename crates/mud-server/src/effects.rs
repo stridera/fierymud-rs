@@ -269,7 +269,13 @@ pub(crate) fn teardown_markers_after_removal(world: &mut World, target: Entity, 
     // `mob_effects::FLAG_MARKERS`. Manually-toggled `hide` / `visible`
     // install / remove Stealth directly without a backing effect, so a
     // target with manual stealth and no status effects is unaffected.
+    let was_flying = world.get::<mud_world::Flying>(target).is_some();
     mud_world::mob_effects::teardown_flag_marker(world, target, name);
+    if was_flying && world.get::<mud_world::Flying>(target).is_none() {
+        // Nothing holds the bearer up any more: fall through an air
+        // room, or drop to the ground anywhere else.
+        crate::flight::on_flight_lost(world, target);
+    }
     // Invisible: the backing is any `InvisibleSource`-tagged instance
     // (INVISIBLE / MASS_INVIS, a permanent `invisible` flag), whatever
     // it is named; the fade message and aggro recheck live in

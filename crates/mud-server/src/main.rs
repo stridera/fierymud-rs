@@ -12,6 +12,7 @@ mod entity_vars;
 mod equip_apply;
 mod events;
 mod fear;
+mod flight;
 mod idle;
 mod item_alter;
 mod item_custom;
@@ -543,6 +544,7 @@ async fn main() {
                 timed!(regen::light_fuel_tick),
                 timed!(regen::drunkenness_tick),
                 timed!(drowning::drowning_tick),
+                timed!(flight::gravity_tick),
                 timed!(weather::weather_tick),
                 timed!(sleep::mob_sleep_tick),
             )

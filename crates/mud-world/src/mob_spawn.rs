@@ -103,5 +103,7 @@ pub fn spawn_mob_from_proto(
     let mob = em.id();
     crate::mob_effects::apply_mob_default_effects(world, mob, proto_key);
     crate::mob_effects::apply_race_effects(world, mob, &proto.race);
+    // Spawned into an air room without wings (or a fly effect): it drops.
+    crate::movement::begin_fall_if_unsupported(world, mob);
     mob
 }

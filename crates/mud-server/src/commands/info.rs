@@ -11297,6 +11297,8 @@ fn give_plain(world: &mut World, player: Entity, args: &str) {
         &[player, target],
         &format!("{player_name} gives {item_name} to {target_name}.\r\n"),
     );
+    // A flying recipient may now be too heavy to stay up.
+    crate::flight::check_overweight(world, target);
 
     // Fire RECEIVE triggers on the recipient. Bodies typically gate
     // on `object.id` to handle quest item turn-ins.
@@ -11647,6 +11649,30 @@ pub(crate) fn cmd_fly(world: &mut World, player: Entity, _args: &str) {
         send_to(world, player, "You're already flying.\r\n");
         return;
     }
+    // Legacy `do_fly`: only something that grants flight lets you rise (gods
+    // always can), and a load past the flight limit pins you down.
+    if !has_effect_named(world, player, "fly") && effective_level(world, player) < 100 {
+        send_to(world, player, "You do not have the means to fly.\r\n");
+        return;
+    }
+    if crate::flight::too_heavy_to_fly(world, player) {
+        send_to(
+            world,
+            player,
+            "You try to rise up, but you can't get off the ground!\r\n",
+        );
+        if let Some(located) = world.get::<Located>(player).copied() {
+            let n = crate::commands::cap_sentence_start(&name_of(world, player));
+            let his = crate::flight::possessive(world, player);
+            broadcast_room_except_players_rendered(
+                world,
+                located.0,
+                &[player],
+                &format!("{n} rises up on {his} toes, as if trying to fly.\r\n"),
+            );
+        }
+        return;
+    }
     try_insert(world, player, mud_world::Flying);
     let mover_name = name_of(world, player);
     send_to(
@@ -11673,6 +11699,8 @@ pub(crate) fn cmd_walk(world: &mut World, player: Entity, _args: &str) {
     try_remove::<mud_world::Flying>(world, player);
     let mover_name = name_of(world, player);
     send_to(world, player, "You touch down and start walking again.\r\n");
+    // Legacy `do_stand` -> `falling_check`: landing over thin air is a fall.
+    mud_world::movement::begin_fall_if_unsupported(world, player);
     if let Some(located) = world.get::<Located>(player).copied() {
         broadcast_room_except_players_rendered(
             world,

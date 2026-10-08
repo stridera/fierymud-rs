@@ -4057,6 +4057,9 @@ impl ConnRouter {
         // Race-innate permanent effects (RaceEffects), rebuilt on every
         // login rather than restored, so relogging never duplicates them.
         apply_player_race_effects(world, entity);
+        // Logging in mid-air without wings: the gravity tick re-checks
+        // flight next tick, once worn items have re-applied their effects.
+        mud_world::movement::begin_fall_if_unsupported(world, entity);
         // Hired / charmed pets — same 1h cap. Helper drops the
         // whole envelope when elapsed exceeds the cap, otherwise
         // spawns each pet next to the player with HP restored.

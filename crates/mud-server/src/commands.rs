@@ -1204,9 +1204,11 @@ fn dispatch_line(world: &mut World, player: Entity, line: &str, run: &mut AliasR
     if ARTICLE_VERBS.contains(&cmd.names[0]) && has_article(args) {
         let stripped = strip_articles(args);
         (cmd.run)(world, player, &stripped);
-        return;
+    } else {
+        (cmd.run)(world, player, args);
     }
-    (cmd.run)(world, player, args);
+    // The command may have loaded a flier down past what the air will bear.
+    crate::flight::after_command(world, player);
 }
 
 /// Verbs whose arguments are an item / target phrase and so skip the
@@ -17680,6 +17682,9 @@ pub(crate) fn invoke_ability_with(
                     && let Some(room) = world.get::<Located>(target_entity).map(|l| l.0)
                 {
                     refresh_room_players(world, room);
+                }
+                if flag == "fly" {
+                    crate::flight::refuse_heavy_flier(world, player, target_entity);
                 }
                 // Paralysis holds its bearer like a stun: no swinging, no
                 // fleeing (legacy `perform_violence` / `attack_ok`).

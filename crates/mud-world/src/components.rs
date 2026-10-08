@@ -1632,6 +1632,21 @@ pub const PREF_CHARSET_KEY: &str = "pref.charset";
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Flying;
 
+/// Marker: an actor stands in an air room with nothing holding it up and is
+/// falling through the down exits (legacy `EVENT_GRAVITY`). Inserted by
+/// [`crate::movement::begin_fall_if_unsupported`] on entering an air room and
+/// by the flight-loss paths; consumed by the server's `gravity_tick`, which
+/// re-validates every step. `due_tick` of 0 means "next tick".
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Falling {
+    /// Room the fall began in (legacy loop detection).
+    pub start_room: Entity,
+    /// Rooms fallen so far (drives landing damage).
+    pub distance: u32,
+    /// `TickCount` at which the next step is due.
+    pub due_tick: u64,
+}
+
 /// Marker: the target is under a `bless`-family buff (cleric BLESS,
 /// paladin BLESS, etc.). Read in `combat::hit_chance_pct` to grant
 /// the attacker a flat +5 accuracy bonus. Installed by the

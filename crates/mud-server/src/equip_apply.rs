@@ -264,6 +264,7 @@ pub fn apply_object_to_wearer(world: &mut World, item: Entity, wearer: Entity) {
                 );
                 continue;
             }
+            let grants_fly = flag == "fly";
             let entity = world
                 .spawn((
                     EffectInstance {
@@ -283,6 +284,9 @@ pub fn apply_object_to_wearer(world: &mut World, item: Entity, wearer: Entity) {
                 .id();
             mud_world::mob_effects::tag_flag_instance(world, entity, &flag);
             spawned_effect_entities.push(entity);
+            if grants_fly {
+                crate::flight::refuse_heavy_flier(world, wearer, wearer);
+            }
         }
     }
     // ---- Bookkeeping for unapply ----
