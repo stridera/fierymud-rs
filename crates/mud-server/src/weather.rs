@@ -1,7 +1,8 @@
 //! Per-zone weather drift tick. Updates `WeatherCatalog` every
-//! `WEATHER_TICK_TICKS` real-time ticks (≈one game-quarter-day) by
-//! nudging each zone's `WeatherState` one band toward a random
-//! climate-bounded target. Fully ephemeral — restart re-derives
+//! `WEATHER_TICK_TICKS` real-time ticks (three game hours, 225 s) by
+//! nudging each zone's `WeatherState` one step. Precipitation moves at
+//! most one rung along the climate's ladder per update, with legacy's
+//! odds (`update_precipitation`). Fully ephemeral — restart re-derives
 //! state from each zone's `Climate`.
 
 use bevy_ecs::prelude::*;
@@ -10,10 +11,14 @@ use mud_world::{PrecipKind, TempBand, WeatherCatalog, WeatherState, ZoneClimate}
 
 use crate::TickCount;
 
-/// One real-time minute (six game-hours). Loose enough that small
-/// random drifts feel weather-like rather than chaotic, tight enough
-/// that a player's session sees it change.
-const WEATHER_TICK_TICKS: u64 = 600;
+/// Ticks per game hour (75 real seconds at 10 Hz; see `advance_clock`).
+const TICKS_PER_GAME_HOUR: u64 = 750;
+
+/// Legacy `update_weather` runs each hour but rotates wind, temperature
+/// and precipitation, so a given element updates once per three game
+/// hours (225 s). Precipitation used to drift every 60 s here — roughly
+/// four times too often, which read as spam (#69).
+const WEATHER_TICK_TICKS: u64 = 3 * TICKS_PER_GAME_HOUR;
 
 pub fn weather_tick(world: &mut World) {
     let tick = world.resource::<TickCount>().0;
@@ -186,13 +191,29 @@ fn seasonal_temp_range(climate: Climate, season: mud_world::Season) -> (TempBand
 }
 
 fn drift_precip(current: PrecipKind, climate: Climate) -> PrecipKind {
-    let pool = precip_pool(climate);
-    // 60% stay, 40% pick a random valid precip for this climate.
-    if rand::random_range(0..5) < 3 {
-        return current;
-    }
-    let pick = rand::random_range(0..pool.len());
-    pool[pick]
+    step_precip(current, precip_pool(climate), rand::random_range(0..7))
+}
+
+/// One legacy `update_precipitation` step on the climate's ladder
+/// (`pool`, calmest first). `roll` is legacy's `random_number(0, 6)` with
+/// no wind: 0-1 climb one rung, 3-4 fall one rung, 2/5/6 hold (so 2/7 up,
+/// 2/7 down, 3/7 unchanged). The ends of the ladder clamp. A state outside
+/// the ladder (a spell set it) rejoins it on the first non-hold roll.
+fn step_precip(current: PrecipKind, pool: &[PrecipKind], roll: u32) -> PrecipKind {
+    let up = match roll {
+        0 | 1 => true,
+        3 | 4 => false,
+        _ => return current,
+    };
+    let Some(idx) = pool.iter().position(|p| *p == current) else {
+        return pool[usize::try_from(roll).unwrap_or(0) % pool.len()];
+    };
+    let next = if up {
+        (idx + 1).min(pool.len() - 1)
+    } else {
+        idx.saturating_sub(1)
+    };
+    pool[next]
 }
 
 fn temp_idx(t: TempBand) -> usize {
@@ -241,6 +262,8 @@ fn temp_range(climate: Climate) -> (TempBand, TempBand) {
     }
 }
 
+/// Precipitation ladder for a climate, calmest first. `step_precip`
+/// moves one rung at a time along it.
 fn precip_pool(climate: Climate) -> &'static [PrecipKind] {
     use PrecipKind::{Blizzard, Clear, Cloudy, Drizzle, Rain, Snow, Storm};
     match climate {
@@ -249,9 +272,8 @@ fn precip_pool(climate: Climate) -> &'static [PrecipKind] {
         Climate::Tropical => &[Clear, Cloudy, Rain, Storm],
         Climate::Subtropical | Climate::Temperate => &[Clear, Cloudy, Drizzle, Rain, Storm],
         Climate::Oceanic => &[Cloudy, Drizzle, Rain, Storm],
-        Climate::Subarctic => &[Cloudy, Snow, Blizzard],
-        Climate::Arctic => &[Snow, Blizzard, Cloudy],
-        Climate::Alpine => &[Cloudy, Snow, Clear],
+        Climate::Subarctic | Climate::Arctic => &[Cloudy, Snow, Blizzard],
+        Climate::Alpine => &[Clear, Cloudy, Snow],
     }
 }
 
@@ -561,6 +583,59 @@ mod tests {
             }
         }
         assert!(changed, "a temperate zone should drift within 500 ticks");
+    }
+
+    #[test]
+    fn precip_drift_is_every_three_game_hours() {
+        // Legacy rotates wind/temp/precip once per game hour: 3 h = 225 s.
+        assert_eq!(WEATHER_TICK_TICKS, 3 * 75 * crate::TICK_HZ);
+    }
+
+    #[test]
+    fn step_precip_uses_legacy_odds_and_moves_one_rung() {
+        use PrecipKind::{Clear, Cloudy, Drizzle, Rain};
+        let pool = [Clear, Cloudy, Drizzle, Rain];
+        // legacy random_number(0, 6): 0-1 up, 3-4 down, 2/5/6 hold.
+        let ups = [0, 1].map(|r| step_precip(Cloudy, &pool, r));
+        let downs = [3, 4].map(|r| step_precip(Cloudy, &pool, r));
+        let holds = [2, 5, 6].map(|r| step_precip(Cloudy, &pool, r));
+        assert_eq!(ups, [Drizzle; 2]);
+        assert_eq!(downs, [Clear; 2]);
+        assert_eq!(holds, [Cloudy; 3]);
+        // Ends of the ladder clamp rather than wrap or jump.
+        assert_eq!(step_precip(Rain, &pool, 0), Rain);
+        assert_eq!(step_precip(Clear, &pool, 3), Clear);
+    }
+
+    #[test]
+    fn step_precip_rejoins_the_ladder_from_outside_it() {
+        use PrecipKind::{Clear, Cloudy, Snow};
+        let pool = [Clear, Cloudy];
+        assert_eq!(step_precip(Snow, &pool, 2), Snow, "hold roll leaves it");
+        assert!(pool.contains(&step_precip(Snow, &pool, 0)));
+        assert!(pool.contains(&step_precip(Snow, &pool, 4)));
+    }
+
+    #[test]
+    fn real_drift_never_skips_a_rung_and_changes_about_four_in_seven() {
+        // Statistical match against legacy: from a mid-ladder state the
+        // chance of any change per update is 4/7 (~57%), never >1 rung.
+        let climate = Climate::Oceanic;
+        let pool = precip_pool(climate);
+        let mid = pool[1];
+        let n: u32 = 20_000;
+        let mut changed: u32 = 0;
+        for _ in 0..n {
+            let next = drift_precip(mid, climate);
+            let (a, b) = (
+                pool.iter().position(|p| *p == mid).unwrap(),
+                pool.iter().position(|p| *p == next).unwrap(),
+            );
+            assert!(a.abs_diff(b) <= 1, "{mid:?} -> {next:?} skipped a rung");
+            changed += u32::from(next != mid);
+        }
+        let frac = f64::from(changed) / f64::from(n);
+        assert!((0.52..0.62).contains(&frac), "change rate {frac}");
     }
 
     #[test]
