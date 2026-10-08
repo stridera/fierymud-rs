@@ -1620,17 +1620,29 @@ pub(crate) struct DamagedBy {
     pub at: std::time::Instant,
 }
 
-/// Record `attacker` as the most recent damage source of `victim`.
-/// Only Players are credited with kills, so other sources are ignored.
-pub(crate) fn record_damager(world: &mut World, victim: Entity, attacker: Entity) {
-    if world.get::<Player>(attacker).is_none() {
-        return;
+/// The Player a damage source is credited to: a Player is itself, a
+/// pet (a mob following a player, charmed or not) is its master.
+/// Anything else (a wild mob) earns no kill credit.
+fn credited_player(world: &World, source: Entity) -> Option<Entity> {
+    if world.get::<Player>(source).is_some() {
+        Some(source)
+    } else {
+        crate::commands::pet_owner(world, source)
     }
+}
+
+/// Record the Player behind `attacker` (the attacker itself, or a pet's
+/// master) as the most recent damage source of `victim`. Only Players
+/// are credited with kills, so other sources are ignored.
+pub(crate) fn record_damager(world: &mut World, victim: Entity, attacker: Entity) {
+    let Some(credit) = credited_player(world, attacker) else {
+        return;
+    };
     try_insert(
         world,
         victim,
         DamagedBy {
-            attacker,
+            attacker: credit,
             at: std::time::Instant::now(),
         },
     );
@@ -1681,50 +1693,121 @@ fn kill_alignment_after(
         .clamp(-MAX_ALIGNMENT, MAX_ALIGNMENT)
 }
 
-/// Shift `killer`'s alignment for killing the player `victim`
-/// (legacy formula, see [`kill_alignment_after`]) and tell them when it
-/// moved.
-fn apply_pvp_alignment_shift(world: &mut World, killer: Entity, victim: Entity) {
+/// `IS_GOOD` / `IS_EVIL` (`utils.hpp`): the alignment bands that make a
+/// legacy `AGGR_GOOD` / `AGGR_EVIL` victim look eviler / better to the
+/// killer.
+const GOOD_ALIGNMENT: i32 = 350;
+
+/// Who shares in a kill: the killer's group members standing in the
+/// killer's room, the killer included. A solo killer is alone. XP, the
+/// trophy split and the alignment shift all use this one roster
+/// (legacy `group_gain` / `receive_kill_credit`).
+fn kill_credit_recipients(world: &mut World, killer: Entity) -> Vec<Entity> {
+    let killer_room = world.get::<Located>(killer).map(|l| l.0);
+    let root = crate::commands::group_root(world, killer);
+    let members = crate::commands::group_members(world, root);
+    let recipients: Vec<Entity> = members
+        .into_iter()
+        .filter(|m| killer_room.is_some() && world.get::<Located>(*m).map(|l| l.0) == killer_room)
+        .collect();
+    if recipients.is_empty() {
+        vec![killer]
+    } else {
+        recipients
+    }
+}
+
+/// `(aggr_good, aggr_evil)` for a mob victim, read from its proto's
+/// aggression formula (the import turns `AGGR_GOOD` / `AGGR_EVIL` into
+/// those formula clauses).
+fn victim_aggro_alignment(world: &mut World, victim: Entity) -> (bool, bool) {
+    let Some(key) = world.get::<WorldKey>(victim).copied() else {
+        return (false, false);
+    };
+    let formula = world
+        .get_resource::<MobPrototypes>()
+        .and_then(|p| p.by_key.get(&(key.zone, key.id)))
+        .and_then(|p| p.aggression_formula.clone());
+    let Some(formula) = formula else {
+        return (false, false);
+    };
+    world
+        .get_resource_mut::<crate::aggression::AggressionFormulaCache>()
+        .map_or((false, false), |mut c| c.alignment_hatred(&formula))
+}
+
+/// Shift the alignment of everyone credited with killing `victim`,
+/// mirroring legacy `receive_kill_credit` -> `change_alignment`: it runs
+/// for every group member in the killer's room, on mob and player
+/// victims alike, and not in arena rooms. A mob victim flagged
+/// `AGGR_GOOD` looks 100 eviler to a good member (and `AGGR_EVIL` 100
+/// better to an evil one). Only the killer of a player is told about
+/// the shift.
+fn apply_kill_alignment(world: &mut World, killer: Entity, victim: Entity) {
+    let in_arena = world
+        .get::<Located>(killer)
+        .is_some_and(|l| world.get::<mud_world::ArenaRoom>(l.0).is_some());
+    if in_arena {
+        return;
+    }
+    let victim_is_player = world.get::<Player>(victim).is_some();
     let victim_alignment = world.get::<CombatStats>(victim).map_or(0, |c| c.alignment);
     let victim_level = world
         .get::<mud_world::Profile>(victim)
         .map_or(1, |p| p.level);
-    let (killer_level, class_id) = world
-        .get::<mud_world::Profile>(killer)
-        .map_or((1, None), |p| (p.level, p.class_id));
-    let bias = class_id
-        .and_then(|id| {
-            world
-                .get_resource::<mud_world::ClassCatalog>()
-                .and_then(|c| c.by_id.get(&id))
-        })
-        .map_or(0, |c| class_alignment_bias(&c.plain_name));
-    let Some(mut cs) = world.get_mut::<CombatStats>(killer) else {
-        return;
+    let (aggr_good, aggr_evil) = if victim_is_player {
+        (false, false)
+    } else {
+        victim_aggro_alignment(world, victim)
     };
-    let before = cs.alignment;
-    let after = kill_alignment_after(before, bias, killer_level, victim_alignment, victim_level);
-    cs.alignment = after;
-    if after < before {
-        send_to(
-            world,
-            killer,
-            "A shadow falls across your soul as you take a player's life.\r\n",
-        );
-    } else if after > before {
-        send_to(
-            world,
-            killer,
-            "Some small good comes of ending a wicked life.\r\n",
-        );
+    for member in kill_credit_recipients(world, killer) {
+        let (member_level, class_id) = world
+            .get::<mud_world::Profile>(member)
+            .map_or((1, None), |p| (p.level, p.class_id));
+        let bias = class_id
+            .and_then(|id| {
+                world
+                    .get_resource::<mud_world::ClassCatalog>()
+                    .and_then(|c| c.by_id.get(&id))
+            })
+            .map_or(0, |c| class_alignment_bias(&c.plain_name));
+        let Some(mut cs) = world.get_mut::<CombatStats>(member) else {
+            continue;
+        };
+        let before = cs.alignment;
+        let mut v_al = victim_alignment;
+        if aggr_good && before >= GOOD_ALIGNMENT {
+            v_al -= 100;
+        } else if aggr_evil && before <= -GOOD_ALIGNMENT {
+            v_al += 100;
+        }
+        let after = kill_alignment_after(before, bias, member_level, v_al, victim_level);
+        cs.alignment = after;
+        if member != killer || !victim_is_player {
+            continue;
+        }
+        if after < before {
+            send_to(
+                world,
+                member,
+                "A shadow falls across your soul as you take a player's life.\r\n",
+            );
+        } else if after > before {
+            send_to(
+                world,
+                member,
+                "Some small good comes of ending a wicked life.\r\n",
+            );
+        }
     }
 }
 
 /// Resolve who gets credit for `victim`'s death: the most recent
-/// recorded Player damager (recent, still present and in `room`),
-/// otherwise a Player currently `Fighting` the victim. Resolved once
-/// per death so XP, coin, loot-claim and autoloot all agree on a
-/// single killer.
+/// recorded damager's Player (recent, still present and in `room`; a
+/// pet's damage is its master's), otherwise a Player, or a pet whose
+/// master is in `room`, currently `Fighting` the victim. Resolved once
+/// per death so XP, coin, loot-claim, autoloot and the alignment shift
+/// all agree on a single killer.
 fn resolve_killer(world: &mut World, victim: Entity, room: Entity) -> Option<Entity> {
     if let Some(d) = world.get::<DamagedBy>(victim).copied()
         && d.attacker != victim
@@ -1734,10 +1817,25 @@ fn resolve_killer(world: &mut World, victim: Entity, room: Entity) -> Option<Ent
     {
         return Some(d.attacker);
     }
-    let mut q = world.query_filtered::<(Entity, &Fighting), With<Player>>();
-    q.iter(world)
-        .find(|(e, f)| f.0 == victim && *e != victim)
-        .map(|(e, _)| e)
+    let fighters: Vec<Entity> = {
+        let mut q = world.query::<(Entity, &Fighting)>();
+        q.iter(world)
+            .filter(|(e, f)| f.0 == victim && *e != victim)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    fighters
+        .iter()
+        .copied()
+        .find(|e| world.get::<Player>(*e).is_some())
+        .or_else(|| {
+            fighters.iter().find_map(|e| {
+                crate::commands::pet_owner(world, *e).filter(|owner| {
+                    *owner != victim
+                        && world.get::<mud_world::Located>(*owner).map(|l| l.0) == Some(room)
+                })
+            })
+        })
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1882,11 +1980,11 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
         }
 
         // PvP alignment shift: legacy `change_alignment` applied to a
-        // player victim. Killing an evil character nudges the killer
-        // toward good, killing a good one toward evil.
+        // player victim, for the killer and their group. Killing an evil
+        // character nudges them toward good, a good one toward evil.
         try_remove::<DamagedBy>(world, victim);
         if let Some(killer) = pvp_killer {
-            apply_pvp_alignment_shift(world, killer, victim);
+            apply_kill_alignment(world, killer, victim);
         }
 
         // Death clears every mob's grudge data against the dead
@@ -1981,6 +2079,11 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
         // down, and hand the same identity to XP, coin and autoloot.
         let killer = resolve_killer(world, victim, room);
         award_kill_xp(world, victim, victim_name, killer);
+        // Legacy `receive_kill_credit` shifts every credited member's
+        // alignment against the victim, mob kills included.
+        if let Some(killer) = killer {
+            apply_kill_alignment(world, killer, victim);
+        }
         // Achievement hooks: first_kill and (eventually)
         // milestone-kill counters. Fire on the player who's
         // currently Fighting the victim — same target as the
@@ -2290,23 +2393,7 @@ fn award_kill_xp(world: &mut World, victim: Entity, victim_name: &str, killer: O
     // top-of-chain follower target), keep only members in the
     // same room as the killer, and split the kill XP evenly. Solo
     // kills (no follow chain) get the full amount.
-    let killer_room = world.get::<mud_world::Located>(killer).map(|l| l.0);
-    let recipients: Vec<Entity> = {
-        let root = crate::commands::group_root(world, killer);
-        let members = crate::commands::group_members(world, root);
-        members
-            .into_iter()
-            .filter(|m| {
-                killer_room.is_some()
-                    && world.get::<mud_world::Located>(*m).map(|l| l.0) == killer_room
-            })
-            .collect()
-    };
-    let recipients = if recipients.is_empty() {
-        vec![killer]
-    } else {
-        recipients
-    };
+    let recipients = kill_credit_recipients(world, killer);
     let n = i32::try_from(recipients.len()).unwrap_or(1).max(1);
     let share = (xp / n).max(1);
     // Trophy kill share: legacy splits 1.0 across the group. The
@@ -4633,5 +4720,383 @@ mod tests {
             is_soundproof,
             "listener's room reports as soundproof — broadcast skips them",
         );
+    }
+
+    // ---- kill credit: pets, groups, alignment ----
+
+    fn credit_proto(alignment: i32, formula: Option<&str>) -> mud_world::MobProto {
+        mud_world::MobProto {
+            zone_id: 1,
+            id: 1,
+            name: "a goblin".to_string(),
+            keywords: vec!["goblin".to_string()],
+            room_description: String::new(),
+            examine_description: String::new(),
+            gender: "neutral".to_string(),
+            race: "humanoid".to_string(),
+            level: 1,
+            alignment,
+            role: mud_db::enums::MobRole::Normal,
+            hp_dice_num: 1,
+            hp_dice_size: 1,
+            hp_dice_bonus: 5,
+            damage_dice_num: 1,
+            damage_dice_size: 1,
+            damage_dice_bonus: 0,
+            accuracy: 0,
+            evasion: 0,
+            attack_power: 0,
+            spell_power: 0,
+            penetration_flat: 0,
+            penetration_percent: 0,
+            armor_rating: 0,
+            damage_reduction_percent: 0,
+            soak: 0,
+            hardness: 0,
+            perception: 0,
+            concealment: 0,
+            resistances: serde_json::json!({}),
+            ward_percent: 0,
+            wealth: 75,
+            class_id: None,
+            behaviors: Vec::new(),
+            protected_kind: mud_db::enums::ProtectedKind::Normal,
+            professions: Vec::new(),
+            size: mud_db::enums::Size::Medium,
+            life_force: mud_db::enums::LifeForce::Life,
+            composition: mud_db::enums::Composition::Flesh,
+            damage_type: mud_db::enums::DamageType::Hit,
+            move_points: 0,
+            default_position: mud_db::enums::Position::Standing,
+            traits: Vec::new(),
+            movement_mode: mud_db::enums::MovementMode::Normal,
+            default_movement_mode: mud_db::enums::MovementMode::Normal,
+            aggression_formula: formula.map(str::to_string),
+        }
+    }
+
+    /// A world with one goblin proto (alignment `alignment`) and a live
+    /// goblin in `room`. Returns the goblin.
+    fn credit_goblin(
+        world: &mut World,
+        room: Entity,
+        alignment: i32,
+        formula: Option<&str>,
+    ) -> Entity {
+        let mut protos = MobPrototypes::default();
+        protos
+            .by_key
+            .insert((1, 1), credit_proto(alignment, formula));
+        world.insert_resource(protos);
+        world.insert_resource(TickCount(0));
+        world.insert_resource(crate::aggression::AggressionFormulaCache::default());
+        world.insert_resource(mud_world::LevelTable::default());
+        world
+            .spawn((
+                Mob,
+                Named {
+                    name: "a goblin".to_string(),
+                },
+                Located(room),
+                Health { hp: 5, max: 5 },
+                CombatStats {
+                    alignment,
+                    ..Default::default()
+                },
+                mud_world::Profile {
+                    level: 1,
+                    class_id: None,
+                    race: "humanoid".to_string(),
+                    experience: 0,
+                    gender: "neutral".to_string(),
+                },
+                mud_world::WorldKey { zone: 1, id: 1 },
+            ))
+            .id()
+    }
+
+    fn credit_player(world: &mut World, room: Entity, name: &str, alignment: i32) -> Entity {
+        world
+            .spawn((
+                Player,
+                Named {
+                    name: name.to_string(),
+                },
+                Located(room),
+                Health { hp: 100, max: 100 },
+                CombatStats {
+                    alignment,
+                    accuracy: 200,
+                    ..Default::default()
+                },
+                NaturalDamage {
+                    num: 1,
+                    size: 1,
+                    bonus: 99,
+                },
+                Posture(PostureKind::Standing),
+                mud_world::Profile {
+                    level: 1,
+                    class_id: None,
+                    race: "human".to_string(),
+                    experience: 0,
+                    gender: "neutral".to_string(),
+                },
+            ))
+            .id()
+    }
+
+    fn credit_pet(world: &mut World, room: Entity, master: Entity, target: Entity) -> Entity {
+        world
+            .spawn((
+                Mob,
+                Named {
+                    name: "a wolf".to_string(),
+                },
+                Located(room),
+                Health { hp: 50, max: 50 },
+                CombatStats {
+                    accuracy: 200,
+                    ..Default::default()
+                },
+                NaturalDamage {
+                    num: 1,
+                    size: 1,
+                    bonus: 99,
+                },
+                Posture(PostureKind::Standing),
+                mud_world::Follower(master),
+                Fighting(target),
+            ))
+            .id()
+    }
+
+    fn alignment_of(world: &World, e: Entity) -> i32 {
+        world.get::<CombatStats>(e).unwrap().alignment
+    }
+
+    fn xp_of(world: &World, e: Entity) -> i32 {
+        world.get::<mud_world::Profile>(e).unwrap().experience
+    }
+
+    #[test]
+    fn pet_only_kill_credits_the_master() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let goblin = credit_goblin(&mut world, room, -800, None);
+        let item = world
+            .spawn((
+                Item,
+                Named {
+                    name: "a rusty dagger".to_string(),
+                },
+                Located(goblin),
+            ))
+            .id();
+        let master = credit_player(&mut world, room, "Master", 0);
+        // The master's own settings drive loot: autoloot on, autogold off.
+        world.entity_mut(master).insert(mud_world::PlayerFlags(vec![
+            mud_db::enums::PlayerFlag::AutoLoot,
+        ]));
+        let _pet = credit_pet(&mut world, room, master, goblin);
+
+        run_combat_tick(&mut world);
+
+        assert!(
+            world.get_entity(goblin).is_err(),
+            "the pet killed the goblin"
+        );
+        assert!(xp_of(&world, master) > 0, "master gets the kill XP");
+        assert_eq!(
+            world.get::<Located>(item).map(|l| l.0),
+            Some(master),
+            "master's autoloot pulls the item"
+        );
+        assert_eq!(alignment_of(&world, master), 4, "master's alignment shifts");
+        let coin = world
+            .query_filtered::<&mud_world::CoinPile, With<Corpse>>()
+            .iter(&world)
+            .map(|p| p.0)
+            .next();
+        assert_eq!(coin, Some(75), "no autogold: coin waits on the corpse");
+    }
+
+    #[test]
+    fn pet_only_kill_pays_the_masters_autogold() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let goblin = credit_goblin(&mut world, room, 0, None);
+        let master = credit_player(&mut world, room, "Master", 0);
+        world.entity_mut(master).insert(mud_world::PlayerFlags(vec![
+            mud_db::enums::PlayerFlag::AutoGold,
+        ]));
+        let _pet = credit_pet(&mut world, room, master, goblin);
+
+        run_combat_tick(&mut world);
+
+        assert!(world.get_entity(goblin).is_err());
+        assert!(world.get::<Wealth>(master).is_some_and(|w| w.0 > 0));
+    }
+
+    #[test]
+    fn pet_damage_is_recorded_as_the_masters() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let goblin = credit_goblin(&mut world, room, 0, None);
+        let master = credit_player(&mut world, room, "Master", 0);
+        let pet = world
+            .spawn((Mob, Located(room), mud_world::Follower(master)))
+            .id();
+        let wild = world.spawn((Mob, Located(room))).id();
+
+        record_damager(&mut world, goblin, wild);
+        assert!(
+            world.get::<DamagedBy>(goblin).is_none(),
+            "wild mobs earn no credit"
+        );
+        record_damager(&mut world, goblin, pet);
+        assert_eq!(world.get::<DamagedBy>(goblin).unwrap().attacker, master);
+        assert_eq!(resolve_killer(&mut world, goblin, room), Some(master));
+    }
+
+    #[test]
+    fn pet_whose_master_left_the_room_credits_nobody() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let elsewhere = make_room(&mut world);
+        let goblin = credit_goblin(&mut world, room, 0, None);
+        let master = credit_player(&mut world, elsewhere, "Master", 0);
+        let _pet = credit_pet(&mut world, room, master, goblin);
+
+        run_combat_tick(&mut world);
+
+        assert!(world.get_entity(goblin).is_err());
+        assert_eq!(xp_of(&world, master), 0);
+    }
+
+    #[test]
+    fn group_kill_shifts_alignment_for_each_member_in_the_room() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let away = make_room(&mut world);
+        let goblin = credit_goblin(&mut world, room, -800, None);
+        let leader = credit_player(&mut world, room, "Leader", 0);
+        // Killer's alignment 500 -> legacy: -800 / (-75 - 25*2) = 6.
+        let killer = credit_player(&mut world, room, "Killer", 500);
+        let extreme = credit_player(&mut world, room, "Extreme", 1000);
+        let absent = credit_player(&mut world, away, "Absent", 0);
+        for m in [killer, extreme, absent] {
+            world.entity_mut(m).insert(mud_world::Follower(leader));
+        }
+        world.entity_mut(killer).insert(Fighting(goblin));
+
+        run_combat_tick(&mut world);
+
+        assert!(world.get_entity(goblin).is_err());
+        assert_eq!(alignment_of(&world, leader), 4);
+        assert_eq!(alignment_of(&world, killer), 506);
+        assert_eq!(alignment_of(&world, extreme), 1000, "clamped at the cap");
+        assert_eq!(alignment_of(&world, absent), 0, "other room: no credit");
+    }
+
+    #[test]
+    fn mob_kill_moves_the_killer_away_from_the_victims_alignment() {
+        for (victim_al, expected) in [(-800, 4), (800, -4), (0, 0)] {
+            let mut world = World::new();
+            let room = make_room(&mut world);
+            let goblin = credit_goblin(&mut world, room, victim_al, None);
+            let killer = credit_player(&mut world, room, "Killer", 0);
+            world.entity_mut(killer).insert(Fighting(goblin));
+            run_combat_tick(&mut world);
+            assert!(world.get_entity(goblin).is_err());
+            assert_eq!(alignment_of(&world, killer), expected, "victim {victim_al}");
+        }
+    }
+
+    #[test]
+    fn aggr_good_mob_looks_eviler_to_a_good_killer() {
+        // Victim -200, killer +400. Plain: -200 / (-75 - 25*3) = -200/-150
+        // = 1 -> 401. AGGR_GOOD: v_al -300 -> 2 -> 402. A neutral killer
+        // gets no skew.
+        for (formula, killer_al, expected) in [
+            (None, 400, 401),
+            (Some("target.alignment >= ALIGN.GOOD"), 400, 402),
+            (Some("target.alignment >= ALIGN.GOOD"), 0, 1),
+        ] {
+            let mut world = World::new();
+            let room = make_room(&mut world);
+            let goblin = credit_goblin(&mut world, room, -200, formula);
+            let killer = credit_player(&mut world, room, "Killer", killer_al);
+            world.entity_mut(killer).insert(Fighting(goblin));
+            run_combat_tick(&mut world);
+            assert_eq!(alignment_of(&world, killer), expected, "{formula:?}");
+        }
+    }
+
+    #[test]
+    fn aggr_evil_mob_looks_better_to_an_evil_killer() {
+        // Victim +200, killer -400, AGGR_EVIL: v_al 300.
+        // den = -75 - 25*|(-400-1000)/200 = -7| = -250; 300/-250 = -1;
+        // drag 2*|-400/1000| = 0 -> -1 (level gap is small) -> -401.
+        // Plain: 200/-250 = 0 -> -400.
+        for (formula, expected) in [(None, -400), (Some("target.alignment <= ALIGN.EVIL"), -401)] {
+            let mut world = World::new();
+            let room = make_room(&mut world);
+            let goblin = credit_goblin(&mut world, room, 200, formula);
+            let killer = credit_player(&mut world, room, "Killer", -400);
+            world.entity_mut(killer).insert(Fighting(goblin));
+            run_combat_tick(&mut world);
+            assert_eq!(alignment_of(&world, killer), expected, "{formula:?}");
+        }
+    }
+
+    #[test]
+    fn arena_kill_shifts_no_alignment() {
+        let mut world = World::new();
+        let room = world.spawn(mud_world::ArenaRoom).id();
+        let goblin = credit_goblin(&mut world, room, -800, None);
+        let killer = credit_player(&mut world, room, "Killer", 0);
+        world.entity_mut(killer).insert(Fighting(goblin));
+        run_combat_tick(&mut world);
+        assert!(world.get_entity(goblin).is_err());
+        assert_eq!(alignment_of(&world, killer), 0);
+    }
+
+    #[test]
+    fn pvp_kill_by_a_pet_is_the_masters_pvp_kill() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        world.insert_resource(TickCount(0));
+        let victim = spawn_dying_player(&mut world, room, "Victim", 0);
+        world.entity_mut(victim).insert(CombatStats {
+            alignment: -800,
+            ..Default::default()
+        });
+        let master = credit_player(&mut world, room, "Master", 0);
+        let pet = credit_pet(&mut world, room, master, victim);
+        // The pet landed the blow; the damage record names its master.
+        record_damager(&mut world, victim, pet);
+
+        super::handle_death(&mut world, victim, "Victim", room);
+
+        assert_eq!(alignment_of(&world, master), 4);
+    }
+
+    #[test]
+    fn pvp_kill_by_a_fighting_pet_without_a_damage_record_credits_the_master() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        world.insert_resource(TickCount(0));
+        let victim = spawn_dying_player(&mut world, room, "Victim", 0);
+        world.entity_mut(victim).insert(CombatStats {
+            alignment: 800,
+            ..Default::default()
+        });
+        let master = credit_player(&mut world, room, "Master", 0);
+        let _pet = credit_pet(&mut world, room, master, victim);
+
+        super::handle_death(&mut world, victim, "Victim", room);
+
+        assert_eq!(alignment_of(&world, master), -4);
     }
 }

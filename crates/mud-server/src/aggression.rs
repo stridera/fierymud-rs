@@ -100,12 +100,9 @@ pub struct AggressionFormulaCache {
 }
 
 impl AggressionFormulaCache {
-    /// Parse-or-fetch from the cache, then evaluate against `ctx`.
-    /// Returns false on parse failure so a malformed row doesn't
-    /// accidentally make every mob aggro to everyone.
-    pub fn eval(&mut self, formula: &str, ctx: EvalCtx) -> bool {
-        let entry = self
-            .by_formula
+    /// Parse-or-fetch the formula.
+    fn parsed(&mut self, formula: &str) -> Option<&Expr> {
+        self.by_formula
             .entry(formula.to_string())
             .or_insert_with(|| {
                 let parsed = parse(formula);
@@ -116,8 +113,40 @@ impl AggressionFormulaCache {
                     );
                 }
                 parsed
-            });
-        entry.as_ref().is_some_and(|e| eval(e, ctx))
+            })
+            .as_ref()
+    }
+
+    /// Parse-or-fetch from the cache, then evaluate against `ctx`.
+    /// Returns false on parse failure so a malformed row doesn't
+    /// accidentally make every mob aggro to everyone.
+    pub fn eval(&mut self, formula: &str, ctx: EvalCtx) -> bool {
+        self.parsed(formula).is_some_and(|e| eval(e, ctx))
+    }
+
+    /// Whether the formula carries the import's `AGGR_GOOD`
+    /// (`target.alignment >= ALIGN.GOOD`) and `AGGR_EVIL`
+    /// (`target.alignment <= ALIGN.EVIL`) alternatives, as
+    /// `(aggr_good, aggr_evil)`. Legacy `change_alignment` skews the
+    /// victim's alignment by those two mob flags.
+    pub fn alignment_hatred(&mut self, formula: &str) -> (bool, bool) {
+        fn walk(e: &Expr, out: &mut (bool, bool)) {
+            match e {
+                Expr::Or(items) => items.iter().for_each(|x| walk(x, out)),
+                Expr::Cmp(LhsKind::Alignment, Op::Ge, Rhs::Int(ALIGN_GOOD_THRESHOLD)) => {
+                    out.0 = true;
+                }
+                Expr::Cmp(LhsKind::Alignment, Op::Le, Rhs::Int(ALIGN_EVIL_THRESHOLD)) => {
+                    out.1 = true;
+                }
+                _ => {}
+            }
+        }
+        let mut out = (false, false);
+        if let Some(e) = self.parsed(formula) {
+            walk(e, &mut out);
+        }
+        out
     }
 
     #[cfg(test)]
@@ -460,5 +489,31 @@ mod tests {
         for f in inputs {
             assert!(parse(f).is_some(), "failed to parse: {f}");
         }
+    }
+
+    #[test]
+    fn alignment_hatred_reads_the_or_alternatives() {
+        let mut cache = AggressionFormulaCache::default();
+        assert_eq!(
+            cache.alignment_hatred("target.alignment >= ALIGN.GOOD"),
+            (true, false)
+        );
+        assert_eq!(
+            cache.alignment_hatred(
+                "(target.alignment <= ALIGN.EVIL) or (target.race.alignment == 'GOOD')"
+            ),
+            (false, true)
+        );
+        assert_eq!(
+            cache.alignment_hatred(
+                "target.alignment > ALIGN.EVIL and target.alignment < ALIGN.GOOD"
+            ),
+            (false, false)
+        );
+        // An AND-ed clause is not a plain AGGR_GOOD alternative.
+        assert_eq!(
+            cache.alignment_hatred("target.alignment >= ALIGN.GOOD and false"),
+            (false, false)
+        );
     }
 }
