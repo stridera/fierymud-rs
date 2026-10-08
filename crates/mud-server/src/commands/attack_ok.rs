@@ -46,7 +46,7 @@ pub(super) fn is_charmed_ro(world: &World, entity: Entity) -> bool {
 /// A mob that serves someone: a player's pet (shop pet, summoned or
 /// animated follower) or a charmed mob. It never starts a fight on its own
 /// (aggro, grudge); it fights when its master does.
-pub(super) fn is_servant(world: &World, mob: Entity) -> bool {
+pub(crate) fn is_servant(world: &World, mob: Entity) -> bool {
     pet_owner(world, mob).is_some()
         || (world.get::<Follower>(mob).is_some()
             && world.get::<Mob>(mob).is_some()

@@ -6,6 +6,10 @@
 //! - `StayZone` mobs only walk through exits that stay in the
 //!   same zone (zone match on the destination room's `WorldKey`).
 //! - Mobs in combat (`Fighting` component) never wander.
+//! - Servants (pets, charmed mobs) and mobs following a leader who is
+//!   in the same room never wander — legacy `mob_movement` refuses
+//!   charmed mobs outright, and a follower walking off would break
+//!   the follow.
 //! - Mounts being ridden (`RiddenBy`) never wander — the rider
 //!   moves them via the cardinal-direction commands.
 //!
@@ -16,8 +20,8 @@
 use bevy_ecs::prelude::*;
 use mud_db::enums::{ExitState, MobBehavior, MobTrait, Sector};
 use mud_world::{
-    AttachedTriggers, Corpse, ExitData, Exits, Fighting, Item, Located, Mob, MobBehaviors,
-    MobTraits, Named, RiddenBy, RoomSector, WorldKey,
+    AttachedTriggers, Corpse, ExitData, Exits, Fighting, Follower, Item, Located, Mob,
+    MobBehaviors, MobTraits, Named, RiddenBy, RoomSector, WorldKey,
 };
 
 use crate::TickCount;
@@ -47,6 +51,18 @@ fn room_is_aquatic(world: &World, room: Entity) -> bool {
         .is_some_and(|s| matches!(s.0, Sector::Shallows | Sector::Water | Sector::Underwater))
 }
 
+/// True for a mob that must not wander: a servant (pet / charmed mob), or
+/// any mob whose `Follower` leader is in the same room as it.
+fn is_tethered(world: &World, mob: Entity, room: Entity) -> bool {
+    if crate::commands::is_servant(world, mob) {
+        return true;
+    }
+    world
+        .get::<Follower>(mob)
+        .and_then(|f| world.get::<Located>(f.0))
+        .is_some_and(|l| l.0 == room)
+}
+
 #[allow(clippy::too_many_lines)]
 pub fn wander_tick(world: &mut World) {
     let tick = world.resource::<TickCount>().0;
@@ -67,6 +83,11 @@ pub fn wander_tick(world: &mut World) {
             .map(|(e, l, _, _)| (e, l.0))
             .collect()
     };
+    // Servants and mobs trailing a leader who is still in the room stay put.
+    let candidates: Vec<(Entity, Entity)> = candidates
+        .into_iter()
+        .filter(|&(mob, room)| !is_tethered(world, mob, room))
+        .collect();
     if candidates.is_empty() {
         return;
     }
@@ -385,5 +406,53 @@ mod tests {
             }
         }
         assert!(moved, "AQUATIC mob should wander between water sectors");
+    }
+
+    /// Run the wander tick enough times that an unblocked mob would
+    /// certainly have stepped through its only exit; report where it ended.
+    fn wander_many(world: &mut World, mob: Entity) -> Option<Entity> {
+        world.insert_resource(TickCount(WANDER_PERIOD_TICKS));
+        for _ in 0..200 {
+            wander_tick(world);
+        }
+        world.get::<Located>(mob).map(|l| l.0)
+    }
+
+    /// A pet (mob following a player) stays put, even when its leader is
+    /// elsewhere; an ordinary mob in the same setup still wanders.
+    #[test]
+    fn pet_does_not_wander_but_ordinary_mob_does() {
+        let mut world = World::new();
+        let from = make_room(&mut world);
+        let to = make_room(&mut world);
+        link(&mut world, from, Direction::North, to);
+        let owner = world.spawn((mud_world::Player, Located(to))).id();
+        let pet = make_mob(&mut world, from);
+        world.entity_mut(pet).insert(Follower(owner));
+        assert_eq!(wander_many(&mut world, pet), Some(from), "pet wandered");
+
+        let ordinary = make_mob(&mut world, from);
+        assert_eq!(wander_many(&mut world, ordinary), Some(to));
+    }
+
+    /// A mob following a (non-player) leader in the same room stays; once
+    /// the leader is in another room it is free to wander.
+    #[test]
+    fn follower_with_leader_in_room_stays() {
+        let mut world = World::new();
+        let from = make_room(&mut world);
+        let to = make_room(&mut world);
+        link(&mut world, from, Direction::North, to);
+        // Sentinel leader so only the follower's own gate is under test.
+        let leader = make_mob(&mut world, from);
+        world
+            .entity_mut(leader)
+            .insert(MobBehaviors(vec![MobBehavior::Sentinel]));
+        let follower = make_mob(&mut world, from);
+        world.entity_mut(follower).insert(Follower(leader));
+        assert_eq!(wander_many(&mut world, follower), Some(from));
+
+        world.entity_mut(leader).insert(Located(to));
+        assert_eq!(wander_many(&mut world, follower), Some(to));
     }
 }
