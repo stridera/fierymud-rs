@@ -2356,15 +2356,32 @@ fn carrying_player(world: &World, holder: Entity) -> Option<Entity> {
 /// player corpse for a player's possession is a loot like `get`: the
 /// move is reported through [`LuaOutbox::corpse_loot`] so the corpse
 /// can't be deleted before the player's save re-homes the item's rows.
+/// An item in a player corpse that has no `PlayerCorpseId` yet is not moved.
 pub fn relocate(world: &mut World, entity: Entity, target: Entity) {
     if world.get::<Located>(entity).is_none() {
         return;
     }
-    let looted = if world.get::<Item>(entity).is_some() {
-        enclosing_player_corpse(world, entity).zip(carrying_player(world, target))
+    let source_corpse = if world.get::<Item>(entity).is_some() {
+        enclosing_player_corpse(world, entity)
     } else {
         None
     };
+    // An unsettled corpse (no `PlayerCorpseId` yet) is still being written
+    // by the death save; taking from it now would race a looter's save over
+    // the same rows. Moves that stay inside the same corpse are harmless.
+    if let Some(corpse) = source_corpse
+        && world.get::<mud_world::PlayerCorpseId>(corpse).is_none()
+        && enclosing_player_corpse(world, target) != Some(corpse)
+        && target != corpse
+    {
+        tracing::warn!(
+            ?entity,
+            ?corpse,
+            "script move out of an unsettled player corpse refused"
+        );
+        return;
+    }
+    let looted = source_corpse.zip(carrying_player(world, target));
     world.entity_mut(entity).insert(Located(target));
     if let Some((corpse, player)) = looted {
         if !world.contains_resource::<LuaOutbox>() {
@@ -6100,5 +6117,34 @@ mod tests {
             .id();
         relocate(&mut world, bag, carried);
         assert!(loot_notes(&world).is_empty());
+    }
+
+    /// While the death write has not given the corpse its id, a script
+    /// can't take items out of it (floor, player, or a bag outside it);
+    /// moving within the corpse and out of a settled one still works.
+    #[test]
+    fn script_move_out_of_an_unsettled_player_corpse_is_refused() {
+        let (mut world, room, player, corpse, bag, gem) = corpse_world();
+        world
+            .entity_mut(corpse)
+            .remove::<mud_world::PlayerCorpseId>();
+        relocate(&mut world, gem, player);
+        relocate(&mut world, gem, room);
+        relocate(&mut world, bag, player);
+        assert_eq!(world.get::<Located>(gem).unwrap().0, bag);
+        assert_eq!(world.get::<Located>(bag).unwrap().0, corpse);
+        assert!(loot_notes(&world).is_empty());
+
+        // Rearranging inside the same corpse is fine.
+        relocate(&mut world, gem, corpse);
+        assert_eq!(world.get::<Located>(gem).unwrap().0, corpse);
+
+        // Once the id lands the move goes through.
+        world
+            .entity_mut(corpse)
+            .insert(mud_world::PlayerCorpseId(7));
+        relocate(&mut world, gem, player);
+        assert_eq!(world.get::<Located>(gem).unwrap().0, player);
+        assert_eq!(loot_notes(&world), vec![(player, corpse)]);
     }
 }
