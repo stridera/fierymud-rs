@@ -10340,6 +10340,27 @@ fn get_from_container(
     needle: &str,
     container: Entity,
 ) {
+    // A player corpse is snapshotted to disk; when a take actually
+    // emptied part of it, rewrite that snapshot and save the player
+    // (corpse first) so a crash can't lose or duplicate the loot.
+    let is_pc = world.get::<mud_world::PlayerCorpse>(container).is_some();
+    let before = is_pc.then(|| crate::corpses::contents_fingerprint(world, container));
+    get_from_container_inner(world, player, room, needle, container);
+    if let Some(before) = before
+        && world.get_entity(container).is_ok()
+        && crate::corpses::contents_fingerprint(world, container) != before
+    {
+        crate::corpses::persist_after_change(world, player);
+    }
+}
+
+fn get_from_container_inner(
+    world: &mut World,
+    player: Entity,
+    room: Entity,
+    needle: &str,
+    container: Entity,
+) {
     let container_name = name_of(world, container);
     let player_name = name_of(world, player);
 

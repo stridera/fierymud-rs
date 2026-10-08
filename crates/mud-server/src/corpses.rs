@@ -18,8 +18,82 @@ use mud_world::{
     Named, ObjectPrototypes, TriggerCatalog, WorldKey, WorldKeyIndex,
 };
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 const CORPSE_SNAPSHOT_PATH: &str = "state/corpses.json";
+
+/// Overrides where the corpse snapshot lives (tests point it at a
+/// scratch dir); absent means [`CORPSE_SNAPSHOT_PATH`].
+#[derive(Resource, Debug, Clone)]
+pub(crate) struct CorpseSnapshotPath(pub(crate) PathBuf);
+
+fn snapshot_path(world: &World) -> PathBuf {
+    world
+        .get_resource::<CorpseSnapshotPath>()
+        .map_or_else(|| PathBuf::from(CORPSE_SNAPSHOT_PATH), |p| p.0.clone())
+}
+
+/// `<path>.loaded`: where a snapshot is moved once it has been restored.
+fn loaded_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".loaded");
+    PathBuf::from(name)
+}
+
+/// Write `bytes` to `path` atomically: write a sibling temp file, fsync
+/// it, then rename over `path`, so a crash leaves either the old or the
+/// new snapshot and never a torn one. The temp file is removed on error.
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut tmp_name = path.as_os_str().to_owned();
+    tmp_name.push(".tmp");
+    let tmp = PathBuf::from(tmp_name);
+    let result = (|| {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return result;
+    }
+    // Best effort: make the rename itself durable.
+    if let Some(parent) = path.parent()
+        && let Ok(dir) = std::fs::File::open(if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        })
+    {
+        let _ = dir.sync_all();
+    }
+    Ok(())
+}
+
+/// Persist the corpse snapshot, then the player's own save. Call after
+/// anything that moves items or coin between a player and a player
+/// corpse (death, looting). The order matters: the corpse file lands
+/// first, so a crash between the two writes can at worst duplicate
+/// gear, never lose it.
+pub(crate) fn persist_after_change(world: &mut World, player: Entity) {
+    save_snapshot(world);
+    crate::quest_progress::save_player_soon(world, player);
+}
+
+/// `(item count, coin)` held by `container`: lets callers detect
+/// whether a looting command actually changed a corpse's contents.
+pub(crate) fn contents_fingerprint(world: &mut World, container: Entity) -> (usize, i64) {
+    let items = {
+        let mut q = world.query_filtered::<&Located, With<Item>>();
+        q.iter(world).filter(|l| l.0 == container).count()
+    };
+    let coin = world
+        .get::<mud_world::CoinPile>(container)
+        .map_or(0, |p| p.0);
+    (items, coin)
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct CorpseSnapshot {
@@ -74,6 +148,11 @@ struct SnapshotFile {
 /// Snapshot every Corpse entity to disk on graceful shutdown.
 /// Invoked alongside the weather and clock snapshots in main.
 pub fn save_snapshot(world: &mut World) {
+    let path = snapshot_path(world);
+    save_snapshot_to(world, &path);
+}
+
+fn save_snapshot_to(world: &mut World, path: &Path) {
     let mut snapshots: Vec<CorpseSnapshot> = Vec::new();
     // Snapshot corpses first, holding their entity IDs so we can
     // do the contents lookup outside the borrow.
@@ -135,10 +214,10 @@ pub fn save_snapshot(world: &mut World) {
     if snapshots.is_empty() {
         // Clear any stale snapshot file — we don't want yesterday's
         // corpses re-spawning the next time someone dies and saves.
-        let _ = std::fs::remove_file(CORPSE_SNAPSHOT_PATH);
+        let _ = std::fs::remove_file(path);
         return;
     }
-    if let Some(parent) = std::path::Path::new(CORPSE_SNAPSHOT_PATH).parent()
+    if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
         && let Err(e) = std::fs::create_dir_all(parent)
     {
@@ -154,30 +233,44 @@ pub fn save_snapshot(world: &mut World) {
             return;
         }
     };
-    if let Err(e) = std::fs::write(CORPSE_SNAPSHOT_PATH, bytes) {
+    if let Err(e) = write_atomic(path, &bytes) {
         tracing::warn!(error = %e, "corpse snapshot write failed");
         return;
     }
-    tracing::info!(count, path = %CORPSE_SNAPSHOT_PATH, "corpse snapshot saved");
+    tracing::info!(count, path = %path.display(), "corpse snapshot saved");
 }
 
 /// Recreate any persisted corpses after the world has finished
 /// loading. Skips corpses whose room or item prototypes have been
 /// removed from the schema since the snapshot was written.
+///
+/// A restored snapshot is renamed to `corpses.json.loaded` so a crash
+/// after boot can never reload (and so duplicate) the same corpses;
+/// the live world is then written straight back out as a fresh
+/// `corpses.json` so those corpses survive that crash too.
 pub fn load_snapshot(world: &mut World) {
-    let bytes = match std::fs::read(CORPSE_SNAPSHOT_PATH) {
+    let path = snapshot_path(world);
+    if load_snapshot_from(world, &path) {
+        save_snapshot_to(world, &path);
+    }
+}
+
+/// Load `path` and retire it to `<path>.loaded`. Returns whether a
+/// snapshot was consumed.
+fn load_snapshot_from(world: &mut World, path: &Path) -> bool {
+    let bytes = match std::fs::read(path) {
         Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
         Err(e) => {
             tracing::warn!(error = %e, "corpse snapshot read failed");
-            return;
+            return false;
         }
     };
     let file: SnapshotFile = match serde_json::from_slice(&bytes) {
         Ok(f) => f,
         Err(e) => {
             tracing::warn!(error = %e, "corpse snapshot parse failed");
-            return;
+            return false;
         }
     };
     let mut restored_corpses = 0;
@@ -229,9 +322,16 @@ pub fn load_snapshot(world: &mut World) {
         restored_items,
         skipped_rooms,
         skipped_protos,
-        path = %CORPSE_SNAPSHOT_PATH,
+        path = %path.display(),
         "corpse snapshot loaded",
     );
+    // Retire the file so it can only ever be loaded once. If the rename
+    // fails, delete it: a stale snapshot is worse than a missing one.
+    if let Err(e) = std::fs::rename(path, loaded_path(path)) {
+        tracing::warn!(error = %e, "couldn't retire corpse snapshot; removing it");
+        let _ = std::fs::remove_file(path);
+    }
+    true
 }
 
 /// Spawn an item from its prototype directly into `parent`. Mirrors
@@ -305,8 +405,135 @@ fn spawn_item_into(world: &mut World, proto_zone: i32, proto_id: i32, parent: En
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use mud_world::{PlayerCorpse, Room};
+
+    /// Fresh scratch dir under the workspace `target/` (gitignored).
+    pub(crate) fn scratch_dir(name: &str) -> PathBuf {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/corpse-tests")
+            .join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    fn keyed_room(world: &mut World, zone: i32, id: i32) -> Entity {
+        let room = world.spawn((Room, WorldKey { zone, id })).id();
+        world
+            .resource_mut::<WorldKeyIndex>()
+            .rooms
+            .insert((zone, id), room);
+        room
+    }
+
+    fn corpse_world() -> (World, Entity) {
+        let mut world = World::new();
+        world.insert_resource(WorldKeyIndex::default());
+        let room = keyed_room(&mut world, 30, 45);
+        (world, room)
+    }
+
+    fn spawn_player_corpse(world: &mut World, room: Entity, coins: i64) -> Entity {
+        let corpse = world
+            .spawn((
+                Item,
+                Corpse,
+                PlayerCorpse,
+                Named {
+                    name: "the corpse of Bob".into(),
+                },
+                Keywords(vec!["corpse".into(), "bob".into()]),
+                Located(room),
+                CorpseDecay {
+                    remaining_secs: 500,
+                },
+            ))
+            .id();
+        if coins > 0 {
+            world.entity_mut(corpse).insert(mud_world::CoinPile(coins));
+        }
+        corpse
+    }
+
+    #[test]
+    fn save_then_load_restores_coins_and_load_retires_the_file() {
+        let dir = scratch_dir("load_once");
+        let path = dir.join("corpses.json");
+        let (mut world, room) = corpse_world();
+        spawn_player_corpse(&mut world, room, 4321);
+        save_snapshot_to(&mut world, &path);
+        let text = std::fs::read_to_string(&path).expect("snapshot written");
+        assert!(text.contains("the corpse of Bob") && text.contains("4321"));
+
+        let (mut fresh, _room) = corpse_world();
+        assert!(load_snapshot_from(&mut fresh, &path));
+        let pile = fresh
+            .query_filtered::<&mud_world::CoinPile, With<PlayerCorpse>>()
+            .single(&fresh)
+            .map(|p| p.0);
+        assert_eq!(pile.ok(), Some(4321));
+        assert!(!path.exists(), "snapshot retired after load");
+        assert!(loaded_path(&path).exists(), "kept as corpses.json.loaded");
+
+        // Second load finds nothing, so nothing is duplicated.
+        let (mut again, _room) = corpse_world();
+        assert!(!load_snapshot_from(&mut again, &path));
+        assert_eq!(
+            again
+                .query_filtered::<Entity, With<Corpse>>()
+                .iter(&again)
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn public_load_rewrites_a_fresh_snapshot_of_the_restored_corpses() {
+        let dir = scratch_dir("load_rewrites");
+        let path = dir.join("corpses.json");
+        let (mut world, room) = corpse_world();
+        spawn_player_corpse(&mut world, room, 10);
+        save_snapshot_to(&mut world, &path);
+
+        let (mut fresh, _room) = corpse_world();
+        fresh.insert_resource(CorpseSnapshotPath(path.clone()));
+        load_snapshot(&mut fresh);
+        let text = std::fs::read_to_string(&path).expect("fresh snapshot");
+        assert!(text.contains("the corpse of Bob"));
+        assert!(loaded_path(&path).exists());
+    }
+
+    #[test]
+    fn atomic_write_replaces_the_file_and_leaves_no_temp() {
+        let dir = scratch_dir("atomic_ok");
+        let path = dir.join("corpses.json");
+        write_atomic(&path, b"old").expect("first write");
+        write_atomic(&path, b"new").expect("second write");
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("corpses.json")]);
+    }
+
+    #[test]
+    fn atomic_write_failure_keeps_the_old_file_and_cleans_the_temp() {
+        let dir = scratch_dir("atomic_fail");
+        // The rename target is a non-empty directory, so the final
+        // rename fails after the temp file was fully written.
+        let path = dir.join("corpses.json");
+        std::fs::create_dir_all(path.join("blocker")).unwrap();
+        assert!(write_atomic(&path, b"data").is_err());
+        assert!(!dir.join("corpses.json.tmp").exists(), "temp removed");
+        assert!(path.is_dir(), "target untouched");
+        // A missing parent dir fails at create and leaves nothing either.
+        let missing = dir.join("nope/corpses.json");
+        assert!(write_atomic(&missing, b"data").is_err());
+        assert!(!dir.join("nope").exists());
+    }
 
     #[test]
     fn snapshot_round_trips_through_json() {

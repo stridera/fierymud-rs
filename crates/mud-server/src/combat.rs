@@ -172,6 +172,7 @@ pub fn corpse_decay_tick(world: &mut World) {
             .map(|(e, l, d, n)| (e, l.0, d.remaining_secs, n.name.clone()))
             .collect()
     };
+    let mut player_corpse_gone = false;
     for (corpse, room, prev_remaining, name) in corpses {
         // Decrement first (or expire and despawn).
         let new_remaining = {
@@ -215,9 +216,15 @@ pub fn corpse_decay_tick(world: &mut World) {
             _ => {}
         }
         crate::item_decay::release_contents(world, corpse, holder, &kind);
+        player_corpse_gone |= world.get::<mud_world::PlayerCorpse>(corpse).is_some();
         if let Ok(em) = world.get_entity_mut(corpse) {
             em.despawn();
         }
+    }
+    // A rotted-away player corpse must leave the on-disk snapshot too,
+    // or a crash would bring it back.
+    if player_corpse_gone {
+        crate::corpses::save_snapshot(world);
     }
 }
 
@@ -1902,10 +1909,10 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
                 crate::commands::cap_sentence_start(victim_name),
             ),
         );
-        // Persist the emptied purse and pack now rather than waiting for
-        // the next autosave, so a crash can't restore the coins on top
-        // of the corpse's copy.
-        crate::quest_progress::save_player_soon(world, victim);
+        // Persist now rather than at the next autosave: the corpse
+        // snapshot first (it holds the gear and purse), then the
+        // player's emptied pack. Otherwise a crash restores nothing.
+        crate::corpses::persist_after_change(world, victim);
         info!(?victim, name = %victim_name, ?corpse, "player corpsed");
     } else {
         // Mob death: notify, spawn a corpse, drop loot + leftover
@@ -3298,11 +3305,36 @@ mod tests {
     }
 
     #[test]
+    fn player_death_writes_the_corpse_snapshot_with_the_coins() {
+        let dir = crate::corpses::tests::scratch_dir("death_snapshot");
+        let path = dir.join("corpses.json");
+        let mut world = World::new();
+        world.insert_resource(TickCount(0));
+        world.insert_resource(mud_world::WorldKeyIndex::default());
+        world.insert_resource(crate::corpses::CorpseSnapshotPath(path.clone()));
+        let room = world.spawn(mud_world::WorldKey { zone: 30, id: 45 }).id();
+        let player = spawn_dying_player(&mut world, room, "Tester", 5_150);
+
+        super::handle_death(&mut world, player, "Tester", room);
+
+        let text = std::fs::read_to_string(&path).expect("death wrote the snapshot");
+        assert!(text.contains("the corpse of Tester"), "{text}");
+        assert!(text.contains("\"coins\": 5150"), "{text}");
+        assert!(text.contains("\"is_player\": true"), "{text}");
+    }
+
+    #[test]
     fn owner_get_all_from_corpse_recovers_the_coins_and_others_cannot() {
         let mut world = World::new();
         let room = make_room(&mut world);
         world.insert_resource(TickCount(0));
         world.insert_resource(ObjectPrototypes::default());
+        world.insert_resource(mud_world::WorldKeyIndex::default());
+        let path = crate::corpses::tests::scratch_dir("loot_snapshot").join("corpses.json");
+        world.insert_resource(crate::corpses::CorpseSnapshotPath(path.clone()));
+        world
+            .entity_mut(room)
+            .insert(mud_world::WorldKey { zone: 30, id: 45 });
         let owner = spawn_dying_player(&mut world, room, "Tester", 777);
         let thief = spawn_dying_player(&mut world, room, "Robber", 0);
         super::handle_death(&mut world, owner, "Tester", room);
@@ -3315,10 +3347,22 @@ mod tests {
             "non-owner is refused by the consent gate"
         );
         assert_eq!(world.get::<Wealth>(thief).unwrap().0, 0);
+        let text = std::fs::read_to_string(&path).expect("death snapshot");
+        assert!(
+            text.contains("\"coins\": 777"),
+            "refused loot leaves it: {text}"
+        );
 
         crate::commands::info::cmd_get(&mut world, owner, "all corpse");
         assert!(world.get::<mud_world::CoinPile>(corpse).is_none());
         assert_eq!(world.get::<Wealth>(owner).unwrap().0, 777);
+        // Looting rewrote the snapshot (corpse first, then the player
+        // save, which needs a DB pool and is a no-op in this world).
+        let text = std::fs::read_to_string(&path).expect("loot snapshot");
+        assert!(
+            text.contains("\"coins\": 0"),
+            "coins left the snapshot: {text}"
+        );
     }
 
     #[test]
