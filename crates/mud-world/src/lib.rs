@@ -38,11 +38,12 @@ pub use components::{
     SpellSlots, Stamina, Stealth, Stunned, SwitchedFrom, SwitchedInto, SyslogMinLevel, TellLog,
     Thirst, TimePlayed, Title, Trophy, TrophyEntry, TrophyKind, UiStyle, WallTraversal,
     WatchingSyslog, Wealth, WearableIn, WimpyThreshold, WizInvis, WorldKey, Zone, ZoneClimate,
-    ZoneVisits, is_lit, room_in_god_zone, zone_is_god,
+    ZoneVisits, is_lit, room_in_god_zone, wear_keyword_slot, zone_is_god,
 };
 pub use loader::{
     LoadStats, ReloadStats, default_weather_for_climate, load_ability_catalog, load_effect_catalog,
     load_from_db, load_trigger_catalog, merge_prototypes, reload_zones, wear_flags_primary_slot,
+    wear_flags_slots,
 };
 pub use mob_spawn::spawn_mob_from_proto;
 pub use reset_gear::{

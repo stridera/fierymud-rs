@@ -1992,50 +1992,65 @@ pub fn default_weather_for_climate(
     WeatherState { temp, precip }
 }
 
-/// Pick a single primary `Slot` from a list of `WearFlag`s. Most
-/// items in legacy data carry exactly one flag; for the few that
-/// have several (e.g. ring on FINGER + neck-pendant on NECK) we
-/// prefer the more common-use slot.
+/// Every `Slot` position an item with these `WearFlag`s can be worn in,
+/// deduplicated and ordered by ascending legacy `find_eq_pos` priority
+/// (finger, neck, body, head, legs, feet, hands, arms, shield, about,
+/// waist, wrist, eyes, face, ear, badge, belt, hover, wield). Each entry
+/// is the first slot of its [`Slot::group`]. `Tail` and `Disguise` have no
+/// in-game slot yet and are ignored.
 #[must_use]
-pub fn wear_flags_primary_slot(
-    flags: &[mud_db::enums::WearFlag],
-) -> Option<crate::components::Slot> {
+pub fn wear_flags_slots(flags: &[mud_db::enums::WearFlag]) -> Vec<crate::components::Slot> {
     use crate::components::Slot;
     use mud_db::enums::WearFlag::{
         About, Arms, Badge, Belt, Body, Disguise, Ear, Eyes, Face, Feet, Finger, Hands, Head,
         Hover, Legs, Mainhand, Neck, Offhand, Tail, Twohand, Waist, Wrist,
     };
-    // Priority order: prefer wield/hold/body slots over decorative.
-    // Tail and Disguise have no in-game slot equivalent yet — silently
-    // ignored. Everything else maps to a Slot variant.
-    for f in flags {
-        let slot = match f {
-            Mainhand | Twohand => Some(Slot::Wield),
-            Offhand => Some(Slot::Hold),
-            Body => Some(Slot::Body),
-            Head => Some(Slot::Head),
-            Arms => Some(Slot::Arms),
-            Legs => Some(Slot::Legs),
-            Feet => Some(Slot::Feet),
-            Hands => Some(Slot::Hands),
-            Waist | Belt => Some(Slot::Waist),
-            Neck => Some(Slot::Neck),
-            Finger => Some(Slot::LeftFinger),
-            Wrist => Some(Slot::Wrist),
-            About => Some(Slot::About),
-            Eyes => Some(Slot::Eyes),
-            Face => Some(Slot::Face),
-            Ear => Some(Slot::Ears),
-            Hover => Some(Slot::Hover),
-            Badge => Some(Slot::Badge),
-            // Tail / Disguise have no anatomical slot in v1.
-            Tail | Disguise => None,
-        };
-        if slot.is_some() {
-            return slot;
+    let mut ranked: Vec<(u8, Slot)> = flags
+        .iter()
+        .filter_map(|f| {
+            let ranked = match f {
+                Finger => (0, Slot::RightFinger),
+                Neck => (1, Slot::Neck),
+                Body => (2, Slot::Body),
+                Head => (3, Slot::Head),
+                Legs => (4, Slot::Legs),
+                Feet => (5, Slot::Feet),
+                Hands => (6, Slot::Hands),
+                Arms => (7, Slot::Arms),
+                Offhand => (8, Slot::Hold),
+                About => (9, Slot::About),
+                Waist => (10, Slot::Waist),
+                Wrist => (11, Slot::RightWrist),
+                Eyes => (12, Slot::Eyes),
+                Face => (13, Slot::Face),
+                Ear => (14, Slot::LeftEar),
+                Badge => (15, Slot::Badge),
+                Belt => (16, Slot::Waist),
+                Hover => (17, Slot::Hover),
+                Mainhand | Twohand => (18, Slot::Wield),
+                Tail | Disguise => return None,
+            };
+            Some(ranked)
+        })
+        .collect();
+    ranked.sort_by_key(|(rank, _)| *rank);
+    let mut slots: Vec<Slot> = Vec::with_capacity(ranked.len());
+    for (_, slot) in ranked {
+        if !slots.contains(&slot) {
+            slots.push(slot);
         }
     }
-    None
+    slots
+}
+
+/// The slot `wear <item>` picks when no body position is named: legacy
+/// `find_eq_pos` lets each matching wear flag overwrite the last, so the
+/// highest-priority flag wins (see [`wear_flags_slots`]).
+#[must_use]
+pub fn wear_flags_primary_slot(
+    flags: &[mud_db::enums::WearFlag],
+) -> Option<crate::components::Slot> {
+    wear_flags_slots(flags).last().copied()
 }
 
 /// Pull `Destination` from a Portal's `values` JSONB. Stored either

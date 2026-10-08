@@ -515,6 +515,9 @@ mod text_layout_tests;
 #[path = "commands/unban.rs"]
 mod unban;
 #[cfg(test)]
+#[path = "commands/wear_tests.rs"]
+mod wear_tests;
+#[cfg(test)]
 #[path = "commands/wimpy_mob_tests.rs"]
 mod wimpy_mob_tests;
 #[path = "commands/writing.rs"]
@@ -12334,45 +12337,117 @@ pub(crate) fn invoke_object_abilities(
     }
 }
 
-#[allow(clippy::too_many_lines)]
+/// Where `wear_item` should put the item.
+#[derive(Clone, Copy)]
+pub(crate) enum WearWhere {
+    /// `wear <item>`: the item's highest-priority wear position.
+    Default,
+    /// `wield` / `hold`: that specific hand slot.
+    Hands(Slot),
+    /// `wear <item> <where>`: the position a body keyword named
+    /// (legacy `find_eq_pos` keyword path).
+    Position(Slot),
+}
+
+/// Every slot position `item` may be worn in, lowest legacy priority
+/// first (so `.last()` is what a bare `wear` picks). Comes from the
+/// prototype's wear flags; items without a prototype fall back to their
+/// `WearableIn` slot.
+pub(crate) fn item_wear_positions(world: &World, item: Entity) -> Vec<Slot> {
+    let from_proto = world.get::<WorldKey>(item).and_then(|k| {
+        world
+            .resource::<ObjectPrototypes>()
+            .by_key
+            .get(&(k.zone, k.id))
+            .map(|p| mud_world::wear_flags_slots(&p.wear_flags))
+    });
+    match from_proto {
+        Some(slots) if !slots.is_empty() => slots,
+        _ => world
+            .get::<WearableIn>(item)
+            .map(|w| vec![w.0.position()])
+            .unwrap_or_default(),
+    }
+}
+
+/// Legacy `wear_messages[]`: what the wearer sees and what the room sees.
+/// `{p}` is the item, `{n}` the actor.
+fn wear_message_templates(slot: Slot) -> (&'static str, &'static str) {
+    match slot {
+        Slot::Light => (
+            "You start using {p} as a light.",
+            "{n} starts using {p} as a light.",
+        ),
+        Slot::RightFinger => (
+            "You slide {p} onto your right ring finger.",
+            "{n} slides {p} onto their right ring finger.",
+        ),
+        Slot::LeftFinger => (
+            "You slide {p} onto your left ring finger.",
+            "{n} slides {p} onto their left ring finger.",
+        ),
+        Slot::Neck | Slot::SecondNeck => (
+            "You wear {p} around your neck.",
+            "{n} wears {p} around their neck.",
+        ),
+        Slot::Body => ("You wear {p} on your body.", "{n} wears {p} on their body."),
+        Slot::Head => ("You wear {p} on your head.", "{n} wears {p} on their head."),
+        Slot::Legs => ("You put {p} on your legs.", "{n} puts {p} on their legs."),
+        Slot::Feet => ("You wear {p} on your feet.", "{n} wears {p} on their feet."),
+        Slot::Hands => ("You put {p} on your hands.", "{n} puts {p} on their hands."),
+        Slot::Arms => ("You wear {p} on your arms.", "{n} wears {p} on their arms."),
+        Slot::About => (
+            "You wear {p} around your body.",
+            "{n} wears {p} about their body.",
+        ),
+        Slot::Waist => (
+            "You wear {p} around your waist.",
+            "{n} wears {p} around their waist.",
+        ),
+        Slot::RightWrist => (
+            "You put {p} on your right wrist.",
+            "{n} puts {p} on their right wrist.",
+        ),
+        Slot::LeftWrist => (
+            "You put {p} on your left wrist.",
+            "{n} puts {p} on their left wrist.",
+        ),
+        Slot::Wield => ("You wield {p}.", "{n} wields {p}."),
+        Slot::Hold => ("You grab {p}.", "{n} grabs {p}."),
+        Slot::Eyes => (
+            "You wear {p} over your eyes.",
+            "{n} wears {p} over their eyes.",
+        ),
+        Slot::Face => ("You wear {p} on your face.", "{n} wears {p} on their face."),
+        Slot::LeftEar => (
+            "You wear {p} in your left ear.",
+            "{n} wears {p} in their left ear.",
+        ),
+        Slot::RightEar => (
+            "You wear {p} in your right ear.",
+            "{n} wears {p} in their right ear.",
+        ),
+        Slot::Badge => ("You wear {p} as a badge.", "{n} wears {p} as a badge."),
+        Slot::Hover => (
+            "{p} starts to hover over your shoulder.",
+            "{p} begins to hover over {n}'s shoulder.",
+        ),
+    }
+}
+
+/// `wield` / `hold` / plain `wear <name>`: find the item in the pack by
+/// name, then wear it.
 pub(crate) fn wear_into(
     world: &mut World,
     player: Entity,
     target_word: &str,
     force_slot: Option<Slot>,
 ) {
-    wear_into_inner(world, player, target_word, force_slot, false);
-}
-
-/// `wear_into` plus a `silent_room` flag. `cmd_wear`'s `wear all`
-/// loop calls this with `silent_room=true` and emits a single
-/// consolidated room broadcast at the end of the loop instead of
-/// the per-item line `wear_into` normally fires. Matches the shape
-/// `cmd_drop all` uses to avoid spamming bystanders.
-pub(crate) fn wear_into_silent(
-    world: &mut World,
-    player: Entity,
-    target_word: &str,
-    force_slot: Option<Slot>,
-) {
-    wear_into_inner(world, player, target_word, force_slot, true);
-}
-
-#[allow(clippy::too_many_lines)]
-fn wear_into_inner(
-    world: &mut World,
-    player: Entity,
-    target_word: &str,
-    force_slot: Option<Slot>,
-    silent_room: bool,
-) {
     if target_word.is_empty() {
         send_to(world, player, "Wear what?\r\n");
         return;
     }
-
-    let item = find_carried_by(world, target_word, player, EquipFilter::Inventory);
-    let Some(item) = item else {
+    let Some(item) = find_carried_by(world, target_word, player, EquipFilter::Inventory) else {
         send_to(
             world,
             player,
@@ -12380,25 +12455,60 @@ fn wear_into_inner(
         );
         return;
     };
+    wear_item(
+        world,
+        player,
+        item,
+        force_slot.map_or(WearWhere::Default, WearWhere::Hands),
+        false,
+    );
+}
 
+/// Wear one specific carried item (legacy `perform_wear`). Returns
+/// whether it ended up equipped. With `quiet` (legacy `collective`, used
+/// by `wear all`) refusals are not reported.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn wear_item(
+    world: &mut World,
+    player: Entity,
+    item: Entity,
+    target: WearWhere,
+    quiet: bool,
+) -> bool {
     let item_name = name_of(world, item);
-
-    let Some(WearableIn(slot)) = world.get::<WearableIn>(item).copied() else {
-        send_rendered(world, player, &format!("{item_name} can't be worn.\r\n"));
-        return;
+    let say = |world: &mut World, msg: &str| {
+        if !quiet {
+            send_rendered(world, player, msg);
+        }
     };
 
-    if let Some(forced) = force_slot
-        && forced != slot
-    {
-        let verb = match forced {
-            Slot::Wield => "wielded",
-            Slot::Hold => "held",
-            _ => "worn there",
-        };
-        send_rendered(world, player, &format!("{item_name} can't be {verb}.\r\n"));
-        return;
-    }
+    let legal = item_wear_positions(world, item);
+    let Some(&primary) = legal.last() else {
+        say(world, &format!("{item_name} can't be worn.\r\n"));
+        return false;
+    };
+    let slot = match target {
+        WearWhere::Default => primary,
+        WearWhere::Hands(forced) => {
+            if !legal.contains(&forced.position()) {
+                let verb = match forced {
+                    Slot::Wield => "wielded",
+                    Slot::Hold => "held",
+                    _ => "worn there",
+                };
+                say(world, &format!("{item_name} can't be {verb}.\r\n"));
+                return false;
+            }
+            forced
+        }
+        WearWhere::Position(wanted) => {
+            if !legal.contains(&wanted.position()) {
+                say(world, &format!("You can't wear {item_name} there.\r\n"));
+                return false;
+            }
+            wanted
+        }
+    };
 
     // Alignment + class + race restrictions: refuse if the proto's
     // restriction list contains the player's bucket. Lookup is
@@ -12451,15 +12561,14 @@ fn wear_into_inner(
         let player_align = world.get::<CombatStats>(player).map_or(0, |c| c.alignment);
         let bucket = mud_db::enums::Alignment::from_score(player_align);
         if alignment_restriction.contains(&bucket) {
-            send_rendered(
+            say(
                 world,
-                player,
                 &format!(
                     "{item_name} repels your touch — your {} alignment is incompatible.\r\n",
                     bucket.label()
                 ),
             );
-            return;
+            return false;
         }
     }
     if !class_restriction.is_empty() {
@@ -12467,12 +12576,11 @@ fn wear_into_inner(
         if let Some(cid) = player_class
             && class_restriction.contains(&cid)
         {
-            send_rendered(
+            say(
                 world,
-                player,
                 &format!("{item_name} won't bend to your training — your class can't use it.\r\n"),
             );
-            return;
+            return false;
         }
     }
     if !race_restriction.is_empty()
@@ -12481,12 +12589,11 @@ fn wear_into_inner(
             .iter()
             .any(|r| r.eq_ignore_ascii_case(&race))
     {
-        send_rendered(
+        say(
             world,
-            player,
             &format!("{item_name} wasn't made for your kind.\r\n"),
         );
-        return;
+        return false;
     }
     // Schema's `Size` enum ordered TINY → GIGANTIC. Local helper
     // so the B6 size band can compare via ordinal rather than
@@ -12512,12 +12619,11 @@ fn wear_into_inner(
         && let Some(race) = world.get::<Profile>(player).map(|p| p.race.clone())
         && !allowed_races.iter().any(|r| r.eq_ignore_ascii_case(&race))
     {
-        send_rendered(
+        say(
             world,
-            player,
             &format!("{item_name} was crafted for other hands.\r\n"),
         );
-        return;
+        return false;
     }
     // B6: size band — `min_size <= wearer.size <= max_size`. The
     // wearer's effective size lives on the `Sized` component
@@ -12531,31 +12637,26 @@ fn wear_into_inner(
         if let Some(min) = min_size.as_deref()
             && wsize_rank < size_rank(min)
         {
-            send_rendered(
+            say(
                 world,
-                player,
                 &format!("{item_name} is far too big for your body.\r\n"),
             );
-            return;
+            return false;
         }
         if let Some(max) = max_size.as_deref()
             && wsize_rank > size_rank(max)
         {
-            send_rendered(
+            say(
                 world,
-                player,
                 &format!("{item_name} is far too small for your body.\r\n"),
             );
-            return;
+            return false;
         }
     }
 
-    // Resolve to the actual destination slot. Paired slots (today
-    // only LeftFinger / RightFinger — rings) try both sides in
-    // order so a second ring falls through cleanly when the first
-    // side is occupied. Other "paired" anatomies (ears, wrists)
-    // are modeled as single bins that cover both sides, so they
-    // keep the existing single-slot refusal.
+    // Resolve to the actual destination slot. Paired anatomy (rings,
+    // necks, wrists, ears) fills in legacy order (`Slot::group`): the
+    // first side, then the second once the first is taken.
     // Per-slot occupancy with the worn item's name, so the
     // refusal message can tell the player what's blocking them
     // ("Your wield slot is already occupied (by a longsword)
@@ -12570,10 +12671,7 @@ fn wear_into_inner(
     };
     let occupied: std::collections::HashSet<Slot> =
         slot_occupants.iter().map(|(s, _)| *s).collect();
-    let candidates: &[Slot] = match slot {
-        Slot::LeftFinger | Slot::RightFinger => &[Slot::LeftFinger, Slot::RightFinger],
-        _ => std::slice::from_ref(&slot),
-    };
+    let candidates: &[Slot] = slot.group();
     let Some(&dest_slot) = candidates.iter().find(|s| !occupied.contains(s)) else {
         // Surface the names of the items in the offending slot(s)
         // so the player knows exactly what to remove.
@@ -12597,8 +12695,8 @@ fn wear_into_inner(
         // here. Most slots are already nouns and pass through.
         let msg = if candidates.len() > 1 {
             format!(
-                "Both {}s are already occupied{blocker_clause}.\r\n",
-                slot.occupancy_label(),
+                "Both of your {}s are already occupied{blocker_clause}.\r\n",
+                slot.position_label(),
             )
         } else {
             format!(
@@ -12606,8 +12704,8 @@ fn wear_into_inner(
                 slot.occupancy_label(),
             )
         };
-        send_rendered(world, player, &msg);
-        return;
+        say(world, &msg);
+        return false;
     };
 
     try_insert(world, item, EquippedSlot(dest_slot));
@@ -12616,12 +12714,8 @@ fn wear_into_inner(
     // by `cmd_remove`'s unapply path.
     crate::equip_apply::apply_object_to_wearer(world, item, player);
 
-    let verb = match dest_slot {
-        Slot::Wield => "wield",
-        Slot::Hold => "hold",
-        _ => "wear",
-    };
-    let mut msg = format!("You {verb} {item_name}.\r\n");
+    let (to_actor, to_room) = wear_message_templates(dest_slot);
+    let mut msg = format!("{}\r\n", to_actor.replace("{p}", &item_name));
     // Surface bound abilities (wands, staves, magical weapons) with
     // sphere-colored parenthetical, so the player learns at equip time
     // what powers the item carries instead of having to `identify`
@@ -12633,24 +12727,21 @@ fn wear_into_inner(
     // Room broadcast — bystanders should see what someone wears,
     // wields, or holds. Without this, a party-mate picking up a
     // glowing sword goes unnoticed until they actually swing it.
-    // Skipped under `silent_room` so `wear all` can emit one
-    // consolidated bystander line rather than N spammy ones.
-    if !silent_room && let Some(located) = world.get::<Located>(player).copied() {
+    if let Some(located) = world.get::<Located>(player).copied() {
         let actor_name = name_of(world, player);
-        let third_verb = match dest_slot {
-            Slot::Wield => "wields",
-            Slot::Hold => "holds",
-            _ => "wears",
-        };
+        let line = to_room
+            .replace("{n}", &actor_name)
+            .replace("{p}", &item_name);
         broadcast_room_visual(
             world,
             located.0,
             player,
             &[player],
-            &cap_sentence_start(&format!("{actor_name} {third_verb} {item_name}.\r\n")),
+            &cap_sentence_start(&format!("{line}\r\n")),
         );
     }
     crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Wear);
+    true
 }
 
 /// Look up `ObjectAbilityCatalog` bindings for `item` and render a

@@ -3865,7 +3865,10 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
                         "It is <cyan>worn</> on your <cyan>right finger</>.\r\n".to_string()
                     }
                     Slot::Badge => "It is <cyan>pinned</> as a badge.\r\n".to_string(),
-                    _ => format!("It is <cyan>worn</> on your <cyan>{}</>.\r\n", slot.label()),
+                    _ => format!(
+                        "It is <cyan>worn</> on your <cyan>{}</>.\r\n",
+                        slot.position_label()
+                    ),
                 }
             } else {
                 // Carried / not currently equipped. Reads as a
@@ -3886,7 +3889,7 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
                     Slot::Badge => "It can be <cyan>pinned</> as a badge.\r\n".to_string(),
                     _ => format!(
                         "It can be <cyan>worn</> on your <cyan>{}</>.\r\n",
-                        slot.label()
+                        slot.position_label()
                     ),
                 }
             };
@@ -11311,63 +11314,130 @@ fn give_plain(world: &mut World, player: Entity, args: &str) {
     }
 }
 
+/// Try to equip `item` for `wear all`: its highest-priority position
+/// first, then its other legal positions (a ring-and-badge item whose
+/// finger slots are full still goes on as a badge). Refusals stay silent
+/// (legacy `perform_wear` with `collective`). Returns whether it was worn.
+fn wear_item_collective(world: &mut World, player: Entity, item: Entity) -> bool {
+    let positions = crate::commands::item_wear_positions(world, item);
+    positions.iter().rev().any(|&pos| {
+        crate::commands::wear_item(
+            world,
+            player,
+            item,
+            crate::commands::WearWhere::Position(pos),
+            true,
+        )
+    })
+}
+
+/// `wear <item> [<where>]`, `wear all`, `wear all.<name>` (legacy `do_wear`).
+/// A trailing body keyword (`wear nexus badge`, `wear bracelet wrist`)
+/// names the position to wear the item at; a second ring/ear/wrist/neck
+/// item falls through to the other side on its own.
 pub(crate) fn cmd_wear(world: &mut World, player: Entity, args: &str) {
-    let trimmed = args.trim();
-    // `wear all` — try to equip every carried wearable. Items whose
-    // primary slot is already filled get skipped silently (a single
-    // collective "couldn't wear N" line summarizes failures).
-    if trimmed.eq_ignore_ascii_case("all") {
-        let items: Vec<Entity> = {
-            let mut q = world
-                .query_filtered::<(Entity, &Located, Option<&EquippedSlot>, Option<&WearableIn>), With<Item>>();
-            q.iter(world)
-                .filter(|(_, l, eq, wi)| l.0 == player && eq.is_none() && wi.is_some())
-                .map(|(e, _, _, _)| e)
-                .collect()
-        };
+    let words: Vec<&str> = args.split_whitespace().collect();
+    let Some(&first) = words.first() else {
+        send_to(world, player, "Wear what?\r\n");
+        return;
+    };
+    let all_dot = first
+        .to_ascii_lowercase()
+        .strip_prefix("all.")
+        .map(str::to_string);
+    let is_all = first.eq_ignore_ascii_case("all");
+    if (is_all || all_dot.is_some()) && words.len() > 1 {
+        send_to(
+            world,
+            player,
+            "You can't specify the same body location for more than one item!\r\n",
+        );
+        return;
+    }
+
+    if is_all {
+        // Every carried item that fits somewhere, in inventory order.
+        let mut items = carried_unequipped_items(world, player);
+        items.retain(|&e| !crate::commands::item_wear_positions(world, e).is_empty());
+        let worn = items
+            .into_iter()
+            .filter(|&e| wear_item_collective(world, player, e))
+            .count();
+        if worn == 0 {
+            send_to(world, player, "You don't have anything you can wear.\r\n");
+        }
+    } else if let Some(filter) = all_dot {
+        if filter.is_empty() {
+            send_to(world, player, "Wear all of what?\r\n");
+            return;
+        }
+        let mut items = carried_unequipped_items(world, player);
+        items.retain(|&e| {
+            let named = world.get::<Named>(e).cloned();
+            let kw = world.get::<Keywords>(e).cloned();
+            named.is_some_and(|n| crate::commands::matches(&filter, &n, kw.as_ref()))
+        });
         if items.is_empty() {
+            let plural = if filter.ends_with('s') { "" } else { "s" };
             send_to(
                 world,
                 player,
-                "You have nothing wearable in your inventory.\r\n",
+                format!("You don't seem to have any {filter}{plural}.\r\n"),
             );
+        } else {
+            let worn = items
+                .into_iter()
+                .filter(|&e| wear_item_collective(world, player, e))
+                .count();
+            if worn == 0 {
+                send_to(
+                    world,
+                    player,
+                    "You don't have anything wearable like that.\r\n",
+                );
+            }
+        }
+    } else if words.len() > 1
+        && let Some(&last) = words.last()
+        && let Some(position) = mud_world::wear_keyword_slot(last)
+    {
+        // The last word is a body position; everything before it names
+        // the item.
+        let name = words[..words.len() - 1].join(" ");
+        let Some(item) = crate::commands::find_carried_by(
+            world,
+            &name,
+            player,
+            crate::commands::EquipFilter::Inventory,
+        ) else {
+            send_to(world, player, format!("You aren't carrying '{name}'.\r\n"));
             return;
-        }
-        // Use the silent-room variant so the loop doesn't fire N
-        // per-item bystander broadcasts. We count actual equips by
-        // sampling the EquippedSlot count delta around the loop,
-        // then emit one consolidated room line at the end.
-        let before_equipped: usize = {
-            let mut q = world.query_filtered::<(&Located, &EquippedSlot), With<Item>>();
-            q.iter(world).filter(|(l, _)| l.0 == player).count()
         };
-        for item in items {
-            let name = name_of(world, item);
-            crate::commands::wear_into_silent(world, player, &name, None);
-        }
-        let after_equipped: usize = {
-            let mut q = world.query_filtered::<(&Located, &EquippedSlot), With<Item>>();
-            q.iter(world).filter(|(l, _)| l.0 == player).count()
-        };
-        let newly = after_equipped.saturating_sub(before_equipped);
-        if newly > 0
-            && let Some(located) = world.get::<Located>(player).copied()
-        {
-            let actor_name = name_of(world, player);
-            let plural = if newly == 1 { "item" } else { "items" };
-            broadcast_room_visual(
-                world,
-                located.0,
-                player,
-                &[player],
-                &cap_sentence_start(&format!("{actor_name} dons {newly} {plural} of gear.\r\n")),
-            );
-        }
-        refresh_player_items_gmcp(world, player);
-        return;
+        crate::commands::wear_item(
+            world,
+            player,
+            item,
+            crate::commands::WearWhere::Position(position),
+            false,
+        );
+    } else {
+        wear_into(world, player, &words.join(" "), None);
     }
-    wear_into(world, player, trimmed, None);
     refresh_player_items_gmcp(world, player);
+}
+
+/// Items the player carries but has not equipped, in inventory listing
+/// order (newest first, as legacy's `ch->carrying` list).
+fn carried_unequipped_items(world: &mut World, player: Entity) -> Vec<Entity> {
+    let mut items: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located, Option<&EquippedSlot>), With<Item>>();
+        q.iter(world)
+            .filter(|(_, l, eq)| l.0 == player && eq.is_none())
+            .map(|(e, _, _)| e)
+            .collect()
+    };
+    crate::commands::sort_newest_first(world, player, &mut items, |e| *e);
+    items
 }
 
 pub(crate) fn cmd_wield(world: &mut World, player: Entity, args: &str) {

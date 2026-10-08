@@ -391,22 +391,24 @@ pub fn is_lit(world: &World, item: Entity) -> bool {
 pub struct Keywords(pub Vec<String>);
 
 /// Equipment slots a wearable item can occupy. Order roughly head-to-toe
-/// for `equipment` display; weapons and odd-fits at the end. Modeled as
-/// single slots even when the schema flag implies a pair (a single
-/// `Ears` slot covers both ears, a single `Wrist` slot covers both
-/// wrists) — matches the legacy `CircleMUD` shape and avoids needing
-/// per-side bookkeeping in v1.
+/// for `equipment` display; weapons and odd-fits at the end. Anatomy that
+/// comes in pairs (fingers, necks, wrists, ears) has one slot per side, as
+/// in legacy (`WEAR_FINGER_R`/`_L`, `WEAR_NECK_1`/`_2`, `WEAR_WRIST_R`/`_L`,
+/// `WEAR_LEAR`/`_REAR`); [`Slot::group`] gives the fill order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Slot {
     Head,
     Eyes,
     Face,
-    Ears,
+    LeftEar,
+    RightEar,
     Neck,
+    SecondNeck,
     About,
     Body,
     Arms,
-    Wrist,
+    LeftWrist,
+    RightWrist,
     Hands,
     LeftFinger,
     RightFinger,
@@ -425,12 +427,15 @@ impl Slot {
         Self::Head,
         Self::Eyes,
         Self::Face,
-        Self::Ears,
+        Self::LeftEar,
+        Self::RightEar,
         Self::Neck,
+        Self::SecondNeck,
         Self::About,
         Self::Body,
         Self::Arms,
-        Self::Wrist,
+        Self::LeftWrist,
+        Self::RightWrist,
         Self::Hands,
         Self::LeftFinger,
         Self::RightFinger,
@@ -450,12 +455,14 @@ impl Slot {
             Self::Head => "head",
             Self::Eyes => "eyes",
             Self::Face => "face",
-            Self::Ears => "ears",
-            Self::Neck => "neck",
+            Self::LeftEar => "ear (left)",
+            Self::RightEar => "ear (right)",
+            Self::Neck | Self::SecondNeck => "neck",
             Self::About => "about body",
             Self::Body => "body",
             Self::Arms => "arms",
-            Self::Wrist => "wrist",
+            Self::LeftWrist => "wrist (left)",
+            Self::RightWrist => "wrist (right)",
             Self::Hands => "hands",
             Self::LeftFinger => "finger (left)",
             Self::RightFinger => "finger (right)",
@@ -494,12 +501,15 @@ impl Slot {
             Self::Head => "HEAD",
             Self::Eyes => "EYES",
             Self::Face => "FACE",
-            Self::Ears => "EARS",
+            Self::LeftEar => "EAR_LEFT",
+            Self::RightEar => "EAR_RIGHT",
             Self::Neck => "NECK",
+            Self::SecondNeck => "NECK_2",
             Self::About => "ABOUT",
             Self::Body => "BODY",
             Self::Arms => "ARMS",
-            Self::Wrist => "WRIST",
+            Self::LeftWrist => "WRIST_LEFT",
+            Self::RightWrist => "WRIST_RIGHT",
             Self::Hands => "HANDS",
             Self::LeftFinger => "FINGER_LEFT",
             Self::RightFinger => "FINGER_RIGHT",
@@ -525,14 +535,17 @@ impl Slot {
             "HEAD" => Some(Self::Head),
             "EYES" => Some(Self::Eyes),
             "FACE" => Some(Self::Face),
-            "EARS" | "EAR" => Some(Self::Ears),
-            // Schema sometimes splits NECK_1/NECK_2 — we collapse to one
-            // slot for now since the runtime doesn't model the pair.
-            "NECK" | "NECK_1" | "NECK_2" => Some(Self::Neck),
+            // Bare EARS / EAR / WRIST are the pre-pairing labels (one bin
+            // for both sides): they resolve to the first slot of the pair.
+            "EARS" | "EAR" | "EAR_LEFT" => Some(Self::LeftEar),
+            "EAR_RIGHT" => Some(Self::RightEar),
+            "NECK" | "NECK_1" => Some(Self::Neck),
+            "NECK_2" => Some(Self::SecondNeck),
             "ABOUT" => Some(Self::About),
             "BODY" => Some(Self::Body),
             "ARMS" => Some(Self::Arms),
-            "WRIST" => Some(Self::Wrist),
+            "WRIST" | "WRIST_RIGHT" => Some(Self::RightWrist),
+            "WRIST_LEFT" => Some(Self::LeftWrist),
             "HANDS" => Some(Self::Hands),
             "FINGER_LEFT" | "FINGER_R" => Some(Self::LeftFinger),
             "FINGER_RIGHT" | "FINGER_L" => Some(Self::RightFinger),
@@ -547,6 +560,94 @@ impl Slot {
             _ => None,
         }
     }
+
+    /// The slots that make up this slot's wear position, in the order
+    /// legacy `may_wear_eq` fills them (`WEAR_FINGER_R` then `_L`,
+    /// `WEAR_NECK_1` then `_2`, `WEAR_WRIST_R` then `_L`, `WEAR_LEAR`
+    /// then `_REAR`). A non-paired slot is a group of one.
+    #[must_use]
+    pub const fn group(self) -> &'static [Self] {
+        match self {
+            Self::LeftFinger | Self::RightFinger => &[Self::RightFinger, Self::LeftFinger],
+            Self::Neck | Self::SecondNeck => &[Self::Neck, Self::SecondNeck],
+            Self::LeftWrist | Self::RightWrist => &[Self::RightWrist, Self::LeftWrist],
+            Self::LeftEar | Self::RightEar => &[Self::LeftEar, Self::RightEar],
+            Self::Head => &[Self::Head],
+            Self::Eyes => &[Self::Eyes],
+            Self::Face => &[Self::Face],
+            Self::About => &[Self::About],
+            Self::Body => &[Self::Body],
+            Self::Arms => &[Self::Arms],
+            Self::Hands => &[Self::Hands],
+            Self::Waist => &[Self::Waist],
+            Self::Legs => &[Self::Legs],
+            Self::Feet => &[Self::Feet],
+            Self::Wield => &[Self::Wield],
+            Self::Hold => &[Self::Hold],
+            Self::Light => &[Self::Light],
+            Self::Hover => &[Self::Hover],
+            Self::Badge => &[Self::Badge],
+        }
+    }
+
+    /// The first slot of this slot's [`group`](Self::group): the one an
+    /// item's wear flag maps to and a `wear <item> <keyword>` targets.
+    #[must_use]
+    pub const fn position(self) -> Self {
+        self.group()[0]
+    }
+
+    /// Side-less singular noun for the position ("ear", "wrist"), used
+    /// where the item is not on a particular side; appending `s` pluralises it.
+    #[must_use]
+    pub fn position_label(self) -> &'static str {
+        match self.position() {
+            Self::LeftEar => "ear",
+            Self::RightWrist => "wrist",
+            Self::RightFinger => "finger",
+            other => other.label(),
+        }
+    }
+}
+
+/// The body-position keywords `wear <item> <where>` accepts, in the order
+/// of legacy `find_eq_pos`'s `keywords[]` (matching is by case-insensitive
+/// prefix, first hit wins). Each maps to the first slot of its wear
+/// position. `shield` is the off-hand slot (this port has no separate
+/// shield slot).
+pub const WEAR_KEYWORDS: &[(&str, Slot)] = &[
+    ("finger", Slot::RightFinger),
+    ("neck", Slot::Neck),
+    ("body", Slot::Body),
+    ("head", Slot::Head),
+    ("legs", Slot::Legs),
+    ("feet", Slot::Feet),
+    ("hands", Slot::Hands),
+    ("arms", Slot::Arms),
+    ("shield", Slot::Hold),
+    ("about", Slot::About),
+    ("waist", Slot::Waist),
+    ("wrist", Slot::RightWrist),
+    ("eyes", Slot::Eyes),
+    ("face", Slot::Face),
+    ("ear", Slot::LeftEar),
+    ("badge", Slot::Badge),
+    ("belt", Slot::Waist),
+    ("hover", Slot::Hover),
+];
+
+/// Resolve a `wear <item> <where>` keyword (legacy `search_block` with
+/// `exact = false`: any non-empty prefix, first keyword in table order).
+#[must_use]
+pub fn wear_keyword_slot(arg: &str) -> Option<Slot> {
+    if arg.is_empty() || arg.starts_with('!') {
+        return None;
+    }
+    let lower = arg.to_ascii_lowercase();
+    WEAR_KEYWORDS
+        .iter()
+        .find(|(kw, _)| kw.starts_with(&lower))
+        .map(|(_, slot)| *slot)
 }
 
 /// Item-only: the slot this item is wearable in. Items without a
@@ -2683,10 +2784,38 @@ mod tests {
     }
 
     #[test]
-    fn slot_from_label_collapses_neck_pair() {
+    fn slot_from_label_splits_neck_pair() {
         assert_eq!(Slot::from_label("NECK_1"), Some(Slot::Neck));
-        assert_eq!(Slot::from_label("NECK_2"), Some(Slot::Neck));
+        assert_eq!(Slot::from_label("NECK_2"), Some(Slot::SecondNeck));
         assert_eq!(Slot::from_label("NECK"), Some(Slot::Neck));
+    }
+
+    #[test]
+    fn paired_slots_fill_in_legacy_order() {
+        assert_eq!(
+            Slot::LeftWrist.group(),
+            &[Slot::RightWrist, Slot::LeftWrist]
+        );
+        assert_eq!(Slot::RightEar.group(), &[Slot::LeftEar, Slot::RightEar]);
+        assert_eq!(Slot::LeftFinger.position(), Slot::RightFinger);
+        assert_eq!(Slot::Badge.group(), &[Slot::Badge]);
+        for s in Slot::ORDER {
+            assert!(s.group().contains(s), "{s:?} is in its own group");
+        }
+    }
+
+    #[test]
+    fn wear_keywords_follow_legacy_prefix_matching() {
+        assert_eq!(wear_keyword_slot("badge"), Some(Slot::Badge));
+        assert_eq!(wear_keyword_slot("BAD"), Some(Slot::Badge));
+        assert_eq!(wear_keyword_slot("wrist"), Some(Slot::RightWrist));
+        assert_eq!(wear_keyword_slot("ear"), Some(Slot::LeftEar));
+        // `e` hits `eyes` before `ear`, as in legacy's table order.
+        assert_eq!(wear_keyword_slot("e"), Some(Slot::Eyes));
+        assert_eq!(wear_keyword_slot("belt"), Some(Slot::Waist));
+        assert_eq!(wear_keyword_slot("!"), None);
+        assert_eq!(wear_keyword_slot(""), None);
+        assert_eq!(wear_keyword_slot("elbow"), None);
     }
 
     #[test]
@@ -2695,11 +2824,11 @@ mod tests {
         // imported items (cloaks/wristbands/goggles/masks/badges/etc.).
         assert_eq!(Slot::from_label("BADGE"), Some(Slot::Badge));
         assert_eq!(Slot::from_label("ABOUT"), Some(Slot::About));
-        assert_eq!(Slot::from_label("EARS"), Some(Slot::Ears));
+        assert_eq!(Slot::from_label("EARS"), Some(Slot::LeftEar));
         // Schema enum is `EAR` (singular); from_label accepts both
         // forms so legacy DB rows that use either spelling resolve.
-        assert_eq!(Slot::from_label("EAR"), Some(Slot::Ears));
-        assert_eq!(Slot::from_label("WRIST"), Some(Slot::Wrist));
+        assert_eq!(Slot::from_label("EAR"), Some(Slot::LeftEar));
+        assert_eq!(Slot::from_label("WRIST"), Some(Slot::RightWrist));
         assert_eq!(Slot::from_label("EYES"), Some(Slot::Eyes));
         assert_eq!(Slot::from_label("FACE"), Some(Slot::Face));
         assert_eq!(Slot::from_label("HOVER"), Some(Slot::Hover));

@@ -323,9 +323,9 @@ pub fn wear_flag_matches_slot(flag: mud_db::enums::WearFlag, slot: mud_world::Sl
     matches!(
         (flag, slot),
         (Finger, Slot::LeftFinger | Slot::RightFinger)
-            | (Neck, Slot::Neck)
-            | (Ear, Slot::Ears)
-            | (Wrist, Slot::Wrist)
+            | (Neck, Slot::Neck | Slot::SecondNeck)
+            | (Ear, Slot::LeftEar | Slot::RightEar)
+            | (Wrist, Slot::LeftWrist | Slot::RightWrist)
             | (Head, Slot::Head)
             | (Eyes, Slot::Eyes)
             | (Face, Slot::Face)
