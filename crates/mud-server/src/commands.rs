@@ -20991,6 +20991,7 @@ pub(crate) fn try_engage_remembered_mob(world: &mut World, player: Entity, room:
                 l.0 == room
                     && mem.0.contains(&player)
                     && can_see_player(world, *e, player)
+                    && !attack_ok::is_servant(world, *e)
                     && !wimpy_mob_is_scared(world, *e)
             })
             .map(|(e, _, _)| e)
@@ -21014,7 +21015,7 @@ pub(crate) fn wimpy_mob_is_scared(world: &World, mob: Entity) -> bool {
 }
 
 /// Legacy gate on a mob *starting* a fight with `target` (aggro on
-/// entry, respawn aggro). Grudge re-engage only uses
+/// entry, respawn aggro; pets and charmed mobs never start one). Grudge re-engage only uses
 /// [`wimpy_mob_is_scared`]: legacy `mob_memory_check` has no awake test. A wimpy mob below its panic
 /// line never starts one (`mobact.cpp:277`), and a wimpy mob is only
 /// willing to attack a target that is asleep (`is_aggr_to`,
@@ -21022,6 +21023,11 @@ pub(crate) fn wimpy_mob_is_scared(world: &World, mob: Entity) -> bool {
 /// protector or peacekeeper. Non-wimpy mobs are unaffected.
 pub(crate) fn mob_will_start_fight(world: &World, mob: Entity, target: Entity) -> bool {
     use mud_db::enums::MobBehavior;
+    // A pet or charmed mob never opens hostilities (not even against
+    // its own master): it fights when its master does.
+    if attack_ok::is_servant(world, mob) {
+        return false;
+    }
     let Some(behaviors) = world.get::<mud_world::MobBehaviors>(mob) else {
         return true;
     };

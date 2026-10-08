@@ -33,6 +33,26 @@ pub(super) fn is_charmed(world: &mut World, entity: Entity) -> bool {
         .any(|(i, a)| a.0 == entity && i.name.eq_ignore_ascii_case("charmed"))
 }
 
+/// Read-only [`is_charmed`] for callers that only hold `&World`.
+pub(super) fn is_charmed_ro(world: &World, entity: Entity) -> bool {
+    world
+        .try_query::<(&EffectInstance, &AppliedTo)>()
+        .is_some_and(|mut q| {
+            q.iter(world)
+                .any(|(i, a)| a.0 == entity && i.name.eq_ignore_ascii_case("charmed"))
+        })
+}
+
+/// A mob that serves someone: a player's pet (shop pet, summoned or
+/// animated follower) or a charmed mob. It never starts a fight on its own
+/// (aggro, grudge); it fights when its master does.
+pub(super) fn is_servant(world: &World, mob: Entity) -> bool {
+    pet_owner(world, mob).is_some()
+        || (world.get::<Follower>(mob).is_some()
+            && world.get::<Mob>(mob).is_some()
+            && is_charmed_ro(world, mob))
+}
+
 /// The player a pet belongs to: any mob following a player, whether it is
 /// charmed or just a shop pet / summoned follower. A pet's attack is judged as
 /// its owner's attack, and an attack on it as an attack on the owner.

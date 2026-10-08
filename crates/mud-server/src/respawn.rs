@@ -826,4 +826,49 @@ mod tests {
         let mob = mob_of(&mut world, 1).expect("respawned");
         assert_eq!(fighting_target(&world, mob), None);
     }
+
+    #[test]
+    fn evil_pet_does_not_attack_its_owner_when_something_respawns() {
+        // The reset mob is neutral, so the pet is the only aggro
+        // candidate in the room.
+        let (mut world, room, player, _rx) = aggro_world(vec![]);
+        world
+            .resource_mut::<MobPrototypes>()
+            .by_key
+            .get_mut(&MOB_KEY)
+            .unwrap()
+            .alignment = 0;
+        let spawn_evil = |world: &mut World| {
+            world
+                .spawn((
+                    Mob,
+                    Named {
+                        name: "a hellhound".into(),
+                    },
+                    Located(room),
+                    mud_world::CombatStats {
+                        alignment: -1000,
+                        ..mud_world::CombatStats::default()
+                    },
+                    mud_world::Health { hp: 50, max: 50 },
+                    mud_world::Posture(mud_world::PostureKind::Standing),
+                ))
+                .id()
+        };
+        let pet = spawn_evil(&mut world);
+        world.entity_mut(pet).insert(mud_world::Follower(player));
+        run_respawn(&mut world, 6000);
+        assert_eq!(fighting_target(&world, pet), None, "pet spares its owner");
+
+        // Control: the same evil mob without a master does attack.
+        world.entity_mut(pet).remove::<mud_world::Follower>();
+        world
+            .resource_mut::<MobRespawnTimers>()
+            .last_death_tick
+            .clear();
+        let mob = mob_of(&mut world, 1).expect("reset mob alive");
+        world.entity_mut(mob).despawn();
+        run_respawn(&mut world, 12000);
+        assert_eq!(fighting_target(&world, pet), Some(player));
+    }
 }
