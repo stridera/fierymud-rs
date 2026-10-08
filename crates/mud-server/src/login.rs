@@ -8,10 +8,10 @@ use mud_db::{characters, characters::CharacterRow, sqlx::PgPool, users, users::U
 use mud_net::{ConnId, Outbound};
 use mud_world::{
     Account, AccountSummary, AttachedTriggers, BankWealth, BoardLink, CombatStats, CoreStats,
-    Description, EquippedSlot, Follower, Health, Item, Keywords, KnownAbilities, LiquidContainer,
-    Located, LoggedInAt, Mob, MobPrototypes, Named, ObjectPrototypes, Online, Player, PlayerFlags,
-    Posture, PostureKind, Profile, Prompt, RecallPoint, Slot, Stamina, Title, TriggerCatalog,
-    Wealth, WearableIn, WorldKey, WorldKeyIndex, wear_flags_primary_slot,
+    Description, EquippedSlot, Fighting, Follower, Ghost, Health, Item, Keywords, KnownAbilities,
+    LiquidContainer, Located, LoggedInAt, Mob, MobPrototypes, Named, ObjectPrototypes, Online,
+    Player, PlayerFlags, Posture, PostureKind, Profile, Prompt, RecallPoint, Slot, Stamina, Title,
+    TriggerCatalog, Wealth, WearableIn, WorldKey, WorldKeyIndex, wear_flags_primary_slot,
 };
 use subtle::ConstantTimeEq;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -503,6 +503,11 @@ enum AuthDoneKind {
 /// login is refused. See [`ConnRouter::complete_login_inner`].
 const PREVIOUS_SAVE_WAIT: Duration = Duration::from_secs(10);
 
+/// How long a linkdead character that is no longer fighting stays in the
+/// world before it is saved and removed. Legacy `check_idling` extracts a
+/// link-less player after 12 idle ticks of 75 s (`limits.cpp`).
+const LINKDEAD_TIMEOUT_TICKS: u64 = 12 * 75 * crate::TICK_HZ;
+
 /// Inclusive length window for a new character name. Lower bound
 /// keeps single-letter ambiguity out of `who`-style listings;
 /// upper bound matches the existing `Characters.name` column
@@ -514,12 +519,6 @@ const MAX_CHARACTER_NAME_LEN: usize = 20;
 /// Default starting room when a character has no current/recall location set.
 /// (0, 0) is "The Void" — fitting.
 const FALLBACK_START: (i32, i32) = (0, 0);
-
-/// Rest / repose: quit-grace window. A player whose `restSource` is
-/// `NONE` or `QUIT` and who logs back in within this window spawns at
-/// their last room rather than at recall. Per design doc §"Login
-/// spawn location". 30 minutes wall-clock. **TUNABLE**.
-pub(crate) const REST_QUIT_GRACE_SECS: i64 = 30 * 60;
 
 /// Rest / repose: offline Repose fill rate per tier. Indexed by
 /// `restTier` (0..=3); tier 0 is `NONE` / `QUIT` and contributes
@@ -935,6 +934,98 @@ fn reprompt_identifier(ctx: &mut LoginCtx, world: &World) {
     ));
 }
 
+/// A socket drop leaves the character in the world only when it is
+/// mid-fight and alive; quitting players, ghosts, and everyone out of
+/// combat are saved and despawned as before.
+fn goes_linkdead(world: &World, entity: Entity) -> bool {
+    world.get::<Fighting>(entity).is_some()
+        && world.get::<Health>(entity).is_some_and(|h| h.hp > 0)
+        && world.get::<Ghost>(entity).is_none()
+        && world.get::<commands::Quitting>(entity).is_none()
+}
+
+/// Detach a character from its (already gone) connection but keep it in the
+/// world: combat, autosave, and everything else carry on without output.
+fn go_linkdead(world: &mut World, entity: Entity) {
+    let since_tick = world.get_resource::<crate::TickCount>().map_or(0, |t| t.0);
+    if let Ok(mut e) = world.get_entity_mut(entity) {
+        e.remove::<Connection>();
+        e.insert(commands::Linkdead { since_tick });
+    }
+    if let Some(room) = world.get::<Located>(entity).map(|l| l.0) {
+        let name = commands::name_of(world, entity);
+        commands::broadcast_room_visual(
+            world,
+            room,
+            entity,
+            &[entity],
+            &commands::cap_sentence_start(&format!("{name} has lost their link.\r\n")),
+        );
+    }
+    info!(entity = ?entity, "connection lost mid-fight; character stays in the world");
+}
+
+/// Take a character out of the world: tell the room, run the ordered save,
+/// then despawn it and everything it carries. The one exit shared by quit,
+/// camp, a dropped link out of combat, idle kicks, and linkdead timeouts.
+async fn retire_player(world: &mut World, entity: Entity, pool: &PgPool) {
+    // Broadcast a Room.RemovePlayer diff so other clients in
+    // the room update their "who's here" panel. Done before
+    // save/despawn so the entity's Located is still valid.
+    // Pair it with a text leave-broadcast so plain-telnet
+    // clients without GMCP support also see the departure —
+    // without this, players in the room had no signal an
+    // ally just logged out / disconnected.
+    if let Some(room) = world.get::<Located>(entity).map(|l| l.0) {
+        commands::broadcast_room_player_diff(world, room, entity, "RemovePlayer");
+        let player_name = commands::name_of(world, entity);
+        // A deliberate `quit` gets the legacy departure line; a
+        // dropped link / kick keeps the "fades from view" one.
+        let departure = if world.get::<commands::Camped>(entity).is_some() {
+            format!("{player_name} rolls up their bedroll and tunes out the world.\r\n")
+        } else if world.get::<commands::Quitting>(entity).is_some() {
+            format!("{player_name} has left the game.\r\n")
+        } else {
+            format!("{player_name} fades from view, retiring to dreams.\r\n")
+        };
+        commands::broadcast_room_visual(
+            world,
+            room,
+            entity,
+            &[entity],
+            &commands::cap_sentence_start(&departure),
+        );
+    }
+    // Disconnect path — player is gone before we could
+    // report a partial save. A failed write is handed to the
+    // background writer for retry before the entity (and its
+    // items) are despawned, so the state isn't lost with it.
+    let outcome = save_player(world, entity, pool).await;
+    retry_failed_save(world, outcome, pool);
+    // Despawn the player AND every item they were carrying / wearing
+    // (Located(player) catches both inventory and equipped —
+    // EquippedSlot is additive), including items nested inside
+    // carried containers. Walk the `Contents` index so this costs
+    // O(carried), not a scan of every item in the world.
+    let mut items: Vec<Entity> = Vec::new();
+    let mut frontier: Vec<Entity> = vec![entity];
+    while let Some(parent) = frontier.pop() {
+        let Some(contents) = world.get::<mud_world::Contents>(parent) else {
+            continue;
+        };
+        for child in contents.iter() {
+            if world.get::<Item>(child).is_some() {
+                items.push(child);
+                frontier.push(child);
+            }
+        }
+    }
+    for item in items {
+        world.despawn(item);
+    }
+    world.despawn(entity);
+}
+
 impl ConnRouter {
     pub fn new() -> Self {
         let (auth_tx, auth_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1032,6 +1123,15 @@ impl ConnRouter {
         );
     }
 
+    /// Every character the autosave and shutdown saves must cover: the
+    /// connected ones plus linkdead characters still fighting in the world.
+    fn online_entities(&self, world: &mut World) -> Vec<Entity> {
+        let mut entities: Vec<Entity> = self.playing.values().copied().collect();
+        let mut q = world.query_filtered::<Entity, With<commands::Linkdead>>();
+        entities.extend(q.iter(world));
+        entities
+    }
+
     /// Run the `save_player` path for every still-connected character
     /// that has finished login. Called once on graceful shutdown so a
     /// Ctrl-C doesn't lose hp/stamina/inventory/location for whoever
@@ -1041,7 +1141,7 @@ impl ConnRouter {
     pub async fn save_all_online(&self, world: &mut World, pool: &PgPool) {
         // Snapshot the (conn_id, entity) pairs so we don't borrow self
         // across `.await` calls — save_player takes &mut World.
-        let entries: Vec<Entity> = self.playing.values().copied().collect();
+        let entries = self.online_entities(world);
         for entity in entries {
             // SaveOutcome dropped — broadcast autosave can't surface
             // a per-player partial-save message anyway, and the
@@ -1075,9 +1175,9 @@ impl ConnRouter {
         };
         coordinator.apply_completions(world);
         let online: HashMap<String, Entity> = self
-            .playing
-            .values()
-            .filter_map(|&e| world.get::<Account>(e).map(|a| (a.character_id.clone(), e)))
+            .online_entities(world)
+            .into_iter()
+            .filter_map(|e| world.get::<Account>(e).map(|a| (a.character_id.clone(), e)))
             .collect();
         let ids: Vec<String> = online.keys().cloned().collect();
         for cid in coordinator.autosave_due(&ids, interval, crate::autosave::AUTOSAVE_PER_SCAN) {
@@ -1099,65 +1199,67 @@ impl ConnRouter {
         }
         self.caps.remove(&conn_id);
         if let Some(entity) = self.playing.remove(&conn_id) {
+            // A dropped link mid-fight leaves the character in the world to
+            // finish it (see `Linkdead`); every other exit saves and despawns.
+            if goes_linkdead(world, entity) {
+                go_linkdead(world, entity);
+                return;
+            }
             // Send Core.Goodbye before any teardown so the client
             // can show a clean disconnect message instead of a
             // raw "connection lost". Plain telnet clients ignore
             // the IAC bytes, so this costs nothing on the
             // unsupported path.
             commands::send_core_goodbye(world, entity, "See you next time!");
-            // Broadcast a Room.RemovePlayer diff so other clients in
-            // the room update their "who's here" panel. Done before
-            // save/despawn so the entity's Located is still valid.
-            // Pair it with a text leave-broadcast so plain-telnet
-            // clients without GMCP support also see the departure —
-            // without this, players in the room had no signal an
-            // ally just logged out / disconnected.
-            if let Some(room) = world.get::<Located>(entity).map(|l| l.0) {
-                commands::broadcast_room_player_diff(world, room, entity, "RemovePlayer");
-                let player_name = commands::name_of(world, entity);
-                // A deliberate `quit` gets the legacy departure line; a
-                // dropped link / kick keeps the "fades from view" one.
-                let departure = if world.get::<commands::Quitting>(entity).is_some() {
-                    format!("{player_name} has left the game.\r\n")
-                } else {
-                    format!("{player_name} fades from view, retiring to dreams.\r\n")
-                };
-                commands::broadcast_room_visual(
-                    world,
-                    room,
-                    entity,
-                    &[entity],
-                    &commands::cap_sentence_start(&departure),
-                );
+            retire_player(world, entity, pool).await;
+        }
+    }
+
+    /// Log out every player flagged [`commands::Quitting`] outside a typed
+    /// command: a completed `camp` is the only such source today (`quit` and
+    /// `rent` are drained by [`Self::on_line`] right after the command).
+    pub async fn drain_quitting(&mut self, world: &mut World, pool: &PgPool) {
+        let pending: Vec<Entity> = {
+            let mut q = world.query_filtered::<Entity, With<commands::Quitting>>();
+            q.iter(world).collect()
+        };
+        for entity in pending {
+            if let Some(conn_id) = self.find_conn(entity) {
+                self.on_disconnect(world, conn_id, pool).await;
+                (self.close_conn)(conn_id);
+            } else if let Ok(mut e) = world.get_entity_mut(entity) {
+                // No connection to close (it already dropped): the marker
+                // is stale, so clear it rather than retry forever.
+                e.remove::<commands::Quitting>();
             }
-            // Disconnect path — player is gone before we could
-            // report a partial save. A failed write is handed to the
-            // background writer for retry before the entity (and its
-            // items) are despawned, so the state isn't lost with it.
-            let outcome = save_player(world, entity, pool).await;
-            retry_failed_save(world, outcome, pool);
-            // Despawn the player AND every item they were carrying / wearing
-            // (Located(player) catches both inventory and equipped —
-            // EquippedSlot is additive), including items nested inside
-            // carried containers. Walk the `Contents` index so this costs
-            // O(carried), not a scan of every item in the world.
-            let mut items: Vec<Entity> = Vec::new();
-            let mut frontier: Vec<Entity> = vec![entity];
-            while let Some(parent) = frontier.pop() {
-                let Some(contents) = world.get::<mud_world::Contents>(parent) else {
-                    continue;
-                };
-                for child in contents.iter() {
-                    if world.get::<Item>(child).is_some() {
-                        items.push(child);
-                        frontier.push(child);
+        }
+    }
+
+    /// Save and despawn every linkdead character whose fight is over for
+    /// good: dead (a ghost waits for `release`, which needs a player at the
+    /// keyboard), or out of combat for [`LINKDEAD_TIMEOUT_TICKS`]. While a
+    /// fight lasts the timer is held at zero. Called every tick from the
+    /// main loop; costs one query over linkdead characters only.
+    pub async fn drain_linkdead(&mut self, world: &mut World, pool: &PgPool) {
+        let now = world.get_resource::<crate::TickCount>().map_or(0, |t| t.0);
+        let linkdead: Vec<(Entity, u64)> = {
+            let mut q = world.query::<(Entity, &commands::Linkdead)>();
+            q.iter(world).map(|(e, l)| (e, l.since_tick)).collect()
+        };
+        for (entity, since) in linkdead {
+            if world.get::<Ghost>(entity).is_none() {
+                if world.get::<Fighting>(entity).is_some() {
+                    if let Some(mut l) = world.get_mut::<commands::Linkdead>(entity) {
+                        l.since_tick = now;
                     }
+                    continue;
+                }
+                if now.saturating_sub(since) < LINKDEAD_TIMEOUT_TICKS {
+                    continue;
                 }
             }
-            for item in items {
-                world.despawn(item);
-            }
-            world.despawn(entity);
+            info!(entity = ?entity, "linkdead character removed from the world");
+            retire_player(world, entity, pool).await;
         }
     }
 
@@ -3284,14 +3386,31 @@ impl ConnRouter {
         if let Some(old_conn) = old_conn {
             (self.close_conn)(old_conn);
         }
-        let _ = outbound.try_send(
-            "You take over your own body, already in use!\r\n"
-                .as_bytes()
-                .to_vec(),
-        );
+        let was_linkdead = world.get::<commands::Linkdead>(entity).is_some();
+        let _ = outbound.try_send(if was_linkdead {
+            b"Reconnecting.\r\n".to_vec()
+        } else {
+            b"You take over your own body, already in use!\r\n".to_vec()
+        });
         // Replacing the component drops the entity's handle to the old
         // channel; the entity itself (items, state) is untouched.
         world.entity_mut(entity).insert(Connection(outbound));
+        if was_linkdead {
+            // Same in-world character, picked up where the fight left it: no
+            // DB read, so nothing here can race an in-flight save.
+            world.entity_mut(entity).remove::<commands::Linkdead>();
+            commands::note_player_input(world, entity);
+            if let Some(room) = world.get::<Located>(entity).map(|l| l.0) {
+                let name = commands::name_of(world, entity);
+                commands::broadcast_room_visual(
+                    world,
+                    room,
+                    entity,
+                    &[entity],
+                    &commands::cap_sentence_start(&format!("{name} has reconnected.\r\n")),
+                );
+            }
+        }
         self.playing.insert(conn_id, entity);
         self.sync_client_width(conn_id, entity, world);
         self.attach_output(conn_id, entity, world);
@@ -3948,15 +4067,14 @@ pub(crate) fn spawn_player(
         .start_room_by_race
         .get(&c.race)
         .copied();
-    // Rest / repose R3: spawn-room decision factors in the queued
-    // RestSource and the elapsed offline window. Quit-with-grace
-    // (< 30min) and any non-NONE source land the player back where
-    // they logged off; QUIT past grace routes through recall.
+    // Everyone logs back in where they left, however they left and however
+    // long they were gone (issue #58: no penalty for quitting, camping or
+    // dropping link).
     let now_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
     let last_login_unix = c.last_login.map(|ts| ts.and_utc().timestamp());
-    let (zone, room) = pick_rest_starting_room(c, race_start, now_unix, last_login_unix);
+    let (zone, room) = pick_starting_room(c, race_start);
 
     // Rest / repose R3: accrue Repose for the elapsed offline window
     // BEFORE the spawn bundle insert, so the RestState component
@@ -5746,54 +5864,6 @@ fn pick_starting_room(c: &CharacterRow, race_start: Option<(i32, i32)>) -> (i32,
     FALLBACK_START
 }
 
-/// Rest / repose: compute the spawn-room decision per design doc
-/// §"Login spawn location":
-///
-/// - `restSource in {CAMP, INN, HOUSE}` → spawn at the saved
-///   `currentRoom` (the room the player rented / camped in).
-/// - `restSource in {QUIT, NONE}` AND elapsed ≥ 30min → spawn at
-///   `recallRoom` (fall through to race start, then Void).
-/// - Otherwise (no source, within grace window) → saved
-///   `currentRoom`.
-///
-/// `now_unix` and `last_login_unix` are wall-clock seconds; the
-/// difference is the offline window length. `None` `last_login` means
-/// fresh character — pretend they exited inside grace.
-fn pick_rest_starting_room(
-    c: &CharacterRow,
-    race_start: Option<(i32, i32)>,
-    now_unix: i64,
-    last_login_unix: Option<i64>,
-) -> (i32, i32) {
-    use mud_db::enums::RestSource;
-    let elapsed = last_login_unix.map_or(0, |prev| now_unix.saturating_sub(prev).max(0));
-    // CAMP / INN / HOUSE: spawn where logged off, period.
-    match c.rest_source {
-        RestSource::Camp | RestSource::Inn | RestSource::House => {
-            if let (Some(z), Some(r)) = (c.current_room_zone_id, c.current_room_id) {
-                return (z, r);
-            }
-            pick_starting_room(c, race_start)
-        }
-        RestSource::Quit | RestSource::None => {
-            if elapsed >= REST_QUIT_GRACE_SECS {
-                // Grace expired: route to recall first, then race
-                // start, then the Void.
-                if let (Some(z), Some(r)) = (c.recall_room_zone_id, c.recall_room_id) {
-                    return (z, r);
-                }
-                if let Some(rs) = race_start {
-                    return rs;
-                }
-                return FALLBACK_START;
-            }
-            // Inside grace window: behave like the legacy
-            // "back where you left off" path.
-            pick_starting_room(c, race_start)
-        }
-    }
-}
-
 /// Rest / repose: accrue Repose for the elapsed offline window.
 /// Returns the new pool value (clamped to per-tier cap). Pure-fn for
 /// unit testability — no DB or component writes.
@@ -5962,47 +6032,20 @@ mod tests {
     // --- Rest / repose spawn + accrue tests ---
 
     #[test]
-    fn pick_rest_starting_room_camp_returns_current_regardless_of_elapsed() {
-        let mut r = row(Some((30, 5)), Some((10, 1)));
-        r.rest_source = mud_db::enums::RestSource::Camp;
-        r.rest_tier = 2;
-        // Even a year offline: CAMP source lands at current_room.
-        assert_eq!(
-            pick_rest_starting_room(&r, Some((50, 1)), 1_000_000_000, Some(1)),
-            (30, 5),
-        );
-    }
-
-    #[test]
-    fn pick_rest_starting_room_quit_under_grace_uses_current() {
-        let mut r = row(Some((30, 5)), Some((10, 1)));
-        r.rest_source = mud_db::enums::RestSource::Quit;
-        // 5 minutes elapsed — well under the 30-min grace.
-        assert_eq!(
-            pick_rest_starting_room(&r, Some((50, 1)), 600, Some(300)),
-            (30, 5),
-        );
-    }
-
-    #[test]
-    fn pick_rest_starting_room_quit_past_grace_routes_to_recall() {
-        let mut r = row(Some((30, 5)), Some((10, 1)));
-        r.rest_source = mud_db::enums::RestSource::Quit;
-        // 31 minutes elapsed — past grace, recall wins.
-        assert_eq!(
-            pick_rest_starting_room(&r, Some((50, 1)), 1860 + 1000, Some(1000)),
-            (10, 1),
-        );
-    }
-
-    #[test]
-    fn pick_rest_starting_room_none_past_grace_with_no_recall_uses_race_start() {
-        let mut r = row(Some((30, 5)), None);
-        r.rest_source = mud_db::enums::RestSource::None;
-        assert_eq!(
-            pick_rest_starting_room(&r, Some((50, 1)), 5000, Some(1000)),
-            (50, 1),
-        );
+    fn login_room_is_the_saved_room_for_every_rest_source_and_offline_time() {
+        use mud_db::enums::RestSource;
+        for source in [
+            RestSource::None,
+            RestSource::Quit,
+            RestSource::Camp,
+            RestSource::Inn,
+            RestSource::House,
+        ] {
+            let mut r = row(Some((30, 5)), Some((10, 1)));
+            r.rest_source = source;
+            // Even a year offline, no source routes the player to recall.
+            assert_eq!(pick_starting_room(&r, Some((50, 1))), (30, 5), "{source:?}");
+        }
     }
 
     #[test]
@@ -6771,6 +6814,302 @@ mod tests {
         assert_eq!(router.playing.get(&1), Some(&guest));
         assert!(QUIT_CLOSED.with(|v| v.borrow().is_empty()));
         assert!(drain(&mut rx).contains("nothing to rent"));
+    }
+
+    // ---- linkdead (dropped link mid-fight), quit / camp refusals, camp logout ----
+
+    /// A connected fighter in `room` swinging at a fresh mob.
+    fn fighter_in(
+        router: &mut ConnRouter,
+        world: &mut World,
+        room: Entity,
+        conn: ConnId,
+    ) -> (Entity, Entity, tokio::sync::mpsc::Receiver<Vec<u8>>) {
+        let (fighter, rx) = playing_in(router, world, room, conn, "Fighter");
+        let foe = world
+            .spawn((mud_world::Mob, Located(room), Health { hp: 50, max: 50 }))
+            .id();
+        world.entity_mut(fighter).insert(mud_world::Fighting(foe));
+        (fighter, foe, rx)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropped_link_mid_fight_leaves_the_character_fighting_in_the_world() {
+        let mut world = World::new();
+        world.insert_resource(mud_world::SocialRegistry::default());
+        world.insert_resource(SaveCoordinator::default());
+        world.insert_resource(crate::TickCount(7));
+        let pool = failing_pool();
+        let mut router = ConnRouter::new();
+        let room = world.spawn(mud_world::Room).id();
+        let (fighter, foe, _rx) = fighter_in(&mut router, &mut world, room, 1);
+        let (_watcher, mut rx_watcher) = playing_in(&mut router, &mut world, room, 2, "Watcher");
+
+        router.on_disconnect(&mut world, 1, &pool).await;
+
+        // Still in the world, still fighting, no socket, not saved/despawned.
+        assert!(world.get_entity(fighter).is_ok());
+        assert!(world.get::<Connection>(fighter).is_none());
+        assert_eq!(world.get::<mud_world::Fighting>(fighter).unwrap().0, foe);
+        assert_eq!(
+            world.get::<commands::Linkdead>(fighter).unwrap().since_tick,
+            7
+        );
+        assert!(!router.playing.contains_key(&1));
+        assert_eq!(world.resource::<SaveCoordinator>().pending(), 0);
+        let seen = drain(&mut rx_watcher);
+        assert!(seen.contains("Fighter has lost their link."), "{seen}");
+        // Output to a socketless character is a silent no-op.
+        commands::send_to(&world, fighter, "nobody hears this\r\n");
+        // The autosave / shutdown save still covers it.
+        assert!(router.online_entities(&mut world).contains(&fighter));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropped_link_out_of_combat_still_saves_and_despawns() {
+        let mut world = World::new();
+        world.insert_resource(mud_world::SocialRegistry::default());
+        world.insert_resource(SaveCoordinator::default());
+        let pool = failing_pool();
+        let mut router = ConnRouter::new();
+        let room = world.spawn(mud_world::Room).id();
+        let (idler, _rx) = playing_in(&mut router, &mut world, room, 1, "Idler");
+
+        router.on_disconnect(&mut world, 1, &pool).await;
+
+        assert!(world.get_entity(idler).is_err());
+        assert_eq!(world.resource::<SaveCoordinator>().pending(), 1);
+        assert!(!router.playing.contains_key(&1));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn relogging_a_linkdead_character_rebinds_the_same_entity_without_the_database() {
+        let mut world = World::new();
+        world.insert_resource(mud_world::SocialRegistry::default());
+        world.insert_resource(SaveCoordinator::default());
+        let pool = failing_pool();
+        let mut router = ConnRouter::new();
+        let room = world.spawn(mud_world::Room).id();
+        let (fighter, foe, _rx) = fighter_in(&mut router, &mut world, room, 1);
+        router.on_disconnect(&mut world, 1, &pool).await;
+        assert!(world.get::<commands::Linkdead>(fighter).is_some());
+
+        // The player comes back on connection 2. The pool is unreachable, so
+        // any attempt to reload the character from the database would refuse
+        // the login instead of re-binding.
+        let (tx2, mut rx2) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+        router.on_connect(2, tx2, None, &world);
+        drain(&mut rx2);
+        let mut char_row = row(None, None);
+        char_row.id = "c-Fighter".into();
+        router
+            .complete_login_inner(2, &mut world, &pool, linked_user(), char_row, false)
+            .await;
+
+        assert_eq!(router.playing.get(&2), Some(&fighter));
+        assert!(!router.login.contains_key(&2));
+        assert!(world.get::<commands::Linkdead>(fighter).is_none());
+        assert!(world.get::<Connection>(fighter).is_some());
+        assert_eq!(world.get::<mud_world::Fighting>(fighter).unwrap().0, foe);
+        // Exactly one copy of the character, no relog wait, nothing saved.
+        let owners = world
+            .query_filtered::<&Account, With<Player>>()
+            .iter(&world)
+            .filter(|a| a.character_id == "c-Fighter")
+            .count();
+        assert_eq!(owners, 1);
+        assert_eq!(world.resource::<SaveCoordinator>().pending(), 0);
+        let out = drain(&mut rx2);
+        assert!(out.contains("Reconnecting."), "{out}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn drain_linkdead_removes_ghosts_and_expired_but_not_active_fighters() {
+        let mut world = World::new();
+        world.insert_resource(mud_world::SocialRegistry::default());
+        world.insert_resource(SaveCoordinator::default());
+        world.insert_resource(crate::TickCount(0));
+        let pool = failing_pool();
+        let mut router = ConnRouter::new();
+        let room = world.spawn(mud_world::Room).id();
+        let (fighting, _foe, _rx1) = fighter_in(&mut router, &mut world, room, 1);
+        let (dead, _foe2, _rx2) = fighter_in(&mut router, &mut world, room, 2);
+        let (resting, _foe3, _rx3) = fighter_in(&mut router, &mut world, room, 3);
+        for c in [1, 2, 3] {
+            router.on_disconnect(&mut world, c, &pool).await;
+        }
+        world.entity_mut(dead).insert(Ghost);
+        world.entity_mut(resting).remove::<mud_world::Fighting>();
+
+        // Just under the timeout: the ghost goes, the other two stay.
+        world.insert_resource(crate::TickCount(LINKDEAD_TIMEOUT_TICKS - 1));
+        router.drain_linkdead(&mut world, &pool).await;
+        assert!(world.get_entity(dead).is_err());
+        assert!(world.get_entity(fighting).is_ok());
+        assert!(world.get_entity(resting).is_ok());
+        assert_eq!(world.resource::<SaveCoordinator>().pending(), 1);
+
+        // At the timeout the idle one is saved and removed; the one still in
+        // a fight has its clock held back and stays.
+        world.insert_resource(crate::TickCount(LINKDEAD_TIMEOUT_TICKS));
+        router.drain_linkdead(&mut world, &pool).await;
+        assert!(world.get_entity(resting).is_err());
+        assert!(world.get_entity(fighting).is_ok());
+        assert_eq!(world.resource::<SaveCoordinator>().pending(), 2);
+        assert_eq!(
+            world
+                .get::<commands::Linkdead>(fighting)
+                .unwrap()
+                .since_tick,
+            LINKDEAD_TIMEOUT_TICKS
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rent_and_camp_are_refused_mid_fight_and_keep_the_connection() {
+        let mut world = World::new();
+        world.insert_resource(mud_world::SocialRegistry::default());
+        world.insert_resource(crate::TickCount(0));
+        let mut protos = mud_world::MobPrototypes::default();
+        protos.by_key.insert(
+            (1, 5),
+            crate::commands::test_support::mob_proto(
+                1,
+                5,
+                mud_db::enums::MobProfession::Receptionist,
+            ),
+        );
+        world.insert_resource(protos);
+        let pool = lazy_pool();
+        let mut router = ConnRouter::new();
+        QUIT_CLOSED.with(|v| v.borrow_mut().clear());
+        router.close_conn = |c| {
+            QUIT_CLOSED.with(|v| v.borrow_mut().push(c));
+            true
+        };
+        let room = world
+            .spawn((
+                mud_world::Room,
+                mud_world::RoomSector(mud_db::enums::Sector::Field),
+            ))
+            .id();
+        world.spawn((
+            mud_world::Mob,
+            mud_world::WorldKey { zone: 1, id: 5 },
+            Located(room),
+            mud_world::Named {
+                name: "the receptionist".into(),
+            },
+        ));
+        let (fighter, _foe, mut rx) = fighter_in(&mut router, &mut world, room, 1);
+
+        router.on_line(1, "rent".into(), &pool, &mut world).await;
+        assert!(drain(&mut rx).contains("No way!  You're fighting for your life!"));
+        router.on_line(1, "camp".into(), &pool, &mut world).await;
+        assert!(drain(&mut rx).contains("You are too busy to do this!"));
+
+        assert!(world.get_entity(fighter).is_ok());
+        assert!(world.get::<mud_world::Camping>(fighter).is_none());
+        assert!(world.get::<commands::Quitting>(fighter).is_none());
+        assert_eq!(router.playing.get(&1), Some(&fighter));
+        assert!(QUIT_CLOSED.with(|v| v.borrow().is_empty()));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn camp_is_refused_where_camping_is_not_allowed_and_starts_where_it_is() {
+        let mut world = World::new();
+        world.insert_resource(mud_world::SocialRegistry::default());
+        world.insert_resource(crate::TickCount(0));
+        let pool = lazy_pool();
+        let mut router = ConnRouter::new();
+        let city = world
+            .spawn((
+                mud_world::Room,
+                mud_world::RoomSector(mud_db::enums::Sector::City),
+            ))
+            .id();
+        let tent = world
+            .spawn((
+                mud_world::Room,
+                mud_world::RoomSector(mud_db::enums::Sector::Field),
+                mud_world::IndoorRoom,
+            ))
+            .id();
+        let field = world
+            .spawn((
+                mud_world::Room,
+                mud_world::RoomSector(mud_db::enums::Sector::Field),
+            ))
+            .id();
+        let (camper, mut rx) = playing_in(&mut router, &mut world, city, 1, "Camper");
+
+        router.on_line(1, "camp".into(), &pool, &mut world).await;
+        assert!(drain(&mut rx).contains("This isn't a place to camp"));
+        assert!(world.get::<mud_world::Camping>(camper).is_none());
+
+        world.entity_mut(camper).insert(Located(tent));
+        router.on_line(1, "camp".into(), &pool, &mut world).await;
+        assert!(drain(&mut rx).contains("You always pitch a tent indoors?"));
+        assert!(world.get::<mud_world::Camping>(camper).is_none());
+
+        world.entity_mut(camper).insert(Located(field));
+        router.on_line(1, "camp".into(), &pool, &mut world).await;
+        assert!(drain(&mut rx).contains("You start setting up camp."));
+        assert!(world.get::<mud_world::Camping>(camper).is_some());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn completed_camp_saves_logs_out_and_closes_the_socket() {
+        let mut world = World::new();
+        world.insert_resource(mud_world::SocialRegistry::default());
+        world.insert_resource(SaveCoordinator::default());
+        world.insert_resource(mud_world::MudClock::default());
+        world.insert_resource(crate::TickCount(0));
+        let pool = failing_pool();
+        let mut router = ConnRouter::new();
+        QUIT_CLOSED.with(|v| v.borrow_mut().clear());
+        router.close_conn = |c| {
+            QUIT_CLOSED.with(|v| v.borrow_mut().push(c));
+            true
+        };
+        let room = world
+            .spawn((
+                mud_world::Room,
+                mud_world::RoomSector(mud_db::enums::Sector::Field),
+            ))
+            .id();
+        let (camper, mut rx) = playing_in(&mut router, &mut world, room, 1, "Camper");
+        let (_watcher, mut rx_watcher) = playing_in(&mut router, &mut world, room, 2, "Watcher");
+        router.on_line(1, "camp".into(), &pool, &mut world).await;
+        assert!(world.get::<mud_world::Camping>(camper).is_some());
+
+        // Countdown not over: still here.
+        world.insert_resource(crate::TickCount(crate::camp::CAMP_DURATION_TICKS - 1));
+        crate::camp::camp_tick(&mut world);
+        router.drain_quitting(&mut world, &pool).await;
+        assert!(world.get_entity(camper).is_ok());
+
+        // Countdown over: the camp tick flags the player, the drain logs out.
+        world.insert_resource(crate::TickCount(crate::camp::CAMP_DURATION_TICKS));
+        crate::camp::camp_tick(&mut world);
+        let rest = *world.get::<mud_world::RestState>(camper).unwrap();
+        assert_eq!(rest.source, mud_db::enums::RestSource::Camp);
+        router.drain_quitting(&mut world, &pool).await;
+
+        assert!(world.get_entity(camper).is_err());
+        assert_eq!(world.resource::<SaveCoordinator>().pending(), 1);
+        assert!(!router.playing.contains_key(&1));
+        assert_eq!(QUIT_CLOSED.with(|v| v.borrow().clone()), vec![1]);
+        let out = drain(&mut rx);
+        assert!(
+            out.contains("You complete your campsite, and leave this world for a while."),
+            "{out}"
+        );
+        let seen = drain(&mut rx_watcher);
+        assert!(
+            seen.contains("Camper rolls up their bedroll and tunes out the world."),
+            "{seen}"
+        );
     }
 
     // ---- device-code / game-password-only login ----

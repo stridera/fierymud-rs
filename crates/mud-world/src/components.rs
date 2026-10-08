@@ -1229,11 +1229,8 @@ pub struct Meditating;
 /// On a player who's set up camp (`camp` command). Records the
 /// tick the timer started and the room they pitched in so the
 /// camp-tick can detect "they moved" and cancel. Removed when the
-/// camp completes (player saved + woken) or aborts (movement /
-/// combat). v1 doesn't disconnect on completion — camp is a
-/// "long rest with checkpoint" rather than the legacy
-/// safe-logout flow, since the runtime auto-saves on disconnect
-/// anyway.
+/// camp completes (player saved + logged out) or aborts (movement /
+/// combat).
 ///
 /// `kit_entity` / `kit_world_key` are populated when the player
 /// typed `camp <kit-name>` — the resolved kit item is captured at

@@ -727,6 +727,23 @@ pub(crate) enum ComposeStep {
 #[derive(Component)]
 pub(crate) struct Quitting;
 
+/// Companion to [`Quitting`] set by a completed `camp`: picks the camp
+/// departure line instead of the `quit` one.
+#[derive(Component)]
+pub(crate) struct Camped;
+
+/// A player whose socket dropped mid-fight. The character stays in the
+/// world with no [`Connection`], keeps swinging on the normal combat
+/// tick, and is autosaved like anyone online. `since_tick` is refreshed
+/// every tick the fight lasts, so the legacy void timeout runs from the
+/// last round of combat. Removed when the player logs back in
+/// (`ConnRouter::try_takeover`) or when `ConnRouter::drain_linkdead`
+/// saves and despawns the character.
+#[derive(Component)]
+pub(crate) struct Linkdead {
+    pub since_tick: u64,
+}
+
 pub fn dispatch(world: &mut World, player: Entity, line: &str) {
     let mut run = AliasRun::default();
     dispatch_line(world, player, line, &mut run);

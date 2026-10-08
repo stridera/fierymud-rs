@@ -2891,6 +2891,26 @@ mod tests {
         assert_eq!(hp.max, 50, "max HP unchanged");
     }
 
+    /// A linkdead player (socket dropped mid-fight) has no `Connection`
+    /// but must keep swinging on the normal combat tick.
+    #[test]
+    fn linkdead_player_without_a_connection_keeps_swinging() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let target = make_target(&mut world, room, 50);
+        let player = make_attacker(&mut world, room, target, 7);
+        world
+            .entity_mut(player)
+            .insert((Player, crate::commands::Linkdead { since_tick: 0 }));
+        assert!(world.get::<crate::commands::Connection>(player).is_none());
+
+        run_combat_tick(&mut world);
+
+        let hp = world.get::<Health>(target).unwrap().hp;
+        assert!(hp < 50, "linkdead player's swing landed, hp {hp}");
+        assert!(world.get::<Fighting>(player).is_some());
+    }
+
     #[test]
     fn skips_off_period_ticks() {
         let mut world = World::new();

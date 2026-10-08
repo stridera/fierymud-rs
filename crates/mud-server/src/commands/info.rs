@@ -1371,13 +1371,12 @@ inventory::submit! {
         category: Category::Settings,
         help: Help {
             usage: "camp",
-            summary: "Pitch camp for a long rest with a checkpoint save.",
+            summary: "Pitch camp, then save and leave the game.",
             long: "Refuses indoors, in cities, on water, in the air, \
                    while mounted, or while in combat. Once setup \
-                   completes (~35 seconds), you're checkpointed \
-                   to disk so a sudden disconnect won't lose recent \
-                   progress. Walking away or being attacked aborts \
-                   the camp.",
+                   completes (~35 seconds), you're saved and leave \
+                   the game, to return right here. Walking away or \
+                   being attacked aborts the camp.",
         },
         run: cmd_camp,
     }
@@ -6768,11 +6767,7 @@ pub(crate) fn cmd_camp(world: &mut World, player: Entity, args: &str) {
         return;
     }
     if world.get::<Fighting>(player).is_some() {
-        send_to(
-            world,
-            player,
-            "You're too busy fighting to pitch a tent.\r\n",
-        );
+        send_to(world, player, "You are too busy to do this!\r\n");
         return;
     }
     if world.get::<mud_world::Mounted>(player).is_some() {
@@ -6787,6 +6782,10 @@ pub(crate) fn cmd_camp(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let room = located.0;
+    if world.get::<mud_world::IndoorRoom>(room).is_some() {
+        send_to(world, player, "You always pitch a tent indoors?\r\n");
+        return;
+    }
     let sector = world.get::<RoomSector>(room).map(|s| s.0);
     let allows = sector.is_some_and(crate::camp::sector_allows_camp);
     if !allows {

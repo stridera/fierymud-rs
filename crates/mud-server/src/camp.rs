@@ -1,11 +1,9 @@
-//! Camp lifecycle: setup, tick, completion. The legacy `do_camp`
-//! pattern was a "safe wilderness logout" — pitch a tent, wait,
-//! save, disconnect. The Rust port treats it as a "long rest with
-//! checkpoint" instead: the auto-save-on-disconnect path already
-//! covers logout safety, but a structured rest that takes a
-//! commitment of in-game time and ends with a save is still
-//! useful (and matches the legacy outdoors-only restriction the
-//! user called out).
+//! Camp lifecycle: setup, tick, completion. Mirrors the legacy
+//! `do_camp`: pitch a tent in a campable room, wait out the
+//! countdown, and on completion the character is saved and logged
+//! out through the same path as `quit` (`Quitting`, drained by
+//! `ConnRouter::drain_quitting`). Moving, fighting, or being
+//! attacked during the countdown cancels it. No penalty either way.
 //!
 //! Rest / repose (R2): on completion, the camp also acquires a
 //! `CAMP` **`RestSource`** with a tier computed from the player's
@@ -15,12 +13,10 @@
 
 use bevy_ecs::prelude::*;
 use mud_db::enums::{RestSource, Sector};
-use mud_world::{
-    Camping, Fighting, Item, Located, PendingSave, PendingWakeAttachments, Profile, RestState,
-};
+use mud_world::{Camping, Fighting, Item, Located, PendingWakeAttachments, Profile, RestState};
 
 use crate::TickCount;
-use crate::commands::{broadcast_room_except_players_rendered, name_of, send_rendered};
+use crate::commands::{Camped, Quitting, send_rendered};
 
 /// Sectors a player may camp in. Mirrors the legacy refusal
 /// pattern: indoor (Structure), city, water variants, and air
@@ -99,10 +95,9 @@ fn compute_camp_tier(world: &mut World, player: Entity, kit_tier_bonus: i32) -> 
 
 /// Per-tick walk over `Camping` players: cancels on combat or room
 /// movement, completes when the deadline is reached. Completion
-/// is a no-op gameplay-wise; the player just gets a flavor line
-/// and a `PendingSave` marker so the next save loop checkpoints
-/// them. Movement / combat aborts also clear the `Camping`
-/// component.
+/// stamps the `Camp` rest source and flags the player `Quitting`
+/// so the main loop saves and disconnects them. Movement / combat
+/// aborts clear the `Camping` component.
 pub fn camp_tick(world: &mut World) {
     let now_tick = world.resource::<TickCount>().0;
     let snapshot: Vec<(Entity, Camping)> = {
@@ -112,7 +107,11 @@ pub fn camp_tick(world: &mut World) {
     for (entity, camp) in snapshot {
         // Combat-cancel: mid-camp ambush wakes you up.
         if world.get::<Fighting>(entity).is_some() {
-            cancel(world, entity, "Combat shatters your half-finished camp.");
+            cancel(
+                world,
+                entity,
+                "You decide now is not the best time for camping.",
+            );
             continue;
         }
         // Movement-cancel: leaving the campsite ends it.
@@ -121,7 +120,7 @@ pub fn camp_tick(world: &mut World) {
             cancel(
                 world,
                 entity,
-                "You wander away from your half-pitched campsite.",
+                "You are no longer near where you began the campsite.",
             );
             continue;
         }
@@ -162,7 +161,8 @@ fn complete(world: &mut World, entity: Entity, camp: Camping) {
     let existing_repose = world.get::<RestState>(entity).map_or(0, |r| r.repose);
     if let Ok(mut em) = world.get_entity_mut(entity) {
         em.remove::<Camping>();
-        em.insert(PendingSave);
+        em.insert(Quitting);
+        em.insert(Camped);
         em.insert(RestState {
             repose: existing_repose,
             source: RestSource::Camp,
@@ -175,19 +175,90 @@ fn complete(world: &mut World, entity: Entity, camp: Camping) {
             });
         }
     }
-    let player_name = name_of(world, entity);
-    let room = world.get::<Located>(entity).map(|l| l.0);
+    // The room hears the departure from `retire_player` once the player is
+    // saved and removed.
     send_rendered(
         world,
         entity,
-        "<b:cyan>You complete your campsite, settle in, and rest for a while.</>\r\n",
+        "<b:cyan>You complete your campsite, and leave this world for a while.</>\r\n",
     );
-    if let Some(room) = room {
-        broadcast_room_except_players_rendered(
-            world,
-            room,
-            &[entity],
-            &format!("<dim>{player_name} finishes pitching camp and settles in.</>\r\n"),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mud_world::{Health, Named, Player};
+
+    fn camper_in(world: &mut World, room: Entity, since_tick: u64) -> Entity {
+        world
+            .spawn((
+                Player,
+                Named {
+                    name: "Camper".into(),
+                },
+                Located(room),
+                Health { hp: 10, max: 10 },
+                Camping {
+                    since_tick,
+                    started_in: room,
+                    kit_entity: None,
+                    kit_world_key: None,
+                    kit_tier_bonus: 0,
+                },
+            ))
+            .id()
+    }
+
+    fn world_at(tick: u64) -> World {
+        let mut world = World::new();
+        world.insert_resource(TickCount(tick));
+        world
+    }
+
+    #[test]
+    fn countdown_completes_into_a_camp_logout() {
+        let mut world = world_at(CAMP_DURATION_TICKS - 1);
+        let room = world.spawn_empty().id();
+        let camper = camper_in(&mut world, room, 0);
+        camp_tick(&mut world);
+        assert!(world.get::<Camping>(camper).is_some());
+        assert!(world.get::<Quitting>(camper).is_none());
+
+        world.insert_resource(TickCount(CAMP_DURATION_TICKS));
+        camp_tick(&mut world);
+        assert!(world.get::<Camping>(camper).is_none());
+        assert!(world.get::<Quitting>(camper).is_some());
+        assert!(world.get::<Camped>(camper).is_some());
+        assert_eq!(
+            world.get::<RestState>(camper).unwrap().source,
+            RestSource::Camp
         );
+    }
+
+    #[test]
+    fn moving_cancels_the_countdown() {
+        let mut world = world_at(10);
+        let room = world.spawn_empty().id();
+        let elsewhere = world.spawn_empty().id();
+        let camper = camper_in(&mut world, room, 0);
+        world.entity_mut(camper).insert(Located(elsewhere));
+        world.insert_resource(TickCount(CAMP_DURATION_TICKS + 10));
+        camp_tick(&mut world);
+        // Cancelled, not completed, even though the deadline had passed.
+        assert!(world.get::<Camping>(camper).is_none());
+        assert!(world.get::<Quitting>(camper).is_none());
+    }
+
+    #[test]
+    fn being_attacked_cancels_the_countdown() {
+        let mut world = world_at(10);
+        let room = world.spawn_empty().id();
+        let camper = camper_in(&mut world, room, 0);
+        let mob = world.spawn((mud_world::Mob, Located(room))).id();
+        world.entity_mut(camper).insert(Fighting(mob));
+        world.insert_resource(TickCount(CAMP_DURATION_TICKS + 10));
+        camp_tick(&mut world);
+        assert!(world.get::<Camping>(camper).is_none());
+        assert!(world.get::<Quitting>(camper).is_none());
     }
 }

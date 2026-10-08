@@ -705,6 +705,11 @@ async fn main() {
                     // through the canonical on_disconnect save flow.
                     idle::drain_idle_kicks(&mut world, &mut router, &pool).await;
                     tick_stats::lap(&mut world, "idle_kicks");
+                    // Completed camps log out; linkdead characters whose
+                    // fight is over are saved and removed.
+                    router.drain_quitting(&mut world, &pool).await;
+                    router.drain_linkdead(&mut world, &pool).await;
+                    tick_stats::lap(&mut world, "logouts");
                 }
                 // Drain real-time syslog WARN+ events to subscribers
                 // before the prompt flush so any pushed lines land
