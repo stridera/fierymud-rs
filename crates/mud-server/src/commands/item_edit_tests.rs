@@ -1,14 +1,14 @@
-//! `nameitem` (issue #68). Test-only.
+//! `nameitem` (issue #68) and `iedit` (issue #67). Test-only.
 
 use bevy_ecs::prelude::*;
 use mud_db::enums::{ObjectType, UserRole};
 use mud_world::{
-    Account, Description, Exits, Item, ItemCustomization, Keywords, Located, Named,
+    Account, Charges, Description, Exits, Item, ItemCustomization, Keywords, Located, Named,
     ObjectPrototypes, PendingSave, Room, WorldKey,
 };
 
-use super::dispatch;
 use super::test_support::{Rx, drain, object_proto, player_in};
+use super::{AdminAuditLog, dispatch};
 use crate::item_custom;
 
 fn setup(role: UserRole) -> (World, Entity, Entity, Rx) {
@@ -195,6 +195,147 @@ fn nameitem_clear_restores_the_prototype_name() {
         c.name.is_none() && c.dirty,
         "cleared override is dirty so the save clears the row"
     );
+}
+
+#[test]
+fn iedit_is_builder_only() {
+    let (mut world, _room, p, mut rx) = setup(UserRole::Player);
+    let sack = item(
+        &mut world,
+        p,
+        1,
+        ObjectType::Container,
+        "a cloth sack",
+        "sack",
+    );
+    dispatch(&mut world, p, "iedit sack name Hacked");
+    let _ = drain(&mut rx);
+    assert_eq!(name(&world, sack), "a cloth sack");
+
+    let (mut world, _room, b, mut rx) = setup(UserRole::Builder);
+    let sack = item(
+        &mut world,
+        b,
+        1,
+        ObjectType::Container,
+        "a cloth sack",
+        "sack",
+    );
+    dispatch(&mut world, b, "iedit sack name <yellow>a gilded sack</>");
+    let out = drain(&mut rx);
+    assert!(out.contains("saves with its holder"), "{out}");
+    assert_eq!(name(&world, sack), "<yellow>a gilded sack</>");
+}
+
+#[test]
+fn iedit_edits_every_field_audits_and_marks_the_holder() {
+    let (mut world, _room, b, mut rx) = setup(UserRole::Builder);
+    let sack = item(
+        &mut world,
+        b,
+        1,
+        ObjectType::Container,
+        "a cloth sack",
+        "sack",
+    );
+    dispatch(&mut world, b, "iedit sack examine A very special sack.");
+    dispatch(&mut world, b, "iedit sack keywords Special  SACK pouch");
+    dispatch(&mut world, b, "iedit sack charges 7");
+    let out = drain(&mut rx);
+    assert!(
+        !out.contains("Unknown") && !out.contains("must be"),
+        "{out}"
+    );
+    assert_eq!(
+        world.get::<Description>(sack).unwrap().0,
+        "A very special sack."
+    );
+    assert_eq!(
+        world.get::<Keywords>(sack).unwrap().0,
+        vec!["special".to_string(), "sack".into(), "pouch".into()]
+    );
+    assert_eq!(world.get::<Charges>(sack).unwrap().0, 7);
+    assert!(world.get::<PendingSave>(b).is_some());
+    let c = world.get::<ItemCustomization>(sack).unwrap();
+    assert!(c.dirty && c.examine.is_some() && c.keywords.is_some());
+    let log = world.resource::<AdminAuditLog>();
+    assert_eq!(log.entries.len(), 3);
+    assert!(log.entries.iter().all(|e| e.verb == "iedit"));
+    assert!(log.entries[0].args.contains("[1:1]"));
+
+    // Reverting restores the prototype's text.
+    dispatch(&mut world, b, "iedit special examine clear");
+    dispatch(&mut world, b, "iedit special keywords clear");
+    let _ = drain(&mut rx);
+    assert_eq!(world.get::<Description>(sack).unwrap().0, "A plain thing.");
+    assert_eq!(
+        world.get::<Keywords>(sack).unwrap().0,
+        vec!["sack".to_string()]
+    );
+}
+
+#[test]
+fn iedit_rejects_bad_input_and_shows_fields() {
+    let (mut world, _room, b, mut rx) = setup(UserRole::Builder);
+    let sack = item(
+        &mut world,
+        b,
+        1,
+        ObjectType::Container,
+        "a cloth sack",
+        "sack",
+    );
+    dispatch(&mut world, b, "iedit sack charges lots");
+    dispatch(&mut world, b, "iedit sack frobnicate 1");
+    dispatch(&mut world, b, "iedit nothing name x");
+    let out = drain(&mut rx);
+    assert!(out.contains("must be a number"), "{out}");
+    assert!(out.contains("Unknown field 'frobnicate'"), "{out}");
+    assert!(out.contains("Item not found"), "{out}");
+    assert!(world.get::<Charges>(sack).is_none());
+    dispatch(&mut world, b, "iedit sack");
+    let out = drain(&mut rx);
+    assert!(
+        out.contains("name:") && out.contains("A plain thing."),
+        "{out}"
+    );
+}
+
+#[test]
+fn iedit_on_a_room_item_applies_but_is_not_persisted() {
+    let (mut world, room, b, mut rx) = setup(UserRole::Builder);
+    let rock = item(
+        &mut world,
+        room,
+        1,
+        ObjectType::Other,
+        "a grey rock",
+        "rock",
+    );
+    dispatch(&mut world, b, "iedit rock name a glowing rock");
+    let out = drain(&mut rx);
+    assert!(out.contains("not persisted"), "{out}");
+    assert_eq!(name(&world, rock), "a glowing rock");
+    assert!(world.get::<PendingSave>(b).is_none());
+}
+
+#[test]
+fn holder_of_walks_up_to_the_carrying_player() {
+    let (mut world, _room, b, mut rx) = setup(UserRole::Builder);
+    let bag = item(
+        &mut world,
+        b,
+        1,
+        ObjectType::Container,
+        "a cloth sack",
+        "sack",
+    );
+    let gem = item(&mut world, bag, 2, ObjectType::Other, "a ruby", "ruby");
+    assert_eq!(item_custom::holder_of(&world, gem), Some(b));
+    // find_carried_by only sees direct carries, so reach it via the bag.
+    item_custom::edit(&mut world, gem, |c| c.name = Some("a flawed ruby".into()));
+    let _ = drain(&mut rx);
+    assert_eq!(name(&world, gem), "a flawed ruby");
 }
 
 #[test]

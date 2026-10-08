@@ -16,6 +16,11 @@ use crate::commands::{ColorMode, render_color_tags};
 /// Shortest and longest player-given item name, in characters.
 pub(crate) const MIN_PLAYER_NAME_LEN: usize = 3;
 pub(crate) const MAX_PLAYER_NAME_LEN: usize = 40;
+/// Staff `iedit` limits.
+pub(crate) const MAX_STAFF_NAME_LEN: usize = 80;
+pub(crate) const MAX_EXAMINE_LEN: usize = 1000;
+pub(crate) const MAX_KEYWORDS: usize = 12;
+pub(crate) const MAX_KEYWORD_LEN: usize = 24;
 
 /// Reduce player-typed text to a plain item name: colour tags and every
 /// character outside letters, digits, space and a little punctuation are
@@ -69,6 +74,57 @@ fn strip_ansi(s: &str) -> String {
         }
     }
     out
+}
+
+/// Staff text: colour tags are allowed, control characters (including ESC
+/// and line breaks, since `iedit` takes typed single lines) are removed.
+pub(crate) fn sanitize_staff_text(raw: &str, max: usize) -> Result<String, String> {
+    let cleaned: String = strip_ansi(raw)
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>()
+        .trim()
+        .to_string();
+    if cleaned.is_empty() {
+        return Err("That text is empty.\r\n".to_string());
+    }
+    let len = cleaned.chars().count();
+    if len > max {
+        return Err(format!(
+            "Too long ({len} characters; the limit is {max}).\r\n"
+        ));
+    }
+    Ok(cleaned)
+}
+
+/// Parse a keyword list: lowercase, deduplicated, bounded.
+pub(crate) fn sanitize_keywords(raw: &str) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::new();
+    for word in raw.split_whitespace() {
+        let w: String = word
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '\'' | '-'))
+            .collect::<String>()
+            .to_ascii_lowercase();
+        if w.is_empty() {
+            continue;
+        }
+        if w.len() > MAX_KEYWORD_LEN {
+            return Err(format!(
+                "Keyword '{w}' is too long (limit {MAX_KEYWORD_LEN}).\r\n"
+            ));
+        }
+        if !out.contains(&w) {
+            out.push(w);
+        }
+    }
+    if out.is_empty() {
+        return Err("Give at least one keyword.\r\n".to_string());
+    }
+    if out.len() > MAX_KEYWORDS {
+        return Err(format!("Too many keywords (limit {MAX_KEYWORDS}).\r\n"));
+    }
+    Ok(out)
 }
 
 /// Keywords a customized item answers to: the base list (the prototype's,
@@ -153,4 +209,18 @@ pub(crate) fn edit(world: &mut World, item: Entity, change: impl FnOnce(&mut Ite
     change(&mut custom);
     custom.dirty = true;
     install(world, item, custom);
+}
+
+/// The player whose save persists `item`: the nearest `Player` up the
+/// `Located` chain (a bag inside a bag still belongs to its carrier).
+pub(crate) fn holder_of(world: &World, item: Entity) -> Option<Entity> {
+    let mut cur = item;
+    for _ in 0..16 {
+        let parent = world.get::<mud_world::Located>(cur)?.0;
+        if world.get::<mud_world::Player>(parent).is_some() {
+            return Some(parent);
+        }
+        cur = parent;
+    }
+    None
 }
