@@ -4443,6 +4443,16 @@ pub(crate) struct PlayerSaveSnapshot {
     core_stats_payload: Option<mud_db::characters::CoreStatsPayload>,
     now_inst: std::time::Instant,
     new_time_played: Option<i32>,
+    /// The player died and the corpse is not committed yet: this write
+    /// inserts the `PlayerCorpses` row and files the moved items under it
+    /// in the same transaction as the rest of the save.
+    death: Option<crate::corpses::DeathPersist>,
+    /// Coins taken from player corpses since the last committed save,
+    /// debited from those corpses in this write's transaction.
+    corpse_coin_takes: Vec<(i32, i64)>,
+    /// `PlayerCorpses.id` the death transaction inserted (0 = none).
+    /// Set once the transaction commits; [`apply_commit`] reads it.
+    committed_corpse_id: std::sync::atomic::AtomicI32,
 }
 
 /// Capture a player's save payload from the ECS without any I/O. Returns
@@ -4529,6 +4539,12 @@ pub(crate) fn snapshot_player(
     // `parent_idx` for newly-acquired items inside newly-acquired
     // containers. `entity_for_idx` is the parallel Vec we use to write
     // back assigned PersistedItemId(s) after the diff returns.
+    //
+    // After a death the corpse's contents are snapshotted too (second
+    // root, `in_corpse`), so the death transaction can file those rows
+    // under the new corpse instead of the diff deleting them as "no
+    // longer carried".
+    let death = crate::corpses::pending_death(world, entity);
     let (new_items, entity_for_idx): (
         Vec<mud_db::character_items::CharacterItemSnap>,
         Vec<Entity>,
@@ -4542,49 +4558,57 @@ pub(crate) fn snapshot_player(
             Option<mud_world::PersistedItemId>,
             Option<mud_world::Charges>,
             Option<mud_world::LiquidContainer>,
+            bool,
         );
-        // BFS from `entity` (the player) through the `Contents` reverse
-        // index of `Located`, so the walk costs O(carried items) rather
-        // than a scan over every item in the world. Parents are pushed
-        // before their children.
+        // BFS from each root (the player, then the corpse) through the
+        // `Contents` reverse index of `Located`, so the walk costs
+        // O(carried items) rather than a scan over every item in the
+        // world. Parents are pushed before their children.
         let mut order: Vec<ItemSnap> = Vec::new();
         let mut entity_to_idx: HashMap<Entity, usize> = HashMap::new();
-        let mut frontier: Vec<Entity> = vec![entity];
-        while let Some(parent) = frontier.pop() {
-            let Some(contents) = world.get::<mud_world::Contents>(parent) else {
-                continue;
-            };
-            for e in contents.iter() {
-                if entity_to_idx.contains_key(&e) || world.get::<Item>(e).is_none() {
-                    continue;
-                }
-                // Items without a prototype key can't be reloaded.
-                let Some(wk) = world.get::<WorldKey>(e).copied() else {
+        let mut roots: Vec<(Entity, bool)> = vec![(entity, false)];
+        if let Some(d) = &death {
+            roots.push((d.corpse, true));
+        }
+        for &(root, in_corpse) in &roots {
+            let mut frontier: Vec<Entity> = vec![root];
+            while let Some(parent) = frontier.pop() {
+                let Some(contents) = world.get::<mud_world::Contents>(parent) else {
                     continue;
                 };
-                // TEMPORARY items vanish on rent / logout — drop them
-                // (and anything inside them) from the snapshot so they
-                // don't round-trip into the next session. Permanent
-                // disappearance is the canonical behavior; the DB row is
-                // also released by the diff (an item not in the snapshot
-                // is deleted).
-                if world
-                    .get::<mud_world::ObjectFlags>(e)
-                    .is_some_and(|f| f.has(mud_db::enums::ObjectFlag::Temporary))
-                {
-                    continue;
+                for e in contents.iter() {
+                    if entity_to_idx.contains_key(&e) || world.get::<Item>(e).is_none() {
+                        continue;
+                    }
+                    // Items without a prototype key can't be reloaded.
+                    let Some(wk) = world.get::<WorldKey>(e).copied() else {
+                        continue;
+                    };
+                    // TEMPORARY items vanish on rent / logout — drop them
+                    // (and anything inside them) from the snapshot so they
+                    // don't round-trip into the next session. Permanent
+                    // disappearance is the canonical behavior; the DB row is
+                    // also released by the diff (an item not in the snapshot
+                    // is deleted).
+                    if world
+                        .get::<mud_world::ObjectFlags>(e)
+                        .is_some_and(|f| f.has(mud_db::enums::ObjectFlag::Temporary))
+                    {
+                        continue;
+                    }
+                    entity_to_idx.insert(e, order.len());
+                    order.push((
+                        e,
+                        parent,
+                        wk,
+                        world.get::<EquippedSlot>(e).copied(),
+                        world.get::<mud_world::PersistedItemId>(e).copied(),
+                        world.get::<mud_world::Charges>(e).copied(),
+                        world.get::<mud_world::LiquidContainer>(e).cloned(),
+                        in_corpse,
+                    ));
+                    frontier.push(e);
                 }
-                entity_to_idx.insert(e, order.len());
-                order.push((
-                    e,
-                    parent,
-                    wk,
-                    world.get::<EquippedSlot>(e).copied(),
-                    world.get::<mud_world::PersistedItemId>(e).copied(),
-                    world.get::<mud_world::Charges>(e).copied(),
-                    world.get::<mud_world::LiquidContainer>(e).cloned(),
-                ));
-                frontier.push(e);
             }
         }
         // Pull persisted-id of the parent (if loaded) from the entity
@@ -4592,19 +4616,20 @@ pub(crate) fn snapshot_player(
         // for the parent's INSERT.
         let parent_pid_lookup: HashMap<Entity, Option<i32>> = order
             .iter()
-            .map(|(e, _, _, _, pid, _, _)| (*e, pid.map(|p| p.0)))
+            .map(|(e, _, _, _, pid, _, _, _)| (*e, pid.map(|p| p.0)))
             .collect();
 
         let mut snaps: Vec<mud_db::character_items::CharacterItemSnap> =
             Vec::with_capacity(order.len());
         let mut ents: Vec<Entity> = Vec::with_capacity(order.len());
-        for (e, parent, wk, eq, pid, ch, lc) in &order {
-            let parent_persisted_id = if *parent == entity {
+        for (e, parent, wk, eq, pid, ch, lc, in_corpse) in &order {
+            let is_root = roots.iter().any(|(r, _)| r == parent);
+            let parent_persisted_id = if is_root {
                 None
             } else {
                 parent_pid_lookup.get(parent).copied().flatten()
             };
-            let parent_idx = if *parent == entity {
+            let parent_idx = if is_root {
                 None
             } else {
                 entity_to_idx.get(parent).copied()
@@ -4620,6 +4645,7 @@ pub(crate) fn snapshot_player(
                 liquid_remaining: lc.as_ref().map(|l| l.remaining),
                 liquid_type: lc.as_ref().map(|l| l.liquid.clone()),
                 lit: world.get::<mud_world::Lit>(*e).is_some(),
+                in_corpse: *in_corpse,
             });
             ents.push(*e);
         }
@@ -4867,6 +4893,12 @@ pub(crate) fn snapshot_player(
         core_stats_payload,
         now_inst,
         new_time_played,
+        death,
+        corpse_coin_takes: world
+            .get::<crate::corpses::PendingCorpseCoinTakes>(entity)
+            .map(|t| t.0.clone())
+            .unwrap_or_default(),
+        committed_corpse_id: std::sync::atomic::AtomicI32::new(0),
     })
 }
 
@@ -5251,7 +5283,30 @@ pub(crate) async fn write_snapshot(
         },
     )
     .await?;
-    let assigned = mud_db::character_items::save_inventory_diff(&mut tx, cid, &snap.items).await?;
+    // Death: the corpse row goes in first so the items can be filed under
+    // its id; the wealth zeroed above and the items moving into the corpse
+    // commit together or not at all.
+    let corpse_id = match &snap.death {
+        Some(d) => Some(
+            mud_db::player_corpses::insert(
+                &mut tx,
+                cid,
+                d.room_zone,
+                d.room_id,
+                d.coins,
+                d.decay_secs,
+            )
+            .await?,
+        ),
+        None => None,
+    };
+    let assigned =
+        mud_db::character_items::save_inventory_diff(&mut tx, cid, &snap.items, corpse_id).await?;
+    // Coins this player took from player corpses leave the corpse in the
+    // very commit that credits their wealth (written above).
+    for (taken_from, amount) in &snap.corpse_coin_takes {
+        mud_db::player_corpses::take_coins(&mut tx, *taken_from, *amount).await?;
+    }
     mud_db::characters::save_drunkenness(&mut *tx, cid, snap.drunk).await?;
     mud_db::characters::save_script_vars(&mut *tx, cid, snap.script_vars_json.as_ref()).await?;
     mud_db::characters::save_trophy(&mut *tx, cid, snap.trophy_json.as_ref()).await?;
@@ -5284,6 +5339,10 @@ pub(crate) async fn write_snapshot(
         characters::save_core_stats(&mut *tx, cid, stats).await?;
     }
     tx.commit().await?;
+    if let Some(id) = corpse_id {
+        snap.committed_corpse_id
+            .store(id, std::sync::atomic::Ordering::SeqCst);
+    }
     info!(
         character_id = %snap.character_id,
         hp = snap.hp,
@@ -5342,13 +5401,34 @@ pub(crate) fn apply_commit(
         // the one it has now.
         let id_at_snapshot = snap.items.get(idx).and_then(|s| s.persisted_id);
         let id_now = world.get::<mud_world::PersistedItemId>(target).map(|p| p.0);
-        if id_now != id_at_snapshot || !is_held_by(world, target, snap.entity) {
+        let held = is_held_by(world, target, snap.entity)
+            || snap
+                .death
+                .as_ref()
+                .is_some_and(|d| is_held_by(world, target, d.corpse));
+        if id_now != id_at_snapshot || !held {
             continue;
         }
         if let Ok(mut em) = world.get_entity_mut(target) {
             em.insert(mud_world::PersistedItemId(new_id));
         }
     }
+    if let Some(d) = &snap.death {
+        // The corpse is committed: let it be looted and dragged, and stop
+        // carrying the death transaction in this player's snapshots.
+        let corpse_id = snap
+            .committed_corpse_id
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if corpse_id != 0 {
+            if let Ok(mut em) = world.get_entity_mut(d.corpse) {
+                em.insert(mud_world::PlayerCorpseId(corpse_id));
+            }
+            if let Ok(mut em) = world.get_entity_mut(snap.entity) {
+                em.remove::<crate::corpses::PendingDeath>();
+            }
+        }
+    }
+    crate::corpses::settle_coin_takes(world, snap.entity, &snap.corpse_coin_takes);
     if let Some(t) = snap.new_time_played
         && let Ok(mut em) = world.get_entity_mut(snap.entity)
     {

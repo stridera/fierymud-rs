@@ -176,6 +176,7 @@ async fn round_trips_character_items() {
             liquid_remaining: None,
             liquid_type: None,
             lit: true,
+            in_corpse: false,
         },
         CharacterItemSnap {
             persisted_id: None,
@@ -188,10 +189,11 @@ async fn round_trips_character_items() {
             liquid_remaining: None,
             liquid_type: None,
             lit: false,
+            in_corpse: false,
         },
     ];
     let mut conn = pool.acquire().await.expect("acquire conn");
-    let assigned = save_inventory_diff(&mut conn, &cid, &payload)
+    let assigned = save_inventory_diff(&mut conn, &cid, &payload, None)
         .await
         .expect("save");
     assert_eq!(assigned.len(), 2, "both rows INSERTed → both ids returned");
@@ -234,9 +236,10 @@ async fn round_trips_character_items() {
             liquid_remaining: r.liquid_type.as_ref().map(|_| r.liquid_remaining),
             liquid_type: r.liquid_type.clone(),
             lit: r.lit,
+            in_corpse: false,
         })
         .collect();
-    save_inventory_diff(&mut conn, &cid, &restore)
+    save_inventory_diff(&mut conn, &cid, &restore, None)
         .await
         .expect("restore");
 }
@@ -641,6 +644,7 @@ async fn race_innates_are_granted_to_a_fresh_ability_set() {
 /// non-object `custom_values` must neither abort the save nor the read.
 #[tokio::test]
 #[ignore = "requires live fierydev DB"]
+#[allow(clippy::too_many_lines)]
 async fn lit_flag_preserves_other_custom_values_keys() {
     let _guard = INVENTORY_LOCK.lock().await;
     let pool = pool().await;
@@ -667,12 +671,13 @@ async fn lit_flag_preserves_other_custom_values_keys() {
         liquid_remaining: None,
         liquid_type: None,
         lit,
+        in_corpse: false,
     };
     // Start from an empty inventory, then insert one unlit item.
-    save_inventory_diff(&mut conn, &cid, &[])
+    save_inventory_diff(&mut conn, &cid, &[], None)
         .await
         .expect("clear");
-    let assigned = save_inventory_diff(&mut conn, &cid, &[snap(None, false)])
+    let assigned = save_inventory_diff(&mut conn, &cid, &[snap(None, false)], None)
         .await
         .expect("insert");
     let id = assigned[&0];
@@ -698,7 +703,7 @@ async fn lit_flag_preserves_other_custom_values_keys() {
     .expect("seed keys");
 
     // Toggle lit on, then off, through the UPDATE path.
-    save_inventory_diff(&mut conn, &cid, &[snap(Some(id), true)])
+    save_inventory_diff(&mut conn, &cid, &[snap(Some(id), true)], None)
         .await
         .expect("lit on");
     let on = custom(&pool).await;
@@ -708,7 +713,7 @@ async fn lit_flag_preserves_other_custom_values_keys() {
     let row = &list_for(&pool, &cid).await.expect("list")[0];
     assert!(row.lit);
 
-    save_inventory_diff(&mut conn, &cid, &[snap(Some(id), false)])
+    save_inventory_diff(&mut conn, &cid, &[snap(Some(id), false)], None)
         .await
         .expect("lit off");
     let off = custom(&pool).await;
@@ -726,7 +731,7 @@ async fn lit_flag_preserves_other_custom_values_keys() {
             .expect("seed bad value");
         let row = &list_for(&pool, &cid).await.expect("tolerant read")[0];
         assert!(!row.lit, "{bad} reads as unlit");
-        save_inventory_diff(&mut conn, &cid, &[snap(Some(id), true)])
+        save_inventory_diff(&mut conn, &cid, &[snap(Some(id), true)], None)
             .await
             .expect("save over bad value");
         assert_eq!(custom(&pool).await["lit"], true);
@@ -746,9 +751,335 @@ async fn lit_flag_preserves_other_custom_values_keys() {
             liquid_remaining: r.liquid_type.as_ref().map(|_| r.liquid_remaining),
             liquid_type: r.liquid_type.clone(),
             lit: r.lit,
+            in_corpse: false,
         })
         .collect();
-    save_inventory_diff(&mut conn, &cid, &restore)
+    save_inventory_diff(&mut conn, &cid, &restore, None)
         .await
         .expect("restore");
+}
+
+// ---------------------------------------------------------------------------
+// DB-backed player corpses
+// ---------------------------------------------------------------------------
+
+/// Throwaway character (and its corpses / items) so the corpse tests never
+/// touch the seeded accounts.
+async fn corpse_test_char(pool: &PgPool, tag: &str) -> String {
+    let suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let id = format!("zt-{tag}-{suffix}");
+    sqlx::query(r#"INSERT INTO "Characters" (id, name, updated_at) VALUES ($1, $2, NOW())"#)
+        .bind(&id)
+        .bind(format!("Zt{tag}{}", suffix % 1_000_000_000_000))
+        .execute(pool)
+        .await
+        .expect("insert character");
+    id
+}
+
+async fn corpse_test_cleanup(pool: &PgPool, ids: &[&String]) {
+    let ids: Vec<String> = ids.iter().map(|s| (*s).clone()).collect();
+    for sql in [
+        r#"DELETE FROM "PlayerCorpses" WHERE owner_id = ANY($1)"#,
+        r#"DELETE FROM "CharacterItems" WHERE character_id = ANY($1)"#,
+        r#"DELETE FROM "Characters" WHERE id = ANY($1)"#,
+    ] {
+        sqlx::query(sql)
+            .bind(&ids)
+            .execute(pool)
+            .await
+            .expect("cleanup");
+    }
+}
+
+fn corpse_snap(
+    persisted_id: Option<i32>,
+    key: (i32, i32),
+    parent_idx: Option<usize>,
+    in_corpse: bool,
+) -> CharacterItemSnap {
+    CharacterItemSnap {
+        persisted_id,
+        object_zone_id: key.0,
+        object_id: key.1,
+        equipped_location: None,
+        parent_persisted_id: None,
+        parent_idx,
+        charges: Some(3),
+        liquid_remaining: None,
+        liquid_type: None,
+        lit: false,
+        in_corpse,
+    }
+}
+
+async fn object_key(pool: &PgPool) -> (i32, i32) {
+    let k = sqlx::query!(r#"SELECT zone_id, id FROM "Objects" ORDER BY zone_id, id LIMIT 1"#)
+        .fetch_one(pool)
+        .await
+        .expect("an Objects row");
+    (k.zone_id, k.id)
+}
+
+/// The death transaction files a bag and its contents under the corpse; a
+/// racing (stale or empty) owner save cannot delete them, and the owner's
+/// carried listing excludes them.
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn corpse_items_survive_racing_owner_saves_and_keep_nesting() {
+    let _guard = INVENTORY_LOCK.lock().await;
+    let pool = pool().await;
+    let key = object_key(&pool).await;
+    let owner = corpse_test_char(&pool, "own").await;
+
+    let mut tx = pool.begin().await.expect("begin");
+    let corpse_id = mud_db::player_corpses::insert(&mut tx, &owner, 30, 45, 321, 600)
+        .await
+        .expect("insert corpse");
+    // bag (idx 0) with a gem inside (idx 1), both in the corpse.
+    let assigned = save_inventory_diff(
+        &mut tx,
+        &owner,
+        &[
+            corpse_snap(None, key, None, true),
+            corpse_snap(None, key, Some(0), true),
+        ],
+        Some(corpse_id),
+    )
+    .await
+    .expect("death save");
+    tx.commit().await.expect("commit");
+    let (bag, gem) = (assigned[&0], assigned[&1]);
+
+    // An empty save (the owner's racing / pending save) must not touch them.
+    let mut conn = pool.acquire().await.expect("conn");
+    save_inventory_diff(&mut conn, &owner, &[], None)
+        .await
+        .expect("racing save");
+    assert!(list_for(&pool, &owner).await.unwrap().is_empty());
+    let rows = mud_db::character_items::list_for_corpse(&pool, corpse_id)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows.iter().find(|r| r.id == gem).unwrap().container_id,
+        Some(bag)
+    );
+    assert!(rows.iter().all(|r| r.character_id == owner));
+
+    let listed = mud_db::player_corpses::list_all(&pool).await.unwrap();
+    let mine = listed.iter().find(|c| c.id == corpse_id).expect("listed");
+    assert_eq!((mine.coins, mine.room_zone_id, mine.room_id), (321, 30, 45));
+    assert!(mine.remaining_secs > 590 && mine.remaining_secs <= 600);
+
+    corpse_test_cleanup(&pool, &[&owner]).await;
+}
+
+/// Looting re-homes the row (new `character_id`, `corpse_id` cleared) through
+/// the normal UPDATE path without touching editor-owned columns.
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn looting_moves_the_row_and_keeps_instance_columns() {
+    let _guard = INVENTORY_LOCK.lock().await;
+    let pool = pool().await;
+    let key = object_key(&pool).await;
+    let owner = corpse_test_char(&pool, "lo").await;
+    let looter = corpse_test_char(&pool, "lt").await;
+
+    let mut tx = pool.begin().await.unwrap();
+    let corpse_id = mud_db::player_corpses::insert(&mut tx, &owner, 30, 45, 0, 600)
+        .await
+        .unwrap();
+    let assigned = save_inventory_diff(
+        &mut tx,
+        &owner,
+        &[corpse_snap(None, key, None, true)],
+        Some(corpse_id),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let row = assigned[&0];
+    sqlx::query(
+        r#"UPDATE "CharacterItems"
+           SET custom_name = 'Fancy', custom_examine_description = 'Shiny', condition = 55,
+               custom_values = '{"note": "keep"}'
+           WHERE id = $1"#,
+    )
+    .bind(row)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Another player's save claims the row (carried, not in corpse).
+    let mut conn = pool.acquire().await.unwrap();
+    save_inventory_diff(
+        &mut conn,
+        &looter,
+        &[corpse_snap(Some(row), key, None, false)],
+        None,
+    )
+    .await
+    .unwrap();
+
+    let (owner_now, corpse_now, custom_name, examine, wear, custom): (
+        String,
+        Option<i32>,
+        Option<String>,
+        Option<String>,
+        i32,
+        serde_json::Value,
+    ) = sqlx::query_as(
+        r#"SELECT character_id, corpse_id, custom_name, custom_examine_description,
+                  condition, custom_values
+           FROM "CharacterItems" WHERE id = $1"#,
+    )
+    .bind(row)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(owner_now, looter);
+    assert_eq!(corpse_now, None);
+    assert_eq!(custom_name.as_deref(), Some("Fancy"));
+    assert_eq!(examine.as_deref(), Some("Shiny"));
+    assert_eq!(wear, 55);
+    assert_eq!(custom["note"], "keep");
+    // The owner's later save can't delete the looter's row.
+    save_inventory_diff(&mut conn, &owner, &[], None)
+        .await
+        .unwrap();
+    assert_eq!(list_for(&pool, &looter).await.unwrap().len(), 1);
+
+    corpse_test_cleanup(&pool, &[&owner, &looter]).await;
+}
+
+/// Coins leave the corpse only in the transaction that credits the looter.
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn corpse_coins_are_taken_atomically_with_the_looters_wealth() {
+    let _guard = INVENTORY_LOCK.lock().await;
+    let pool = pool().await;
+    let owner = corpse_test_char(&pool, "co").await;
+    let looter = corpse_test_char(&pool, "cl").await;
+    let mut conn = pool.acquire().await.unwrap();
+    let corpse_id = mud_db::player_corpses::insert(&mut conn, &owner, 30, 45, 500, 600)
+        .await
+        .unwrap();
+    drop(conn);
+    let coins = || async {
+        sqlx::query_scalar::<_, i64>(r#"SELECT coins FROM "PlayerCorpses" WHERE id = $1"#)
+            .bind(corpse_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    let wealth = || async {
+        sqlx::query_scalar::<_, i64>(r#"SELECT wealth FROM "Characters" WHERE id = $1"#)
+            .bind(&looter)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+
+    // Rolled back: neither side moves.
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query(r#"UPDATE "Characters" SET wealth = 200 WHERE id = $1"#)
+        .bind(&looter)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    mud_db::player_corpses::take_coins(&mut tx, corpse_id, 200)
+        .await
+        .unwrap();
+    drop(tx);
+    assert_eq!((coins().await, wealth().await), (500, 0));
+
+    // Committed: both move together.
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query(r#"UPDATE "Characters" SET wealth = 200 WHERE id = $1"#)
+        .bind(&looter)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    mud_db::player_corpses::take_coins(&mut tx, corpse_id, 200)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!((coins().await, wealth().await), (300, 200));
+
+    // Over-taking clamps at zero instead of going negative.
+    let mut conn = pool.acquire().await.unwrap();
+    mud_db::player_corpses::take_coins(&mut conn, corpse_id, 10_000)
+        .await
+        .unwrap();
+    assert_eq!(coins().await, 0);
+
+    corpse_test_cleanup(&pool, &[&owner, &looter]).await;
+}
+
+/// Decay deletes the corpse row and (by cascade) whatever is still in it,
+/// leaving looted items alone; expired corpses list with remaining <= 0.
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn deleting_a_corpse_cascades_to_its_remaining_items() {
+    let _guard = INVENTORY_LOCK.lock().await;
+    let pool = pool().await;
+    let key = object_key(&pool).await;
+    let owner = corpse_test_char(&pool, "de").await;
+
+    let mut tx = pool.begin().await.unwrap();
+    let corpse_id = mud_db::player_corpses::insert(&mut tx, &owner, 30, 45, 5, 600)
+        .await
+        .unwrap();
+    save_inventory_diff(
+        &mut tx,
+        &owner,
+        &[
+            corpse_snap(None, key, None, true),
+            corpse_snap(None, key, None, false),
+        ],
+        Some(corpse_id),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    sqlx::query(
+        r#"UPDATE "PlayerCorpses" SET decay_at = NOW() - INTERVAL '2 minutes' WHERE id = $1"#,
+    )
+    .bind(corpse_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let listed = mud_db::player_corpses::list_all(&pool).await.unwrap();
+    assert!(
+        listed
+            .iter()
+            .find(|c| c.id == corpse_id)
+            .unwrap()
+            .remaining_secs
+            <= 0
+    );
+
+    mud_db::player_corpses::delete(&pool, corpse_id)
+        .await
+        .unwrap();
+    mud_db::player_corpses::delete(&pool, corpse_id)
+        .await
+        .unwrap(); // idempotent
+    assert!(
+        mud_db::character_items::list_for_corpse(&pool, corpse_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        list_for(&pool, &owner).await.unwrap().len(),
+        1,
+        "the carried (non-corpse) row is untouched"
+    );
+
+    corpse_test_cleanup(&pool, &[&owner]).await;
 }

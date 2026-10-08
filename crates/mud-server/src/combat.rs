@@ -158,21 +158,36 @@ pub fn seed_test_items(world: &mut World) {
 /// for a carried one ("$p decays in your hands."), to the enclosing
 /// container otherwise — then the corpse itself is removed. Player and
 /// mob corpses share the path; they differ only in their starting timer.
-/// Ephemeral aside from the corpse snapshot.
+/// A persisted player corpse first deletes its database rows and only
+/// releases its contents once that commits (a crash in between brings
+/// the corpse back whole instead of leaving rows for gear that is
+/// already on the floor).
 pub fn corpse_decay_tick(world: &mut World) {
     let tick = world.resource::<TickCount>().0;
     if !tick.is_multiple_of(10) {
         return;
     }
+    // Corpses whose database rows are gone release their contents now.
+    for corpse in crate::corpses::take_decayed(world) {
+        if world.get_entity(corpse).is_err() {
+            continue;
+        }
+        let name = world
+            .get::<Named>(corpse)
+            .map(|n| n.name.clone())
+            .unwrap_or_default();
+        expire_corpse(world, corpse, &name);
+    }
     // Snapshot so we can mutate freely.
     let corpses: Vec<(Entity, Entity, i32, String)> = {
-        let mut q =
-            world.query_filtered::<(Entity, &Located, &CorpseDecay, &Named), With<Corpse>>();
+        let mut q = world.query_filtered::<
+            (Entity, &Located, &CorpseDecay, &Named),
+            (With<Corpse>, Without<crate::corpses::DecayDeleting>),
+        >();
         q.iter(world)
             .map(|(e, l, d, n)| (e, l.0, d.remaining_secs, n.name.clone()))
             .collect()
     };
-    let mut player_corpse_gone = false;
     for (corpse, room, prev_remaining, name) in corpses {
         // Decrement first (or expire and despawn).
         let new_remaining = {
@@ -184,47 +199,50 @@ pub fn corpse_decay_tick(world: &mut World) {
             }
         };
         // Atmospheric decay markers — fire on the tick that crosses
-        // each threshold so a snapshot-restored corpse with a non-
-        // canonical timer (e.g. 380s) still hits them on the way
-        // down. Silent if the room has no observers.
+        // each threshold so a restored corpse with a non-canonical
+        // timer (e.g. 380s) still hits them on the way down. Silent if
+        // the room has no observers.
         if let Some(line) = decay_milestone(prev_remaining, new_remaining, &name) {
             broadcast_room_except_rendered(world, room, &[], &line);
         }
         if new_remaining > 0 {
             continue;
         }
-        let (holder, kind) = crate::item_decay::location_kind(world, corpse);
-        match kind {
-            crate::item_decay::HolderKind::Room => {
-                broadcast_room_except_rendered(
-                    world,
-                    holder,
-                    &[],
-                    &format!("A quivering horde of maggots consumes {name}.\r\n"),
-                );
-            }
-            crate::item_decay::HolderKind::Player => {
-                crate::commands::send_to(
-                    world,
-                    holder,
-                    format!(
-                        "{} decays in your hands.\r\n",
-                        crate::commands::cap_sentence_start(&name)
-                    ),
-                );
-            }
-            _ => {}
+        if crate::corpses::begin_decay_delete(world, corpse) {
+            continue;
         }
-        crate::item_decay::release_contents(world, corpse, holder, &kind);
-        player_corpse_gone |= world.get::<mud_world::PlayerCorpse>(corpse).is_some();
-        if let Ok(em) = world.get_entity_mut(corpse) {
-            em.despawn();
-        }
+        expire_corpse(world, corpse, &name);
     }
-    // A rotted-away player corpse must leave the on-disk snapshot too,
-    // or a crash would bring it back.
-    if player_corpse_gone {
-        crate::corpses::save_snapshot(world);
+}
+
+/// Announce a rotted corpse, drop its contents where it lies and
+/// despawn it.
+fn expire_corpse(world: &mut World, corpse: Entity, name: &str) {
+    let (holder, kind) = crate::item_decay::location_kind(world, corpse);
+    match kind {
+        crate::item_decay::HolderKind::Room => {
+            broadcast_room_except_rendered(
+                world,
+                holder,
+                &[],
+                &format!("A quivering horde of maggots consumes {name}.\r\n"),
+            );
+        }
+        crate::item_decay::HolderKind::Player => {
+            crate::commands::send_to(
+                world,
+                holder,
+                format!(
+                    "{} decays in your hands.\r\n",
+                    crate::commands::cap_sentence_start(name)
+                ),
+            );
+        }
+        _ => {}
+    }
+    crate::item_decay::release_contents(world, corpse, holder, &kind);
+    if let Ok(em) = world.get_entity_mut(corpse) {
+        em.despawn();
     }
 }
 
@@ -1777,8 +1795,7 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
         // after spawn — bundling it inline with the 6+ components
         // in `spawn(...)` above doesn't reliably attach in this
         // Bevy version (verified empirically; the second insert
-        // attaches cleanly). Snapshot save/load round-trips this
-        // marker so it survives a restart.
+        // attaches cleanly). Boot restores this marker with the corpse.
         let victim_level = world
             .get::<mud_world::Profile>(victim)
             .map_or(1, |p| p.level);
@@ -1909,10 +1926,13 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
                 crate::commands::cap_sentence_start(victim_name),
             ),
         );
-        // Persist now rather than at the next autosave: the corpse
-        // snapshot first (it holds the gear and purse), then the
-        // player's emptied pack. Otherwise a crash restores nothing.
-        crate::corpses::persist_after_change(world, victim);
+        // Persist now rather than at the next autosave. The corpse, its
+        // items and the emptied purse commit in ONE transaction with the
+        // player's save (the `PendingDeath` marker makes every snapshot
+        // of this player carry it until it lands), so a crash restores
+        // either the full pre-death pack or the corpse, never neither.
+        try_insert(world, victim, crate::corpses::PendingDeath(corpse));
+        crate::quest_progress::save_player_soon(world, victim);
         info!(?victim, name = %victim_name, ?corpse, "player corpsed");
     } else {
         // Mob death: notify, spawn a corpse, drop loot + leftover
@@ -3305,22 +3325,30 @@ mod tests {
     }
 
     #[test]
-    fn player_death_writes_the_corpse_snapshot_with_the_coins() {
-        let dir = crate::corpses::tests::scratch_dir("death_snapshot");
-        let path = dir.join("corpses.json");
+    fn player_death_marks_the_corpse_pending_for_the_death_transaction() {
         let mut world = World::new();
         world.insert_resource(TickCount(0));
         world.insert_resource(mud_world::WorldKeyIndex::default());
-        world.insert_resource(crate::corpses::CorpseSnapshotPath(path.clone()));
         let room = world.spawn(mud_world::WorldKey { zone: 30, id: 45 }).id();
         let player = spawn_dying_player(&mut world, room, "Tester", 5_150);
 
         super::handle_death(&mut world, player, "Tester", room);
 
-        let text = std::fs::read_to_string(&path).expect("death wrote the snapshot");
-        assert!(text.contains("the corpse of Tester"), "{text}");
-        assert!(text.contains("\"coins\": 5150"), "{text}");
-        assert!(text.contains("\"is_player\": true"), "{text}");
+        let corpse = player_corpse_in(&mut world, room);
+        assert_eq!(
+            world.get::<crate::corpses::PendingDeath>(player).unwrap().0,
+            corpse
+        );
+        assert!(
+            world.get::<mud_world::PlayerCorpseId>(corpse).is_none(),
+            "no id until the death transaction commits"
+        );
+        let death = crate::corpses::pending_death(&world, player).expect("pending death");
+        assert_eq!(
+            (death.room_zone, death.room_id, death.coins),
+            (30, 45, 5_150)
+        );
+        assert!(death.decay_secs > 0);
     }
 
     #[test]
@@ -3330,8 +3358,6 @@ mod tests {
         world.insert_resource(TickCount(0));
         world.insert_resource(ObjectPrototypes::default());
         world.insert_resource(mud_world::WorldKeyIndex::default());
-        let path = crate::corpses::tests::scratch_dir("loot_snapshot").join("corpses.json");
-        world.insert_resource(crate::corpses::CorpseSnapshotPath(path.clone()));
         world
             .entity_mut(room)
             .insert(mud_world::WorldKey { zone: 30, id: 45 });
@@ -3340,6 +3366,14 @@ mod tests {
         super::handle_death(&mut world, owner, "Tester", room);
         let corpse = player_corpse_in(&mut world, room);
 
+        // Until the death transaction commits the corpse is off limits.
+        crate::commands::info::cmd_get(&mut world, owner, "all corpse");
+        assert_eq!(world.get::<mud_world::CoinPile>(corpse).unwrap().0, 777);
+        assert_eq!(world.get::<Wealth>(owner).unwrap().0, 0);
+
+        world
+            .entity_mut(corpse)
+            .insert(mud_world::PlayerCorpseId(77));
         crate::commands::info::cmd_get(&mut world, thief, "all corpse");
         assert_eq!(
             world.get::<mud_world::CoinPile>(corpse).unwrap().0,
@@ -3347,21 +3381,69 @@ mod tests {
             "non-owner is refused by the consent gate"
         );
         assert_eq!(world.get::<Wealth>(thief).unwrap().0, 0);
-        let text = std::fs::read_to_string(&path).expect("death snapshot");
         assert!(
-            text.contains("\"coins\": 777"),
-            "refused loot leaves it: {text}"
+            world
+                .get::<crate::corpses::PendingCorpseCoinTakes>(thief)
+                .is_none()
         );
 
         crate::commands::info::cmd_get(&mut world, owner, "all corpse");
         assert!(world.get::<mud_world::CoinPile>(corpse).is_none());
         assert_eq!(world.get::<Wealth>(owner).unwrap().0, 777);
-        // Looting rewrote the snapshot (corpse first, then the player
-        // save, which needs a DB pool and is a no-op in this world).
-        let text = std::fs::read_to_string(&path).expect("loot snapshot");
-        assert!(
-            text.contains("\"coins\": 0"),
-            "coins left the snapshot: {text}"
+        assert_eq!(
+            world
+                .get::<crate::corpses::PendingCorpseCoinTakes>(owner)
+                .unwrap()
+                .0,
+            vec![(77, 777)],
+            "the take is queued for the owner's own save to settle with the corpse row"
+        );
+    }
+
+    #[test]
+    fn player_corpses_cannot_be_carried_or_stuffed() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        world.insert_resource(TickCount(0));
+        world.insert_resource(ObjectPrototypes::default());
+        world.insert_resource(mud_world::WorldKeyIndex::default());
+        let owner = spawn_dying_player(&mut world, room, "Tester", 0);
+        let other = spawn_dying_player(&mut world, room, "Robber", 0);
+        super::handle_death(&mut world, owner, "Tester", room);
+        let corpse = player_corpse_in(&mut world, room);
+        world
+            .entity_mut(corpse)
+            .insert(mud_world::PlayerCorpseId(5));
+
+        for (who, cmd) in [
+            (other, "corpse"),
+            (owner, "corpse"),
+            (owner, "all"),
+            (other, "all.corpse"),
+        ] {
+            crate::commands::info::cmd_get(&mut world, who, cmd);
+            assert_eq!(
+                world.get::<Located>(corpse).unwrap().0,
+                room,
+                "`get {cmd}` must leave the corpse on the floor"
+            );
+        }
+
+        let trinket = world
+            .spawn((
+                Item,
+                Named {
+                    name: "a trinket".to_string(),
+                },
+                Keywords(vec!["trinket".into()]),
+                Located(other),
+            ))
+            .id();
+        crate::commands::info::cmd_put(&mut world, other, "trinket corpse");
+        assert_eq!(
+            world.get::<Located>(trinket).unwrap().0,
+            other,
+            "nothing goes into a persisted corpse"
         );
     }
 

@@ -883,12 +883,18 @@ pub struct Corpse;
 #[derive(Component, Debug, Clone, Copy)]
 pub struct PlayerCorpse;
 
+/// `PlayerCorpses.id` of a player corpse whose gear and coins are
+/// committed to the database. Absent while the death write is still in
+/// flight; looting and dragging wait for it so a loot can never be
+/// persisted before the corpse it came from.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct PlayerCorpseId(pub i32);
+
 /// Records the dead actor's level at corpse-spawn time. Read by
 /// `ANIMATE_DEAD` to scale the spawned skeleton's HP — animating a
 /// high-level mob's corpse should yield a beefier undead than
-/// animating a goblin's. Round-tripped through the corpse snapshot
-/// so the level survives a restart. Defaults to 1 on legacy
-/// snapshots that pre-date this component.
+/// animating a goblin's. Restored from the owner's level when a player
+/// corpse is loaded at boot.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct CorpseOriginLevel(pub i32);
 

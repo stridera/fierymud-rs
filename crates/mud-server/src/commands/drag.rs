@@ -61,6 +61,10 @@ fn check_draggable(
 ) -> Option<(Entity, f64)> {
     let result = match dragged {
         Dragged::Object(item) => {
+            if crate::corpses::is_unsettled(world, item) {
+                send_to(world, player, "That body is still settling.\r\n");
+                return None;
+            }
             if !staff {
                 let is_corpse = world.get::<Corpse>(item).is_some();
                 if !is_corpse && has_restriction(world, item, ObjectRestriction::NoTake) {
@@ -276,6 +280,9 @@ pub(crate) fn cmd_drag(world: &mut World, player: Entity, args: &str) {
         .is_some_and(|l| l.0 == to_room);
     if !already_there && world.get::<Located>(subject).is_some() {
         world.entity_mut(subject).insert(Located(to_room));
+        if matches!(dragged, Dragged::Object(_)) {
+            crate::corpses::queue_set_room(world, subject, to_room);
+        }
     }
     let is_player_body =
         !already_there && matches!(dragged, Dragged::Body(b) if world.get::<Player>(b).is_some());
@@ -484,11 +491,94 @@ mod tests {
         assert_eq!(room_of(&world, fixture), a);
 
         let pc = corpse(&mut world, a, "the corpse of Bob");
-        world.entity_mut(pc).insert(PlayerCorpse);
+        world
+            .entity_mut(pc)
+            .insert((PlayerCorpse, PlayerCorpseId(1)));
         dispatch(&mut world, p, "drag corpse s");
         assert!(drain(&mut rx).contains("Not without consent"));
         assert_eq!(room_of(&world, p), a);
         assert_eq!(room_of(&world, pc), a);
+    }
+
+    #[test]
+    fn drag_refuses_a_player_corpse_whose_death_is_not_committed() {
+        let (mut world, a, _b, p, mut rx) = setup();
+        let c = corpse(&mut world, a, "the corpse of Tester");
+        world.entity_mut(c).insert(PlayerCorpse);
+        dispatch(&mut world, p, "drag corpse s");
+        assert!(drain(&mut rx).contains("still settling"));
+        assert_eq!(room_of(&world, c), a);
+        assert_eq!(room_of(&world, p), a);
+    }
+
+    #[tokio::test]
+    async fn dragging_your_corpse_updates_its_row_room() {
+        let _lock = crate::commands::test_support::db_test_lock().await;
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://strider@localhost/fierydev".into());
+        let Ok(Ok(pool)) = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            mud_db::connect_with(&url, crate::commands::test_support::db_test_pool_settings()),
+        )
+        .await
+        else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        if mud_db::sqlx::query("SELECT 1 FROM \"PlayerCorpses\" LIMIT 1")
+            .execute(&pool)
+            .await
+            .is_err()
+        {
+            eprintln!("skipping: PlayerCorpses table missing");
+            return;
+        }
+        let cid = format!("zd-{}", std::process::id());
+        mud_db::sqlx::query(
+            "INSERT INTO \"Characters\" (id, name, updated_at) VALUES ($1, $2, NOW()) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(&cid)
+        .bind(format!("Zd{}", std::process::id()))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        let corpse_id = mud_db::player_corpses::insert(&mut conn, &cid, 30, 45, 0, 600)
+            .await
+            .unwrap();
+        drop(conn);
+
+        let (mut world, a, b, p, _rx) = setup();
+        world.entity_mut(b).insert(WorldKey { zone: 30, id: 46 });
+        let c = corpse(&mut world, a, "the corpse of Tester");
+        world
+            .entity_mut(c)
+            .insert((PlayerCorpse, PlayerCorpseId(corpse_id)));
+        world.insert_resource(crate::corpses::CorpseDb::spawn(pool.clone()));
+
+        dispatch(&mut world, p, "drag corpse s");
+        assert_eq!(room_of(&world, c), b);
+        let mut room = (0, 0);
+        for _ in 0..100 {
+            room = mud_db::sqlx::query_as(
+                "SELECT room_zone_id, room_id FROM \"PlayerCorpses\" WHERE id = $1",
+            )
+            .bind(corpse_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if room == (30, 46) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(room, (30, 46));
+        mud_db::sqlx::query("DELETE FROM \"Characters\" WHERE id = $1")
+            .bind(&cid)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     #[test]

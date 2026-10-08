@@ -47,6 +47,7 @@ pub mod object_reset_contents;
 pub mod object_resets;
 pub mod object_resistance;
 pub mod objects;
+pub mod player_corpses;
 pub mod quest_objectives;
 pub mod quests;
 pub mod race_abilities;

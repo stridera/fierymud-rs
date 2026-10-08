@@ -83,6 +83,11 @@ pub struct CharacterItemSnap {
     /// row's `custom_values` JSONB (other keys are left alone), so no
     /// schema change is needed.
     pub lit: bool,
+    /// The item sits in the dying owner's corpse (written by the death
+    /// transaction): its row keeps `character_id = owner` and gets the
+    /// corpse's id. Every other snapshot entry clears `corpse_id`, which
+    /// is how a looted item moves into its new holder's inventory.
+    pub in_corpse: bool,
 }
 
 /// One row from the `pscan` admin lookup — a player + an item
@@ -142,6 +147,7 @@ pub async fn pscan_owners_by_item(pool: &PgPool, needle: &str) -> sqlx::Result<V
 /// re-acquired after newer ones; `id` only breaks ties for rows written
 /// outside the diff (import, chest withdraw).
 pub async fn list_for(pool: &PgPool, character_id: &str) -> sqlx::Result<Vec<CharacterItemRow>> {
+    // Corpse items keep `character_id = owner` but are not carried.
     sqlx::query_as!(
         CharacterItemRow,
         r#"
@@ -157,10 +163,37 @@ pub async fn list_for(pool: &PgPool, character_id: &str) -> sqlx::Result<Vec<Cha
             liquid_type,
             COALESCE(custom_values -> 'lit' = 'true'::jsonb, FALSE) AS "lit!"
         FROM "CharacterItems"
-        WHERE character_id = $1
+        WHERE character_id = $1 AND corpse_id IS NULL
         ORDER BY updated_at, id
         "#,
         character_id,
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// Read every item row inside a player corpse (nesting via
+/// `container_id`), oldest arrival first like [`list_for`].
+pub async fn list_for_corpse(pool: &PgPool, corpse_id: i32) -> sqlx::Result<Vec<CharacterItemRow>> {
+    sqlx::query_as!(
+        CharacterItemRow,
+        r#"
+        SELECT
+            id,
+            character_id,
+            object_zone_id,
+            object_id,
+            container_id,
+            equipped_location,
+            charges,
+            liquid_remaining,
+            liquid_type,
+            COALESCE(custom_values -> 'lit' = 'true'::jsonb, FALSE) AS "lit!"
+        FROM "CharacterItems"
+        WHERE corpse_id = $1
+        ORDER BY updated_at, id
+        "#,
+        corpse_id,
     )
     .fetch_all(pool)
     .await
@@ -170,13 +203,17 @@ pub async fn list_for(pool: &PgPool, character_id: &str) -> sqlx::Result<Vec<Cha
 /// against the DB row set:
 ///
 /// * Rows whose `id` is no longer in the snapshot (item dropped, sold,
-///   given) → DELETE.
+///   given) → DELETE. Scoped to `corpse_id IS NULL`: rows inside the
+///   owner's corpse are not part of the carried set, so a stale or racing
+///   save can never delete them.
 /// * Snapshot entries with `persisted_id = Some` (loaded items still
 ///   carried) → UPDATE the runtime-owned columns (`equipped_location`,
 ///   `container_id`, `charges`, `liquid_remaining`, `liquid_type`,
 ///   the `lit` key of `custom_values`, `updated_at`) and re-home the row to this character
 ///   (`character_id`), so an item handed over from another character is
-///   claimed rather than deleted by the previous owner's save. Other
+///   claimed rather than deleted by the previous owner's save. The row's
+///   `corpse_id` is set to `corpse_id` for entries flagged `in_corpse` and
+///   cleared otherwise (an item looted out of a corpse). Other
 ///   columns (`condition`, `instance_flags`, `custom_name`, etc.) are
 ///   untouched. If the row no longer exists the item is inserted.
 /// * Snapshot entries with `persisted_id = None` (newly acquired this
@@ -196,6 +233,7 @@ pub async fn save_inventory_diff(
     conn: &mut sqlx::PgConnection,
     character_id: &str,
     items: &[CharacterItemSnap],
+    corpse_id: Option<i32>,
 ) -> sqlx::Result<HashMap<usize, i32>> {
     // 1. DELETE rows for this character whose id isn't in the snapshot.
     //    Empty `keep` means delete everything (player gave up every
@@ -203,7 +241,7 @@ pub async fn save_inventory_diff(
     let keep: Vec<i32> = items.iter().filter_map(|s| s.persisted_id).collect();
     if keep.is_empty() {
         sqlx::query!(
-            r#"DELETE FROM "CharacterItems" WHERE character_id = $1"#,
+            r#"DELETE FROM "CharacterItems" WHERE character_id = $1 AND corpse_id IS NULL"#,
             character_id,
         )
         .execute(&mut *conn)
@@ -212,7 +250,7 @@ pub async fn save_inventory_diff(
         sqlx::query!(
             r#"
             DELETE FROM "CharacterItems"
-            WHERE character_id = $1 AND NOT (id = ANY($2))
+            WHERE character_id = $1 AND corpse_id IS NULL AND NOT (id = ANY($2))
             "#,
             character_id,
             &keep,
@@ -243,6 +281,7 @@ pub async fn save_inventory_diff(
         // snapshot order makes it a strict arrival-order key (see
         // `list_for`).
         let arrival_offset_ms = i32::try_from(idx).unwrap_or(i32::MAX);
+        let row_corpse_id = if snap.in_corpse { corpse_id } else { None };
         let container_id: Option<i32> = snap
             .parent_idx
             .and_then(|p_idx| ids.get(p_idx).copied())
@@ -267,7 +306,8 @@ pub async fn save_inventory_diff(
                         ELSE (CASE WHEN jsonb_typeof(custom_values) = 'object'
                                    THEN custom_values ELSE '{}'::jsonb END) - 'lit'
                         END,
-                    updated_at = NOW() + $9::int * INTERVAL '1 millisecond'
+                    updated_at = NOW() + $9::int * INTERVAL '1 millisecond',
+                    corpse_id = $10
                 WHERE id = $7
                 RETURNING id
                 "#,
@@ -280,6 +320,7 @@ pub async fn save_inventory_diff(
                 id,
                 snap.lit,
                 arrival_offset_ms,
+                row_corpse_id,
             )
             .fetch_optional(&mut *conn)
             .await?;
@@ -293,10 +334,12 @@ pub async fn save_inventory_diff(
             INSERT INTO "CharacterItems"
                 (character_id, object_zone_id, object_id,
                  equipped_location, container_id,
-                 charges, liquid_remaining, liquid_type, custom_values, updated_at)
+                 charges, liquid_remaining, liquid_type, custom_values, updated_at,
+                 corpse_id)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
                     CASE WHEN $9::boolean THEN '{"lit": true}'::jsonb ELSE '{}'::jsonb END,
-                    NOW() + $10::int * INTERVAL '1 millisecond')
+                    NOW() + $10::int * INTERVAL '1 millisecond',
+                    $11)
             RETURNING id
             "#,
             character_id,
@@ -309,6 +352,7 @@ pub async fn save_inventory_diff(
             snap.liquid_type.as_deref(),
             snap.lit,
             arrival_offset_ms,
+            row_corpse_id,
         )
         .fetch_one(&mut *conn)
         .await?;

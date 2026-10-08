@@ -9935,6 +9935,7 @@ fn drain_coin_pile(world: &mut World, container: Entity, player: Entity) -> Opti
         try_insert(world, player, Wealth(amount));
     }
     try_remove::<CoinPile>(world, container);
+    crate::corpses::note_coin_take(world, player, container, amount);
     Some(amount)
 }
 
@@ -10230,6 +10231,18 @@ fn get_plain(world: &mut World, player: Entity, args: &str) {
         return;
     }
 
+    // A player's corpse can be dragged but never carried (legacy: it has
+    // no TAKE flag). Carried corpses couldn't be saved with their owner's
+    // gear, so nobody, staff included, picks one up.
+    if world.get::<mud_world::PlayerCorpse>(item).is_some() {
+        send_rendered(
+            world,
+            player,
+            &format!("{item_name}: you can't take that!\r\n"),
+        );
+        return;
+    }
+
     // A loose pile of coins (a decayed corpse's money) goes straight
     // into the purse rather than the inventory.
     if let Some(amount) = take_loose_coins(world, player, item) {
@@ -10300,9 +10313,9 @@ fn get_from_container(
     needle: &str,
     container: Entity,
 ) {
-    // A player corpse is snapshotted to disk; when a take actually
-    // emptied part of it, rewrite that snapshot and save the player
-    // (corpse first) so a crash can't lose or duplicate the loot.
+    // A player corpse lives in the database; when a take actually emptied
+    // part of it, the looter's own save (item rows re-homed, coins debited
+    // in the same transaction) is the only write. Never the corpse first.
     let is_pc = world.get::<mud_world::PlayerCorpse>(container).is_some();
     let before = is_pc.then(|| crate::corpses::contents_fingerprint(world, container));
     get_from_container_inner(world, player, room, needle, container);
@@ -10310,7 +10323,7 @@ fn get_from_container(
         && world.get_entity(container).is_ok()
         && crate::corpses::contents_fingerprint(world, container) != before
     {
-        crate::corpses::persist_after_change(world, player);
+        crate::quest_progress::save_player_soon(world, player);
     }
 }
 
@@ -10367,6 +10380,18 @@ fn get_from_container_inner(
             );
             return;
         }
+    }
+
+    // A corpse whose death write hasn't committed holds items the
+    // database doesn't know about yet; looting them now could persist the
+    // looter's copy while the corpse's rows survive a crash.
+    if is_pc && crate::corpses::is_unsettled(world, container) {
+        send_to(
+            world,
+            player,
+            format!("{container_name} is still settling; try again in a moment.\r\n"),
+        );
+        return;
     }
 
     // `get all from <container>`: snapshot every item inside,
@@ -10605,6 +10630,14 @@ fn get_all_from_floor(world: &mut World, player: Entity, room: Entity, filter: &
             moved += 1;
             continue;
         }
+        if world.get::<mud_world::PlayerCorpse>(*item).is_some() {
+            send_rendered(
+                world,
+                player,
+                &format!("{item_name}: you can't take that!\r\n"),
+            );
+            continue;
+        }
         // NO_TAKE fixtures skip silently in the bulk path — the
         // singular `get <item>` path surfaces the message. Staff
         // bypass mirrors the singular path: builders sometimes
@@ -10689,6 +10722,18 @@ fn put_plain(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let container_name = name_of(world, container);
+
+    // Legacy corpses have zero capacity. A player corpse's contents are
+    // exactly what is in the database; anything dropped in would be lost
+    // from the giver's save and never reach the corpse's rows.
+    if world.get::<mud_world::PlayerCorpse>(container).is_some() {
+        send_rendered(
+            world,
+            player,
+            &format!("{container_name} can't hold anything more.\r\n"),
+        );
+        return;
+    }
 
     // `put all in <container>` — store every carried (non-equipped)
     // item in the target. Skips the container itself.

@@ -321,9 +321,13 @@ async fn main() {
     // Same for the in-game clock — without this, every restart snaps
     // back to year 1 / month 1 / day 1 / hour 12.
     weather::load_clock_snapshot(&mut world);
-    // Recreate any corpses that were on the floor at last shutdown.
-    // Needs prototypes + WorldKeyIndex which load_from_db populated.
-    corpses::load_snapshot(&mut world);
+    // Recreate the player corpses persisted in the database (gear, bags
+    // and coins). Needs prototypes + WorldKeyIndex which load_from_db
+    // populated. The writer resource is installed afterwards so the
+    // restore itself never queues deletes.
+    corpses::load_from_db(&mut world, &pool).await;
+    corpses::register_observers(&mut world);
+    world.insert_resource(corpses::CorpseDb::spawn(pool.clone()));
     // Restore shop stock deltas from last shutdown so a server
     // restart doesn't silently refill every depleted shelf.
     shops::load_snapshot(&mut world);
@@ -798,7 +802,6 @@ async fn main() {
     // left off instead of snapping back to climate defaults.
     weather::save_snapshot(&world);
     weather::save_clock_snapshot(&world);
-    corpses::save_snapshot(&mut world);
     shops::save_snapshot(&world);
 
     info!(
