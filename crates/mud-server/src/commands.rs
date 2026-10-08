@@ -404,6 +404,8 @@ mod housing;
 mod identity;
 #[path = "commands/info.rs"]
 pub(crate) mod info;
+#[path = "commands/look_auras.rs"]
+mod look_auras;
 #[path = "commands/name_approval.rs"]
 mod name_approval;
 pub(crate) use info::{cmd_look, has_object_flag, has_restriction};
@@ -461,6 +463,9 @@ mod item_edit_tests;
 #[cfg(test)]
 #[path = "commands/item_effects_tests.rs"]
 mod item_effects_tests;
+#[cfg(test)]
+#[path = "commands/look_aura_tests.rs"]
+mod look_aura_tests;
 #[cfg(test)]
 #[path = "commands/look_mob_tests.rs"]
 mod look_mob_tests;

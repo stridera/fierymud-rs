@@ -3499,7 +3499,7 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
                 prof.level,
             ));
         }
-        // Size + lifeforce + body metrics from `RaceCatalog`.
+        // Lifeforce + size/composition + body metrics from `RaceCatalog`.
         // Surfaced on examine so a player can gauge a stranger's
         // physique without poking their score sheet. Size + lifeforce
         // come straight from the race row; height/weight come from
@@ -3512,9 +3512,15 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
             .get(&prof.race)
             .cloned();
         if let Some(def) = race_def_owned {
-            let size = capitalize(&def.default_size.to_ascii_lowercase());
             let life = capitalize(&def.default_lifeforce.to_ascii_lowercase());
-            out.push_str(&format!("Size: {size}; lifeforce: {life}.\r\n"));
+            out.push_str(&format!("Lifeforce: {life}.\r\n"));
+            // Legacy `print_char_appearance_to_char` runs for players as
+            // well as mobs: size, plus the race's composition.
+            out.push_str(&appearance_line(
+                &prof.gender,
+                &def.default_size,
+                def.default_composition,
+            ));
         }
         if let Some(bm) = world.get::<mud_world::BodyMetrics>(target).copied() {
             // Render height as feet+inches so the readout matches
@@ -3614,9 +3620,9 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
         let size = world
             .get::<mud_world::Sized>(target)
             .map_or(proto.size, |s| s.0);
-        out.push_str(&mob_appearance_line(
-            proto,
-            size,
+        out.push_str(&appearance_line(
+            &proto.gender,
+            size.label(),
             mob_composition(world, proto),
         ));
     }
@@ -3691,12 +3697,6 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
         // Self-only — others shouldn't see your stealth marker.
         out.push_str("You are hidden.\r\n");
     }
-    if let Some(BoardLink(board_id)) = world.get::<BoardLink>(target).copied()
-        && let Some(summary) = world
-            .get_resource::<BoardCatalog>()
-            .and_then(|c| c.by_id.get(&board_id))
-            .cloned()
-    {
     if target == player {
         // Self-only — hunger / thirst, same effect query the score sheet
         // uses so nourished / refreshed read alongside hungry / thirsty.
@@ -3715,6 +3715,30 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
             out.push_str(&format!("You feel {open}{c}{close}.\r\n"));
         }
     }
+    if let Some(BoardLink(board_id)) = world.get::<BoardLink>(target).copied()
+        && let Some(summary) = world
+            .get_resource::<BoardCatalog>()
+            .and_then(|c| c.by_id.get(&board_id))
+            .cloned()
+    {
+        if target == player {
+            // Self-only — hunger / thirst, same effect query the score sheet
+            // uses so nourished / refreshed read alongside hungry / thirsty.
+            let hunger = world.get::<mud_world::Hunger>(player).map_or(0, |h| h.0);
+            let thirst = world.get::<mud_world::Thirst>(player).map_or(0, |t| t.0);
+            let self_effects: Vec<String> = {
+                let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+                q.iter(world)
+                    .filter(|(_, a)| a.0 == player)
+                    .map(|(inst, _)| inst.name.clone())
+                    .collect()
+            };
+            if let Some(c) = condition_summary(hunger, thirst, &self_effects) {
+                let open = condition_color_tag(hunger, thirst).unwrap_or("");
+                let close = if open.is_empty() { "" } else { "</>" };
+                out.push_str(&format!("You feel {open}{c}{close}.\r\n"));
+            }
+        }
         let lock = if summary.locked { " (locked)" } else { "" };
         // Many board titles already end in "Board"; avoid the awkward
         // "Mortal Board board".
@@ -3743,24 +3767,11 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
         };
         out.push_str(&format!("{line}\r\n"));
     }
-    // Active effects on actors (Player or Mob). Quick "is this mob
-    // blessed / bleeding?" read without needing your own `effects`
-    // command (which is self-only). Items skip this — their effects
-    // are bound differently.
+    // Active effects on actors (Player or Mob), as legacy-style flavor
+    // sentences (`look_auras`); magical ones need Detect Magic. Items
+    // skip this — their effects are bound differently.
     if world.get::<Item>(target).is_none() {
-        let names: Vec<String> = {
-            let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-            q.iter(world)
-                .filter(|(_, a)| a.0 == target)
-                .map(|(inst, _)| inst.name.clone())
-                .collect()
-        };
-        if !names.is_empty() {
-            out.push_str(&format!(
-                "{name_rendered} is affected by: {}.\r\n",
-                names.join(", "),
-            ));
-        }
+        out.push_str(&super::look_auras::aura_lines(world, player, target));
         // Equipped gear list. Players and mobs alike — bystanders
         // should see what someone's wielding before engaging them
         // (the warhammer vs the toothpick matters tactically).
@@ -4271,22 +4282,18 @@ fn mob_composition(world: &World, proto: &mud_world::MobProto) -> mud_db::enums:
         .map_or(Composition::Flesh, |r| r.default_composition)
 }
 
-/// Legacy `print_char_appearance_to_char` line for a mob:
+/// Legacy `print_char_appearance_to_char` line for an actor:
 /// "He is large in size." for flesh, "... and is insubstantial." for
 /// ether, "... and is composed of plant material." otherwise.
 /// Ends with CRLF.
-fn mob_appearance_line(
-    proto: &mud_world::MobProto,
-    size: mud_db::enums::Size,
-    composition: mud_db::enums::Composition,
-) -> String {
+fn appearance_line(gender: &str, size: &str, composition: mud_db::enums::Composition) -> String {
     use mud_db::enums::Composition;
-    let pronoun = match proto.gender.to_ascii_lowercase().as_str() {
+    let pronoun = match gender.to_ascii_lowercase().as_str() {
         "male" => "He",
         "female" => "She",
         _ => "It",
     };
-    let size = size.label().to_ascii_lowercase();
+    let size = size.to_ascii_lowercase();
     match composition {
         Composition::Flesh => format!("{pronoun} is <yellow>{size}</> in size.\r\n"),
         Composition::Ether => {
@@ -4534,7 +4541,11 @@ pub(crate) fn cmd_inspect(world: &mut World, player: Entity, args: &str) {
             proto.damage_dice_bonus,
             proto.accuracy,
             proto.evasion,
-            mob_appearance_line(&proto, proto.size, mob_composition(world, &proto)),
+            appearance_line(
+                &proto.gender,
+                proto.size.label(),
+                mob_composition(world, &proto),
+            ),
         );
         send_rendered(world, player, &out);
         return;
