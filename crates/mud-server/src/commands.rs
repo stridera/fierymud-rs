@@ -1791,7 +1791,7 @@ pub(crate) fn send_raw(world: &World, target: Entity, text: impl Into<String>) {
         // to every non-prompt-mode write).
         let wire = if world
             .get_resource::<PromptState>()
-            .is_some_and(|s| s.note_output(target))
+            .is_some_and(|s| s.note_output(target, &text))
         {
             format!("\r\n{text}")
         } else {
@@ -1831,7 +1831,7 @@ pub(crate) fn send_raw(world: &World, target: Entity, text: impl Into<String>) {
     });
 }
 
-/// Per-world bookkeeping for prompt spacing (issue #53). Interior
+/// Per-world bookkeeping for prompt spacing (issues #53, #89). Interior
 /// mutability because the output choke point (`send_raw`) only has
 /// `&World`. Absent in bare test worlds, where spacing is simply off.
 #[derive(Resource, Default)]
@@ -1843,9 +1843,46 @@ struct PromptStateInner {
     /// end of the prompt line until they type something or output
     /// forces a line break.
     prompt_open: std::collections::HashSet<Entity>,
-    /// Players who got output since their last prompt; the next prompt
-    /// is set off from it by a blank line unless they are in COMPACT.
-    output_pending: std::collections::HashSet<Entity>,
+    /// Line terminators (capped at 2) at the very end of what the player
+    /// has been sent: 0 = mid-line, 1 = at the start of a fresh line,
+    /// 2 = a blank line is already on screen. The prompt tops this up so
+    /// exactly one blank line (none in COMPACT) precedes it, whatever
+    /// the preceding output looked like. Absent = a fresh line.
+    tail: std::collections::HashMap<Entity, u8>,
+}
+
+/// Trailing line terminators of `text`, ignoring `\r` and trailing ANSI
+/// colour resets. The second value is true when `text` holds nothing but
+/// newlines (so the count extends whatever came before).
+fn trailing_newlines(text: &str) -> (u8, bool) {
+    let mut rest = text;
+    // Drop trailing SGR sequences (`ESC [ ... m`), e.g. a closing reset.
+    while rest.ends_with('m') {
+        match rest.rfind('\x1b') {
+            Some(i)
+                if rest[i + 1..].starts_with('[')
+                    && rest[i + 2..rest.len() - 1]
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || b == b';') =>
+            {
+                rest = &rest[..i];
+            }
+            _ => break,
+        }
+    }
+    let mut count = 0u8;
+    let mut only_newlines = true;
+    for c in rest.chars().rev() {
+        match c {
+            '\n' => count = count.saturating_add(1),
+            '\r' => {}
+            _ => {
+                only_newlines = false;
+                break;
+            }
+        }
+    }
+    (count.min(2), only_newlines)
 }
 
 impl PromptState {
@@ -1855,34 +1892,50 @@ impl PromptState {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Record output to `target`. Returns true when the write must be
-    /// prefixed with CRLF because it lands on an open prompt line.
-    fn note_output(&self, target: Entity) -> bool {
+    /// Record `text` sent to `target`. Returns true when the write must
+    /// be prefixed with CRLF because it lands on an open prompt line.
+    fn note_output(&self, target: Entity, text: &str) -> bool {
         let mut inner = self.lock();
-        inner.output_pending.insert(target);
-        inner.prompt_open.remove(&target)
+        let was_open = inner.prompt_open.remove(&target);
+        let before = if was_open {
+            1
+        } else {
+            inner.tail.get(&target).copied().unwrap_or(1)
+        };
+        let (count, only_newlines) = trailing_newlines(text);
+        let now = if only_newlines {
+            (before + count).min(2)
+        } else {
+            count
+        };
+        inner.tail.insert(target, now);
+        was_open
     }
 
     /// The player submitted a line: their client echo moved them off
     /// the prompt line, so the next reply needs no leading CRLF.
     pub(crate) fn note_input(&self, target: Entity) {
-        self.lock().prompt_open.remove(&target);
+        let mut inner = self.lock();
+        inner.prompt_open.remove(&target);
+        inner.tail.insert(target, 1);
     }
 
-    /// A prompt is about to be written. Returns true when it needs a
-    /// blank line first (output since the last prompt), and marks the
-    /// prompt line open.
-    fn note_prompt(&self, target: Entity) -> bool {
+    /// A prompt is about to be written. Returns how many CRLFs must
+    /// precede it: enough for one blank line (none when `compact`, which
+    /// still wants the prompt on a fresh line). Marks the prompt line open.
+    fn note_prompt(&self, target: Entity, compact: bool) -> usize {
         let mut inner = self.lock();
         inner.prompt_open.insert(target);
-        inner.output_pending.remove(&target)
+        let have = inner.tail.insert(target, 0).unwrap_or(1);
+        let want = if compact { 1 } else { 2 };
+        usize::from(want - have.min(want))
     }
 
     /// Forget a player who left the world.
     fn forget(&self, target: Entity) {
         let mut inner = self.lock();
         inner.prompt_open.remove(&target);
-        inner.output_pending.remove(&target);
+        inner.tail.remove(&target);
     }
 }
 
@@ -7934,18 +7987,14 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
         Some(prefix) => format!("{prefix}{rendered}"),
         None => rendered,
     };
-    // Legacy `process_output`: unless COMPACT, a blank line separates
-    // the last block of output from the prompt. Only after actual
-    // output, so a bare <enter> just redraws the prompt.
-    let blank_line = world
+    // Legacy `process_output`: unless COMPACT, a blank line separates the
+    // last block of output from the prompt. Issue #89: exactly one, also
+    // after a bare <enter>, however the preceding output was terminated.
+    let compact = has_flag(world, target, PlayerFlag::Compact);
+    let breaks = world
         .get_resource::<PromptState>()
-        .is_some_and(|s| s.note_prompt(target))
-        && !has_flag(world, target, PlayerFlag::Compact);
-    let final_prompt = if blank_line {
-        format!("\r\n{final_prompt}")
-    } else {
-        final_prompt
-    };
+        .map_or(0, |s| s.note_prompt(target, compact));
+    let final_prompt = format!("{}{final_prompt}", "\r\n".repeat(breaks));
     // Prompts can carry color tags both directly in the template
     // (`prompt <red>%h</>`) and indirectly via %r / %n (room and player
     // names that may have embedded tags). render_color_tags handles

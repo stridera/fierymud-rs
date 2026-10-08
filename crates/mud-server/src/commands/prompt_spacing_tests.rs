@@ -81,14 +81,59 @@ fn compact_removes_the_blank_line_before_the_prompt() {
 }
 
 #[test]
-fn bare_enter_redraws_the_prompt_without_a_blank_line() {
+fn bare_enter_gets_one_blank_line_before_the_prompt() {
     let (mut world, _room, player, mut rx) = world_with_player();
     send_prompt(&mut world, player);
     drain(&mut rx);
     note_player_input(&world, player);
     send_prompt(&mut world, player);
     let out = plain(&drain(&mut rx));
+    assert!(out.starts_with("\r\n<"), "one blank line: {out:?}");
+    assert!(!out.starts_with("\r\n\r\n"), "{out:?}");
+}
+
+#[test]
+fn bare_enter_in_compact_redraws_with_no_blank_line() {
+    let (mut world, _room, player, mut rx) = world_with_player();
+    set_compact(&mut world, player);
+    send_prompt(&mut world, player);
+    drain(&mut rx);
+    note_player_input(&world, player);
+    send_prompt(&mut world, player);
+    let out = plain(&drain(&mut rx));
     assert!(out.starts_with('<'), "no leading newline: {out:?}");
+}
+
+#[test]
+fn exactly_one_blank_line_whatever_the_output_ends_with() {
+    for (text, expect) in [
+        ("Ok.", "Ok.\r\n\r\n<"),
+        ("Ok.\r\n", "Ok.\r\n\r\n<"),
+        ("Ok.\r\n\r\n", "Ok.\r\n\r\n<"),
+        ("Ok.\r\n\r\n\r\n", "Ok.\r\n\r\n\r\n<"),
+        ("<red>Ok.\r\n</>", "Ok.\r\n\r\n<"),
+        ("<red>Ok.\r\n\r\n</>", "Ok.\r\n\r\n<"),
+    ] {
+        let (mut world, _room, player, mut rx) = world_with_player();
+        note_player_input(&world, player);
+        send_to(&world, player, text);
+        send_prompt(&mut world, player);
+        let out = plain(&drain(&mut rx));
+        assert!(out.starts_with(expect), "{text:?} -> {out:?}");
+    }
+}
+
+#[test]
+fn compact_never_adds_a_blank_line_but_still_starts_a_fresh_line() {
+    for (text, expect) in [("Ok.", "Ok.\r\n<"), ("Ok.\r\n", "Ok.\r\n<")] {
+        let (mut world, _room, player, mut rx) = world_with_player();
+        set_compact(&mut world, player);
+        note_player_input(&world, player);
+        send_to(&world, player, text);
+        send_prompt(&mut world, player);
+        let out = plain(&drain(&mut rx));
+        assert!(out.starts_with(expect), "{text:?} -> {out:?}");
+    }
 }
 
 #[test]
