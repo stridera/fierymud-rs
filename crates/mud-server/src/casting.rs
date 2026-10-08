@@ -65,10 +65,6 @@ pub(crate) const COMBAT_ROUND_TICKS: i32 = 40;
 /// Legacy cast times are counted in "stars" of one second each.
 const TICKS_PER_STAR: i32 = 10;
 
-/// Ticks between the `Casting: Fireball **` countdown lines (legacy:
-/// one every two seconds).
-const COUNTDOWN_TICKS: i32 = 20;
-
 /// Catalog key (lowercased `plain_name`) of the Quick Chant skill.
 const QUICK_CHANT_KEY: &str = "quick_chant";
 
@@ -589,7 +585,7 @@ pub(crate) fn abort_casting(world: &mut World, caster: Entity) -> bool {
 }
 
 /// Advance every wind-up one tick: drop casts whose target is gone
-/// or whose caster can no longer cast, print the countdown, and
+/// or whose caster can no longer cast, and
 /// resolve casts that reach 0 against the target locked at the start.
 /// Runs once per server tick.
 #[allow(clippy::needless_pass_by_value)]
@@ -627,18 +623,8 @@ pub(crate) fn casting_tick(world: &mut World) {
             c.ticks_remaining = remaining;
         }
         if remaining > 0 {
-            let elapsed = snap.ticks_total - remaining;
-            if elapsed > 0 && elapsed % COUNTDOWN_TICKS == 0 {
-                let stars = "*".repeat(
-                    usize::try_from((remaining + COUNTDOWN_TICKS - 1) / COUNTDOWN_TICKS)
-                        .unwrap_or(1),
-                );
-                send_to(
-                    world,
-                    caster,
-                    format!("Casting: {} {stars}\r\n", snap.ability_name),
-                );
-            }
+            // The prompt's `[Casting Spell N/M]` prefix is the only
+            // progress indicator (no per-tick countdown lines).
             continue;
         }
         // The wind-up is over. Take the component off and park the slot
@@ -1380,14 +1366,21 @@ mod tests {
     }
 
     #[test]
-    fn caster_sees_a_countdown() {
+    fn casting_shows_exactly_one_indicator() {
         let (mut world, room, _) = world_with_spell(2);
         let (caster, mut rx) = caster_in(&mut world, room);
         let (_bob, _b) = bob_in(&mut world, room);
         start_mend(&mut world, caster);
         drain(&mut rx);
         run_ticks(&mut world, 20);
-        assert!(drain(&mut rx).contains("Casting: Mend"));
+        // The legacy per-tick `Casting: Mend *` countdown is gone.
+        let ticks = drain(&mut rx);
+        assert!(!ticks.contains("Casting:"), "{ticks:?}");
+        // The prompt prefix is the single remaining indicator.
+        crate::commands::send_prompt(&mut world, caster);
+        let prompt = drain(&mut rx);
+        assert_eq!(prompt.matches("Casting").count(), 1, "{prompt:?}");
+        assert!(prompt.contains("Casting Mend"), "{prompt:?}");
     }
 
     fn quick_chant_world(rounds: i32) -> (World, Entity) {
