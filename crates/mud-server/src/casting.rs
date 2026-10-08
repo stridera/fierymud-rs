@@ -922,6 +922,86 @@ mod tests {
         invoke_ability(world, caster, "'mend' bob", AbilityKind::Spell, "cast");
     }
 
+    /// Make `caster` a staff member of `level` with `role`.
+    fn make_staff(world: &mut World, caster: Entity, level: i32, role: mud_db::enums::UserRole) {
+        world.entity_mut(caster).insert((
+            Account {
+                user_id: String::new(),
+                character_id: String::new(),
+                role,
+                account_role: role,
+                perms: vec![],
+            },
+            Profile {
+                level,
+                class_id: None,
+                race: "Human".into(),
+                experience: 0,
+                gender: "neutral".into(),
+            },
+        ));
+    }
+
+    #[test]
+    fn gods_of_level_101_and_up_cast_instantly() {
+        use mud_db::enums::UserRole;
+        for level in [101, 102, 105] {
+            let (mut world, room, _) = world_with_spell(2);
+            let (caster, _rx) = caster_in(&mut world, room);
+            let (bob, _b) = bob_in(&mut world, room);
+            make_staff(
+                &mut world,
+                caster,
+                level,
+                mud_db::enums::effective_rank(level, UserRole::Player),
+            );
+            start_mend(&mut world, caster);
+            assert!(
+                world.get::<Casting>(caster).is_none(),
+                "level {level}: no wind-up"
+            );
+            assert!(
+                hp(&world, bob) > 5,
+                "level {level}: the spell landed at once"
+            );
+        }
+    }
+
+    #[test]
+    fn lower_staff_and_mortals_still_wind_up() {
+        use mud_db::enums::UserRole;
+        // Legacy `LVL_IMMORT` (100) is below `LVL_GOD`, and a low-level
+        // character on a staff account is not a god either.
+        for (level, role) in [(100, UserRole::Immortal), (50, UserRole::Implementor)] {
+            let (mut world, room, _) = world_with_spell(2);
+            let (caster, _rx) = caster_in(&mut world, room);
+            let (bob, _b) = bob_in(&mut world, room);
+            make_staff(&mut world, caster, level, role);
+            start_mend(&mut world, caster);
+            assert!(world.get::<Casting>(caster).is_some(), "level {level}");
+            assert_eq!(hp(&world, bob), 5, "level {level}: nothing landed yet");
+        }
+    }
+
+    #[test]
+    fn god_instant_cast_applies_to_typed_lines_only() {
+        use crate::commands::{CommandOrigin, with_command_origin};
+        let (mut world, room, _) = world_with_spell(2);
+        let (caster, _rx) = caster_in(&mut world, room);
+        let (_bob, _b) = bob_in(&mut world, room);
+        make_staff(
+            &mut world,
+            caster,
+            105,
+            mud_db::enums::UserRole::Implementor,
+        );
+        with_command_origin(CommandOrigin::Script, || start_mend(&mut world, caster));
+        assert!(
+            world.get::<Casting>(caster).is_some(),
+            "a script-queued cast keeps its wind-up"
+        );
+    }
+
     #[test]
     fn target_is_locked_when_the_cast_starts() {
         let (mut world, room, _) = world_with_spell(2);

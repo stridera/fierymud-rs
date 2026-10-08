@@ -14222,11 +14222,18 @@ pub(crate) fn invoke_ability_with(
     // that isn't here is refused up front (not after the whole chant)
     // and the wind-up is locked to that exact entity. Room-wide
     // spells lock nothing; they pick their victims when they land.
+    //
+    // Legacy `do_cast`: characters at `LVL_GOD` (101) or above "instacast"
+    // (`STOP_CASTING` + `complete_spell` right after the chant starts), so
+    // for them nothing is queued and the spell resolves at once. Only a
+    // line the god typed counts (`is_god_level_character`).
+    let god_instant_cast = crate::room_access::is_god_level_character(world, player);
     let queue_wind_up = !skip_queue
         && !from_item
         && !aoe_repeat
         && !matches!(kind, mud_db::abilities::AbilityKind::Skill)
-        && def.cast_time_rounds > 0;
+        && def.cast_time_rounds > 0
+        && !god_instant_cast;
     let mut cast_target = mud_world::CastTarget::Area;
     if queue_wind_up && aoe_scope_for(&def).is_none() {
         let Some((_, lock)) =
