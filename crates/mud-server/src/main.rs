@@ -13,6 +13,7 @@ mod equip_apply;
 mod events;
 mod fear;
 mod idle;
+mod item_alter;
 mod item_custom;
 mod item_decay;
 mod layout;

@@ -140,6 +140,10 @@ pub(crate) struct ChestItemState {
     pub custom_examine: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_keywords: Option<Vec<String>>,
+    /// Spell-altered state (Curse): the delta against the prototype, see
+    /// [`crate::item_alter`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub curse: Option<mud_db::character_items::ItemAlter>,
 }
 
 /// Capture the per-instance state of `item` for its chest row.
@@ -153,6 +157,7 @@ pub(crate) fn chest_state_of(world: &World, item: Entity) -> ChestItemState {
         custom_name: custom.and_then(|c| c.name.clone()),
         custom_examine: custom.and_then(|c| c.examine.clone()),
         custom_keywords: custom.and_then(|c| c.keywords.clone()),
+        curse: Some(crate::item_alter::snapshot(world, item)).filter(|a| !a.is_empty()),
     }
 }
 
@@ -528,6 +533,10 @@ pub(crate) fn spawn_withdrawn_item(
         em.insert(Charges(c));
     }
     restore_customization(world, item_entity, &state);
+    if let Some(curse) = &state.curse {
+        // `withdraw_to_inventory` wrote the delta into the new row.
+        crate::item_alter::restore(world, item_entity, curse, false);
+    }
     let shown = crate::commands::name_of(world, item_entity);
     send_to(
         world,
@@ -964,6 +973,11 @@ mod tests {
             custom_name: Some("Daedela's sack".to_string()),
             custom_examine: Some("A tidy sack.".to_string()),
             custom_keywords: Some(vec!["sack".to_string()]),
+            curse: Some(mud_db::character_items::ItemAlter {
+                restrictions_added: vec!["NO_DROP".to_string()],
+                restrictions_removed: Vec::new(),
+                weapon_dice_size: -1,
+            }),
         };
         let json = serde_json::to_value(&state).unwrap();
         let back: ChestItemState = serde_json::from_value(json).unwrap();
@@ -974,6 +988,43 @@ mod tests {
         assert_eq!(back.custom_name.as_deref(), Some("Daedela's sack"));
         assert_eq!(back.custom_examine.as_deref(), Some("A tidy sack."));
         assert_eq!(back.custom_keywords, Some(vec!["sack".to_string()]));
+        assert_eq!(back.curse.unwrap().weapon_dice_size, -1);
+    }
+
+    /// Issue #77: a cursed item stashed in the account chest and withdrawn
+    /// is still `NO_DROP` with its die shrunk, in memory and in the new row.
+    #[tokio::test(flavor = "current_thread")]
+    async fn chest_round_trip_keeps_a_curse() {
+        use mud_db::enums::ObjectRestriction::NoDrop;
+        use mud_world::components::WeaponDiceSizeAdjust;
+        let Some(fx) = fixture().await else { return };
+        let (mut world, player, _rx) = fx.world();
+        let blade = fx.item(&mut world, player, "a test object", "object");
+        world
+            .entity_mut(blade)
+            .insert((ObjectRestrictions(vec![NoDrop]), WeaponDiceSizeAdjust(-2)));
+        let custom = serde_json::to_value(chest_state_of(&world, blade)).unwrap();
+        world.despawn(blade);
+        fx.stock_chest(Some(custom)).await;
+        cmd_chest_withdraw(&mut world, player, &fx.pool, "0").await;
+        let back = world
+            .query_filtered::<Entity, With<Item>>()
+            .single(&world)
+            .unwrap();
+        assert!(world.get::<ObjectRestrictions>(back).unwrap().has(NoDrop));
+        assert_eq!(world.get::<WeaponDiceSizeAdjust>(back).unwrap().0, -2);
+        let rows = fx.inventory_ids().await;
+        let stored: Option<serde_json::Value> = mud_db::sqlx::query_scalar(
+            "SELECT custom_values -> 'curse' FROM \"CharacterItems\" WHERE id = $1",
+        )
+        .bind(rows[0])
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap();
+        fx.end().await;
+        let stored = stored.expect("curse written with the withdrawn row");
+        assert_eq!(stored["restrictions_added"], serde_json::json!(["NO_DROP"]));
+        assert_eq!(stored["weapon_dice_size"], -2);
     }
 
     #[test]

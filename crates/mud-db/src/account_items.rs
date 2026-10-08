@@ -130,8 +130,8 @@ pub async fn deposit(
 /// chest row is already gone (race / double-withdraw — the runtime should
 /// surface "not found" to the player without erroring out the command).
 ///
-/// `charges`, `liquid_remaining` and `liquid_type` are carried over from
-/// `custom_data`; the other per-instance fields have no inventory column.
+/// `charges`, `liquid_remaining`, `liquid_type` and the `curse` delta are
+/// carried over from `custom_data`; the other per-instance fields have no inventory column.
 pub async fn withdraw_to_inventory(
     pool: &PgPool,
     item_id: i32,
@@ -172,12 +172,23 @@ pub async fn withdraw_to_inventory(
     let liquid_type = field("liquid_type")
         .and_then(serde_json::Value::as_str)
         .map(str::to_string);
+    // A Curse's delta rides along as the `curse` key of `custom_values`
+    // (see `character_items::ItemAlter`).
+    let mut custom_values = serde_json::Map::new();
+    if let Some(curse) = field("curse")
+        .and_then(|v| serde_json::from_value::<crate::character_items::ItemAlter>(v.clone()).ok())
+        .filter(|a| !a.is_empty())
+        && let Ok(v) = serde_json::to_value(&curse)
+    {
+        custom_values.insert("curse".into(), v);
+    }
+    let custom_values = serde_json::Value::Object(custom_values);
     let inserted = sqlx::query!(
         r#"
         INSERT INTO "CharacterItems"
             (character_id, object_zone_id, object_id,
-             charges, liquid_remaining, liquid_type, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, NOW())
+             charges, liquid_remaining, liquid_type, custom_values, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, NOW())
         RETURNING id
         "#,
         character_id,
@@ -186,6 +197,7 @@ pub async fn withdraw_to_inventory(
         charges,
         liquid_remaining,
         liquid_type,
+        custom_values,
     )
     .fetch_one(&mut *tx)
     .await?;

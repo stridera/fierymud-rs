@@ -352,6 +352,13 @@ impl ObjectRestrictions {
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WeaponDiceSizeAdjust(pub i32);
 
+/// Marker: a spell changed this item's restrictions or weapon die this
+/// session (Curse / Remove Curse), so the next save writes the delta over
+/// its `CharacterItems` row. Cleared once a save has written it, like
+/// `ItemCustomization::dirty`. See the server's `item_alter` module.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct ItemAlterDirty;
+
 /// Marker: a Light-type item is currently lit. Only the `light` command
 /// sets it (wearing or holding a light does not), `extinguish` and fuel
 /// burn-out clear it. A lit light on or beside an actor lights the room.

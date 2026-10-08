@@ -377,6 +377,7 @@ fn customization_round_trips_through_the_row_loader() {
         custom_name: c.name.clone(),
         custom_examine_description: c.examine.clone(),
         custom_keywords: c.keywords.clone(),
+        custom_curse: None,
     }];
     assert_eq!(crate::login::spawn_inventory(&mut world2, p2, &rows), 1);
     let loaded = world2

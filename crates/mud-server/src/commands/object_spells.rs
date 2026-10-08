@@ -99,6 +99,7 @@ pub(super) fn apply_alter_object(
             .entity_mut(item)
             .insert(WeaponDiceSizeAdjust(current + delta));
     }
+    crate::item_alter::mark_dirty(world, item);
     if let Some(msg) = say(param_str(spec, "messageToCaster")) {
         send_to(world, caster, format!("{msg}\r\n"));
     }
@@ -390,6 +391,19 @@ mod tests {
             Some(0)
         );
         assert!(drain(&mut rx).contains("a long sword briefly glows blue."));
+    }
+
+    #[test]
+    fn curse_and_remove_curse_mark_the_item_for_saving() {
+        use mud_world::components::ItemAlterDirty;
+        let (mut world, _room, caster, _rx) = world_with_curses();
+        let helm = item(&mut world, "a helm", "helm", caster);
+        assert!(world.get::<ItemAlterDirty>(helm).is_none());
+        cast(&mut world, caster, "curse", "helm");
+        assert!(world.get::<ItemAlterDirty>(helm).is_some());
+        world.entity_mut(helm).remove::<ItemAlterDirty>();
+        cast(&mut world, caster, "remove curse", "helm");
+        assert!(world.get::<ItemAlterDirty>(helm).is_some());
     }
 
     #[test]

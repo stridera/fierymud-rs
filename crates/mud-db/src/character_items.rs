@@ -10,6 +10,11 @@
 //! `CUSTOM_DESCRIBED` instance flags that mirror them) is loaded always but
 //! written back only when the snapshot says the runtime changed it
 //! (`ItemCustomSnap::overwrite`), or on INSERT.
+//! Spell-altered state (a Curse's restriction change and weapon-die shrink,
+//! [`ItemAlter`]) lives in the `curse` key of `custom_values` and follows the
+//! same rule (`ItemAlterSnap::overwrite`). The `ItemInstanceFlag` enum has no
+//! curse value and is a DB-schema type owned by the editor, so the delta is
+//! kept in the JSONB column instead.
 //! Other columns (`condition`, the rest of `custom_values`, the rest of
 //! `instance_flags`, `liquid_effects`, `liquid_identified`)
 //! aren't yet read or written by any runtime command, so the save path
@@ -62,6 +67,64 @@ pub struct CharacterItemRow {
     pub custom_examine_description: Option<String>,
     /// Keyword override (the `keywords` array in `custom_values`).
     pub custom_keywords: Option<Vec<String>>,
+    /// Raw `curse` key of `custom_values` (see [`ItemAlter`]); read it with
+    /// [`CharacterItemRow::alter`].
+    pub custom_curse: Option<serde_json::Value>,
+}
+
+impl CharacterItemRow {
+    /// The spell-altered state stored on this row, if any. A malformed value
+    /// reads as none rather than failing the load.
+    #[must_use]
+    pub fn alter(&self) -> Option<ItemAlter> {
+        self.custom_curse
+            .as_ref()
+            .and_then(|v| serde_json::from_value::<ItemAlter>(v.clone()).ok())
+            .filter(|a| !a.is_empty())
+    }
+}
+
+/// Per-instance change a spell made to an item, relative to its prototype
+/// (legacy `mag_alter_obj`): Curse adds `NO_DROP` and shrinks a weapon's
+/// die, Remove Curse reverses both. Stored as the `curse` key of
+/// `custom_values`; restrictions use the DB spelling (`NO_DROP`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemAlter {
+    /// Restrictions the instance has that its prototype does not.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub restrictions_added: Vec<String>,
+    /// Prototype restrictions the instance has had lifted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub restrictions_removed: Vec<String>,
+    /// Change to the weapon's dice size (negative: cursed).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub weapon_dice_size: i32,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero(n: &i32) -> bool {
+    *n == 0
+}
+
+impl ItemAlter {
+    /// True when the instance matches its prototype.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.restrictions_added.is_empty()
+            && self.restrictions_removed.is_empty()
+            && self.weapon_dice_size == 0
+    }
+}
+
+/// Save-side spell-altered state (see [`CharacterItemSnap::alter`]).
+#[derive(Debug, Clone, Default)]
+pub struct ItemAlterSnap {
+    pub state: ItemAlter,
+    /// The runtime changed the state this session: write it over an existing
+    /// row (an empty state clears the key). When `false` an UPDATE leaves the
+    /// row's value alone, preserving edits made directly in the database. A
+    /// fresh INSERT always writes it.
+    pub overwrite: bool,
 }
 
 /// Save-side per-instance text customization (see [`CharacterItemSnap::custom`]).
@@ -110,6 +173,9 @@ pub struct CharacterItemSnap {
     /// Text customization; `None` when the item has no customization
     /// component (UPDATE leaves the row's columns alone).
     pub custom: Option<ItemCustomSnap>,
+    /// Spell-altered state; `None` when the runtime tracks none for the
+    /// item (UPDATE leaves the row's value alone).
+    pub alter: Option<ItemAlterSnap>,
     /// The item sits in the dying owner's corpse (written by the death
     /// transaction): its row keeps `character_id = owner` and gets the
     /// corpse's id. Every other snapshot entry clears `corpse_id`, which
@@ -193,7 +259,8 @@ pub async fn list_for(pool: &PgPool, character_id: &str) -> sqlx::Result<Vec<Cha
             custom_examine_description,
             CASE WHEN jsonb_typeof(custom_values -> 'keywords') = 'array'
                  THEN ARRAY(SELECT jsonb_array_elements_text(custom_values -> 'keywords'))
-            END AS "custom_keywords?"
+            END AS "custom_keywords?",
+            custom_values -> 'curse' AS "custom_curse?"
         FROM "CharacterItems"
         WHERE character_id = $1 AND corpse_id IS NULL
         ORDER BY updated_at, id
@@ -225,7 +292,8 @@ pub async fn list_for_corpse(pool: &PgPool, corpse_id: i32) -> sqlx::Result<Vec<
             custom_examine_description,
             CASE WHEN jsonb_typeof(custom_values -> 'keywords') = 'array'
                  THEN ARRAY(SELECT jsonb_array_elements_text(custom_values -> 'keywords'))
-            END AS "custom_keywords?"
+            END AS "custom_keywords?",
+            custom_values -> 'curse' AS "custom_curse?"
         FROM "CharacterItems"
         WHERE corpse_id = $1
         ORDER BY updated_at, id
@@ -291,7 +359,8 @@ pub async fn delete_corpse_item_rows(
 ///   customization (`custom_name`, `custom_examine_description`, the
 ///   `keywords` key of `custom_values` and the mirroring
 ///   `CUSTOM_NAMED` / `CUSTOM_DESCRIBED` instance flags) is rewritten only
-///   when `custom.overwrite`. Other columns (`condition`, other
+///   when `custom.overwrite`; the `curse` key of `custom_values` only when
+///   `alter.overwrite`. Other columns (`condition`, other
 ///   `instance_flags`, etc.) are untouched. If the row no longer exists the item is inserted.
 /// * Snapshot entries with `persisted_id = None` (newly acquired this
 ///   session) → INSERT.
@@ -370,7 +439,12 @@ pub async fn save_inventory_diff(
         let overwrite = custom.is_some_and(|c| c.overwrite);
         let custom_name = custom.and_then(|c| c.name.as_deref());
         let custom_examine = custom.and_then(|c| c.examine.as_deref());
-        let patch = custom_values_patch(snap.lit, custom.and_then(|c| c.keywords.as_deref()));
+        let alter = snap.alter.as_ref().map(|a| &a.state);
+        let alter_overwrite = snap.alter.as_ref().is_some_and(|a| a.overwrite);
+        let keywords = custom.and_then(|c| c.keywords.as_deref());
+        let update_patch =
+            custom_values_patch(snap.lit, keywords, alter.filter(|_| alter_overwrite));
+        let insert_patch = custom_values_patch(snap.lit, keywords, alter);
         if let Some(id) = snap.persisted_id {
             let updated = sqlx::query!(
                 r#"
@@ -386,7 +460,9 @@ pub async fn save_inventory_diff(
                                    THEN custom_values ELSE '{}'::jsonb END) - 'lit' - 'keywords'
                         ELSE (CASE WHEN jsonb_typeof(custom_values) = 'object'
                                    THEN custom_values ELSE '{}'::jsonb END) - 'lit'
-                        END) || $8::jsonb,
+                        END)
+                        - (CASE WHEN $14::boolean THEN 'curse'::text ELSE ''::text END)
+                        || $8::jsonb,
                     custom_name = CASE WHEN $11::boolean THEN $12::text ELSE custom_name END,
                     custom_examine_description =
                         CASE WHEN $11::boolean THEN $13::text ELSE custom_examine_description END,
@@ -411,12 +487,13 @@ pub async fn save_inventory_diff(
                 snap.liquid_remaining.unwrap_or(0),
                 snap.liquid_type.as_deref(),
                 id,
-                patch,
+                update_patch,
                 arrival_offset_ms,
                 row_corpse_id,
                 overwrite,
                 custom_name,
                 custom_examine,
+                alter_overwrite,
             )
             .fetch_optional(&mut *conn)
             .await?;
@@ -449,7 +526,7 @@ pub async fn save_inventory_diff(
             snap.charges.unwrap_or(-1),
             snap.liquid_remaining.unwrap_or(0),
             snap.liquid_type.as_deref(),
-            patch,
+            insert_patch,
             arrival_offset_ms,
             row_corpse_id,
             custom_name,
@@ -468,15 +545,25 @@ pub async fn save_inventory_diff(
 }
 
 /// The `custom_values` keys the runtime owns, as one JSON object: `lit`
-/// (only when set) and `keywords` (only when overridden). The UPDATE strips
-/// the owned keys from the row and merges this over the rest.
-fn custom_values_patch(lit: bool, keywords: Option<&[String]>) -> serde_json::Value {
+/// (only when set), `keywords` (only when overridden) and `curse` (only when
+/// `alter` is non-empty). The UPDATE strips the owned keys from the row and
+/// merges this over the rest.
+fn custom_values_patch(
+    lit: bool,
+    keywords: Option<&[String]>,
+    alter: Option<&ItemAlter>,
+) -> serde_json::Value {
     let mut patch = serde_json::Map::new();
     if lit {
         patch.insert("lit".into(), serde_json::Value::Bool(true));
     }
     if let Some(kw) = keywords {
         patch.insert("keywords".into(), serde_json::json!(kw));
+    }
+    if let Some(a) = alter.filter(|a| !a.is_empty())
+        && let Ok(v) = serde_json::to_value(a)
+    {
+        patch.insert("curse".into(), v);
     }
     serde_json::Value::Object(patch)
 }

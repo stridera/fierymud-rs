@@ -177,6 +177,7 @@ async fn round_trips_character_items() {
             liquid_type: None,
             lit: true,
             custom: None,
+            alter: None,
             in_corpse: false,
         },
         CharacterItemSnap {
@@ -191,6 +192,7 @@ async fn round_trips_character_items() {
             liquid_type: None,
             lit: false,
             custom: None,
+            alter: None,
             in_corpse: false,
         },
     ];
@@ -239,6 +241,7 @@ async fn round_trips_character_items() {
             liquid_type: r.liquid_type.clone(),
             lit: r.lit,
             custom: None,
+            alter: None,
             in_corpse: false,
         })
         .collect();
@@ -675,6 +678,7 @@ async fn lit_flag_preserves_other_custom_values_keys() {
         liquid_type: None,
         lit,
         custom: None,
+        alter: None,
         in_corpse: false,
     };
     // Start from an empty inventory, then insert one unlit item.
@@ -756,6 +760,7 @@ async fn lit_flag_preserves_other_custom_values_keys() {
             liquid_type: r.liquid_type.clone(),
             lit: r.lit,
             custom: None,
+            alter: None,
             in_corpse: false,
         })
         .collect();
@@ -818,6 +823,7 @@ fn corpse_snap(
         liquid_type: None,
         lit: false,
         custom: None,
+        alter: None,
         in_corpse,
     }
 }
@@ -1117,4 +1123,133 @@ async fn mail_unread_count_tracks_read_and_delete() {
         .execute(&pool)
         .await
         .expect("cleanup");
+}
+
+/// A Curse's delta (`ItemAlter`, the `curse` key of `custom_values`) is
+/// written by INSERT, survives the corpse and a looter's save untouched,
+/// is overwritten only when the snapshot says the runtime changed it, and
+/// never disturbs the row's other `custom_values` keys.
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+#[allow(clippy::too_many_lines)]
+async fn curse_delta_persists_through_corpse_loot_and_overwrite() {
+    use mud_db::character_items::{ItemAlter, ItemAlterSnap};
+    let _guard = INVENTORY_LOCK.lock().await;
+    let pool = pool().await;
+    let key = object_key(&pool).await;
+    let owner = corpse_test_char(&pool, "cu").await;
+    let looter = corpse_test_char(&pool, "cl").await;
+    let cursed = ItemAlter {
+        restrictions_added: vec!["NO_DROP".to_string()],
+        restrictions_removed: Vec::new(),
+        weapon_dice_size: -1,
+    };
+    let with_alter = |persisted_id: Option<i32>, in_corpse: bool, alter: Option<ItemAlterSnap>| {
+        let mut s = corpse_snap(persisted_id, key, None, in_corpse);
+        s.alter = alter;
+        s
+    };
+
+    // Death: the cursed item goes into the corpse (INSERT always writes).
+    let mut tx = pool.begin().await.unwrap();
+    let corpse_id = mud_db::player_corpses::insert(&mut tx, &owner, 30, 45, 0, 600)
+        .await
+        .unwrap();
+    let assigned = save_inventory_diff(
+        &mut tx,
+        &owner,
+        &[with_alter(
+            None,
+            true,
+            Some(ItemAlterSnap {
+                state: cursed.clone(),
+                overwrite: false,
+            }),
+        )],
+        Some(corpse_id),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let row = assigned[&0];
+    let corpse_rows = mud_db::character_items::list_for_corpse(&pool, corpse_id)
+        .await
+        .unwrap();
+    assert_eq!(corpse_rows[0].alter(), Some(cursed.clone()));
+
+    sqlx::query(
+        r#"UPDATE "CharacterItems" SET custom_values = custom_values || '{"note": "keep"}' WHERE id = $1"#,
+    )
+    .bind(row)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // The looter's save carries a clean (non-overwriting) snapshot: the
+    // stored delta must stay, and so must the other key.
+    let mut conn = pool.acquire().await.unwrap();
+    save_inventory_diff(
+        &mut conn,
+        &looter,
+        &[with_alter(
+            Some(row),
+            false,
+            Some(ItemAlterSnap {
+                state: ItemAlter::default(),
+                overwrite: false,
+            }),
+        )],
+        None,
+    )
+    .await
+    .unwrap();
+    let carried = list_for(&pool, &looter).await.unwrap();
+    assert_eq!(carried[0].alter(), Some(cursed.clone()));
+
+    // Remove Curse: a dirty, now-empty snapshot clears the key only.
+    save_inventory_diff(
+        &mut conn,
+        &looter,
+        &[with_alter(
+            Some(row),
+            false,
+            Some(ItemAlterSnap {
+                state: ItemAlter::default(),
+                overwrite: true,
+            }),
+        )],
+        None,
+    )
+    .await
+    .unwrap();
+    let values: serde_json::Value =
+        sqlx::query_scalar(r#"SELECT custom_values FROM "CharacterItems" WHERE id = $1"#)
+            .bind(row)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(values, serde_json::json!({"note": "keep"}));
+    assert_eq!(list_for(&pool, &looter).await.unwrap()[0].alter(), None);
+
+    // Cursed again (dirty) writes it back next to the other key.
+    save_inventory_diff(
+        &mut conn,
+        &looter,
+        &[with_alter(
+            Some(row),
+            false,
+            Some(ItemAlterSnap {
+                state: cursed.clone(),
+                overwrite: true,
+            }),
+        )],
+        None,
+    )
+    .await
+    .unwrap();
+    let carried = list_for(&pool, &looter).await.unwrap();
+    assert_eq!(carried[0].alter(), Some(cursed));
+    drop(conn);
+
+    corpse_test_cleanup(&pool, &[&owner, &looter]).await;
 }

@@ -4725,6 +4725,12 @@ pub(crate) fn snapshot_player(
                         overwrite: c.dirty,
                     }
                 }),
+                alter: Some(mud_db::character_items::ItemAlterSnap {
+                    state: crate::item_alter::snapshot(world, *e),
+                    overwrite: world
+                        .get::<mud_world::components::ItemAlterDirty>(*e)
+                        .is_some(),
+                }),
                 in_corpse: *in_corpse,
             });
             ents.push(*e);
@@ -5545,7 +5551,8 @@ pub(crate) fn apply_commit(
     }
 }
 
-/// The commit wrote every `dirty` item customization it carried, so the
+/// The commit wrote every `dirty` item customization (and spell-altered
+/// item state, see `item_alter`) it carried, so the
 /// overrides are settled: clear their `dirty` flag, otherwise every later
 /// save would keep overwriting the row and clobber edits made in the
 /// database. An override changed again since the snapshot stays dirty for
@@ -5553,6 +5560,11 @@ pub(crate) fn apply_commit(
 /// of the flag, so this only ever clears.
 fn settle_item_customizations(world: &mut World, snap: &PlayerSaveSnapshot) {
     for (idx, item) in snap.items.iter().enumerate() {
+        if let Some(alter) = item.alter.as_ref().filter(|a| a.overwrite)
+            && let Some(target) = snap.entity_for_idx.get(idx).copied()
+        {
+            crate::item_alter::settle(world, target, &alter.state);
+        }
         let Some(saved) = item.custom.as_ref().filter(|c| c.overwrite) else {
             continue;
         };
@@ -5942,6 +5954,9 @@ pub(crate) fn spawn_inventory(
                         dirty: false,
                     },
                 );
+            }
+            if let Some(alter) = row.alter() {
+                crate::item_alter::restore(world, item_entity, &alter, false);
             }
             spawned.insert(row.id, item_entity);
             made_progress = true;
@@ -8549,6 +8564,152 @@ mod tests {
             .await
             .unwrap();
         temp_cleanup(&pool, &[], &[&c.id], &[]).await;
+    }
+
+    async fn save(world: &mut World, player: Entity, pool: &PgPool) {
+        let out = save_player(world, player, pool).await;
+        assert!(out.committed, "{:?}", out.error);
+    }
+
+    /// Issue #77: Curse on a carried weapon (`NO_DROP` + a smaller die) and
+    /// Remove Curse both survive a save and relog; a clean save never
+    /// clobbers a delta an admin wrote straight into the row.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn item_curse_survives_save_and_reload() {
+        use mud_db::enums::ObjectRestriction::{NoDrop, NoSell};
+        use mud_world::components::{ItemAlterDirty, WeaponDiceSizeAdjust};
+        let Some((pool, _db_lock)) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let object: Option<(i32, i32)> =
+            mud_db::sqlx::query_as("SELECT zone_id, id FROM \"Objects\" LIMIT 1")
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+        let Some((oz, oid)) = object else {
+            eprintln!("skipping: no Objects rows");
+            return;
+        };
+        let (_user, ch) = temp_unlinked_char(&pool, "curse").await;
+        let mut protos = mud_world::ObjectPrototypes::default();
+        let mut proto =
+            crate::commands::test_support::object_proto(oz, oid, mud_db::enums::ObjectType::Weapon);
+        proto.weapon_dice_num = 2;
+        proto.weapon_dice_size = 6;
+        proto.restrictions = vec![NoSell];
+        protos.by_key.insert((oz, oid), proto);
+        let by_key = protos.by_key.clone();
+        let mut world = World::new();
+        world.insert_resource(SaveCoordinator::default());
+        world.insert_resource(protos);
+        world.insert_resource(mud_world::TriggerCatalog::default());
+        world.insert_resource(mud_world::ObjectAbilityCatalog::default());
+        let room = world.spawn_empty().id();
+        let player = spawn_player_for(&mut world, &ch.id, room);
+        let sword = world
+            .spawn((
+                Item,
+                Named {
+                    name: "a test object".into(),
+                },
+                WorldKey { zone: oz, id: oid },
+                mud_world::ObjectRestrictions(vec![NoSell]),
+                Located(player),
+            ))
+            .id();
+        let curse_key = |pool: PgPool, id: i32| async move {
+            mud_db::sqlx::query_scalar::<_, Option<serde_json::Value>>(
+                "SELECT custom_values -> 'curse' FROM \"CharacterItems\" WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+        let reload = |pool: PgPool, by_key: std::collections::HashMap<(i32, i32), _>| {
+            let cid = ch.id.clone();
+            async move {
+                let rows = mud_db::character_items::list_for(&pool, &cid)
+                    .await
+                    .unwrap();
+                let mut fresh = World::new();
+                fresh.insert_resource(mud_world::ObjectPrototypes { by_key });
+                fresh.insert_resource(mud_world::TriggerCatalog::default());
+                fresh.insert_resource(mud_world::ObjectAbilityCatalog::default());
+                let fresh_room = fresh.spawn_empty().id();
+                let who = spawn_player_for(&mut fresh, &cid, fresh_room);
+                assert_eq!(spawn_inventory(&mut fresh, who, &rows), 1);
+                let item = fresh
+                    .query_filtered::<Entity, With<Item>>()
+                    .iter(&fresh)
+                    .next()
+                    .unwrap();
+                (fresh, item)
+            }
+        };
+
+        // A clean first save writes no curse key.
+        save(&mut world, player, &pool).await;
+        let pid = world.get::<mud_world::PersistedItemId>(sword).unwrap().0;
+        assert_eq!(curse_key(pool.clone(), pid).await, None);
+
+        // Curse: NO_DROP added, die shrunk, marked dirty (as the spell does).
+        world
+            .entity_mut(sword)
+            .insert(mud_world::ObjectRestrictions(vec![NoSell, NoDrop]));
+        world.entity_mut(sword).insert(WeaponDiceSizeAdjust(-1));
+        crate::item_alter::mark_dirty(&mut world, sword);
+        save(&mut world, player, &pool).await;
+        assert!(
+            world.get::<ItemAlterDirty>(sword).is_none(),
+            "a committed save settles the dirty marker"
+        );
+        let stored = curse_key(pool.clone(), pid).await.expect("curse key");
+        assert_eq!(stored["restrictions_added"], serde_json::json!(["NO_DROP"]));
+        assert_eq!(stored["weapon_dice_size"], -1);
+        let (w2, loaded) = reload(pool.clone(), by_key.clone()).await;
+        let r = w2.get::<mud_world::ObjectRestrictions>(loaded).unwrap();
+        assert!(r.has(NoDrop) && r.has(NoSell), "{:?}", r.0);
+        assert_eq!(w2.get::<WeaponDiceSizeAdjust>(loaded).unwrap().0, -1);
+        assert!(w2.get::<ItemAlterDirty>(loaded).is_none());
+
+        // A relogged, unchanged item saves without rewriting the key: an
+        // admin edit made meanwhile survives.
+        mud_db::sqlx::query(
+            "UPDATE \"CharacterItems\" SET custom_values = \
+             '{\"curse\": {\"weapon_dice_size\": -3}}' WHERE id = $1",
+        )
+        .bind(pid)
+        .execute(&pool)
+        .await
+        .unwrap();
+        save(&mut world, player, &pool).await;
+        assert_eq!(
+            curse_key(pool.clone(), pid).await.unwrap()["weapon_dice_size"],
+            -3
+        );
+
+        // Remove Curse: back to the prototype, dirty again, key cleared.
+        world
+            .entity_mut(sword)
+            .insert(mud_world::ObjectRestrictions(vec![NoSell]));
+        world.entity_mut(sword).remove::<WeaponDiceSizeAdjust>();
+        crate::item_alter::mark_dirty(&mut world, sword);
+        save(&mut world, player, &pool).await;
+        assert_eq!(curse_key(pool.clone(), pid).await, None);
+        let (w3, loaded) = reload(pool.clone(), by_key).await;
+        let r = w3.get::<mud_world::ObjectRestrictions>(loaded).unwrap();
+        assert!(!r.has(NoDrop) && r.has(NoSell), "{:?}", r.0);
+        assert!(w3.get::<WeaponDiceSizeAdjust>(loaded).is_none());
+
+        mud_db::sqlx::query("DELETE FROM \"CharacterItems\" WHERE character_id = $1")
+            .bind(&ch.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        temp_cleanup(&pool, &[], &[&ch.id], &[]).await;
     }
 
     /// Issues #67/#68: a custom name, examine text and keyword override
