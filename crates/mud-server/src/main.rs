@@ -541,7 +541,6 @@ async fn main() {
                 timed!(regen::drunkenness_tick),
                 timed!(drowning::drowning_tick),
                 timed!(weather::weather_tick),
-                timed!(weather::ambient_tick),
                 timed!(sleep::mob_sleep_tick),
             )
                 .chain(),

@@ -15,26 +15,6 @@ use crate::TickCount;
 /// that a player's session sees it change.
 const WEATHER_TICK_TICKS: u64 = 600;
 
-/// Ambient flavor cadence — every 20 real-time seconds, sample
-/// outdoor players for a sky/wildlife line keyed off the current
-/// per-zone precip. Tighter than the drift tick so the world feels
-/// alive even when the band hasn't changed; looser than the combat
-/// tick so it isn't spammy.
-const AMBIENT_TICK_TICKS: u64 = 200;
-/// Per-tick chance any given outdoor player hears an ambient line.
-/// 1 in 4 means roughly one line every 80s on average — present
-/// without being noisy.
-const AMBIENT_CHANCE_DENOM: u32 = 4;
-
-/// Minimum quiet window after a player's last command before another
-/// ambient line is allowed to fire. Without this the ambient tick
-/// can land in the gap between a command's response and the next
-/// prompt, producing the disorienting "I cast a spell and immediately
-/// got a weather line" reading. Two seconds is comfortably longer
-/// than any normal command's response cycle but short enough that
-/// ambient flavor still surfaces between actions.
-const AMBIENT_MIN_QUIET_SECS: u64 = 2;
-
 pub fn weather_tick(world: &mut World) {
     let tick = world.resource::<TickCount>().0;
     if !tick.is_multiple_of(WEATHER_TICK_TICKS) {
@@ -95,198 +75,50 @@ pub fn weather_tick(world: &mut World) {
             }
         }
     }
-    // Broadcast precip changes. Snapshot players in outdoor rooms
-    // for each affected zone, then send a transition flavor line.
+    // Broadcast precip changes (state transitions only) to awake
+    // players standing outdoors in the affected zone.
     for (zone_id, _prev, new_precip) in precip_changes {
-        let outdoor_recipients: Vec<Entity> = {
-            let mut q = world.query_filtered::<(Entity, &mud_world::Located), (
-                With<mud_world::Player>,
-                With<mud_world::Online>,
-            )>();
-            q.iter(world)
-                .filter(|(_, l)| {
-                    let room = l.0;
-                    let zone_match = world
-                        .get::<mud_world::WorldKey>(room)
-                        .is_some_and(|k| k.zone == zone_id);
-                    let outdoor = world
-                        .get::<mud_world::RoomSector>(room)
-                        .is_some_and(|s| crate::commands::sector_is_outdoor_for_weather(s.0));
-                    zone_match && outdoor
-                })
-                .map(|(e, _)| e)
-                .collect()
-        };
-        let line = transition_line(new_precip);
-        for r in outdoor_recipients {
-            crate::commands::send_to(world, r, format!("\r\n{line}\r\n"));
-        }
+        broadcast_precip_change(world, zone_id, new_precip);
     }
 }
 
-/// Ambient weather chatter — light, repeating flavor for each
-/// outdoor player keyed off the per-zone precip. Runs more often
-/// than the drift tick so the world feels alive even when the
-/// band hasn't shifted; per-player probability gate keeps the
-/// stream readable. No-op for indoor/cave/plane sectors.
-pub fn ambient_tick(world: &mut World) {
-    let tick = world.resource::<TickCount>().0;
-    if !tick.is_multiple_of(AMBIENT_TICK_TICKS) {
-        return;
+/// Players who should hear a weather change in `zone_id`: online,
+/// awake, standing in an outdoor room of that zone. Mirrors legacy
+/// `cb_outdoor` (`AWAKE(ch) && CH_OUTSIDE(ch) && IN_ZONE_RNUM(ch)`),
+/// plus the builder `IndoorRoom` shelter override that `look` honours.
+fn weather_recipients(world: &mut World, zone_id: i32) -> Vec<Entity> {
+    let mut q = world.query_filtered::<(
+        Entity,
+        &mud_world::Located,
+        Option<&mud_world::Posture>,
+    ), (
+        With<mud_world::Player>,
+        With<mud_world::Online>,
+    )>();
+    q.iter(world)
+        .filter(|(_, l, posture)| {
+            let room = l.0;
+            let awake = posture.is_none_or(|p| p.0 != mud_world::PostureKind::Sleeping);
+            let zone_match = world
+                .get::<mud_world::WorldKey>(room)
+                .is_some_and(|k| k.zone == zone_id);
+            let outdoor = world
+                .get::<mud_world::RoomSector>(room)
+                .is_some_and(|s| crate::commands::sector_is_outdoor_for_weather(s.0))
+                && world.get::<mud_world::IndoorRoom>(room).is_none();
+            awake && zone_match && outdoor
+        })
+        .map(|(e, _, _)| e)
+        .collect()
+}
+
+/// Send the transition line for `new_precip` to everyone who can
+/// perceive it. Called only when a zone's precipitation changed.
+fn broadcast_precip_change(world: &mut World, zone_id: i32, new_precip: PrecipKind) {
+    let line = transition_line(new_precip);
+    for r in weather_recipients(world, zone_id) {
+        crate::commands::send_to(world, r, format!("\r\n{line}\r\n"));
     }
-    let now = std::time::Instant::now();
-    let quiet_floor = std::time::Duration::from_secs(AMBIENT_MIN_QUIET_SECS);
-    let candidates: Vec<(Entity, Entity)> = {
-        let mut q = world.query_filtered::<(
-            Entity,
-            &mud_world::Located,
-            Option<&mud_world::LastInputAt>,
-        ), (
-            With<mud_world::Player>,
-            With<mud_world::Online>,
-        )>();
-        q.iter(world)
-            .filter(|(_, l, _)| {
-                world
-                    .get::<mud_world::RoomSector>(l.0)
-                    .is_some_and(|s| crate::commands::sector_is_outdoor_for_weather(s.0))
-            })
-            .filter(|(_, _, last_in)| {
-                // Skip a player whose last command landed within
-                // AMBIENT_MIN_QUIET_SECS — the ambient line would
-                // otherwise crash into their command's output.
-                last_in.is_none_or(|li| now.duration_since(li.0) >= quiet_floor)
-            })
-            .map(|(e, l, _)| (e, l.0))
-            .collect()
-    };
-    for (player, room) in candidates {
-        if rand::random_range(0..AMBIENT_CHANCE_DENOM) != 0 {
-            continue;
-        }
-        let zone = world.get::<mud_world::WorldKey>(room).map(|k| k.zone);
-        let state = zone.and_then(|z| world.resource::<WeatherCatalog>().by_zone.get(&z).copied());
-        let Some(state) = state else { continue };
-        // Cascade: precip first (the most vivid cue when present),
-        // then temperature extreme on quiet-sky days, then terrain
-        // flavor for fully mild outdoor rooms. The first hit fires;
-        // missing all three stays silent.
-        let sector = world.get::<mud_world::RoomSector>(room).map(|s| s.0);
-        let line = ambient_line(state.precip)
-            .or_else(|| ambient_temp_line(state.temp))
-            .or_else(|| sector.and_then(ambient_terrain_line));
-        if let Some(line) = line {
-            crate::commands::send_to(world, player, format!("\r\n{line}\r\n"));
-        }
-    }
-}
-
-/// Terrain-keyed flavor for mild outdoor rooms where neither
-/// precip nor temperature extreme has anything to say. Returns
-/// None for sectors whose surroundings don't have an obvious
-/// ambient sound (City streets, Roads — too varied to flavor
-/// generically).
-fn ambient_terrain_line(sector: mud_db::enums::Sector) -> Option<&'static str> {
-    use mud_db::enums::Sector;
-    // Color palette: <green> for forest/grass/swamp life,
-    // <cyan> for water/sea, <dim> for stone/wind, <b:yellow>
-    // for warm-band flashes. Lines stay one-color so render
-    // cost is trivial and the eye can scan them quickly.
-    let pool: &[&str] = match sector {
-        Sector::Forest => &[
-            "<green>Leaves rustle in the canopy</> overhead.",
-            "Somewhere unseen, <green>a bird calls</>.",
-            "<dim>A branch snaps in the distance.</>",
-        ],
-        Sector::Hills => &[
-            "<dim>Wind whispers across the slopes.</>",
-            "<green>Grass bends</> in the breeze.",
-        ],
-        Sector::Mountain => &[
-            "<dim>A distant rock clatters down the slope.</>",
-            "<dim>Wind howls between the peaks.</>",
-            "<b:yellow>A raptor's cry</> echoes off the stone.",
-        ],
-        Sector::Field | Sector::Grasslands => &[
-            "<green>Tall grass whispers</> in the wind.",
-            "<green>Insects hum</> in the undergrowth.",
-        ],
-        Sector::Beach | Sector::Shallows | Sector::Water => &[
-            "<cyan>Waves wash against the shore.</>",
-            "<b:cyan>A distant gull cries.</>",
-            "<cyan>Salt spray rides the wind.</>",
-        ],
-        Sector::Swamp => &[
-            "<green>Frogs croak</> from the murky pools.",
-            "<cyan>Something splashes nearby.</>",
-            "<dim>Mosquitoes whine past your ear.</>",
-        ],
-        Sector::Ruins => &[
-            "<dim>Old stone settles with a creak.</>",
-            "<dim>Wind whistles through cracked walls.</>",
-        ],
-        _ => return None,
-    };
-    let pick = rand::random_range(0..pool.len());
-    Some(pool[pick])
-}
-
-/// Temperature-extreme flavor for the quiet-precip days where
-/// `ambient_line` returns None. Mild bands stay silent — only
-/// the ends of the scale (Frigid / Sweltering) get chatter.
-fn ambient_temp_line(temp: TempBand) -> Option<&'static str> {
-    // Cold ends paint <b:cyan> / <b:white>; hot ends paint
-    // <red> / <b:yellow> for an immediate "hot vs cold" read.
-    let pool: &[&str] = match temp {
-        TempBand::Frigid => &[
-            "<b:cyan>Your breath fogs</> in the bitter cold.",
-            "<b:cyan>The cold gnaws</> at every exposed inch of skin.",
-        ],
-        TempBand::Sweltering => &[
-            "<red>Heat shimmers</> off every surface.",
-            "<red>Sweat beads on your brow</>; the air feels heavy.",
-        ],
-        _ => return None,
-    };
-    let pick = rand::random_range(0..pool.len());
-    Some(pool[pick])
-}
-
-/// Returns a flavor line for the given precip, or None for the
-/// quiet bands (Clear / Cloudy) where chatter would just be noise.
-/// Multiple variants per band; picked uniformly at random so the
-/// same band doesn't fire the same line every time.
-fn ambient_line(precip: PrecipKind) -> Option<&'static str> {
-    // <cyan> for rain/water, <b:white> for snow,
-    // <b:yellow> for lightning bursts, <dim> for thunder /
-    // wind that should sit *behind* the louder hits visually.
-    let pool: &[&str] = match precip {
-        PrecipKind::Clear | PrecipKind::Cloudy => return None,
-        PrecipKind::Drizzle => &[
-            "<cyan>A fine mist</> drifts past your face.",
-            "<cyan>Drops patter softly</> on stone.",
-        ],
-        PrecipKind::Rain => &[
-            "<cyan>Rain hisses</> against the ground.",
-            "<dim>Wet wind tugs at your cloak.</>",
-            "<cyan>A puddle ripples</> nearby.",
-        ],
-        PrecipKind::Storm => &[
-            "<dim>Thunder rumbles</> in the distance.",
-            "<b:yellow>Lightning splits the sky</> for an instant.",
-            "<dim>The wind shrieks through the trees.</>",
-        ],
-        PrecipKind::Snow => &[
-            "<b:white>Snowflakes settle</> on your shoulders.",
-            "<b:white>The snow muffles every sound.</>",
-        ],
-        PrecipKind::Blizzard => &[
-            "<b:white>The blizzard howls</>; visibility shrinks.",
-            "<b:white>Stinging snow</> whips past your face.",
-        ],
-    };
-    let pick = rand::random_range(0..pool.len());
-    Some(pool[pick])
 }
 
 /// One-line atmospheric flavor for a precip transition. Generic
@@ -424,7 +256,7 @@ fn precip_pool(climate: Climate) -> &'static [PrecipKind] {
 }
 
 /// Render a one-line description for the given state, suitable for
-/// the `weather` command and outdoor `look`. Pass by value — the
+/// the `weather` command and `look sky`. Pass by value — the
 /// state is only two enum variants (~2 bytes total).
 #[must_use]
 pub fn describe(state: WeatherState) -> String {
@@ -584,4 +416,150 @@ pub fn save_snapshot(world: &World) {
         return;
     }
     tracing::info!(zones = catalog.by_zone.len(), path = %WEATHER_SNAPSHOT_PATH, "weather snapshot saved");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::Connection;
+    use crate::commands::test_support::{Rx, drain};
+    use mud_db::enums::Sector;
+    use mud_world::{
+        IndoorRoom, Located, MudClock, Named, Online, Player, Posture, PostureKind, Room,
+        RoomSector, WeatherDriftLocks, WorldKey, Zone,
+    };
+
+    const ZONE: i32 = 10;
+
+    fn world() -> World {
+        let mut world = World::new();
+        world.insert_resource(TickCount(0));
+        world.insert_resource(MudClock::default());
+        world.insert_resource(WeatherCatalog::default());
+        world.insert_resource(WeatherDriftLocks::default());
+        world.insert_resource(mud_world::ObjectPrototypes::default());
+        world.spawn((
+            Zone,
+            WorldKey { zone: ZONE, id: 0 },
+            Named {
+                name: "Test".into(),
+            },
+            ZoneClimate(Climate::Temperate),
+        ));
+        world
+    }
+
+    fn room(world: &mut World, zone: i32, id: i32, sector: Sector) -> Entity {
+        world
+            .spawn((
+                Room,
+                WorldKey { zone, id },
+                Named {
+                    name: format!("Room {id}"),
+                },
+                RoomSector(sector),
+                mud_world::Exits::default(),
+            ))
+            .id()
+    }
+
+    fn player(world: &mut World, room: Entity, posture: PostureKind) -> (Entity, Rx) {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+        let e = world
+            .spawn((
+                Player,
+                Online,
+                Named {
+                    name: "Wanderer".into(),
+                },
+                Located(room),
+                Posture(posture),
+                Connection(tx),
+            ))
+            .id();
+        (e, rx)
+    }
+
+    #[test]
+    fn precip_change_reaches_only_awake_outdoor_players_in_the_zone() {
+        let mut w = world();
+        let field = room(&mut w, ZONE, 1, Sector::Field);
+        let inside = room(&mut w, ZONE, 2, Sector::Structure);
+        let shelter = room(&mut w, ZONE, 3, Sector::Field);
+        w.entity_mut(shelter).insert(IndoorRoom);
+        let elsewhere = room(&mut w, 99, 1, Sector::Field);
+        let (_, mut awake) = player(&mut w, field, PostureKind::Standing);
+        let (_, mut resting) = player(&mut w, field, PostureKind::Resting);
+        let (_, mut asleep) = player(&mut w, field, PostureKind::Sleeping);
+        let (_, mut indoors) = player(&mut w, inside, PostureKind::Standing);
+        let (_, mut sheltered) = player(&mut w, shelter, PostureKind::Standing);
+        let (_, mut other_zone) = player(&mut w, elsewhere, PostureKind::Standing);
+
+        broadcast_precip_change(&mut w, ZONE, PrecipKind::Rain);
+
+        assert!(drain(&mut awake).contains("rain"), "awake outdoor hears it");
+        assert!(drain(&mut resting).contains("rain"), "resting is awake");
+        assert!(drain(&mut asleep).is_empty(), "sleeper hears nothing");
+        assert!(drain(&mut indoors).is_empty(), "indoor room hears nothing");
+        assert!(drain(&mut sheltered).is_empty(), "IndoorRoom hears nothing");
+        assert!(
+            drain(&mut other_zone).is_empty(),
+            "other zone hears nothing"
+        );
+    }
+
+    #[test]
+    fn no_unprompted_chatter_when_nothing_changes() {
+        let mut w = world();
+        let field = room(&mut w, ZONE, 1, Sector::Forest);
+        let (_, mut rx) = player(&mut w, field, PostureKind::Standing);
+        w.resource_mut::<WeatherCatalog>().by_zone.insert(
+            ZONE,
+            WeatherState {
+                temp: TempBand::Frigid,
+                precip: PrecipKind::Storm,
+            },
+        );
+        // Off-cadence ticks do nothing at all.
+        for tick in 1..WEATHER_TICK_TICKS {
+            w.resource_mut::<TickCount>().0 = tick;
+            weather_tick(&mut w);
+        }
+        // On-cadence tick with the zone held by CONTROL_WEATHER: no drift,
+        // so no state change and no message.
+        w.resource_mut::<WeatherDriftLocks>().by_zone.insert(
+            ZONE,
+            std::time::Instant::now() + std::time::Duration::from_secs(600),
+        );
+        w.resource_mut::<TickCount>().0 = WEATHER_TICK_TICKS;
+        weather_tick(&mut w);
+        assert_eq!(drain(&mut rx), "");
+    }
+
+    #[test]
+    fn weather_tick_announces_each_precip_change_once() {
+        let mut w = world();
+        let field = room(&mut w, ZONE, 1, Sector::Field);
+        let (_, mut rx) = player(&mut w, field, PostureKind::Standing);
+        let mut changed = false;
+        for _ in 0..500 {
+            let before = w
+                .resource::<WeatherCatalog>()
+                .by_zone
+                .get(&ZONE)
+                .map(|s| s.precip);
+            w.resource_mut::<TickCount>().0 = WEATHER_TICK_TICKS;
+            weather_tick(&mut w);
+            let after = w.resource::<WeatherCatalog>().by_zone[&ZONE].precip;
+            let out = drain(&mut rx);
+            // Never a message without a change; at most one per tick.
+            if before.is_some_and(|b| b == after) {
+                assert_eq!(out, "", "message without a precip change");
+            } else if before.is_some() {
+                assert!(!out.is_empty(), "precip changed silently");
+                changed = true;
+            }
+        }
+        assert!(changed, "a temperate zone should drift within 500 ticks");
+    }
 }
