@@ -21195,6 +21195,23 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
                 .collect()
         };
         for f in new_followers {
+            // A closed or locked door stops each follower on their own rank
+            // (legacy runs every follower through the same exit check): a
+            // mortal trailing a god stays behind, a god follower passes.
+            if exit.state != ExitState::Open && !crate::room_access::can_pass_closed_doors(world, f)
+            {
+                let verb = if exit.state == ExitState::Locked {
+                    "locked"
+                } else {
+                    "closed"
+                };
+                send_to(
+                    world,
+                    f,
+                    format!("{} is {verb}.\r\n", exit_noun_phrase(&exit)),
+                );
+                continue;
+            }
             // A follower the room refuses stays behind (legacy checks each
             // mover); followers of a deity already inside are admitted.
             if crate::room_access::entry_allowed_following(world, f, target, Some(leader), true) {

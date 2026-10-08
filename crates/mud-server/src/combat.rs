@@ -1820,6 +1820,11 @@ fn apply_kill_alignment(world: &mut World, killer: Entity, victim: Entity) {
 /// credited (legacy credits the attacker itself). Resolved once per
 /// death so XP, coin, loot-claim, autoloot and the alignment shift all
 /// agree on a single killer.
+/// Marker put on a mob a staff member is about to slay outright; its death
+/// then awards no kill credit to anyone.
+#[derive(Component, Debug, Clone, Copy)]
+pub(crate) struct StaffSlain;
+
 fn resolve_killer(world: &mut World, victim: Entity, room: Entity) -> Option<Entity> {
     if let Some(d) = world.get::<DamagedBy>(victim).copied()
         && d.attacker != victim
@@ -2074,11 +2079,19 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
         );
         // Resolve the killer once, before any Fighting links are torn
         // down, and hand the same identity to XP, coin and autoloot.
-        let killer = resolve_killer(world, victim, room);
+        // A staff slay (`slay`, staff `kill`) is credited to nobody, like
+        // legacy `die()` from `do_slay`: no XP, trophy, alignment, kill
+        // count, achievement, quest progress, loot claim or autoloot.
+        let slain = world.get::<StaffSlain>(victim).is_some();
+        let killer = if slain {
+            None
+        } else {
+            resolve_killer(world, victim, room)
+        };
         // Legacy `disburse_kill_exp` returns early for an illusory mob:
         // no XP, no trophy credit.
         let illusory = is_illusory_mob(world, victim);
-        if !illusory {
+        if !illusory && !slain {
             award_kill_xp(world, victim, victim_name, killer);
         }
         // Legacy `receive_kill_credit` shifts every credited member's

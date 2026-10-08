@@ -164,6 +164,54 @@ fn a_forced_unlock_still_needs_the_key() {
     assert!(drain(&mut rx).contains("no keyhole"));
 }
 
+#[test]
+fn followers_are_checked_against_the_door_on_their_own_rank() {
+    let (mut world, leader, a, b, _rx) = door_world(105, ExitState::Locked);
+    let (mortal, mut mrx) = player_in(&mut world, a);
+    world
+        .entity_mut(mortal)
+        .insert((level_account(30), mud_world::Follower(leader)));
+    let mount = world
+        .spawn((
+            Mob,
+            Named {
+                name: "a horse".into(),
+            },
+            Located(a),
+        ))
+        .id();
+    world.entity_mut(mortal).insert(mud_world::Mounted(mount));
+    let (god, mut grx) = player_in(&mut world, a);
+    world
+        .entity_mut(god)
+        .insert((level_account(101), mud_world::Follower(leader)));
+    let (mortal2, _m2) = player_in(&mut world, a);
+    // A mortal following the mortal (chain) is stranded with them.
+    world
+        .entity_mut(mortal2)
+        .insert((level_account(30), mud_world::Follower(mortal)));
+
+    dispatch(&mut world, leader, "north");
+    assert_eq!(at(&world, leader), b);
+    assert_eq!(at(&world, god), b, "staff follower passes");
+    assert_eq!(at(&world, mortal), a, "mortal follower stays behind");
+    assert_eq!(at(&world, mount), a, "the mortal's mount stays too");
+    assert_eq!(at(&world, mortal2), a);
+    assert!(drain(&mut mrx).contains("is locked."));
+    assert!(!drain(&mut grx).contains("is locked."));
+}
+
+#[test]
+fn followers_on_an_open_door_still_follow() {
+    let (mut world, leader, a, b, _rx) = door_world(105, ExitState::Open);
+    let (mortal, _m) = player_in(&mut world, a);
+    world
+        .entity_mut(mortal)
+        .insert((level_account(30), mud_world::Follower(leader)));
+    dispatch(&mut world, leader, "north");
+    assert_eq!(at(&world, mortal), b);
+}
+
 // ---------------------------------------------------------------- kill
 
 fn kill_world(level: i32) -> (World, Entity, Entity, Rx) {
@@ -273,15 +321,90 @@ fn staff_kill_legacy_refusals() {
     assert!(world.get_entity(g).is_ok(), "goblin untouched by refusals");
 }
 
+/// Goblin carrying one item, victim of a kill by `killer` (autoloot on).
+fn loot_goblin(world: &mut World, room: Entity) -> (Entity, Entity) {
+    let g = goblin(world, room);
+    let item = world
+        .spawn((
+            mud_world::Item,
+            Named {
+                name: "a rusty dagger".into(),
+            },
+            Located(g),
+        ))
+        .id();
+    (g, item)
+}
+
+#[test]
+fn staff_kill_and_slay_award_no_credit_but_a_normal_kill_does() {
+    // Control: an ordinary kill credits the killer (loot claim + autoloot).
+    let (mut world, room, god, _rx) = kill_world(105);
+    world.entity_mut(god).insert((
+        mud_world::PlayerFlags(vec![mud_db::enums::PlayerFlag::AutoLoot]),
+        mud_world::KillStats::default(),
+    ));
+    let (g, item) = loot_goblin(&mut world, room);
+    world.entity_mut(god).insert(mud_world::Fighting(g));
+    crate::combat::handle_death(&mut world, g, "a goblin", room);
+    assert_eq!(at(&world, item), god, "control: autoloot credited");
+    assert_eq!(world.get::<mud_world::KillStats>(god).unwrap().total, 1);
+
+    for verb in ["kill goblin", "slay goblin"] {
+        let (mut world, room, god, mut rx) = kill_world(105);
+        world.entity_mut(god).insert((
+            mud_world::PlayerFlags(vec![mud_db::enums::PlayerFlag::AutoLoot]),
+            mud_world::KillStats::default(),
+        ));
+        let (g, item) = loot_goblin(&mut world, room);
+        dispatch(&mut world, god, verb);
+        assert!(
+            world.get_entity(g).is_err(),
+            "{verb}: dead: {}",
+            drain(&mut rx)
+        );
+        let holder = at(&world, item);
+        assert_ne!(holder, god, "{verb}: no autoloot");
+        assert!(world.get::<mud_world::Corpse>(holder).is_some(), "{verb}");
+        assert!(
+            world.get::<mud_world::LootClaim>(holder).is_none(),
+            "{verb}: no loot claim"
+        );
+        assert_eq!(
+            world.get::<mud_world::KillStats>(god).unwrap().total,
+            0,
+            "{verb}: no kill count"
+        );
+    }
+}
+
+#[test]
+fn a_low_level_character_on_a_staff_account_cannot_kill_to_slay() {
+    use crate::room_access::is_god_level_character;
+    let (mut world, room, p, mut rx) = kill_world(40);
+    // Builder account role, but the character is level 40.
+    world.entity_mut(p).insert(Account {
+        role: UserRole::Builder,
+        ..level_account(40)
+    });
+    assert!(!is_god_level_character(&world, p));
+    let g = goblin(&mut world, room);
+    dispatch(&mut world, p, "kill goblin");
+    assert!(world.get_entity(g).is_ok(), "goblin lives");
+    assert!(!drain(&mut rx).contains("chop"));
+}
+
 #[test]
 fn kill_is_slay_only_from_lvl_god_up() {
-    use crate::room_access::is_god_level;
+    use crate::room_access::is_god_level_character;
     let (mut world, _room, p, _rx) = kill_world(100);
-    assert!(!is_god_level(&world, p), "LVL_IMMORT still fights");
+    assert!(
+        !is_god_level_character(&world, p),
+        "LVL_IMMORT still fights"
+    );
     world.entity_mut(p).insert(level_account(101));
-    assert!(is_god_level(&world, p));
-    world.entity_mut(p).insert(level_account(40));
-    assert!(!is_god_level(&world, p));
+    world.get_mut::<Profile>(p).unwrap().level = 101;
+    assert!(is_god_level_character(&world, p));
 }
 
 // ------------------------------------------------------- transfer all
@@ -347,4 +470,29 @@ fn transfer_all_needs_lvl_grgod() {
     dispatch(&mut world, staff, "transfer all");
     assert_eq!(at(&world, bob), far);
     assert!(drain(&mut rx).contains("I think not."));
+}
+
+#[test]
+fn transfer_all_skips_equal_or_higher_effective_rank_ghosts_and_linkdead() {
+    let (mut world, here, far) = transfer_world();
+    let (staff, _rx) = named_player(&mut world, "Laoris", 102, here);
+    // Low level, but a Coder account: outranks the caller.
+    let (coder, _c) = named_player(&mut world, "Coder", 20, far);
+    world.entity_mut(coder).insert(Account {
+        role: UserRole::Coder,
+        ..level_account(20)
+    });
+    let (ghost, _g) = named_player(&mut world, "Ghost", 20, far);
+    world.entity_mut(ghost).insert(mud_world::Ghost);
+    let (ld, _l) = named_player(&mut world, "Ld", 20, far);
+    world
+        .entity_mut(ld)
+        .insert(crate::commands::Linkdead { since_tick: 0 });
+    let (ok, _o) = named_player(&mut world, "Ok", 20, far);
+
+    dispatch(&mut world, staff, "transfer all");
+    assert_eq!(at(&world, ok), here);
+    for (e, why) in [(coder, "higher rank"), (ghost, "ghost"), (ld, "linkdead")] {
+        assert_eq!(at(&world, e), far, "{why} stays");
+    }
 }

@@ -29,9 +29,10 @@ inventory::submit! {
     help: Help {
         usage: "kill <target>",
         summary: "Engage a target in melee combat (staff slay it outright).",
-        long: "For mortals, identical to attack. Staff of Builder rank \
-               and above (legacy LVL_GOD) slay a non-player target on the \
-               spot instead of entering combat.",
+        long: "For mortals, identical to attack. Staff characters of \
+               level 101 and above (legacy LVL_GOD) slay a non-player \
+               target on the spot, with no kill credit, instead of \
+               entering combat.",
     },
     run: cmd_kill,
     }
@@ -1117,10 +1118,10 @@ fn try_switch_opponent(world: &mut World, player: Entity, old: Entity, roll: i32
 /// `kill`: legacy `do_kill` (act.offensive.cpp). Everyone is refused in
 /// magical darkness and peaceful rooms; below `LVL_GOD` (here: below
 /// `Builder`, the role levels 101+ map to) or when the line was not typed
-/// by the character, it is plain `attack` (`do_hit`). Staff slay the target
+/// by a character of level 101+, it is plain `attack` (`do_hit`). Staff slay the target
 /// outright with legacy's messages.
 pub(crate) fn cmd_kill(world: &mut World, player: Entity, args: &str) {
-    if !crate::room_access::is_god_level(world, player) {
+    if !crate::room_access::is_god_level_character(world, player) {
         cmd_attack(world, player, args);
         return;
     }
@@ -1186,8 +1187,8 @@ pub(crate) fn cmd_kill(world: &mut World, player: Entity, args: &str) {
         &[player],
         &format!("{self_name} brutally slays {target_name}!\r\n"),
     );
-    // Credit the kill like `slay` does (handle_death sweeps the Fighting).
-    try_insert(world, player, Fighting(target));
+    // Like `slay`, no kill credit for anyone (legacy `die()` from a slay).
+    try_insert(world, target, crate::combat::StaffSlain);
     crate::combat::handle_death(world, target, &target_name, located.0);
 }
 

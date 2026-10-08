@@ -19,7 +19,7 @@ use bevy_ecs::prelude::*;
 use mud_db::enums::UserRole;
 use mud_world::{
     Account, Contents, DeathTrap, EntryRestriction, Located, Mob, NoTeleportRoom, PeacefulRoom,
-    Player, RoomCapacity, WorldKey, WorldKeyIndex, room_in_god_zone, zone_is_god,
+    Player, Profile, RoomCapacity, WorldKey, WorldKeyIndex, room_in_god_zone, zone_is_god,
 };
 
 /// Legacy refusal (act.movement.cpp `do_simple_move`, GODROOM branch).
@@ -49,6 +49,13 @@ pub(crate) fn is_immortal(world: &World, entity: Entity) -> bool {
 /// `force`d command never borrows the acting character's rank.
 pub(crate) fn can_pass_closed_doors(world: &World, entity: Entity) -> bool {
     is_god_level(world, entity)
+}
+
+/// Legacy `GET_LEVEL(ch) >= LVL_GOD` (101) judged on the *character's*
+/// level as well as the role, so a low-level character on a staff account
+/// does not get god powers (`kill` as an outright slay).
+pub(crate) fn is_god_level_character(world: &World, entity: Entity) -> bool {
+    is_god_level(world, entity) && world.get::<Profile>(entity).is_some_and(|p| p.level >= 101)
 }
 
 /// Legacy `GET_LEVEL(ch) >= LVL_GOD` (101): effective role `Builder`+.

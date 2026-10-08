@@ -1049,10 +1049,9 @@ pub(crate) fn cmd_slay(world: &mut World, player: Entity, args: &str) {
         &format!("{target_name} crumbles to dust at your gesture.\r\n"),
     );
 
-    // Briefly point the admin at the target so the kill payout's
-    // first-Player-attacker walk credits them. handle_death sweeps
-    // the Fighting component on the way out.
-    try_insert(world, player, Fighting(target));
+    // Legacy `do_slay` gives the slayer nothing: mark the death so
+    // handle_death awards no kill credit to anyone.
+    try_insert(world, target, crate::combat::StaffSlain);
     crate::combat::handle_death(world, target, &target_name, located.0);
 }
 
@@ -2900,15 +2899,24 @@ fn cmd_transfer_all(world: &mut World, player: Entity) {
     };
     let my_level = world.get::<Profile>(player).map_or(0, |p| p.level);
     let victims: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), (With<Player>, With<Online>)>();
+        // Ghosts (dead) and linkdead characters are not summoned.
+        let mut q = world.query_filtered::<(Entity, &Located), (
+            With<Player>,
+            With<Online>,
+            Without<mud_world::Ghost>,
+            Without<commands::Linkdead>,
+        )>();
         q.iter(world)
             .filter(|(e, l)| *e != player && l.0 != dest)
             .map(|(e, _)| e)
             .collect()
     };
+    let rank = |world: &World, e: Entity| world.get::<Account>(e).map_or(0, |a| a.role.rank());
+    let my_rank = rank(world, player);
     for victim in victims {
+        // Strictly lower level (legacy) and strictly lower effective rank.
         let level = world.get::<Profile>(victim).map_or(0, |p| p.level);
-        if level >= my_level {
+        if level >= my_level || rank(world, victim) >= my_rank {
             continue;
         }
         transfer_to_staff_room(world, player, victim, dest);
