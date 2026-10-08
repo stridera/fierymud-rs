@@ -3339,17 +3339,29 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
             .collect()
     };
     // Newest arrival first inside each holder, room before inventory
-    // (matches the order `look` / `inventory` list them in).
+    // (matches the order `look` / `inventory` list them in). Rank maps are
+    // built once per holder, not once per comparison.
     let mut entity_matches = entity_matches;
+    let mut ranks: std::collections::HashMap<Entity, std::collections::HashMap<Entity, usize>> =
+        std::collections::HashMap::new();
+    for e in &entity_matches {
+        if let Some(h) = world.get::<Located>(*e).map(|l| l.0) {
+            ranks.entry(h).or_insert_with(|| {
+                crate::commands::newest_first(world, h)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, x)| (x, i))
+                    .collect()
+            });
+        }
+    }
     entity_matches.sort_by_key(|&e| {
         let holder = world.get::<Located>(e).map(|l| l.0);
         let in_inv = holder == Some(player);
         let rank = holder
-            .and_then(|h| {
-                crate::commands::newest_first(world, h)
-                    .iter()
-                    .position(|&x| x == e)
-            })
+            .and_then(|h| ranks.get(&h))
+            .and_then(|m| m.get(&e))
+            .copied()
             .unwrap_or(usize::MAX);
         (in_inv, rank)
     });
