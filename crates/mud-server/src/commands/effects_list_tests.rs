@@ -134,3 +134,18 @@ fn permanent_effect_is_flagged_not_timed() {
     assert!(out.contains("Infravision (permanent)"), "{out}");
     assert!(!out.contains("remaining"), "{out}");
 }
+
+#[test]
+fn score_lists_permanent_effects_tagged_and_timed_ones_plain() {
+    let (mut world, player, mut rx) = setup();
+    world.init_resource::<mud_world::AchievementCatalog>();
+    add_effect(&mut world, player, "infravision", -1, None);
+    add_effect(&mut world, player, "fly", -1, None);
+    add_effect(&mut world, player, "detect_magic", 750, None);
+    super::info::cmd_score(&mut world, player, "");
+    let out = plain(&drain(&mut rx));
+    assert!(out.contains("Infravision (permanent)"), "{out}");
+    assert!(out.contains("Fly (permanent)"), "{out}");
+    assert!(out.contains("Detect Magic"), "{out}");
+    assert!(!out.contains("Detect Magic (permanent)"), "{out}");
+}

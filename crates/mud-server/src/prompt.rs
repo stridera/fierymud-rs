@@ -1036,6 +1036,31 @@ mod tests {
     }
 
     #[test]
+    fn prompt_effects_skip_permanent_ones() {
+        use mud_world::EffectSource;
+        let mut world = World::new();
+        let player = world.spawn_empty().id();
+        for (name, remaining_secs) in [("fly", -1), ("bless", 300)] {
+            world.spawn((
+                EffectInstance {
+                    kind: 1,
+                    name: name.to_string(),
+                    strength: 1,
+                    remaining_secs,
+                    source: EffectSource::Item,
+                    ability_id: None,
+                },
+                AppliedTo(player),
+            ));
+        }
+        let names: Vec<String> = active_effects(&mut world, player)
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(names, vec!["bless".to_string()]);
+    }
+
+    #[test]
     fn experience_codes() {
         // Halfway through the level.
         assert_eq!(

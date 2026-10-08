@@ -7185,10 +7185,23 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
     // by AppliedTo so we only get the player's own effects.
     let active_effects: Vec<String> = {
         let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-        q.iter(world)
-            .filter(|(_, a)| a.0 == player)
-            .map(|(inst, _)| inst.name.clone())
-            .collect()
+        let mut seen: Vec<String> = Vec::new();
+        for (inst, applied) in q.iter(world) {
+            if applied.0 != player {
+                continue;
+            }
+            // Permanent effects (innate, worn gear, mob defaults) are
+            // listed too, tagged so they read apart from timed buffs.
+            let label = if inst.remaining_secs < 0 {
+                format!("{} (permanent)", effect_display_name(&inst.name))
+            } else {
+                effect_display_name(&inst.name)
+            };
+            if !seen.contains(&label) {
+                seen.push(label);
+            }
+        }
+        seen
     };
     // Group / follow status for the score sheet. `leader_name` is
     // populated when the player is following someone directly;
