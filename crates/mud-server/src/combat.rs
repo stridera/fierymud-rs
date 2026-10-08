@@ -1590,6 +1590,90 @@ pub(crate) fn record_damager(world: &mut World, victim: Entity, attacker: Entity
     );
 }
 
+/// Legacy `MIN_ALIGNMENT` / `MAX_ALIGNMENT` (`chars.hpp`), the bounds
+/// every alignment write clamps to.
+const MAX_ALIGNMENT: i32 = 1000;
+
+/// Killer-class bias legacy `change_alignment` adds to the killer's
+/// alignment before the formula ("good" classes should know better,
+/// "bad" classes less so). Matches on the class's plain name; legacy's
+/// switch falls through, so Paladin/Priest get +100, Ranger/Druid +50,
+/// Anti-Paladin/Diabolist/Necromancer -100, Thief/Assassin -50.
+fn class_alignment_bias(plain_name: &str) -> i32 {
+    match plain_name.to_ascii_lowercase().as_str() {
+        "paladin" | "priest" => 100,
+        "ranger" | "druid" => 50,
+        "anti-paladin" | "diabolist" | "necromancer" => -100,
+        "thief" | "assassin" => -50,
+        _ => 0,
+    }
+}
+
+/// Alignment change for a kill, mirroring legacy `change_alignment`
+/// (`fight.cpp`) with C++ truncating integer division. The mob-only
+/// aggressive-flag skew on the victim's alignment does not apply to
+/// player victims. The killer moves AWAY from the victim's alignment
+/// (an evil victim raises it), scaled down as the killer sits further
+/// toward good, less a small drag proportional to how extreme the
+/// killer already is. A big level gap over the victim amplifies a
+/// negative change. The result is clamped to the alignment bounds.
+fn kill_alignment_after(
+    killer_alignment: i32,
+    killer_bias: i32,
+    killer_level: i32,
+    victim_alignment: i32,
+    victim_level: i32,
+) -> i32 {
+    let k_al = killer_alignment + killer_bias;
+    let mut change =
+        victim_alignment / (-75 - 25 * ((k_al - 1000) / 200).abs()) - 2 * (k_al / 1000).abs();
+    if change < 0 && killer_level > victim_level + 10 {
+        change *= (killer_level - victim_level) / 10;
+    }
+    killer_alignment
+        .saturating_add(change)
+        .clamp(-MAX_ALIGNMENT, MAX_ALIGNMENT)
+}
+
+/// Shift `killer`'s alignment for killing the player `victim`
+/// (legacy formula, see [`kill_alignment_after`]) and tell them when it
+/// moved.
+fn apply_pvp_alignment_shift(world: &mut World, killer: Entity, victim: Entity) {
+    let victim_alignment = world.get::<CombatStats>(victim).map_or(0, |c| c.alignment);
+    let victim_level = world
+        .get::<mud_world::Profile>(victim)
+        .map_or(1, |p| p.level);
+    let (killer_level, class_id) = world
+        .get::<mud_world::Profile>(killer)
+        .map_or((1, None), |p| (p.level, p.class_id));
+    let bias = class_id
+        .and_then(|id| {
+            world
+                .get_resource::<mud_world::ClassCatalog>()
+                .and_then(|c| c.by_id.get(&id))
+        })
+        .map_or(0, |c| class_alignment_bias(&c.plain_name));
+    let Some(mut cs) = world.get_mut::<CombatStats>(killer) else {
+        return;
+    };
+    let before = cs.alignment;
+    let after = kill_alignment_after(before, bias, killer_level, victim_alignment, victim_level);
+    cs.alignment = after;
+    if after < before {
+        send_to(
+            world,
+            killer,
+            "A shadow falls across your soul as you take a player's life.\r\n",
+        );
+    } else if after > before {
+        send_to(
+            world,
+            killer,
+            "Some small good comes of ending a wicked life.\r\n",
+        );
+    }
+}
+
 /// Resolve who gets credit for `victim`'s death: the most recent
 /// recorded Player damager (recent, still present and in `room`),
 /// otherwise a Player currently `Fighting` the victim. Resolved once
@@ -1633,6 +1717,9 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
         // in it, ghost the player. They stay where they are (in their
         // body's last room) until they `release`. Default decay is
         // 10 minutes; legacy MUDs typically decayed in similar time.
+        // Resolve credit before the Fighting links below are torn down:
+        // `resolve_killer` falls back to a Player `Fighting` the victim.
+        let pvp_killer: Option<Entity> = resolve_killer(world, victim, room);
         let attackers: Vec<Entity> = {
             let mut q = world.query::<(Entity, &Fighting)>();
             q.iter(world)
@@ -1743,27 +1830,12 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
             );
         }
 
-        // PvP alignment shift: if a Player killed this Player,
-        // the killer's alignment slides 50 points toward evil
-        // (clamped at -1000). PvP carries weight even for
-        // self-styled "neutral" players. The killer is whoever
-        // had Fighting(victim) at death-time and is themselves
-        // a Player.
-        let pvp_killer: Option<Entity> = resolve_killer(world, victim, room);
+        // PvP alignment shift: legacy `change_alignment` applied to a
+        // player victim. Killing an evil character nudges the killer
+        // toward good, killing a good one toward evil.
         try_remove::<DamagedBy>(world, victim);
-        if let Some(killer) = pvp_killer
-            && let Some(mut cs) = world.get_mut::<CombatStats>(killer)
-        {
-            let before = cs.alignment;
-            cs.alignment = (cs.alignment - 50).max(-1000);
-            let after = cs.alignment;
-            if before != after {
-                send_to(
-                    world,
-                    killer,
-                    "A shadow falls across your soul as you take a player's life.\r\n",
-                );
-            }
+        if let Some(killer) = pvp_killer {
+            apply_pvp_alignment_shift(world, killer, victim);
         }
 
         // Death clears every mob's grudge data against the dead
@@ -3260,6 +3332,77 @@ mod tests {
             "mob carried Wealth is not a corpse source; only proto wealth is"
         );
         assert!(world.get::<mud_world::PlayerCorpse>(corpse).is_none());
+    }
+
+    fn pvp_kill_alignment(victim_align: i32, killer_align: i32) -> i32 {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        world.insert_resource(TickCount(0));
+        let victim = spawn_dying_player(&mut world, room, "Victim", 0);
+        world.entity_mut(victim).insert(CombatStats {
+            alignment: victim_align,
+            ..Default::default()
+        });
+        let killer = world
+            .spawn((
+                Player,
+                Named {
+                    name: "Killer".to_string(),
+                },
+                Located(room),
+                Health { hp: 100, max: 100 },
+                CombatStats {
+                    alignment: killer_align,
+                    ..Default::default()
+                },
+                Fighting(victim),
+            ))
+            .id();
+        super::handle_death(&mut world, victim, "Victim", room);
+        world.get::<CombatStats>(killer).unwrap().alignment
+    }
+
+    #[test]
+    fn killing_an_evil_player_raises_killer_alignment() {
+        // v_al -800, k_al 0: -800 / (-75 - 25*5) = 4; no killer drag.
+        assert_eq!(pvp_kill_alignment(-800, 0), 4);
+    }
+
+    #[test]
+    fn killing_a_good_player_lowers_killer_alignment() {
+        assert_eq!(pvp_kill_alignment(800, 0), -4);
+    }
+
+    #[test]
+    fn killing_a_neutral_player_is_a_wash_except_for_extreme_killers() {
+        // Legacy: 0 / x - 2*|k/1000|; only |k| = 1000 pays the drag.
+        assert_eq!(pvp_kill_alignment(0, 0), 0);
+        assert_eq!(pvp_kill_alignment(0, 1000), 998);
+        assert_eq!(pvp_kill_alignment(0, -1000), -1000);
+    }
+
+    #[test]
+    fn pvp_alignment_clamps_at_the_bounds() {
+        assert_eq!(pvp_kill_alignment(-1000, 1000), 1000);
+        assert_eq!(pvp_kill_alignment(1000, -1000), -1000);
+    }
+
+    #[test]
+    fn kill_alignment_formula_matches_legacy_examples() {
+        use super::kill_alignment_after as f;
+        // Evil killer (-500) killing a good victim (+1000):
+        // 1000 / (-75 - 25*|(-500-1000)/200 = -7|) = 1000/-250 = -4,
+        // minus 2*|-500/1000| = 0.
+        assert_eq!(f(-500, 0, 50, 1000, 50), -504);
+        // Level gap > 10 amplifies a negative change: -4 * (30/10).
+        assert_eq!(f(0, 0, 40, 800, 10), -12);
+        // Positive changes are not amplified.
+        assert_eq!(f(0, 0, 40, -800, 10), 4);
+        // Class bias: a paladin at 900 reads as 1000 (+100) so the
+        // killer drag applies.
+        assert_eq!(f(900, 100, 50, 0, 50), 898);
+        assert_eq!(super::class_alignment_bias("Anti-Paladin"), -100);
+        assert_eq!(super::class_alignment_bias("Warrior"), 0);
     }
 
     #[test]
