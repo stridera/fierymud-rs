@@ -254,6 +254,21 @@ impl MobBehaviors {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Sized(pub mud_db::enums::Size);
 
+/// Net temporary size shift on a creature (legacy `APPLY_SIZE` /
+/// `mod_size`: Reduce, Shapechange, worn size items). `shift` is the sum
+/// of every live size delta; `base` is the `Sized` the creature had
+/// before the first shift (`None` for a player, who carries no `Sized`
+/// until shifted). Keeping the running sum rather than only the clamped
+/// result makes each delta exactly reversible even at the ends of the
+/// size ladder; the component and any `Sized` it added go away when the
+/// sum returns to zero. Never persisted: size is rebuilt at login and
+/// restored size buffs re-apply their recorded delta.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct SizeShift {
+    pub base: Option<mud_db::enums::Size>,
+    pub shift: i32,
+}
+
 /// Life-force category — gates holy/unholy interactions, undead
 /// detection, and certain ability filters. `LIFE` is the default
 /// for organic mobs; UNDEAD makes a mob a valid `turn_undead` /

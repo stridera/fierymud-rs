@@ -1560,3 +1560,155 @@ fn a_fading_summon_drops_its_gear_and_frees_its_fighters() {
     }
     assert!(world.get::<mud_world::Fighting>(p).is_none(), "disengaged");
 }
+
+// ---- `size` modify key (legacy APPLY_SIZE) ----
+
+fn size_of(world: &World, e: Entity) -> Option<mud_db::enums::Size> {
+    world.get::<mud_world::Sized>(e).map(|s| s.0)
+}
+
+/// A cast size spell: the delta applied and recorded on the instance, the
+/// way the `modify` arm of the spell pipeline does.
+fn size_spell(world: &mut World, p: Entity, name: &str, amount: i32, secs: i32) -> Entity {
+    assert!(crate::commands::apply_modify_delta(
+        world, p, "size", amount
+    ));
+    world
+        .spawn((
+            EffectInstance {
+                kind: MODIFY,
+                name: name.into(),
+                strength: amount,
+                remaining_secs: secs,
+                source: EffectSource::Spell,
+                ability_id: None,
+            },
+            AppliedTo(p),
+            mud_world::ModifyDelta {
+                target: "size".into(),
+                amount,
+            },
+        ))
+        .id()
+}
+
+fn expire_all(world: &mut World) {
+    let mut q = world.query::<&mut EffectInstance>();
+    for mut i in q.iter_mut(world) {
+        i.remaining_secs = 1;
+    }
+    world.insert_resource(crate::TickCount(10));
+    crate::effects::effects_tick(world);
+}
+
+#[test]
+fn worn_size_item_shifts_size_and_removal_restores_a_sizeless_player() {
+    use mud_db::enums::Size;
+    let (mut world, p, mut rx) = setup();
+    assert_eq!(size_of(&world, p), None, "players carry no Sized");
+    ring(&mut world, p, 500, "growth", vec![modify("size", 1)]);
+    wear(&mut world, p, &mut rx, "growth");
+    assert_eq!(size_of(&world, p), Some(Size::Large), "Medium default + 1");
+    remove(&mut world, p, &mut rx, "growth");
+    assert_eq!(size_of(&world, p), None, "Sized the shift added is gone");
+    assert!(world.get::<mud_world::SizeShift>(p).is_none());
+}
+
+#[test]
+fn size_deltas_stack_and_stay_reversible_at_the_ends_of_the_ladder() {
+    use mud_db::enums::Size;
+    let (mut world, p, _rx) = setup();
+    world.entity_mut(p).insert(mud_world::Sized(Size::Small));
+    // Two shrinks from Small: clamped at Tiny, but the sum is kept.
+    assert!(crate::commands::apply_modify_delta(
+        &mut world, p, "size", -1
+    ));
+    assert!(crate::commands::apply_modify_delta(
+        &mut world, p, "size", -1
+    ));
+    assert_eq!(size_of(&world, p), Some(Size::Tiny));
+    crate::commands::reverse_modify_delta(&mut world, p, "size", -1);
+    assert_eq!(
+        size_of(&world, p),
+        Some(Size::Tiny),
+        "one shrink still live"
+    );
+    crate::commands::reverse_modify_delta(&mut world, p, "size", -1);
+    assert_eq!(size_of(&world, p), Some(Size::Small), "exactly back");
+    assert!(world.get::<mud_world::SizeShift>(p).is_none());
+    // A shrink and an enlarge cancel to the original size.
+    assert!(crate::commands::apply_modify_delta(
+        &mut world, p, "size", 1
+    ));
+    assert!(crate::commands::apply_modify_delta(
+        &mut world, p, "size", -1
+    ));
+    assert_eq!(size_of(&world, p), Some(Size::Small));
+    assert!(world.get::<mud_world::SizeShift>(p).is_none());
+}
+
+#[test]
+fn a_size_spell_expiring_gives_the_size_back() {
+    use mud_db::enums::Size;
+    let (mut world, p, _rx) = setup();
+    world.entity_mut(p).insert(mud_world::Sized(Size::Medium));
+    size_spell(&mut world, p, "size", -1, 600);
+    assert_eq!(size_of(&world, p), Some(Size::Small));
+    expire_all(&mut world);
+    assert_eq!(size_of(&world, p), Some(Size::Medium));
+    assert!(world.get::<mud_world::SizeShift>(p).is_none());
+    assert!(effects_on(&mut world, p).is_empty());
+}
+
+#[test]
+fn a_worn_size_item_and_a_size_spell_unwind_independently() {
+    use mud_db::enums::Size;
+    let (mut world, p, mut rx) = setup();
+    world.entity_mut(p).insert(mud_world::Sized(Size::Medium));
+    ring(&mut world, p, 501, "growth", vec![modify("size", 1)]);
+    wear(&mut world, p, &mut rx, "growth");
+    size_spell(&mut world, p, "size", 1, 600);
+    assert_eq!(size_of(&world, p), Some(Size::Huge));
+    expire_all(&mut world);
+    assert_eq!(size_of(&world, p), Some(Size::Large), "ring still worn");
+    remove(&mut world, p, &mut rx, "growth");
+    assert_eq!(size_of(&world, p), Some(Size::Medium));
+}
+
+#[test]
+fn a_relogged_size_spell_is_not_doubled_and_still_expires_clean() {
+    use mud_db::enums::Size;
+    let (mut world, p, _rx) = setup();
+    size_spell(&mut world, p, "size", -1, 600);
+    assert_eq!(size_of(&world, p), Some(Size::Small));
+    // Size is not part of the saved character row.
+    assert_eq!(base_core_stats(&world, p).unwrap().strength, 13);
+    let saved = saved_effects(&mut world, p);
+
+    // Fresh login: a player is sizeless again, the live spell re-applies
+    // its recorded delta exactly once.
+    let (mut world2, p2, _rx2) = setup();
+    assert_eq!(size_of(&world2, p2), None);
+    crate::login::restore_persisted_effects(&mut world2, p2, saved);
+    assert_eq!(size_of(&world2, p2), Some(Size::Small), "not doubled");
+    expire_all(&mut world2);
+    assert_eq!(size_of(&world2, p2), None, "expiry gives back exactly -1");
+    assert!(world2.get::<mud_world::SizeShift>(p2).is_none());
+}
+
+#[test]
+fn a_size_spell_that_expired_offline_leaves_no_size_behind() {
+    let (mut world, p, _rx) = setup();
+    let fx = persisted(&serde_json::json!([{
+        "kind": MODIFY,
+        "name": "size",
+        "strength": -1,
+        "remaining_secs": 0,
+        "source": "Spell",
+        "ability_id": null,
+        "modify_delta": ["size", -1],
+    }]));
+    crate::login::restore_persisted_effects(&mut world, p, fx);
+    assert_eq!(size_of(&world, p), None, "nothing baked, nothing applied");
+    assert!(effects_on(&mut world, p).is_empty());
+}

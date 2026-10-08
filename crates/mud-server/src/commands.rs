@@ -15920,9 +15920,9 @@ pub(crate) fn invoke_ability_with(
                 //   - CombatStats:  hitroll, damroll, ward (lower
                 //                   AC = better; ward+N → ac-=N)
                 //   - Maxes:        max_hp, max_move/max_stamina
-                // Unsupported targets (eva, acc, focus, size,
-                // unarmed_damage, weapon_hitroll, save_spell, ...)
-                // spawn a labeled effect without applying anything.
+                // Unsupported targets (unarmed_damage, weapon_hitroll,
+                // item_bonus, max_mana, ...) spawn a labeled effect
+                // without applying anything.
                 let target_stat = spec
                     .override_params
                     .as_ref()
@@ -18976,6 +18976,10 @@ pub(crate) fn apply_modify_delta(
             }
             true
         }
+        "size" => {
+            apply_size_shift(world, target, amount);
+            true
+        }
         "hiddenness" => {
             // Stealth bonus from gear (e.g. Amulet of True Shadows).
             // Existing `Stealth` is a marker component; extend it
@@ -18992,6 +18996,48 @@ pub(crate) fn apply_modify_delta(
             true
         }
         _ => false,
+    }
+}
+
+/// Shift `target`'s body size by `amount` bands (legacy `APPLY_SIZE`:
+/// +1 Shapechange / Enlarge, -1 Reduce). The running sum lives in
+/// `SizeShift` so stacked, clamped and reversed deltas always net out;
+/// when it returns to zero the pre-shift `Sized` (or its absence, for a
+/// player) is restored exactly.
+fn apply_size_shift(world: &mut World, target: Entity, amount: i32) {
+    use mud_db::enums::Size;
+    let Ok(em) = world.get_entity(target) else {
+        return;
+    };
+    let mut state = em
+        .get::<mud_world::SizeShift>()
+        .copied()
+        .unwrap_or_else(|| mud_world::SizeShift {
+            base: em.get::<mud_world::Sized>().map(|s| s.0),
+            shift: 0,
+        });
+    state.shift = state.shift.saturating_add(amount);
+    let Ok(mut em) = world.get_entity_mut(target) else {
+        return;
+    };
+    if state.shift == 0 {
+        em.remove::<mud_world::SizeShift>();
+        match state.base {
+            Some(base) => {
+                em.insert(mud_world::Sized(base));
+            }
+            None => {
+                em.remove::<mud_world::Sized>();
+            }
+        }
+    } else {
+        // A player has no `Sized`; shift from the Medium default the
+        // flight / wear-band code already assumes.
+        let base_rank = state.base.unwrap_or(Size::Medium).rank();
+        em.insert((
+            state,
+            mud_world::Sized(Size::from_rank(base_rank.saturating_add(state.shift))),
+        ));
     }
 }
 

@@ -1123,6 +1123,25 @@ impl Size {
         }
     }
 
+    /// Inverse of [`Self::rank`], clamped to the valid band
+    /// (TINY..=MOUNTAINOUS) so a stacked size shift never walks off the
+    /// ends of the ladder.
+    #[must_use]
+    pub const fn from_rank(rank: i32) -> Self {
+        match rank {
+            i32::MIN..=0 => Self::Tiny,
+            1 => Self::Small,
+            2 => Self::Medium,
+            3 => Self::Large,
+            4 => Self::Huge,
+            5 => Self::Giant,
+            6 => Self::Gargantuan,
+            7 => Self::Colossal,
+            8 => Self::Titanic,
+            9..=i32::MAX => Self::Mountainous,
+        }
+    }
+
     /// Human-readable label for `examine` / `stat mob`. All variants
     /// fit a single word and read cleanly inline.
     #[must_use]

@@ -34,7 +34,7 @@ pub use components::{
     ProtectFromEvil, ProtectFromGood, RecallPoint, RefreshedBonus, RegenBonus, Resistances,
     RestState, RevealedExits, RiddenBy, Room, RoomBlockedExit, RoomBlockedExits, RoomBurningEffect,
     RoomCapacity, RoomExtras, RoomLayout, RoomMagicalDarkness, RoomMagicalLight, RoomSector,
-    Sanctuary, SavingThrows, ScriptVars, Shopkeeper, Sized, SkillPoints, Slot, SlotHold,
+    Sanctuary, SavingThrows, ScriptVars, Shopkeeper, SizeShift, Sized, SkillPoints, Slot, SlotHold,
     SlotReservation, SnoopedBy, Snooping, SoundproofRoom, SpellCooldown, SpellResistanceDelta,
     SpellSlots, Stamina, Stealth, Stunned, SwitchedFrom, SwitchedInto, SyslogMinLevel, TellLog,
     Thirst, TimePlayed, Title, Trophy, TrophyEntry, TrophyKind, UiStyle, WallTraversal,
