@@ -464,6 +464,9 @@ mod goto_tests;
 #[cfg(test)]
 #[path = "commands/invisibility_tests.rs"]
 mod invisibility_tests;
+#[cfg(test)]
+#[path = "commands/item_aura_tests.rs"]
+mod item_aura_tests;
 #[path = "commands/item_edit.rs"]
 mod item_edit;
 #[cfg(test)]
@@ -11583,7 +11586,9 @@ pub(crate) fn look_in_container(world: &mut World, player: Entity, target_word: 
             .map(|(e, _, n)| (e, n.name.clone()))
             .collect();
         sort_newest_first(world, container, &mut rows, |r| r.0);
-        rows.into_iter().map(|(_, n)| n).collect()
+        rows.into_iter()
+            .map(|(e, n)| senses::with_item_tags(world, player, e, n))
+            .collect()
     };
     let coin = world.get::<mud_world::CoinPile>(container).map(|c| c.0);
     if items.is_empty() && coin.unwrap_or(0) <= 0 {

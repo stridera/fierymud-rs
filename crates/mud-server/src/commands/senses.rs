@@ -4,9 +4,10 @@
 //! actors). Legacy `EFF_INFRAVISION`, `EFF_SENSE_LIFE`, `EFF_DETECT_ALIGN`.
 
 use bevy_ecs::prelude::{Entity, With, World};
-use mud_db::enums::{LifeForce, Size};
+use mud_db::enums::{Alignment, LifeForce, Size};
 use mud_world::{
-    CombatStats, DetectAlign, Infravision, LifeForceTag, Located, Mob, Player, SenseLife, Sized,
+    CombatStats, DetectAlign, Infravision, LifeForceTag, Located, Mob, ObjectPrototypes, Player,
+    SenseLife, Sized, WorldKey,
 };
 
 use super::{can_see_player, hidden_by_magic_from, wiz_hidden_from};
@@ -37,6 +38,43 @@ pub(crate) fn alignment_aura(
         Some("<b:yellow>(Gold Aura)</>")
     } else {
         None
+    }
+}
+
+/// The `detect_align` tag `viewer` reads off an item, from legacy
+/// `print_obj_flags_to_char`: only an item barred to neutrals shows one,
+/// red when it also bars the good (and not the evil), gold when it bars
+/// the evil (and not the good). An item barring both gets nothing.
+#[must_use]
+pub(crate) fn item_alignment_aura(
+    world: &World,
+    viewer: Entity,
+    item: Entity,
+) -> Option<&'static str> {
+    world.get::<DetectAlign>(viewer)?;
+    let key = world.get::<WorldKey>(item)?;
+    let proto = world
+        .get_resource::<ObjectPrototypes>()?
+        .by_key
+        .get(&(key.zone, key.id))?;
+    let bars = |a: Alignment| proto.restricted_alignments.contains(&a);
+    if !bars(Alignment::Neutral) {
+        return None;
+    }
+    match (bars(Alignment::Good), bars(Alignment::Evil)) {
+        (true, false) => Some("(<red>Red Aura</>)"),
+        (false, true) => Some("(<b:yellow>Gold Aura</>)"),
+        _ => None,
+    }
+}
+
+/// `line` with the item tags `viewer` perceives appended, the way legacy
+/// `print_obj_flags_to_char` trails them after an item's description.
+#[must_use]
+pub(crate) fn with_item_tags(world: &World, viewer: Entity, item: Entity, line: String) -> String {
+    match item_alignment_aura(world, viewer, item) {
+        Some(tag) => format!("{line} {tag}"),
+        None => line,
     }
 }
 

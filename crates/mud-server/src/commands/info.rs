@@ -3896,6 +3896,14 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
                 .map(|(e, _, n)| (e, n.name.clone()))
                 .collect();
             crate::commands::sort_newest_first(world, target, &mut rows, |r| r.0);
+            for (e, name) in &mut rows {
+                *name = crate::commands::senses::with_item_tags(
+                    world,
+                    player,
+                    *e,
+                    std::mem::take(name),
+                );
+            }
             let names: Vec<String> = rows.into_iter().map(|(_, n)| n).collect();
             stack_entries(names, has_flag(world, player, PlayerFlag::ExpandObjs))
         };
@@ -6210,7 +6218,10 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
             {
                 continue;
             }
-            names.push(item_room_line(world, e, &n.name));
+            let line = item_room_line(world, e, &n.name);
+            names.push(crate::commands::senses::with_item_tags(
+                world, player, e, line,
+            ));
         }
         stack_entries(names, has_flag(world, player, PlayerFlag::ExpandObjs))
             .into_iter()
@@ -9976,10 +9987,11 @@ pub(crate) fn cmd_inventory(world: &mut World, player: Entity, args: &str) {
     let items: Vec<String> = item_entities
         .iter()
         .map(|&e| {
-            world
+            let name = world
                 .get::<Named>(e)
                 .map(|n| n.name.clone())
-                .unwrap_or_default()
+                .unwrap_or_default();
+            crate::commands::senses::with_item_tags(world, player, e, name)
         })
         .collect();
     let stacked = stack_entries(
@@ -12405,7 +12417,11 @@ pub(crate) fn cmd_equipment(world: &mut World, player: Entity, _args: &str) {
         let mut q = world.query_filtered::<(Entity, &Located, &Named, &EquippedSlot), With<Item>>();
         q.iter(world)
             .filter(|(_, l, _, _)| l.0 == player)
-            .map(|(e, _, n, eq)| (e, eq.0, n.name.clone(), item_weight(world, e)))
+            .map(|(e, _, n, eq)| {
+                let name =
+                    crate::commands::senses::with_item_tags(world, player, e, n.name.clone());
+                (e, eq.0, name, item_weight(world, e))
+            })
             .collect()
     };
     if worn_items.is_empty() {
