@@ -989,7 +989,7 @@ impl AliasLimit {
 
 /// One-character command names that legacy `command_interpreter` splits
 /// from their argument without a space (`'hi`, `:waves`, `.hello`, `;hi`).
-const SYMBOL_COMMANDS: &[char] = &['\'', ':', '.', ';', '/'];
+const SYMBOL_COMMANDS: &[char] = &['\'', ':', '.', ';'];
 
 /// Insert the missing space after a leading symbol command so `'hello`
 /// reaches the registry as `' hello`. Anything else is returned untouched.
@@ -3137,7 +3137,7 @@ mod tests {
             assert!(names.contains(&name), "movement command '{name}' missing");
         }
         // channels.rs (broadcast comm channels)
-        for name in ["gossip", "/", "music", "shout", "wiznet", ";"] {
+        for name in ["gossip", ".", "music", "shout", "wiznet", ";"] {
             assert!(names.contains(&name), "channel '{name}' missing");
         }
         // tells.rs (private comms + ignore list + history)
@@ -13341,43 +13341,6 @@ pub(crate) fn wear_item(
     crate::equip_apply::apply_object_to_wearer(world, item, player);
     crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Wear);
     true
-}
-
-/// Legacy `do_remove` tail: whatever hangs from a belt falls into the pack
-/// once no belt (`Waist` item) is worn any more.
-pub(crate) fn drop_unsupported_belt_item(world: &mut World, player: Entity) {
-    let worn_in = |world: &mut World, slot: Slot| -> Option<Entity> {
-        let mut q = world.query_filtered::<(Entity, &Located, &EquippedSlot), With<Item>>();
-        q.iter(world)
-            .find(|(_, l, eq)| l.0 == player && eq.0 == slot)
-            .map(|(e, _, _)| e)
-    };
-    if worn_in(world, Slot::Waist).is_some() {
-        return;
-    }
-    let Some(hung) = worn_in(world, Slot::Belt) else {
-        return;
-    };
-    let item_name = name_of(world, hung);
-    crate::equip_apply::unapply_object_from_wearer(world, hung, player);
-    try_remove::<EquippedSlot>(world, hung);
-    send_rendered(
-        world,
-        player,
-        &format!("{item_name} falls off as you remove your belt.\r\n"),
-    );
-    if let Some(located) = world.get::<Located>(player).copied() {
-        let actor_name = name_of(world, player);
-        broadcast_room_visual(
-            world,
-            located.0,
-            player,
-            &[player],
-            &cap_sentence_start(&format!(
-                "{item_name} falls off as {actor_name} removes their belt.\r\n"
-            )),
-        );
-    }
 }
 
 /// Look up `ObjectAbilityCatalog` bindings for `item` and render a

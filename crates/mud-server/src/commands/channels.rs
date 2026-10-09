@@ -18,7 +18,7 @@ use crate::commands::{
 
 inventory::submit! {
     Command {
-        names: &["gossip", "/", "."],
+        names: &["gossip", "."],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Communication,
@@ -27,7 +27,7 @@ inventory::submit! {
             summary: "Talk on the global gossip channel.",
             long: "Visible to every online player who hasn't toggled \
                    their 'deaf' flag and isn't ignoring you. The \
-                   slash alias ('/') lets seasoned players stack \
+                   dot alias ('.') lets seasoned players stack \
                    gossips without arrowing back to type the verb.",
         },
         run: cmd_gossip,

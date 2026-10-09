@@ -12578,7 +12578,14 @@ pub(crate) fn cmd_remove(world: &mut World, player: Entity, args: &str) {
         }
         let actor_name = name_of(world, player);
         let located = world.get::<Located>(player).copied();
+        let mut removed = 0usize;
         for (item, item_name) in &items {
+            // A belt item that fell off with the waist item above is
+            // already in the pack.
+            if world.get::<EquippedSlot>(*item).is_none() {
+                continue;
+            }
+            removed += 1;
             // "You remove X." goes out first, then the wear-granted bonuses
             // are reversed and whatever that announces ("You fall to the
             // ground.") follows (issue #87). The reversal still runs BEFORE
@@ -12595,7 +12602,7 @@ pub(crate) fn cmd_remove(world: &mut World, player: Entity, args: &str) {
         // one line per item would spam bystanders. Matches the
         // shape `cmd_drop all` uses.
         if let Some(l) = located {
-            let count = items.len();
+            let count = removed;
             let plural = if count == 1 { "item" } else { "items" };
             broadcast_room_visual(
                 world,
@@ -12635,7 +12642,6 @@ pub(crate) fn cmd_remove(world: &mut World, player: Entity, args: &str) {
     crate::equip_apply::unapply_object_from_wearer(world, item, player);
     try_remove::<EquippedSlot>(world, item);
     crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Remove);
-    crate::commands::drop_unsupported_belt_item(world, player);
     refresh_player_items_gmcp(world, player);
 }
 

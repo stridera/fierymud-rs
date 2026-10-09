@@ -140,3 +140,47 @@ fn removing_the_belt_drops_what_hangs_from_it() {
     assert!(out.contains("falls off as you remove your belt"), "{out}");
     assert_eq!(world.get::<Located>(pouch).map(|l| l.0), Some(p));
 }
+
+#[test]
+fn remove_all_takes_the_belt_item_off_once() {
+    let (mut world, p, mut rx) = setup();
+    let girdle = gear(
+        &mut world,
+        p,
+        1,
+        "a leather girdle",
+        "girdle",
+        &[WearFlag::Waist],
+    );
+    let pouch = gear(&mut world, p, 2, "a belt pouch", "pouch", &[WearFlag::Belt]);
+    dispatch(&mut world, p, "wear girdle");
+    dispatch(&mut world, p, "wear pouch");
+    drain(&mut rx);
+    dispatch(&mut world, p, "remove all");
+    let out = drain(&mut rx);
+    assert_eq!(worn_in(&world, girdle), None, "{out}");
+    assert_eq!(worn_in(&world, pouch), None, "{out}");
+    assert!(out.contains("falls off as you remove your belt"), "{out}");
+    assert!(!out.contains("You remove a belt pouch"), "{out}");
+}
+
+#[test]
+fn any_unapply_of_the_waist_item_drops_the_belt_item() {
+    // Quest take-items, mob unequip and the like call the shared
+    // equip_apply entry points rather than `remove`.
+    let (mut world, p, _rx) = setup();
+    let girdle = gear(
+        &mut world,
+        p,
+        1,
+        "a leather girdle",
+        "girdle",
+        &[WearFlag::Waist],
+    );
+    let pouch = gear(&mut world, p, 2, "a belt pouch", "pouch", &[WearFlag::Belt]);
+    dispatch(&mut world, p, "wear girdle");
+    dispatch(&mut world, p, "wear pouch");
+    crate::equip_apply::release_gear(&mut world, girdle);
+    assert_eq!(worn_in(&world, pouch), None);
+    assert_eq!(world.get::<Located>(pouch).map(|l| l.0), Some(p));
+}

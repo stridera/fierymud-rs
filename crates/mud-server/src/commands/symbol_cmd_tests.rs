@@ -11,6 +11,7 @@ use crate::commands::{dispatch, split_symbol_command};
 fn setup() -> (World, Entity, Rx, Rx) {
     let mut world = World::new();
     world.insert_resource(mud_world::ObjectPrototypes::default());
+    world.insert_resource(mud_world::SocialRegistry::default());
     let room = world.spawn(Room).id();
     let (speaker, srx) = player_in(&mut world, room);
     let acct = || Account {
@@ -65,4 +66,45 @@ fn colon_emote_without_space() {
     dispatch(&mut world, p, ":waves hello");
     assert!(drain(&mut srx).contains("Tester waves hello"));
     assert!(drain(&mut brx).contains("Tester waves hello"));
+}
+
+#[test]
+fn split_leaves_slash_alone() {
+    // Legacy has no `/` command, so it is not a symbol command.
+    assert_eq!(split_symbol_command("/tell bob x"), "/tell bob x");
+    assert_eq!(split_symbol_command("/hi"), "/hi");
+}
+
+#[test]
+fn slash_tell_does_not_reach_gossip() {
+    let (mut world, p, mut srx, mut brx) = setup();
+    world.entity_mut(p).insert(mud_world::Online);
+    dispatch(&mut world, p, "/tell Bob my secret");
+    let mine = drain(&mut srx);
+    assert!(mine.contains("Unknown command"), "{mine}");
+    assert!(!mine.contains("gossip"), "{mine}");
+    let bobs = drain(&mut brx);
+    assert!(!bobs.contains("secret"), "leaked to Bob: {bobs}");
+    // The bare slash is not a gossip alias either.
+    dispatch(&mut world, p, "/ my secret");
+    assert!(!drain(&mut brx).contains("secret"));
+}
+
+#[test]
+fn mortal_semicolon_wiznet_is_refused_and_not_broadcast() {
+    let (mut world, p, mut srx, mut brx) = setup();
+    world.entity_mut(p).insert(mud_world::Online);
+    dispatch(&mut world, p, ";hi staff");
+    let mine = drain(&mut srx);
+    assert!(mine.contains("You can't do that."), "{mine}");
+    assert!(!drain(&mut brx).contains("hi staff"));
+}
+
+#[test]
+fn dot_still_gossips() {
+    let (mut world, p, mut srx, mut brx) = setup();
+    world.entity_mut(p).insert(mud_world::Online);
+    dispatch(&mut world, p, ".hello world");
+    assert!(drain(&mut srx).contains("You gossip"));
+    assert!(drain(&mut brx).contains("hello world"));
 }

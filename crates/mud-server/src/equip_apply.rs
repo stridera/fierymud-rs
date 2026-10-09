@@ -329,6 +329,7 @@ pub fn unapply_object_from_wearer(world: &mut World, item: Entity, wearer: Entit
     if world.get_entity(item).is_err() {
         return;
     }
+    drop_belt_items_with_waist(world, item, wearer, true);
     let bookkeeping = world.get::<GrantedDeltas>(item).cloned();
     let Some(bookkeeping) = bookkeeping else {
         return;
@@ -456,6 +457,54 @@ pub fn describe_item_grants(world: &World, proto: &mud_world::ObjectProto) -> It
     out
 }
 
+/// Legacy `do_remove` tail: whatever hangs from a belt falls into the pack
+/// once no belt is worn. Every way of taking a `Waist` item off funnels
+/// through [`unapply_object_from_wearer`] / [`release_gear`], so the rule
+/// lives here: when `item` is the worn `Waist` item, each `Belt` item on
+/// `wearer` is reversed, loses its `EquippedSlot` and stays with the
+/// wearer. `announce` sends the "falls off" lines (explicit removal);
+/// death, banish and other wholesale strips pass false, as the whole
+/// kit is leaving anyway.
+fn drop_belt_items_with_waist(world: &mut World, item: Entity, wearer: Entity, announce: bool) {
+    if world.get::<EquippedSlot>(item).map(|e| e.0) != Some(mud_world::Slot::Waist) {
+        return;
+    }
+    let hung: Vec<Entity> = {
+        let mut q = world
+            .query_filtered::<(Entity, &mud_world::Located, &EquippedSlot), With<mud_world::Item>>(
+            );
+        q.iter(world)
+            .filter(|(e, l, eq)| *e != item && l.0 == wearer && eq.0 == mud_world::Slot::Belt)
+            .map(|(e, _, _)| e)
+            .collect()
+    };
+    for h in hung {
+        let item_name = crate::commands::name_of(world, h);
+        unapply_object_from_wearer(world, h, wearer);
+        crate::commands::try_remove::<EquippedSlot>(world, h);
+        if !announce {
+            continue;
+        }
+        crate::commands::send_rendered(
+            world,
+            wearer,
+            &format!("{item_name} falls off as you remove your belt.\r\n"),
+        );
+        if let Some(located) = world.get::<mud_world::Located>(wearer).copied() {
+            let actor_name = crate::commands::name_of(world, wearer);
+            crate::commands::broadcast_room_visual(
+                world,
+                located.0,
+                wearer,
+                &[wearer],
+                &crate::commands::cap_sentence_start(&format!(
+                    "{item_name} falls off as {actor_name} removes their belt.\r\n"
+                )),
+            );
+        }
+    }
+}
+
 /// Take `item` off whoever is wearing it: reverses its gear bonuses and
 /// worn effects (when it has any applied). Call this BEFORE removing
 /// `EquippedSlot` / re-locating the item at any site that strips worn
@@ -463,6 +512,9 @@ pub fn describe_item_grants(world: &World, proto: &mud_world::ObjectProto) -> It
 /// stats and markers never outlive the item and a stale `GrantedDeltas`
 /// can't stop the next wearer's bonuses from applying.
 pub fn release_gear(world: &mut World, item: Entity) {
+    if let Some(wearer) = world.get::<mud_world::Located>(item).map(|l| l.0) {
+        drop_belt_items_with_waist(world, item, wearer, false);
+    }
     if world.get::<GrantedDeltas>(item).is_none() {
         return;
     }
