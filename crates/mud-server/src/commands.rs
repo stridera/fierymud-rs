@@ -525,6 +525,9 @@ mod rank_tests;
 mod recast_tests;
 #[path = "commands/release.rs"]
 pub(crate) mod release;
+#[cfg(test)]
+#[path = "commands/remove_paralysis_tests.rs"]
+mod remove_paralysis_tests;
 #[path = "commands/room_chat.rs"]
 mod room_chat;
 #[cfg(test)]
