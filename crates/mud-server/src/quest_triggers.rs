@@ -1,8 +1,7 @@
 //! Quest trigger dispatchers (Wave 4.1).
 //!
-//! Wires `Quest.trigger_type` columns (`MOB` is handled directly
-//! by the existing `qaccept` flow; this module covers the others:
-//! `LEVEL` / `ITEM` / `ROOM` / `SKILL` / `EVENT` / `AUTO`).
+//! Wires `Quest.trigger_type` columns (`LEVEL` / `ITEM` / `ROOM` /
+//! `SKILL` / `EVENT` / `AUTO`, plus `MOB`: asking the quest giver).
 //!
 //! Every entry point follows the same pattern:
 //! 1. Snapshot `(character_id, level)` from the world.
@@ -29,17 +28,19 @@ use std::sync::{Arc, RwLock};
 
 use crate::commands::{Connection, DbPool};
 
-/// In-memory copy of what the room-entry path needs from the quest
-/// tables, so walking around costs no database round trips: the quests
-/// triggered by each room, and the rooms any `VISIT_ROOM` objective
-/// targets. Loaded at boot and refreshed by the once-a-minute quest
-/// sweep, so a quest edited in Muditor takes effect within a minute.
+/// In-memory copy of what the room-entry and `ask` paths need from the
+/// quest tables, so walking around and talking cost no database round
+/// trips: the quests triggered by each room, the quests each giver mob
+/// hands out, and the rooms any `VISIT_ROOM` objective targets. Loaded
+/// at boot and refreshed by the once-a-minute quest sweep, so a quest
+/// edited in Muditor takes effect within a minute.
 #[derive(Resource, Clone, Default)]
 pub(crate) struct RoomQuestIndex(Arc<RwLock<RoomIndexData>>);
 
 #[derive(Default)]
 struct RoomIndexData {
     triggers: HashMap<(i32, i32), Vec<mud_db::quests::QuestRow>>,
+    givers: HashMap<(i32, i32), Vec<mud_db::quests::QuestRow>>,
     visit_targets: HashSet<(i32, i32)>,
 }
 
@@ -50,11 +51,30 @@ impl RoomQuestIndex {
         visit_targets: impl IntoIterator<Item = (i32, i32)>,
     ) -> Self {
         let index = Self::default();
-        index.replace(quests, visit_targets.into_iter().collect());
+        index.replace(quests, Vec::new(), visit_targets.into_iter().collect());
         index
     }
 
-    fn replace(&self, quests: Vec<mud_db::quests::QuestRow>, visit_targets: HashSet<(i32, i32)>) {
+    /// Test index holding only these giver-mob quests.
+    #[cfg(test)]
+    pub(crate) fn with_givers(quests: Vec<mud_db::quests::QuestRow>) -> Self {
+        let index = Self::default();
+        index.replace(Vec::new(), quests, HashSet::new());
+        index
+    }
+
+    fn replace(
+        &self,
+        quests: Vec<mud_db::quests::QuestRow>,
+        giver_quests: Vec<mud_db::quests::QuestRow>,
+        visit_targets: HashSet<(i32, i32)>,
+    ) {
+        let mut givers: HashMap<(i32, i32), Vec<_>> = HashMap::new();
+        for q in giver_quests {
+            if let (Some(z), Some(m)) = (q.trigger_mob_zone_id, q.trigger_mob_id) {
+                givers.entry((z, m)).or_default().push(q);
+            }
+        }
         let mut triggers: HashMap<(i32, i32), Vec<_>> = HashMap::new();
         for q in quests {
             if let (Some(z), Some(r)) = (q.trigger_room_zone_id, q.trigger_room_id) {
@@ -64,6 +84,7 @@ impl RoomQuestIndex {
         if let Ok(mut data) = self.0.write() {
             *data = RoomIndexData {
                 triggers,
+                givers,
                 visit_targets,
             };
         }
@@ -78,6 +99,15 @@ impl RoomQuestIndex {
             .unwrap_or_default()
     }
 
+    /// Quests the mob with prototype `mob` hands out.
+    pub(crate) fn giver_quests(&self, mob: (i32, i32)) -> Vec<mud_db::quests::QuestRow> {
+        self.0
+            .read()
+            .ok()
+            .and_then(|d| d.givers.get(&mob).cloned())
+            .unwrap_or_default()
+    }
+
     /// Is any `VISIT_ROOM` objective aimed at `room`?
     pub(crate) fn is_visit_target(&self, room: (i32, i32)) -> bool {
         self.0.read().is_ok_and(|d| d.visit_targets.contains(&room))
@@ -86,8 +116,9 @@ impl RoomQuestIndex {
     /// Reload from the database. On error the previous contents stay.
     pub(crate) async fn refresh(&self, pool: &mud_db::sqlx::PgPool) -> mud_db::sqlx::Result<()> {
         let quests = mud_db::quests::list_room_trigger_quests(pool).await?;
+        let givers = mud_db::quests::list_mob_trigger_quests(pool).await?;
         let targets = mud_db::quests::list_visit_room_targets(pool).await?;
-        self.replace(quests, targets.into_iter().collect());
+        self.replace(quests, givers, targets.into_iter().collect());
         Ok(())
     }
 }
@@ -152,6 +183,66 @@ where
     });
 }
 
+/// Drop quests that are hidden or were already offered to this player
+/// this session.
+fn unoffered(
+    world: &World,
+    player: Entity,
+    quests: Vec<mud_db::quests::QuestRow>,
+) -> Vec<mud_db::quests::QuestRow> {
+    quests
+        .into_iter()
+        .filter(|q| {
+            !q.hidden
+                && !world
+                    .get::<OfferedQuests>(player)
+                    .is_some_and(|o| o.0.contains(&(q.zone_id, q.id)))
+        })
+        .collect()
+}
+
+/// [`unoffered`] quests whose availability requirement the player
+/// passes (the same check `qaccept` runs; fails closed on a script
+/// error).
+fn available_unoffered(
+    world: &mut World,
+    player: Entity,
+    quests: Vec<mud_db::quests::QuestRow>,
+) -> Vec<mud_db::quests::QuestRow> {
+    let mut allowed = Vec::new();
+    for q in unoffered(world, player, quests) {
+        if let Some(expr) = q
+            .availability_requirement
+            .as_deref()
+            .filter(|e| !e.trim().is_empty())
+            && !crate::commands::quests::eval_quest_availability(
+                world,
+                player,
+                expr,
+                &format!(
+                    "quest ({}, {}) availability requirement (trigger)",
+                    q.zone_id, q.id
+                ),
+            )
+        {
+            continue;
+        }
+        allowed.push(q);
+    }
+    allowed
+}
+
+/// Remember that these quests were offered, so this session never
+/// offers them again.
+fn mark_offered(world: &mut World, player: Entity, quests: &[mud_db::quests::QuestRow]) {
+    let mut offered = world
+        .get::<OfferedQuests>(player)
+        .map(|o| o.0.clone())
+        .unwrap_or_default();
+    offered.extend(quests.iter().map(|q| (q.zone_id, q.id)));
+    crate::commands::try_insert(world, player, OfferedQuests(offered));
+}
+
 /// World-thread half of every trigger: gate the candidate quests by
 /// their availability requirement (the same check `qaccept` runs;
 /// fails closed on a script error), then offer or auto-accept the
@@ -177,47 +268,12 @@ pub(crate) fn offer_candidates(
     let update_tx = world
         .get_resource::<crate::commands::PlayerUpdateTx>()
         .map(|t| t.0.clone());
-    let mut allowed = Vec::new();
-    for q in quests {
-        if q.hidden {
-            continue;
-        }
-        if world
-            .get::<OfferedQuests>(player)
-            .is_some_and(|o| o.0.contains(&(q.zone_id, q.id)))
-        {
-            continue;
-        }
-        if let Some(expr) = q
-            .availability_requirement
-            .as_deref()
-            .filter(|e| !e.trim().is_empty())
-            && !crate::commands::quests::eval_quest_availability(
-                world,
-                player,
-                expr,
-                &format!(
-                    "quest ({}, {}) availability requirement (trigger)",
-                    q.zone_id, q.id
-                ),
-            )
-        {
-            continue;
-        }
-        allowed.push(q);
-    }
+    let allowed = available_unoffered(world, player, quests);
     if allowed.is_empty() {
         return 0;
     }
     let handed_on = allowed.len();
-    {
-        let mut offered = world
-            .get::<OfferedQuests>(player)
-            .map(|o| o.0.clone())
-            .unwrap_or_default();
-        offered.extend(allowed.iter().map(|q| (q.zone_id, q.id)));
-        crate::commands::try_insert(world, player, OfferedQuests(offered));
-    }
+    mark_offered(world, player, &allowed);
     tokio::spawn(async move {
         for q in &allowed {
             grant_or_offer(&pool, &cid, &out, level, q, update_tx.as_ref()).await;
@@ -267,6 +323,97 @@ pub(crate) fn dispatch_room_trigger(
         return 0;
     }
     offer_candidates(world, player, quests)
+}
+
+/// Dispatch MOB-trigger quests when `player` asks the mob with
+/// prototype `mob` something: the quest giver. Same gate as the other
+/// triggers (not hidden, once per session, availability requirement),
+/// plus the acceptance gates `qaccept` applies (level, prerequisites,
+/// cooldown, exclusive group, already active, completed and not
+/// repeatable): a quest the player could not take is not offered, and
+/// does not use up this session's one offer. The survivors come back
+/// as [`PendingPlayerUpdate::GiverCandidates`](crate::commands::PendingPlayerUpdate::GiverCandidates)
+/// and are offered, or accepted when the quest says so, by
+/// [`offer_giver_candidates`].
+///
+/// Returns how many quests went on to the database gates.
+pub(crate) fn dispatch_giver_trigger(world: &mut World, player: Entity, mob: (i32, i32)) -> usize {
+    let Some(index) = world.get_resource::<RoomQuestIndex>() else {
+        return 0;
+    };
+    let quests = index.giver_quests(mob);
+    if quests.is_empty() {
+        return 0;
+    }
+    let (Some(cid), Some(pool), Some(tx)) = (
+        world.get::<Account>(player).map(|a| a.character_id.clone()),
+        world.get_resource::<DbPool>().map(|p| p.0.clone()),
+        world
+            .get_resource::<crate::commands::PlayerUpdateTx>()
+            .map(|t| t.0.clone()),
+    ) else {
+        return 0;
+    };
+    let level = world.get::<Profile>(player).map_or(1, |p| p.level);
+    let candidates = available_unoffered(world, player, quests);
+    let handed_on = candidates.len();
+    if candidates.is_empty() {
+        return 0;
+    }
+    tokio::spawn(async move {
+        let mut takeable = Vec::new();
+        for q in candidates {
+            match mud_db::quests::check_acceptance_gates(&pool, &cid, level, &q).await {
+                Ok(None) => takeable.push(q),
+                Ok(Some(_)) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, zone = q.zone_id, id = q.id, "giver quest gate check failed");
+                }
+            }
+        }
+        if !takeable.is_empty() {
+            let _ = tx
+                .send(crate::commands::PendingPlayerUpdate::GiverCandidates {
+                    character_id: cid,
+                    quests: takeable,
+                })
+                .await;
+        }
+    });
+    handed_on
+}
+
+/// World-thread half of [`dispatch_giver_trigger`]: the quests that
+/// passed the acceptance gates are offered (or auto-accepted) unless
+/// an earlier ask already offered them this session.
+pub(crate) fn offer_giver_candidates(
+    world: &mut World,
+    player: Entity,
+    quests: Vec<mud_db::quests::QuestRow>,
+) -> usize {
+    let (Some(cid), Some(out), Some(pool)) = (
+        world.get::<Account>(player).map(|a| a.character_id.clone()),
+        world.get::<Connection>(player).map(|c| c.0.clone()),
+        world.get_resource::<DbPool>().map(|p| p.0.clone()),
+    ) else {
+        return 0;
+    };
+    let level = world.get::<Profile>(player).map_or(1, |p| p.level);
+    let update_tx = world
+        .get_resource::<crate::commands::PlayerUpdateTx>()
+        .map(|t| t.0.clone());
+    let fresh = unoffered(world, player, quests);
+    if fresh.is_empty() {
+        return 0;
+    }
+    mark_offered(world, player, &fresh);
+    let count = fresh.len();
+    tokio::spawn(async move {
+        for q in &fresh {
+            offer_or_accept(&pool, &cid, &out, level, q, update_tx.as_ref()).await;
+        }
+    });
+    count
 }
 
 /// Dispatch SKILL-trigger quests when `player` first successfully
@@ -327,6 +474,19 @@ pub(crate) async fn grant_or_offer(
             return;
         }
     }
+    offer_or_accept(pool, cid, out, level, q, update_tx).await;
+}
+
+/// Tell the character about the quest, or put them on it when the
+/// quest auto-accepts (the full `accept_for_player` gates still apply).
+async fn offer_or_accept(
+    pool: &mud_db::sqlx::PgPool,
+    cid: &str,
+    out: &mud_net::Outbound,
+    level: i32,
+    q: &mud_db::quests::QuestRow,
+    update_tx: Option<&tokio::sync::mpsc::Sender<crate::commands::PendingPlayerUpdate>>,
+) {
     if q.auto_accept {
         match mud_db::quests::accept_for_player(pool, cid, level, q.zone_id, q.id).await {
             Ok(mud_db::quests::AcceptOutcome::Accepted) => {

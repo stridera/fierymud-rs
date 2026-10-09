@@ -1261,3 +1261,294 @@ async fn pack_watch_only_covers_players_with_collect_objectives() {
     );
     fx.end().await;
 }
+
+// ---- Quest giver (trigger type MOB): asking the mob offers the quest ----
+
+/// The giver mob of a MOB-triggered quest row.
+fn giver_of(quest: &mud_db::quests::QuestRow) -> (i32, i32) {
+    (
+        quest.trigger_mob_zone_id.expect("giver zone"),
+        quest.trigger_mob_id.expect("giver id"),
+    )
+}
+
+impl Fx {
+    /// Make the fixture quest a MOB-triggered quest handed out by the
+    /// first mob prototype in the database.
+    async fn make_giver_quest(&self, auto_accept: bool) -> mud_db::quests::QuestRow {
+        let giver: (i32, i32) =
+            sqlx::query_as("SELECT zone_id, id FROM \"Mobs\" ORDER BY zone_id, id LIMIT 1")
+                .fetch_one(&self.pool)
+                .await
+                .unwrap();
+        sqlx::query(
+            "UPDATE \"Quest\" SET trigger_type = 'MOB'::\"QuestTriggerType\", \
+             trigger_mob_zone_id = $3, trigger_mob_id = $4, auto_accept = $5 \
+             WHERE zone_id = $1 AND id = $2",
+        )
+        .bind(self.zone)
+        .bind(self.quest)
+        .bind(giver.0)
+        .bind(giver.1)
+        .bind(auto_accept)
+        .execute(&self.pool)
+        .await
+        .unwrap();
+        self.quest_row().await
+    }
+
+    async fn quest_row(&self) -> mud_db::quests::QuestRow {
+        mud_db::quests::get_quest(&self.pool, self.zone, self.quest)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    /// Set the character's record of `(zone, quest)` to `status`.
+    async fn record(&self, quest: (i32, i32), status: &str) {
+        sqlx::query(
+            "INSERT INTO \"CharacterQuest\" \
+             (id, character_id, quest_zone_id, quest_id, status, completed_at) \
+             VALUES (gen_random_uuid()::text, $1, $2, $3, $4::\"QuestStatus\", NOW()) \
+             ON CONFLICT (character_id, quest_zone_id, quest_id) \
+             DO UPDATE SET status = EXCLUDED.status, completed_at = EXCLUDED.completed_at",
+        )
+        .bind(&self.char_id)
+        .bind(quest.0)
+        .bind(quest.1)
+        .bind(status)
+        .execute(&self.pool)
+        .await
+        .unwrap();
+    }
+
+    async fn clear_record(&self) {
+        sqlx::query(
+            "DELETE FROM \"CharacterQuest\" \
+             WHERE character_id = $1 AND quest_zone_id = $2 AND quest_id = $3",
+        )
+        .bind(&self.char_id)
+        .bind(self.zone)
+        .bind(self.quest)
+        .execute(&self.pool)
+        .await
+        .unwrap();
+    }
+
+    /// A world with the player and the giver mob ("Mayor") in one room,
+    /// the giver index holding only `quest`.
+    fn giver_world(&self, quest: mud_db::quests::QuestRow) -> (World, Entity, Rx) {
+        let (mut world, player, room, rx) = self.world();
+        Fx::with_updates(&mut world);
+        crate::quest_triggers::init_resources(&mut world);
+        let giver = giver_of(&quest);
+        world.insert_resource(crate::quest_triggers::RoomQuestIndex::with_givers(vec![
+            quest,
+        ]));
+        world.spawn((
+            mud_world::Mob,
+            Named {
+                name: "Mayor".into(),
+            },
+            Located(room),
+            WorldKey {
+                zone: giver.0,
+                id: giver.1,
+            },
+        ));
+        (world, player, rx)
+    }
+}
+
+/// Run one `ask` and let the background gate checks land, collecting the
+/// player's output. Stops early once `until` shows up; with `None` it
+/// waits long enough for an offer that is going to come to have come.
+async fn ask_giver(world: &mut World, player: Entity, rx: &mut Rx, until: Option<&str>) -> String {
+    super::dispatch(world, player, "ask mayor hello");
+    let mut text = String::new();
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        super::drain_player_updates(world);
+        text.push_str(&drain(rx));
+        if until.is_some_and(|n| text.contains(n)) {
+            break;
+        }
+    }
+    text
+}
+
+fn offered(text: &str, fx: &Fx) -> bool {
+    text.contains("Quest available") && text.contains(&format!("({}, {})", fx.zone, fx.quest))
+}
+
+/// Asking the giver offers the quest (and does not start it); a second
+/// ask in the same session is quiet; a new session is offered it again.
+#[tokio::test(flavor = "current_thread")]
+async fn asking_the_giver_offers_the_quest_once_per_session() {
+    let Some(fx) = fixture().await else { return };
+    let quest = fx.make_giver_quest(false).await;
+    let giver = giver_of(&quest);
+    let (mut world, player, mut rx) = fx.giver_world(quest);
+
+    let first = ask_giver(&mut world, player, &mut rx, Some("Quest available")).await;
+    assert!(offered(&first, &fx), "first ask offers it: {first:?}");
+    assert!(first.contains(&format!("qaccept {} {}", fx.zone, fx.quest)));
+    assert_eq!(fx.status().await, "NONE", "an offer does not accept");
+
+    for _ in 0..3 {
+        let again = ask_giver(&mut world, player, &mut rx, None).await;
+        assert!(!offered(&again, &fx), "no repeat offer: {again:?}");
+    }
+    assert_eq!(
+        crate::quest_triggers::dispatch_giver_trigger(&mut world, player, giver),
+        0,
+        "the session already offered it"
+    );
+
+    // Another giver mob's quests are not this one's.
+    assert_eq!(
+        crate::quest_triggers::dispatch_giver_trigger(
+            &mut world,
+            player,
+            (giver.0, giver.1 + 1_000_000)
+        ),
+        0
+    );
+
+    // A fresh session (new entity, same character) is offered it again.
+    let (mut world2, player2, mut rx2) = fx.giver_world(fx.quest_row().await);
+    let fresh = ask_giver(&mut world2, player2, &mut rx2, Some("Quest available")).await;
+    assert!(offered(&fresh, &fx), "{fresh:?}");
+    fx.end().await;
+}
+
+/// A giver whose quest auto-accepts puts the player on it straight away.
+#[tokio::test(flavor = "current_thread")]
+async fn asking_an_auto_accept_giver_accepts_the_quest() {
+    let Some(fx) = fixture().await else { return };
+    let quest = fx.make_giver_quest(true).await;
+    let (mut world, player, mut rx) = fx.giver_world(quest);
+
+    let text = ask_giver(&mut world, player, &mut rx, Some("New quest")).await;
+    assert!(text.contains("New quest"), "{text:?}");
+    assert_eq!(fx.wait_for_status("IN_PROGRESS").await, "IN_PROGRESS");
+    fx.end().await;
+}
+
+/// Unmet prerequisites mean no offer - and no wasted offer: once the
+/// prerequisite is done, asking again in the same session offers it.
+#[tokio::test(flavor = "current_thread")]
+async fn giver_does_not_offer_until_prerequisites_are_done() {
+    let Some(fx) = fixture().await else { return };
+    let prereq = (fx.zone, 9_960_000 + fx.quest % 30_000);
+    sqlx::query(
+        "INSERT INTO \"Quest\" (zone_id, id, name, plain_name, repeatable, updated_at) \
+         VALUES ($1, $2, 'zz rt test', 'zz rt test', false, NOW())",
+    )
+    .bind(prereq.0)
+    .bind(prereq.1)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO \"QuestPrerequisite\" \
+         (quest_zone_id, quest_id, prerequisite_quest_zone_id, prerequisite_quest_id) \
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(fx.zone)
+    .bind(fx.quest)
+    .bind(prereq.0)
+    .bind(prereq.1)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    let quest = fx.make_giver_quest(false).await;
+    let (mut world, player, mut rx) = fx.giver_world(quest);
+
+    let blocked = ask_giver(&mut world, player, &mut rx, None).await;
+    assert!(!offered(&blocked, &fx), "prerequisite unmet: {blocked:?}");
+    assert_eq!(fx.status().await, "NONE");
+
+    fx.record(prereq, "COMPLETED").await;
+    let open = ask_giver(&mut world, player, &mut rx, Some("Quest available")).await;
+    assert!(offered(&open, &fx), "prerequisite done: {open:?}");
+
+    sqlx::query("DELETE FROM \"Quest\" WHERE zone_id = $1 AND id = $2")
+        .bind(prereq.0)
+        .bind(prereq.1)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    fx.end().await;
+}
+
+/// A completed quest that is not repeatable is never offered again; a
+/// repeatable one waits out its cooldown; one in progress is not offered.
+#[tokio::test(flavor = "current_thread")]
+async fn giver_does_not_offer_finished_cooling_down_or_active_quests() {
+    let Some(fx) = fixture().await else { return };
+    let quest = fx.make_giver_quest(false).await;
+    let (mut world, player, mut rx) = fx.giver_world(quest);
+
+    // Completed, not repeatable.
+    sqlx::query("UPDATE \"Quest\" SET repeatable = false WHERE zone_id = $1 AND id = $2")
+        .bind(fx.zone)
+        .bind(fx.quest)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    fx.record((fx.zone, fx.quest), "COMPLETED").await;
+    world.insert_resource(crate::quest_triggers::RoomQuestIndex::with_givers(vec![
+        fx.quest_row().await,
+    ]));
+    let done = ask_giver(&mut world, player, &mut rx, None).await;
+    assert!(!offered(&done, &fx), "completed, not repeatable: {done:?}");
+
+    // Repeatable, but cooling down.
+    sqlx::query(
+        "UPDATE \"Quest\" SET repeatable = true, cooldown_minutes = 600 \
+         WHERE zone_id = $1 AND id = $2",
+    )
+    .bind(fx.zone)
+    .bind(fx.quest)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    world.insert_resource(crate::quest_triggers::RoomQuestIndex::with_givers(vec![
+        fx.quest_row().await,
+    ]));
+    let cooling = ask_giver(&mut world, player, &mut rx, None).await;
+    assert!(!offered(&cooling, &fx), "cooling down: {cooling:?}");
+
+    // Already in progress.
+    fx.record((fx.zone, fx.quest), "IN_PROGRESS").await;
+    let active = ask_giver(&mut world, player, &mut rx, None).await;
+    assert!(!offered(&active, &fx), "already active: {active:?}");
+
+    // Control: with the record gone the same ask does offer it.
+    fx.clear_record().await;
+    let open = ask_giver(&mut world, player, &mut rx, Some("Quest available")).await;
+    assert!(offered(&open, &fx), "{open:?}");
+    fx.end().await;
+}
+
+/// A hidden quest and one whose availability requirement fails are not
+/// offered by the giver either.
+#[tokio::test(flavor = "current_thread")]
+async fn giver_does_not_offer_hidden_or_unavailable_quests() {
+    let Some(fx) = fixture().await else { return };
+    sqlx::query(
+        "UPDATE \"Quest\" SET hidden = true, availability_requirement = 'false' \
+         WHERE zone_id = $1 AND id = $2",
+    )
+    .bind(fx.zone)
+    .bind(fx.quest)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    let quest = fx.make_giver_quest(false).await;
+    let (mut world, player, mut rx) = fx.giver_world(quest);
+    let text = ask_giver(&mut world, player, &mut rx, None).await;
+    assert!(!offered(&text, &fx), "hidden: {text:?}");
+    fx.end().await;
+}

@@ -294,6 +294,50 @@ pub async fn list_room_trigger_quests(pool: &PgPool) -> sqlx::Result<Vec<QuestRo
     .await
 }
 
+/// Quests a player can ask a mob for: `trigger_type = MOB` with a quest
+/// giver mob set and not hidden. Loaded into the giver index.
+pub async fn list_mob_trigger_quests(pool: &PgPool) -> sqlx::Result<Vec<QuestRow>> {
+    sqlx::query_as!(
+        QuestRow,
+        r#"
+        SELECT
+            zone_id,
+            id,
+            name,
+            plain_name,
+            description,
+            short_description,
+            min_level,
+            max_level,
+            repeatable,
+            shareable,
+            hidden,
+            auto_accept,
+            trigger_type::text AS "trigger_type!: String",
+            trigger_mob_zone_id,
+            trigger_mob_id,
+            trigger_level,
+            trigger_item_zone_id,
+            trigger_item_id,
+            trigger_room_zone_id,
+            trigger_room_id,
+            trigger_ability_id,
+            trigger_event_id,
+            time_limit_minutes,
+            cooldown_minutes,
+            exclusive_group,
+            availability_requirement
+        FROM "Quest"
+        WHERE trigger_type = 'MOB'::"QuestTriggerType"
+          AND trigger_mob_zone_id IS NOT NULL
+          AND trigger_mob_id IS NOT NULL
+          AND hidden = false
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+}
+
 /// Every room some `VISIT_ROOM` objective targets.
 pub async fn list_visit_room_targets(pool: &PgPool) -> sqlx::Result<Vec<(i32, i32)>> {
     let rows = sqlx::query!(
@@ -495,36 +539,27 @@ pub enum AcceptOutcome {
     },
 }
 
-/// Player-initiated quest acceptance. Validates level + prereqs +
-/// non-duplicate + cooldown + exclusive-group before inserting the
-/// `IN_PROGRESS` row. The availability-Lua check (Wave 4.4) is left
-/// to the caller (command layer) because it needs world access.
-///
-/// On success, stamps `expires_at = NOW() + time_limit_minutes`
-/// when the quest has a time limit (Wave 4.2). Existing rows are
-/// revived in-place: status flips back to `IN_PROGRESS`, `accepted_at`
-/// gets a fresh stamp, `variables` resets to `{}` and the previous run's
-/// objective progress is deleted.
+/// Every gate `qaccept` applies to a quest that exists, short of the
+/// availability requirement (a Lua check the caller runs): hidden, level
+/// range, current record (in progress, completed and not repeatable,
+/// cooldown), exclusive group and prerequisites. `None` means the
+/// character may take it now; otherwise the refusal, as
+/// [`accept_for_player`] would report it.
 #[allow(clippy::too_many_lines)]
-pub async fn accept_for_player(
+pub async fn check_acceptance_gates(
     pool: &PgPool,
     character_id: &str,
     character_level: i32,
-    zone_id: i32,
-    quest_id: i32,
-) -> sqlx::Result<AcceptOutcome> {
-    // Quest existence + level / hidden gates.
-    let Some(quest) = get_quest(pool, zone_id, quest_id).await? else {
-        return Ok(AcceptOutcome::NotFound);
-    };
+    quest: &QuestRow,
+) -> sqlx::Result<Option<AcceptOutcome>> {
     if quest.hidden {
-        return Ok(AcceptOutcome::Hidden);
+        return Ok(Some(AcceptOutcome::Hidden));
     }
     if character_level < quest.min_level {
-        return Ok(AcceptOutcome::LevelTooLow(quest.min_level));
+        return Ok(Some(AcceptOutcome::LevelTooLow(quest.min_level)));
     }
     if quest.max_level > 0 && character_level > quest.max_level {
-        return Ok(AcceptOutcome::LevelTooHigh(quest.max_level));
+        return Ok(Some(AcceptOutcome::LevelTooHigh(quest.max_level)));
     }
     // Existing CharacterQuest row gates + cooldown.
     let existing = sqlx::query!(
@@ -536,17 +571,17 @@ pub async fn accept_for_player(
         WHERE character_id = $1 AND quest_zone_id = $2 AND quest_id = $3
         "#,
         character_id,
-        zone_id,
-        quest_id,
+        quest.zone_id,
+        quest.id,
     )
     .fetch_optional(pool)
     .await?;
     if let Some(row) = &existing {
         if row.status == "IN_PROGRESS" {
-            return Ok(AcceptOutcome::AlreadyInProgress);
+            return Ok(Some(AcceptOutcome::AlreadyInProgress));
         }
         if row.status == "COMPLETED" && !quest.repeatable {
-            return Ok(AcceptOutcome::AlreadyCompletedNonRepeatable);
+            return Ok(Some(AcceptOutcome::AlreadyCompletedNonRepeatable));
         }
         // Cooldown gate (Wave 4.2): only applies to repeatable
         // quests whose previous run is COMPLETED.
@@ -557,7 +592,7 @@ pub async fn accept_for_player(
             let now = chrono::Utc::now().naive_utc();
             if now < next_allowed {
                 let remaining_secs = (next_allowed - now).num_seconds().max(0);
-                return Ok(AcceptOutcome::Cooldown { remaining_secs });
+                return Ok(Some(AcceptOutcome::Cooldown { remaining_secs }));
             }
         }
     }
@@ -580,17 +615,17 @@ pub async fn accept_for_player(
             "#,
             character_id,
             group,
-            zone_id,
-            quest_id,
+            quest.zone_id,
+            quest.id,
         )
         .fetch_optional(pool)
         .await?;
         if let Some(c) = conflict {
-            return Ok(AcceptOutcome::ExclusiveGroupConflict {
+            return Ok(Some(AcceptOutcome::ExclusiveGroupConflict {
                 group: group.clone(),
                 held_zone: c.held_zone,
                 held_id: c.held_id,
-            });
+            }));
         }
     }
     // Prerequisite check: every required prereq must have a
@@ -604,8 +639,8 @@ pub async fn accept_for_player(
           AND quest_id = $2
           AND require_completion = true
         "#,
-        zone_id,
-        quest_id,
+        quest.zone_id,
+        quest.id,
     )
     .fetch_all(pool)
     .await?;
@@ -627,11 +662,41 @@ pub async fn accept_for_player(
         .fetch_optional(pool)
         .await?;
         if done.is_none() {
-            return Ok(AcceptOutcome::PrerequisiteIncomplete {
+            return Ok(Some(AcceptOutcome::PrerequisiteIncomplete {
                 zone: p.pz,
                 id: p.pid,
-            });
+            }));
         }
+    }
+    Ok(None)
+}
+
+/// Player-initiated quest acceptance. Validates level + prereqs +
+/// non-duplicate + cooldown + exclusive-group before inserting the
+/// `IN_PROGRESS` row. The availability-Lua check (Wave 4.4) is left
+/// to the caller (command layer) because it needs world access.
+///
+/// On success, stamps `expires_at = NOW() + time_limit_minutes`
+/// when the quest has a time limit (Wave 4.2). Existing rows are
+/// revived in-place: status flips back to `IN_PROGRESS`, `accepted_at`
+/// gets a fresh stamp, `variables` resets to `{}` and the previous run's
+/// objective progress is deleted.
+#[allow(clippy::too_many_lines)]
+pub async fn accept_for_player(
+    pool: &PgPool,
+    character_id: &str,
+    character_level: i32,
+    zone_id: i32,
+    quest_id: i32,
+) -> sqlx::Result<AcceptOutcome> {
+    // Quest existence, then every gate.
+    let Some(quest) = get_quest(pool, zone_id, quest_id).await? else {
+        return Ok(AcceptOutcome::NotFound);
+    };
+    if let Some(refusal) =
+        check_acceptance_gates(pool, character_id, character_level, &quest).await?
+    {
+        return Ok(refusal);
     }
     // All gates passed. Insert (or revive) the row, stamping
     // expires_at when the quest has a time limit.

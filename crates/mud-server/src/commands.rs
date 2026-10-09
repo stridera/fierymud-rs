@@ -103,6 +103,13 @@ pub enum PendingPlayerUpdate {
         character_id: String,
         quests: Vec<mud_db::quests::QuestRow>,
     },
+    /// Quests the character asked a giver mob for that also passed the
+    /// acceptance gates (level, prerequisites, cooldown, ...): offer or
+    /// auto-accept them, once per session.
+    GiverCandidates {
+        character_id: String,
+        quests: Vec<mud_db::quests::QuestRow>,
+    },
     /// A `COLLECT_ITEM` objective was claimed as complete: take the
     /// required items from the pack (or give the claim back if they
     /// are gone) and carry on with the quest.
@@ -148,6 +155,7 @@ impl PendingPlayerUpdate {
             | Self::CollectTargets { character_id, .. }
             | Self::SavePlayer { character_id }
             | Self::TriggerCandidates { character_id, .. }
+            | Self::GiverCandidates { character_id, .. }
             | Self::QuestAccepted { character_id, .. }
             | Self::DialogueReply { character_id, .. } => character_id,
         }
@@ -279,6 +287,9 @@ pub fn drain_player_updates(world: &mut World) {
             }
             PendingPlayerUpdate::TriggerCandidates { quests, .. } => {
                 crate::quest_triggers::offer_candidates(world, entity, quests);
+            }
+            PendingPlayerUpdate::GiverCandidates { quests, .. } => {
+                crate::quest_triggers::offer_giver_candidates(world, entity, quests);
             }
             PendingPlayerUpdate::CollectClaimed { obj, object, .. } => {
                 crate::quest_progress::finish_collect(world, entity, &obj, object);

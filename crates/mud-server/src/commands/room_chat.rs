@@ -258,6 +258,8 @@ fn cmd_ask(world: &mut World, player: Entity, args: &str) {
         // Already in a conversation with this mob? Walk the dialogue
         // tree in-band (no DB round-trip); nothing else counts.
         let mob = (key.zone, key.id);
+        // The quest giver: asking the mob offers its quests.
+        crate::quest_triggers::dispatch_giver_trigger(world, player, mob);
         if let Some(open) =
             crate::quest_dialogue::try_advance_active_tree(world, player, mob, topic)
         {
