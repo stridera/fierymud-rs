@@ -117,7 +117,7 @@ Legacy `APPLY_*` constants mapped to existing Rust components:
 | `FOCUS` | `Focus.0` | new component (used by spell slot regen) |
 | `PERCEPTION` | `Perception.0` | new component (used by detect / search) |
 | `HIT_REGEN` | `RegenBonus.hp` | new component (used by `regen.rs`) |
-| `HIDDENNESS` | `Stealth.bonus` | extends existing `Stealth` |
+| `HIDDENNESS` | `Hiddenness` (0..1000) | `hiding::add_hiddenness`, clamped; viewers need `Perception` at least this to see the wearer |
 | `SIZE` / `AGE` / `CHAR_HEIGHT` / `CHAR_WEIGHT` / `COMPOSITION` / `GOLD` | logged, no-op | follow-up — these need flavor systems |
 
 `apply_modify_delta` is extended with each new branch and `reverse_modify_delta`

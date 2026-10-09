@@ -75,12 +75,22 @@ pub fn is_blind_flag(flag: &str) -> bool {
 
 const FLAG_MARKERS: &[FlagMarker] = &[
     FlagMarker {
-        flags: &["hidden", "sneak", "concealment"],
+        flags: &["hidden", "concealment"],
         insert: |e| {
             e.insert(crate::components::Stealth);
         },
         remove: Some(|e| {
             e.remove::<crate::components::Stealth>();
+        }),
+        tag_backed: None,
+    },
+    FlagMarker {
+        flags: &["sneak"],
+        insert: |e| {
+            e.insert(crate::components::Sneaking);
+        },
+        remove: Some(|e| {
+            e.remove::<crate::components::Sneaking>();
         }),
         tag_backed: None,
     },
@@ -573,7 +583,7 @@ mod tests {
         let mut world = World::new();
         let mapped: &[(&str, Has)] = &[
             ("hidden", |w, e| w.get::<Stealth>(e).is_some()),
-            ("sneak", |w, e| w.get::<Stealth>(e).is_some()),
+            ("sneak", |w, e| w.get::<Sneaking>(e).is_some()),
             ("concealment", |w, e| w.get::<Stealth>(e).is_some()),
             ("fly", |w, e| w.get::<Flying>(e).is_some()),
             ("bless", |w, e| w.get::<Bless>(e).is_some()),

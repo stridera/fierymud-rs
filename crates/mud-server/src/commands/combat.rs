@@ -632,13 +632,14 @@ inventory::submit! {
     category: Category::Combat,
     help: Help {
         usage: "sneak",
-        summary: "Move silently — stealth that survives footsteps.",
+        summary: "Move silently — keep your hiding as you walk.",
         long: "Drains 3 stamina and dispatches the SNEAK skill \
                via the data path. Spawns a 'sneak' status effect \
-               and installs the Stealth marker (same gate as \
-               'hide'). Movement-stealth-break logic isn't wired \
-               yet, so sneak is functionally identical to hide \
-               until that lands.",
+               that wears 'hide' down only slowly as you move, so \
+               a sneaking, hidden character passes observers \
+               whose perception is below their hiding unseen and \
+               unheard. Sneaking alone hides nothing: 'hide' \
+               first.",
     },
     run: cmd_sneak,
     }
@@ -655,9 +656,9 @@ inventory::submit! {
         summary: "Magical concealment — improved hiding.",
         long: "Drains 4 stamina and dispatches the CONCEAL skill \
                via the data path. Spawns a 'hidden' status effect \
-               and installs the Stealth marker. Difference vs. \
-               'hide' is in the schema (different proficiency \
-               curve, longer duration), not in the runtime path.",
+               and installs the Stealth marker, which earns the \
+               opening-strike bonus. It does not raise your \
+               hiding: use 'hide' for that.",
     },
     run: cmd_conceal,
     }

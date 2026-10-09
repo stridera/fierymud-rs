@@ -100,6 +100,16 @@ pub fn spawn_mob_from_proto(
     if proto.is_mountable() {
         em.insert(Mountable);
     }
+    // Legacy `PERC:` / `HIDE:` (`Mobs.perception` / `Mobs.concealment`):
+    // how well the mob spots hidden characters, and how well it hides.
+    if proto.perception != 0 {
+        em.insert(crate::components::Perception(proto.perception));
+    }
+    if proto.concealment > 0 {
+        em.insert(crate::components::Hiddenness(
+            proto.concealment.min(crate::components::MAX_HIDDENNESS),
+        ));
+    }
     let mob = em.id();
     crate::mob_effects::apply_mob_default_effects(world, mob, proto_key);
     crate::mob_effects::apply_race_effects(world, mob, &proto.race);

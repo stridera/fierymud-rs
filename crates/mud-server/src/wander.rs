@@ -174,9 +174,13 @@ pub fn wander_tick(world: &mut World) {
         if !crate::room_access::entry_allowed(world, mob, target_room) {
             continue;
         }
-        broadcast_room_except_players_rendered(
+        // A hiding mob wears its hiding down as it walks, and observers
+        // who cannot see it through that hear nothing of it.
+        crate::hiding::decay_on_move(world, mob, &mut |lo, hi| rand::random_range(lo..=hi));
+        crate::commands::broadcast_room_visible(
             world,
             from_room,
+            mob,
             &[mob],
             &format!(
                 "{} leaves {}.\r\n",
@@ -186,9 +190,10 @@ pub fn wander_tick(world: &mut World) {
         );
         crate::combat::relocate(world, mob, target_room);
         let arrival_dir = arrival_from(dir);
-        broadcast_room_except_players_rendered(
+        crate::commands::broadcast_room_visible(
             world,
             target_room,
+            mob,
             &[mob],
             &format!(
                 "{} arrives from {arrival_dir}.\r\n",

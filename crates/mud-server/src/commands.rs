@@ -465,6 +465,9 @@ mod god_zone_tests;
 #[path = "commands/goto_tests.rs"]
 mod goto_tests;
 #[cfg(test)]
+#[path = "commands/hiding_tests.rs"]
+mod hiding_tests;
+#[cfg(test)]
 #[path = "commands/invisibility_tests.rs"]
 mod invisibility_tests;
 #[cfg(test)]
@@ -1160,6 +1163,15 @@ fn dispatch_line(world: &mut World, player: Entity, line: &str, run: &mut AliasR
             send_to(world, player, CASTING_BUSY_MSG);
             return;
         }
+        // A social gives a hiding character away, bar the two legacy
+        // hide-safe ones.
+        if crate::hiding::social_reveals(tokens[0])
+            && world
+                .get_resource::<SocialRegistry>()
+                .is_some_and(|r| r.get(tokens[0]).is_some())
+        {
+            crate::hiding::reveal(world, player);
+        }
         if try_dispatch_social(world, player, tokens[0], skip_n_tokens(trimmed, 1)) {
             return;
         }
@@ -1218,6 +1230,16 @@ fn dispatch_line(world: &mut World, player: Entity, line: &str, run: &mut AliasR
              An admin must flip the GameConfig row to re-enable them.\r\n",
         );
         return;
+    }
+
+    // Legacy `command_interpreter`: anything not flagged `CMD_HIDE` gives
+    // a hiding character away before it runs.
+    if !crate::hiding::is_hide_safe(
+        cmd.names[0],
+        tokens[0],
+        cmd.min_role.rank() > UserRole::Player.rank(),
+    ) {
+        crate::hiding::reveal(world, player);
     }
 
     let span = info_span!("cmd", name = cmd.names[0]);
@@ -11221,7 +11243,10 @@ pub(crate) fn hidden_by_magic_from(world: &World, viewer: Entity, target: Entity
 /// ([`senses::is_blind`]) sees nobody else; a magically
 /// invisible `target` (`Invisible`) is hidden from anyone who does not
 /// pierce invisibility ([`pierces_invisibility`]); a `WizInvis(N)`
-/// target is hidden from viewers whose `Profile.level` is below `N`.
+/// target is hidden from viewers whose `Profile.level` is below `N`; a
+/// hiding target ([`crate::hiding::hidden_from`]) is hidden from a viewer whose
+/// perception falls short of its hiddenness, unless the viewer is the
+/// target, in its group, an immortal or on `HOLY_LIGHT`.
 /// Every room listing, name-based target resolver, aggro check and
 /// per-observer message goes through this one function.
 #[must_use]
@@ -11231,6 +11256,7 @@ pub(crate) fn can_see_player(world: &World, viewer: Entity, target: Entity) -> b
     }
     !senses::is_blind(world, viewer)
         && !hidden_by_magic_from(world, viewer, target)
+        && !crate::hiding::hidden_from(world, viewer, target)
         && !wiz_hidden_from(world, viewer, target)
 }
 
@@ -14914,7 +14940,9 @@ pub(crate) fn invoke_ability_with(
     );
     let caster_weapon_damage = caster_weapon_damage(world, player);
     let caster_stats = world.get::<CoreStats>(player).copied().unwrap_or_default();
-    let caster_hidden = i32::from(world.get::<Stealth>(player).is_some());
+    let caster_hidden = i32::from(
+        world.get::<Stealth>(player).is_some() || crate::hiding::is_hidden(world, player),
+    );
     let int_bonus = CoreStats::bonus(caster_stats.intelligence);
     let wis_bonus = CoreStats::bonus(caster_stats.wisdom);
     // `base_damage` = level + spell_circle*2 + max(int_bonus, wis_bonus)
@@ -14998,6 +15026,11 @@ pub(crate) fn invoke_ability_with(
         victim_is_celestial: 0,
         victim_is_elemental: 0,
     };
+    // A violent ability (backstab included) gives a hiding caster away;
+    // `caster_hidden` above already carries the opening-strike bonus.
+    if def.violent {
+        crate::hiding::reveal(world, player);
+    }
     let effect_specs: Vec<EffectSpec> = {
         let mappings = world
             .resource::<AbilityCatalog>()
@@ -18002,13 +18035,13 @@ pub(crate) fn invoke_ability_with(
                     ))
                     .id();
                 spawn_count += 1;
-                // Stealth-flag status effects (HIDE, SNEAK, CONCEAL,
-                // and a few buff spells) install the `Stealth` marker
-                // on the target so existing visibility gates fire. The
+                // `hidden` status effects (CONCEAL and a few buff spells)
+                // install the `Stealth` marker on the target (`sneak`
+                // installs `Sneaking` through the flag table below). The
                 // marker is removed in `effects_tick` once the last
                 // backing EffectInstance fades — mirroring the
                 // Stunned tick pattern.
-                if pretty.eq_ignore_ascii_case("hidden") || pretty.eq_ignore_ascii_case("sneak") {
+                if pretty.eq_ignore_ascii_case("hidden") {
                     try_insert(world, target_entity, mud_world::Stealth);
                 }
                 // Marker flags (fly, bless, sanctuary, detect_invisible,
@@ -19325,18 +19358,10 @@ pub(crate) fn apply_modify_delta(
             true
         }
         "hiddenness" => {
-            // Stealth bonus from gear (e.g. Amulet of True Shadows).
-            // Existing `Stealth` is a marker component; extend it
-            // lazily into a magnitude. For now stash under a stub
-            // RegenBonus.stamina-like channel — the visibility tick
-            // can read it once stealth scoring is wired (Q6 in
-            // combat-rebalance.md). Logged-only for now to avoid
-            // silently dropping the modifier.
-            tracing::debug!(
-                target = ?target,
-                amount,
-                "APPLY_HIDDENNESS recorded but no consumer wired yet"
-            );
+            // Legacy `APPLY_HIDDENNESS`: added to the current hiding and
+            // clamped to 0..=1000 (so un-applying after a clamp or after
+            // the wearer has acted is not an exact inverse, as in legacy).
+            crate::hiding::add_hiddenness(world, target, amount);
             true
         }
         _ => false,
@@ -22258,6 +22283,21 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
     let dir_name = direction_name(dir);
     let arrival_dir = arrival_from(dir);
 
+    // Walking wears hiding down (legacy `do_simple_move`, once per mover
+    // before anyone is told): slowly for a sneaker, by a skill roll
+    // otherwise. Departure and arrival messages below then read the
+    // worn-down value, and an observer who cannot see the mover through
+    // it gets nothing (`can_see_player`).
+    for &mover in &movers {
+        let before = crate::hiding::hiddenness(world, mover);
+        if before > 0
+            && crate::hiding::decay_on_move(world, mover, &mut |lo, hi| rand::random_range(lo..=hi))
+                == 0
+        {
+            send_to(world, mover, "Your footsteps give you away.\r\n");
+        }
+    }
+
     // Notify the source room of each mover departing (in chain order).
     // Use the sender-aware broadcast so wiz-invised admins stay
     // hidden to lower-level observers. Per-mover verb overrides
@@ -22387,16 +22427,6 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         // isn't immediately drowned by a room description.
         if world.get::<Ghost>(mover).is_none() {
             info::look_after_move(world, mover);
-        }
-        // Hide-on-move semantics: footsteps break `hide` but not
-        // `sneak`. If a mover has a `hidden` EffectInstance and
-        // no `sneak` effect, drop the hidden effect; effects_tick
-        // GCs the Stealth marker once no hidden/sneak effects
-        // remain. A mover with only `sneak` glides through.
-        let has_sneak = has_effect_named(world, mover, "sneak");
-        if !has_sneak && has_effect_named(world, mover, "hidden") {
-            remove_effect_named(world, mover, "hidden");
-            send_to(world, mover, "Your footsteps reveal you.\r\n");
         }
     }
 
@@ -22565,6 +22595,13 @@ pub(crate) fn engage_combat(world: &mut World, attacker: Entity, defender: Entit
     let defender_name = name_of(world, defender);
     try_insert(world, attacker, Fighting(defender));
     try_insert(world, defender, Fighting(attacker));
+    // A mob that is hiding or sneaking keeps quiet about it (legacy
+    // `memory_attack_announce`); its first swing gives it away.
+    if crate::hiding::is_hidden(world, attacker)
+        || world.get::<mud_world::Sneaking>(attacker).is_some()
+    {
+        return;
+    }
     let attacker_cap = cap_sentence_start(&seen_name(world, defender, attacker, &attacker_name));
     send_to(
         world,

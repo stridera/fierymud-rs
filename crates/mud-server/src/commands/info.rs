@@ -737,12 +737,17 @@ inventory::submit! {
         category: Category::Settings,
         help: Help {
             usage: "hide",
-            summary: "Slip into the shadows (sets the Stealth marker).",
-            long: "Currently a marker toggle — combat formulas that \
-                   reference 'hidden' (e.g. BACKSTAB's bonus) read \
-                   the marker. The full rogue skill check, noise \
-                   gating, and look-time visibility filtering land \
-                   with the skill system.",
+            summary: "Slip into the shadows.",
+            long: "Rolls how well you hide from your hide skill, \
+                   Dexterity and Intelligence (rogues and DEX help \
+                   most). Anyone whose perception is below that \
+                   number cannot see you until you act: any command \
+                   but looking around, hiding, moving and the like \
+                   gives you away, as does attacking or being found \
+                   by 'search'. Walking wears the hiding down; \
+                   'sneak' slows that. Hiding leaves you busy for \
+                   a combat round (half for thieves). Your group \
+                   always sees you.",
         },
         run: cmd_hide,
     }
@@ -756,8 +761,8 @@ inventory::submit! {
         category: Category::Settings,
         help: Help {
             usage: "visible",
-            summary: "Stop hiding (clears the Stealth marker).",
-            long: "Removes the 'Stealth' marker — back to normal visibility.",
+            summary: "Stop hiding.",
+            long: "Drops your hiding: back to normal visibility.",
         },
         run: cmd_visible,
     }
@@ -3687,7 +3692,7 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
             "{rider_name} is riding {name_rendered}.\r\n"
         )));
     }
-    if world.get::<Stealth>(target).is_some() && target == player {
+    if crate::hiding::is_hidden(world, target) && target == player {
         // Self-only — others shouldn't see your stealth marker.
         out.push_str("You are hidden.\r\n");
     }
@@ -5645,7 +5650,7 @@ inventory::submit! {
         category: Category::Info,
         help: Help {
             usage: "search [<keyword>]",
-            summary: "Search the area for hidden exits.",
+            summary: "Search the area for hidden exits and hiding characters.",
             long: "Refuses while fighting. Each hidden exit you \
                    haven't found is checked in turn: naming its \
                    keyword ('search monolith') always finds it, \
@@ -5656,7 +5661,12 @@ inventory::submit! {
                    login starts back at zero known hidden exits, \
                    matching the legacy contract until a persistent \
                    table for revealed exits lands. Pair with \
-                   'exits' afterward to confirm what surfaced.",
+                   'exits' afterward to confirm what surfaced. \
+                   When no exit turns up, you look for hiding \
+                   characters outside your group instead: your \
+                   perception cuts each one's hiding by a random \
+                   amount, and whoever is left within your \
+                   perception is found.",
         },
         run: cmd_search,
     }
@@ -5767,6 +5777,28 @@ pub(crate) fn search_with_roll(
         &format!("{player_name} searches the area.\r\n"),
     );
 
+    // Legacy `do_search`: doors first; only when none turn up does the
+    // searcher look for hiding characters.
+    let Some(nothing) = search_exits(world, player, room, args, &player_name, staff, roll) else {
+        return;
+    };
+    if search_characters(world, player, room, staff, roll) {
+        return;
+    }
+    send_to(world, player, nothing);
+}
+
+/// The hidden-exit half of `search`. `None` when an exit was found (and
+/// reported); otherwise the line to show if nothing else turns up either.
+fn search_exits(
+    world: &mut World,
+    player: Entity,
+    room: Entity,
+    args: &str,
+    player_name: &str,
+    staff: bool,
+    roll: &mut dyn FnMut(i32) -> i32,
+) -> Option<&'static str> {
     let arg = args.split_whitespace().next().unwrap_or("");
     let hidden: Vec<(Direction, bool)> = world
         .get::<Exits>(room)
@@ -5780,8 +5812,7 @@ pub(crate) fn search_with_roll(
         })
         .unwrap_or_default();
     if hidden.is_empty() {
-        send_to(world, player, "You find nothing of interest.\r\n");
-        return;
+        return Some("You find nothing of interest.\r\n");
     }
     let already: std::collections::HashSet<(Entity, Direction)> = world
         .get::<RevealedExits>(player)
@@ -5792,8 +5823,7 @@ pub(crate) fn search_with_roll(
         .filter(|(d, _)| !already.contains(&(room, *d)))
         .collect();
     if candidates.is_empty() {
-        send_to(world, player, "You find nothing new.\r\n");
-        return;
+        return Some("You find nothing new.\r\n");
     }
     let intelligence = world.get::<CoreStats>(player).map_or(0, |s| s.intelligence);
     let found = candidates
@@ -5801,8 +5831,7 @@ pub(crate) fn search_with_roll(
         .find(|(_, keyword_hit)| *keyword_hit || staff || intelligence > roll(200))
         .map(|(d, _)| d);
     let Some(found) = found else {
-        send_to(world, player, "You find nothing of interest.\r\n");
-        return;
+        return Some("You find nothing of interest.\r\n");
     };
     let newly = [found];
     let mut next = already;
@@ -5838,6 +5867,83 @@ pub(crate) fn search_with_roll(
     }
     send_rendered(world, player, &out);
     broadcast_room_except_players_rendered(world, room, &[player], &others);
+    None
+}
+
+/// The hidden-character half of `search` (legacy `do_search`,
+/// act.informative.cpp:1036): every hiding non-group character the
+/// searcher could see if it were not hiding has its hiddenness cut by
+/// `random(perception / 2, perception)`, and is found once what is left
+/// is within the searcher's perception. The cut stays even when the
+/// character is not found. Staff find everyone, and keep looking after
+/// the first find. `roll(hi)` draws `0..=hi`. True when someone was found.
+fn search_characters(
+    world: &mut World,
+    player: Entity,
+    room: Entity,
+    staff: bool,
+    roll: &mut dyn FnMut(i32) -> i32,
+) -> bool {
+    use crate::hiding;
+    let perception = hiding::perception_of(world, player);
+    let hidden: Vec<Entity> = {
+        let mut q = world
+            .query_filtered::<(Entity, &Located), bevy_ecs::query::Or<(With<Player>, With<Mob>)>>();
+        q.iter(world)
+            .filter(|(e, l)| l.0 == room && *e != player)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    let searcher_name = name_of(world, player);
+    let mut found = false;
+    for target in hidden {
+        if found && !staff {
+            break;
+        }
+        let orig = hiding::hiddenness(world, target);
+        if orig == 0 || hiding::same_group(world, player, target) {
+            continue;
+        }
+        // Could the searcher see it were it not hiding?
+        hiding::set_hiddenness(world, target, 0);
+        let sees = can_see_player(world, player, target);
+        hiding::set_hiddenness(world, target, orig);
+        if !sees {
+            continue;
+        }
+        let cut = perception / 2 + roll(perception - perception / 2);
+        hiding::set_hiddenness(world, target, (orig - cut).max(0));
+        if hiding::hiddenness(world, target) > perception && !staff {
+            continue;
+        }
+        hiding::reveal(world, target);
+        let target_name = name_of(world, target);
+        let verb = if orig <= perception {
+            "point out"
+        } else {
+            "find"
+        };
+        send_to(
+            world,
+            player,
+            format!("You {verb} {target_name} lurking here!\r\n"),
+        );
+        broadcast_room_except_players_rendered(
+            world,
+            room,
+            &[player, target],
+            &format!("{searcher_name} points out {target_name} lurking here!\r\n"),
+        );
+        if hiding::perception_of(world, target) + roll(200) > perception {
+            send_to(
+                world,
+                target,
+                format!("You think {searcher_name} has spotted you!\r\n"),
+            );
+        }
+        found = true;
+    }
+    found
 }
 
 inventory::submit! {
@@ -7005,10 +7111,10 @@ pub(crate) fn cmd_point(world: &mut World, player: Entity, args: &str) {
     // Actor in the room: player or mob.
     if let Some(target) = find_actor_in_room(world, arg, room, player) {
         let target_name = name_of(world, target);
-        let was_hidden = world.get::<Stealth>(target).is_some();
+        let was_hidden = crate::hiding::is_hidden(world, target);
         if was_hidden {
             // Reveal — pointing at someone hidden gives them away.
-            try_remove::<Stealth>(world, target);
+            crate::hiding::reveal(world, target);
             send_rendered(
                 world,
                 player,
@@ -7488,7 +7594,7 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
         recall: recall_owned
             .as_ref()
             .map(|(name, zone, id)| (name.as_str(), *zone, *id)),
-        stealth: world.get::<Stealth>(player).is_some(),
+        stealth: crate::hiding::is_hidden(world, player),
         flying: world.get::<Flying>(player).is_some(),
         mount_name: mount_name_owned.as_deref(),
         house: world
@@ -7839,15 +7945,20 @@ const TOPIC_HELP_ARTICLES: &[(&str, &str)] = &[
     ),
     (
         "stealth",
-        "<cyan>hide</> sets the Stealth marker. While hidden, your next swing\r\n\
-         lands an opening-strike bonus: <b:yellow>+acc, +50% damage</>, softened\r\n\
-         by the defender's <cyan>Perception</> (high perception spots you mid-\r\n\
-         swing). Stealth clears after that first swing regardless of outcome,\r\n\
-         so it's a real opener — not a permanent buff.\r\n\
+        "<cyan>hide</> rolls how well you hide from your hide skill, Dexterity and\r\n\
+         Intelligence. Anyone whose perception is below that number cannot see\r\n\
+         you; your group always can. Anything but looking around, hiding, moving\r\n\
+         and the like gives you away, and walking wears it down (<cyan>sneak</>\r\n\
+         slows that). <cyan>search</> can find a hider; <cyan>point</> gives one\r\n\
+         away.\r\n\
+         \r\n\
+         While hidden, your next swing lands an opening-strike bonus:\r\n\
+         <b:yellow>+acc, +50% damage</>, softened by the defender's <cyan>Perception</>.\r\n\
+         It is gone after that first swing regardless of outcome.\r\n\
          \r\n\
          <cyan>backstab</> is the rogue's specialty stealth strike: pierce-weapon\r\n\
          only, big multiplier on the weapon roll, even bigger when paired with\r\n\
-         <cyan>hide</> first. <cyan>visible</> clears stealth without swinging.",
+         <cyan>hide</> first. <cyan>visible</> drops your hiding without swinging.",
     ),
     (
         "tank",
@@ -11772,27 +11883,111 @@ pub(crate) fn cmd_walk(world: &mut World, player: Entity, _args: &str) {
     }
 }
 
-/// `hide`: set the `Stealth` marker on the player. Today this just
-/// flips the `hidden` symbol in damage formulas (BACKSTAB's bonus
-/// reads it) — there's no auto-fail on noisy actions, no skill check,
-/// and no visibility filtering in `look` yet. Those land with the
-/// rogue skill tree. The verb works so muscle memory is preserved.
-pub(crate) fn cmd_hide(world: &mut World, player: Entity, _args: &str) {
-    if world.get::<Stealth>(player).is_some() {
-        send_to(world, player, "You're already hidden.\r\n");
-        return;
-    }
-    try_insert(world, player, Stealth);
-    send_to(world, player, "You attempt to slip into the shadows.\r\n");
+/// Tick before which the hider may not hide again (legacy `WAIT_STATE`
+/// after `do_hide`; only `hide` itself honours it).
+#[derive(Component, Debug, Clone, Copy)]
+struct HideLag {
+    until: u64,
 }
 
-/// `visible` / `vis`: clear the `Stealth` marker. Always succeeds.
+/// `hide`: roll a [`Hiddenness`](mud_world::Hiddenness) from the `hide`
+/// skill, DEX and INT (legacy `do_hide`, act.other.cpp:1105). Anyone
+/// with a lower perception then fails to see you until you act, are
+/// found by `search`, or walk it off. The roll's constants come from the
+/// `HIDE` ability row.
+pub(crate) fn cmd_hide(world: &mut World, player: Entity, _args: &str) {
+    hide_with_roll(world, player, &mut |lo, hi| rand::random_range(lo..=hi));
+}
+
+/// `cmd_hide` with the `random(lower, upper)` roll injected.
+pub(crate) fn hide_with_roll(
+    world: &mut World,
+    player: Entity,
+    roll: &mut dyn FnMut(i32, i32) -> i32,
+) {
+    use crate::hiding;
+    let staff = crate::room_access::is_immortal(world, player);
+    // Staff have every skill (legacy gods carry the full set).
+    let skill = if staff {
+        100
+    } else {
+        hiding::skill_pct(world, player, "hide")
+    };
+    if skill == 0 {
+        send_to(
+            world,
+            player,
+            "You'd better leave that art to the rogues.\r\n",
+        );
+        return;
+    }
+    if world.get::<mud_world::Mounted>(player).is_some() {
+        send_to(world, player, "While mounted? I don't think so...\r\n");
+        return;
+    }
+    let now = world.get_resource::<crate::TickCount>().map_or(0, |t| t.0);
+    if !staff && world.get::<HideLag>(player).is_some_and(|l| l.until > now) {
+        send_to(
+            world,
+            player,
+            "You are still recovering from your last attempt to hide.\r\n",
+        );
+        return;
+    }
+    if hiding::is_hidden(world, player) {
+        send_to(world, player, "You try to find a better hiding spot.\r\n");
+    } else {
+        send_to(world, player, "You attempt to hide yourself.\r\n");
+    }
+    let params = hiding::hide_params(world);
+    let stats = world
+        .get::<mud_world::CoreStats>(player)
+        .copied()
+        .unwrap_or_default();
+    let level = mud_world::effective_level(world, player);
+    let mut bonus = hiding::rogue_skill_bonus(stats.dexterity);
+    // A halfling hiding with its group makes the DEX bonus count for more.
+    if hiding::is_halfling(world, player) && hiding_group_size(world, player) > 1 {
+        bonus = bonus.saturating_mul(level / params.halfling_group_level_divisor + 1);
+    }
+    let rolled = hiding::roll_hiddenness(
+        &params,
+        skill,
+        stats.dexterity,
+        stats.intelligence,
+        bonus,
+        roll,
+    );
+    hiding::set_hiddenness(world, player, rolled);
+    let wait = if hiding::class_plain_name(world, player).as_deref() == Some("thief") {
+        params.thief_wait_ticks
+    } else {
+        params.wait_ticks
+    };
+    try_insert(world, player, HideLag { until: now + wait });
+}
+
+/// Members of `player`'s group standing in the same room, `player`
+/// included (legacy `group_size(ch, true)`).
+fn hiding_group_size(world: &mut World, player: Entity) -> usize {
+    let Some(room) = world.get::<Located>(player).map(|l| l.0) else {
+        return 1;
+    };
+    let leader = crate::commands::group_root(world, player);
+    crate::commands::group_members(world, leader)
+        .into_iter()
+        .filter(|m| world.get::<Located>(*m).is_some_and(|l| l.0 == room))
+        .count()
+        .max(1)
+}
+
+/// `visible` / `vis`: stop hiding. Always succeeds.
 pub(crate) fn cmd_visible(world: &mut World, player: Entity, _args: &str) {
-    if world.get::<Stealth>(player).is_none() {
+    if !crate::hiding::is_hidden(world, player) {
         send_to(world, player, "You're already visible.\r\n");
         return;
     }
-    try_remove::<Stealth>(world, player);
+    crate::hiding::reveal(world, player);
     send_to(world, player, "You stop hiding.\r\n");
 }
 

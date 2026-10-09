@@ -18,9 +18,9 @@ use mud_db::enums::EntityType;
 use mud_world::{
     AbilityCatalog, AppliedTo, AttachedTriggers, ClassCatalog, CombatStats, CoreStats, Description,
     EffectCatalog, EffectInstance, EntityVariableCache, EquippedSlot, Fighting, Follower, Health,
-    Item, Keywords, KnownAbilities, Located, LuaOutbox, Mob, MobPrototypes, Named,
-    ObjectPrototypes, Online, Player, Posture, PostureKind, Profile, Stealth, Title,
-    TriggerCatalog, WorldKey, WorldKeyIndex,
+    Hiddenness, Item, Keywords, KnownAbilities, Located, LuaOutbox, Mob, MobPrototypes, Named,
+    ObjectPrototypes, Online, Player, Posture, PostureKind, Profile, Title, TriggerCatalog,
+    WorldKey, WorldKeyIndex,
 };
 
 /// One trigger body that ran into `wait(N)` and got parked. We hold the
@@ -3937,19 +3937,19 @@ impl UserData for LuaActor {
                         )
                     }),
                     // `actor.can_be_seen` / `canbeseen` — true when
-                    // the entity is *not* in stealth. Used by greet
+                    // the entity is not hiding. Used by greet
                     // / receive triggers to skip messaging hidden
                     // actors. (8 corpus refs)
                     "can_be_seen" | "canbeseen" => world_from_lua(lua, |w| {
-                        Value::Boolean(w.get::<Stealth>(this.entity).is_none())
+                        Value::Boolean(w.get::<Hiddenness>(this.entity).is_none())
                     }),
-                    // `actor.hiddenness` — integer stealth strength.
-                    // Schema doesn't model graded stealth yet, so the
-                    // marker present = 1, absent = 0. Legacy bodies
-                    // compare like `if actor.hiddenness < 1` which
-                    // resolves "no Stealth" → 0 → see the actor.
+                    // `actor.hiddenness` — legacy `GET_HIDDENNESS`,
+                    // 0..=1000 (0 when not hiding). Legacy bodies compare
+                    // like `if actor.hiddenness < 1`.
                     "hiddenness" => world_from_lua(lua, |w| {
-                        Value::Integer(i64::from(w.get::<Stealth>(this.entity).is_some()))
+                        Value::Integer(i64::from(
+                            w.get::<Hiddenness>(this.entity).map_or(0, |h| h.0),
+                        ))
                     }),
                     // `actor.flags` / `aff_flags` / `eff_flags` —
                     // legacy CircleMUD-style concatenation of active

@@ -13,6 +13,7 @@ mod equip_apply;
 mod events;
 mod fear;
 mod flight;
+mod hiding;
 mod idle;
 mod item_alter;
 mod item_custom;

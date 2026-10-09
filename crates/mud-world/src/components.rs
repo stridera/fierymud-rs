@@ -760,9 +760,10 @@ pub struct SavingThrows {
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct Focus(pub i32);
 
-/// Detect-hidden / detect-stealth modifier. Compared against
-/// defenders' `Stealth` bonus to decide whether the wearer can see
-/// hidden mobs / players. Legacy `APPLY_PERCEPTION` lives here.
+/// Perception modifier on top of the player base (legacy
+/// `APPLY_PERCEPTION`; a mob's proto `perception` is its whole value).
+/// A viewer sees a hidden character only when this total reaches the
+/// target's [`Hiddenness`]; see `hiding::perception_of`.
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct Perception(pub i32);
 
@@ -1116,13 +1117,33 @@ pub struct CoinPile(pub i64);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct LooseCoins;
 
-/// Marker: this entity is hidden / sneaking. Resolves the `hidden`
-/// symbol in formula expressions to 1 (vs 0 when absent). Used by
-/// rogue-style abilities (BACKSTAB's `bonusIfHidden`, future
-/// THROATCUT bonus). No `hide` command yet — admin tooling /
-/// future content sets the marker.
+/// Marker: the bearer carries a `hidden` / `concealment` status flag
+/// (legacy `EFF_STEALTH`, which `fierylib` imports as `hidden`; a
+/// finished `hide` that also passes the stealth skill roll sets it).
+/// Resolves the `hidden` symbol in formula expressions to 1 and earns
+/// the opening-strike bonus, same as a positive [`Hiddenness`]. It has
+/// no say in who can see the bearer: visibility reads [`Hiddenness`]
+/// only. Sneaking is its own marker, [`Sneaking`].
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Stealth;
+
+/// Marker: the bearer is sneaking (the `sneak` status flag; legacy
+/// `EFF_SNEAK`). Sneaking does not hide anyone by itself: it makes
+/// [`Hiddenness`] decay slowly per move instead of fast.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Sneaking;
+
+/// Highest [`Hiddenness`] (legacy `APPLY_HIDDENNESS` clamps to 0..1000).
+pub const MAX_HIDDENNESS: i32 = 1000;
+
+/// How well hidden the bearer is (legacy `GET_HIDDENNESS`), 1..=1000.
+/// Absent means 0, not hidden. A viewer whose perception
+/// ([`Perception`] plus the player base) is below this value does not
+/// see the bearer (legacy `INVIS_OK`). Roll it with `hide`, strip it
+/// with `hiding::reveal`; never insert a zero or out-of-range value
+/// directly, go through `hiding::set_hiddenness`.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Hiddenness(pub i32);
 
 /// Per-character set of `(room_entity, direction)` pairs the
 /// player has discovered via `search`, overriding the

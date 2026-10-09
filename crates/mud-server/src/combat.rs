@@ -1198,8 +1198,8 @@ fn apply_swing(world: &mut World, s: &Swing) {
         }
     }
 
-    // A6 (perception / stealth bonus): an attacker with the
-    // Stealth marker gets an opening-strike accuracy + damage
+    // A6 (perception / stealth bonus): a hiding attacker (positive
+    // `Hiddenness`, or the Stealth marker) gets an opening-strike accuracy + damage
     // bonus on this swing, then loses Stealth. The defender's
     // `Perception` softens the bonus — high-perception
     // characters spot the attacker mid-swing and partially
@@ -1210,7 +1210,11 @@ fn apply_swing(world: &mut World, s: &Swing) {
     // Stealth is cleared after this swing whether or not the
     // attacker saw a bonus, mirroring how a real opening attack
     // breaks concealment regardless of outcome.
-    let attacker_hidden = world.get::<mud_world::Stealth>(s.attacker).is_some();
+    // Legacy `hit()` saves the attacker's hiddenness for the backstab bonus
+    // and then zeroes it, so a hiding attacker is seen from here on.
+    let attacker_hidden = world.get::<mud_world::Stealth>(s.attacker).is_some()
+        || crate::hiding::is_hidden(world, s.attacker);
+    crate::hiding::reveal(world, s.attacker);
     let defender_perception = world
         .get::<mud_world::Perception>(s.target)
         .map_or(0, |p| p.0);
@@ -1880,6 +1884,8 @@ fn resolve_killer(world: &mut World, victim: Entity, room: Entity) -> Option<Ent
 #[allow(clippy::too_many_lines)]
 pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str, room: Entity) {
     let is_player = world.get::<Player>(victim).is_some();
+    // The dead do not hide.
+    crate::hiding::reveal(world, victim);
 
     if is_player {
         // If they're already a Ghost, don't double-corpse them — just
@@ -3104,6 +3110,36 @@ mod tests {
             world.get::<mud_world::Stealth>(attacker).is_none(),
             "Stealth marker dropped after first swing",
         );
+    }
+
+    /// Legacy `hit()`: any swing from a hiding attacker reveals it, and the
+    /// opening-strike bonus is read before that happens.
+    #[test]
+    fn a_swing_reveals_a_hiding_attacker_and_the_bonus_is_read_first() {
+        let hp_lost = |hid: i32| -> (i32, i32) {
+            let mut world = World::new();
+            let room = make_room(&mut world);
+            let target = make_target(&mut world, room, 1000);
+            let attacker = make_attacker(&mut world, room, target, 5);
+            if hid > 0 {
+                world
+                    .get_entity_mut(attacker)
+                    .unwrap()
+                    .insert(mud_world::Hiddenness(hid));
+            }
+            run_combat_tick(&mut world);
+            (
+                1000 - world.get::<Health>(target).unwrap().hp,
+                crate::hiding::hiddenness(&world, attacker),
+            )
+        };
+        let (_, left) = hp_lost(400);
+        assert_eq!(left, 0, "hiddenness dropped by the swing");
+        // The forced hit roll always lands, so any difference is the bonus
+        // damage a hiding attacker gets (+50% at zero defender perception).
+        let (hidden, _) = hp_lost(400);
+        let (open, _) = hp_lost(0);
+        assert!(hidden > open, "hidden {hidden} vs open {open}");
     }
 
     /// Blur gives one extra swing pass per round, like Haste: summed over

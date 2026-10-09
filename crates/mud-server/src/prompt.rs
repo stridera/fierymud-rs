@@ -31,8 +31,8 @@
 use bevy_ecs::prelude::{Entity, World};
 use mud_world::{
     AbilityCatalog, AppliedTo, BankWealth, ClassCatalog, CombatStats, Cooldowns, EffectInstance,
-    Fighting, Health, Located, MudClock, Named, PlayerFlags, Profile, Stamina, Stealth,
-    SwitchedInto, Wealth, WizInvis,
+    Fighting, Health, Located, MudClock, Named, PlayerFlags, Profile, Stamina, SwitchedInto,
+    Wealth, WizInvis,
 };
 
 use crate::commands::{
@@ -789,7 +789,7 @@ pub(crate) fn build_prompt_ctx(world: &mut World, target: Entity) -> PromptCtx {
         class_name,
         level,
         alignment: world.get::<CombatStats>(acting).map_or(0, |c| c.alignment),
-        hiddenness: i64::from(world.get::<Stealth>(acting).is_some()),
+        hiddenness: i64::from(crate::hiding::hiddenness(world, acting)),
         rage: 0,
         zone_name,
         room,
