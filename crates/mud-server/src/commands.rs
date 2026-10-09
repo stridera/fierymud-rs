@@ -508,6 +508,10 @@ mod multi_hit_tests;
 #[cfg(test)]
 #[path = "commands/norepeat_tests.rs"]
 mod norepeat_tests;
+
+#[cfg(test)]
+#[path = "commands/symbol_cmd_tests.rs"]
+mod symbol_cmd_tests;
 #[cfg(test)]
 #[path = "commands/order_tests.rs"]
 mod order_tests;
@@ -973,6 +977,22 @@ impl AliasLimit {
     }
 }
 
+/// One-character command names that legacy `command_interpreter` splits
+/// from their argument without a space (`'hi`, `:waves`, `.hello`, `;hi`).
+const SYMBOL_COMMANDS: &[char] = &['\'', ':', '.', ';', '/'];
+
+/// Insert the missing space after a leading symbol command so `'hello`
+/// reaches the registry as `' hello`. Anything else is returned untouched.
+fn split_symbol_command(line: &str) -> std::borrow::Cow<'_, str> {
+    let mut chars = line.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), Some(next)) if SYMBOL_COMMANDS.contains(&c) && !next.is_whitespace() => {
+            std::borrow::Cow::Owned(format!("{c} {}", &line[c.len_utf8()..]))
+        }
+        _ => std::borrow::Cow::Borrowed(line),
+    }
+}
+
 /// Longest alias-in-alias chain followed for one typed line.
 const MAX_ALIAS_DEPTH: usize = 8;
 /// Most commands one typed line may expand into across all aliases.
@@ -1030,6 +1050,11 @@ fn dispatch_line(world: &mut World, player: Entity, line: &str, run: &mut AliasR
         run.active.pop();
         return;
     }
+
+    // Legacy `command_interpreter`: a non-alphabetic first character is a
+    // one-character command that needs no space, so `'hi` is `' hi`.
+    let split_line = split_symbol_command(trimmed);
+    let trimmed = split_line.as_ref();
 
     // `switch` redirects: when the player is puppeteering a mob,
     // commands they type dispatch against the mob instead. The
