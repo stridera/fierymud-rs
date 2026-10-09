@@ -2216,6 +2216,71 @@ impl IgnoreList {
     }
 }
 
+/// One grant or revoke on a command (legacy `GrantType`): who placed it
+/// and at what level, so a lower-level staffer cannot undo it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GrantEntry {
+    /// Canonical (primary) command name, lowercase.
+    pub command: String,
+    pub grantor: String,
+    pub level: i32,
+}
+
+/// What a character's grants say about one command (legacy
+/// `CMD_GRANTED` / `CMD_REVOKED` / `CMD_NOT_GRANTED`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrantUsability {
+    Granted,
+    Revoked,
+    NotGranted,
+}
+
+/// Per-character command grants and revokes (legacy `grant` / `revoke`
+/// / `ungrant`). A grant lets the character use a command above their
+/// rank; a revoke takes one away. A command is on at most one of the two
+/// lists. Persisted as JSON on `Characters.command_grants`.
+#[derive(Component, Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CommandGrants {
+    #[serde(default)]
+    pub grants: Vec<GrantEntry>,
+    #[serde(default)]
+    pub revokes: Vec<GrantEntry>,
+}
+
+impl CommandGrants {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.grants.is_empty() && self.revokes.is_empty()
+    }
+
+    #[must_use]
+    pub fn usability(&self, command: &str) -> GrantUsability {
+        if self.revokes.iter().any(|g| g.command == command) {
+            GrantUsability::Revoked
+        } else if self.grants.iter().any(|g| g.command == command) {
+            GrantUsability::Granted
+        } else {
+            GrantUsability::NotGranted
+        }
+    }
+
+    #[must_use]
+    pub fn find_grant(&self, command: &str) -> Option<&GrantEntry> {
+        self.grants.iter().find(|g| g.command == command)
+    }
+
+    #[must_use]
+    pub fn find_revoke(&self, command: &str) -> Option<&GrantEntry> {
+        self.revokes.iter().find(|g| g.command == command)
+    }
+
+    /// Drop every entry for `command` from both lists.
+    pub fn clear_command(&mut self, command: &str) {
+        self.grants.retain(|g| g.command != command);
+        self.revokes.retain(|g| g.command != command);
+    }
+}
+
 /// Bounded history of recent `tell` senders, newest first. Stores the
 /// sender's name at the time (not their Entity) so the readout is
 /// stable across reconnects / despawns. Display-only — `reply` still

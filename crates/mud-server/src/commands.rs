@@ -497,6 +497,21 @@ mod economy;
 mod followers;
 #[path = "commands/gmcp.rs"]
 mod gmcp;
+#[path = "commands/grants.rs"]
+mod grants;
+#[cfg(test)]
+#[path = "commands/grants_tests.rs"]
+mod grants_tests;
+#[path = "commands/script_attach.rs"]
+mod script_attach;
+#[cfg(test)]
+#[path = "commands/script_attach_tests.rs"]
+mod script_attach_tests;
+#[path = "commands/staff_tell.rs"]
+mod staff_tell;
+#[cfg(test)]
+#[path = "commands/staff_tell_tests.rs"]
+mod staff_tell_tests;
 pub(crate) use gmcp::clear_gmcp_sent;
 #[cfg(test)]
 #[path = "commands/gmcp_tests.rs"]
@@ -884,7 +899,14 @@ pub async fn try_dispatch_async(
             || (UserRole::Player, Vec::new()),
             |a| (a.role, a.perms.clone()),
         );
-        match resolve_abbrev(&head, role, &perms, world.get_resource::<SocialRegistry>()) {
+        let grants = world.get::<mud_world::CommandGrants>(player);
+        match resolve_abbrev(
+            &head,
+            role,
+            &perms,
+            grants,
+            world.get_resource::<SocialRegistry>(),
+        ) {
             Some(Abbrev::Command(cmd)) if abbrev_allowed(cmd) => {
                 head = cmd.names[0].to_string();
             }
@@ -1278,7 +1300,8 @@ fn dispatch_line(world: &mut World, player: Entity, line: &str, run: &mut AliasR
             || (UserRole::Player, Vec::new()),
             |a| (a.role, a.perms.clone()),
         );
-        match resolve_abbrev(tokens[0], role, &perms, registry)? {
+        let grants = world.get::<mud_world::CommandGrants>(player);
+        match resolve_abbrev(tokens[0], role, &perms, grants, registry)? {
             Abbrev::Command(winner) => Some((winner, usize::from(abbrev_allowed(winner)))),
             Abbrev::Social(name) => {
                 social_word = name.to_string();
@@ -1529,6 +1552,20 @@ fn command_permitted(world: &World, player: Entity, cmd: &Command) -> bool {
     }
     let dev_mode_on = world.get_resource::<crate::DevMode>().is_some_and(|d| d.0);
     if let Some(a) = world.get::<Account>(player) {
+        // Per-character `grant` / `revoke` (legacy `can_use_command`): a
+        // grant opens the command whatever the rank, a revoke closes it
+        // whatever the rank. Only the typed-by-the-player origin reaches
+        // here (the script-origin gate above already refused non-Player
+        // commands), so a grant never widens what a script can run.
+        match world
+            .get::<mud_world::CommandGrants>(player)
+            .map_or(mud_world::GrantUsability::NotGranted, |g| {
+                g.usability(cmd.names[0])
+            }) {
+            mud_world::GrantUsability::Granted => return true,
+            mud_world::GrantUsability::Revoked => return false,
+            mud_world::GrantUsability::NotGranted => {}
+        }
         dev_mode_on
             || (a.role.at_least(cmd.min_role)
                 && cmd.required_perm.is_none_or(|p| a.perms.contains(&p)))
@@ -1827,7 +1864,7 @@ pub(crate) fn resolve_by_prefix(
     role: UserRole,
     perms: &[Permission],
 ) -> Option<&'static Command> {
-    match resolve_abbrev(typed, role, perms, None) {
+    match resolve_abbrev(typed, role, perms, None, None) {
         Some(Abbrev::Command(c)) => Some(c),
         _ => None,
     }
@@ -1844,6 +1881,7 @@ pub(crate) fn resolve_abbrev<'a>(
     typed: &str,
     role: UserRole,
     perms: &[Permission],
+    grants: Option<&mud_world::CommandGrants>,
     socials: Option<&'a SocialRegistry>,
 ) -> Option<Abbrev<'a>> {
     if typed.is_empty() {
@@ -1855,7 +1893,7 @@ pub(crate) fn resolve_abbrev<'a>(
     // of theirs has a table position), by their primary name.
     let mut best_new_cmd: Option<(PrefixKey<'_>, &'static Command)> = None;
     for cmd in all_commands() {
-        if !visible(cmd, role, perms) {
+        if !visible_with(cmd, role, perms, grants) {
             continue;
         }
         let new_to_rust = cmd.names.iter().all(|n| priority::legacy_rank(n).is_none());
@@ -9661,6 +9699,24 @@ pub(crate) fn stack_entries(
 
 pub(crate) fn visible(cmd: &Command, role: UserRole, perms: &[Permission]) -> bool {
     role.at_least(cmd.min_role) && cmd.required_perm.is_none_or(|p| perms.contains(&p))
+}
+
+/// [`visible`] with the character's `grant` / `revoke` lists applied
+/// (legacy `can_use_command`): a granted command is visible whatever the
+/// rank, a revoked one is not.
+pub(crate) fn visible_with(
+    cmd: &Command,
+    role: UserRole,
+    perms: &[Permission],
+    grants: Option<&mud_world::CommandGrants>,
+) -> bool {
+    match grants.map_or(mud_world::GrantUsability::NotGranted, |g| {
+        g.usability(cmd.names[0])
+    }) {
+        mud_world::GrantUsability::Granted => true,
+        mud_world::GrantUsability::Revoked => false,
+        mud_world::GrantUsability::NotGranted => visible(cmd, role, perms),
+    }
 }
 
 /// Cap on how many prefix suggestions the unknown-command hint

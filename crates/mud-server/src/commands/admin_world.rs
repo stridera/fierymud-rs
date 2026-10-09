@@ -2700,7 +2700,11 @@ fn parse_instance_key(needle: &str) -> Option<(i32, i32)> {
 /// `zone:id` (a spawned instance of that mob prototype; `N.zone:id` picks
 /// the Nth). Candidates in the viewer's own room come first, in `look`
 /// order; then online players; then mobs by (prototype, spawn order).
-fn find_actor_anywhere(world: &mut World, viewer: Entity, token: &str) -> Option<Entity> {
+pub(crate) fn find_actor_anywhere(
+    world: &mut World,
+    viewer: Entity,
+    token: &str,
+) -> Option<Entity> {
     let (index, needle) = commands::parse_indexed_needle(token);
     let key = parse_instance_key(needle);
     let needle = needle.to_ascii_lowercase();

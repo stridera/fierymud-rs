@@ -4004,6 +4004,7 @@ impl ConnRouter {
             spell_cooldowns_json,
             cooldowns_json,
             ignore_list_json,
+            command_grants_json,
             effect_instances_json,
             pets_json,
             house_summary,
@@ -4179,6 +4180,14 @@ impl ConnRouter {
                 && !list.is_empty()
             {
                 e.insert(mud_world::IgnoreList(list));
+            }
+            // CommandGrants — JSON {grants, revokes} (validated in
+            // `load_persisted`).
+            if let Some(json) = command_grants_json
+                && let Ok(grants) = serde_json::from_value::<mud_world::CommandGrants>(json)
+                && !grants.is_empty()
+            {
+                e.insert(grants);
             }
             // Cooldowns — JSON map of ability_id → unix_secs_ready_at.
             // Convert to Instant by computing the offset from `now`,
@@ -4916,6 +4925,7 @@ pub(crate) struct PlayerSaveSnapshot {
     spell_cooldowns_json: Option<serde_json::Value>,
     cooldowns_json: Option<serde_json::Value>,
     ignore_list_json: Option<serde_json::Value>,
+    command_grants_json: Option<serde_json::Value>,
     pub(crate) effect_instances_json: Option<serde_json::Value>,
     pets_json: Option<serde_json::Value>,
     ability_rows: Vec<mud_db::character_abilities::CharacterAbilityRow>,
@@ -5223,6 +5233,10 @@ pub(crate) fn snapshot_player(
         .get::<mud_world::IgnoreList>(entity)
         .filter(|l| !l.0.is_empty())
         .and_then(|l| serde_json::to_value(&l.0).ok());
+    let command_grants_json: Option<serde_json::Value> = world
+        .get::<mud_world::CommandGrants>(entity)
+        .filter(|g| !g.is_empty())
+        .and_then(|g| serde_json::to_value(g).ok());
     // Active EffectInstances on this player. Query for every effect
     // entity whose AppliedTo points at the player; flatten to the
     // persistence shape with optional ModifyDelta. Permanent effects
@@ -5410,6 +5424,7 @@ pub(crate) fn snapshot_player(
         spell_cooldowns_json,
         cooldowns_json,
         ignore_list_json,
+        command_grants_json,
         effect_instances_json,
         pets_json,
         ability_rows,
@@ -5524,6 +5539,7 @@ struct PersistedLoad {
     spell_cooldowns_json: Option<serde_json::Value>,
     cooldowns_json: Option<serde_json::Value>,
     ignore_list_json: Option<serde_json::Value>,
+    command_grants_json: Option<serde_json::Value>,
     effect_instances_json: Option<serde_json::Value>,
     pets_json: Option<serde_json::Value>,
     house_summary: Option<HouseBundle>,
@@ -5681,6 +5697,12 @@ async fn load_persisted(
         mud_db::characters::load_ignore_list(pool, id),
     )
     .await?;
+    let command_grants_json = guarded(
+        fault,
+        "command_grants",
+        mud_db::characters::load_command_grants(pool, id),
+    )
+    .await?;
     let effect_instances_json = guarded(
         fault,
         "effect_instances",
@@ -5701,6 +5723,7 @@ async fn load_persisted(
     )?;
     check_json::<mud_world::SpellSlots>("spell_cooldowns", spell_cooldowns_json.as_ref())?;
     check_json::<Vec<String>>("ignore_list", ignore_list_json.as_ref())?;
+    check_json::<mud_world::CommandGrants>("command_grants", command_grants_json.as_ref())?;
     check_json::<std::collections::HashMap<String, i64>>("cooldowns", cooldowns_json.as_ref())?;
     check_json::<PersistedEffects>("effect_instances", effect_instances_json.as_ref())?;
     check_json::<PersistedPets>("pets", pets_json.as_ref())?;
@@ -5754,6 +5777,7 @@ async fn load_persisted(
         spell_cooldowns_json,
         cooldowns_json,
         ignore_list_json,
+        command_grants_json,
         effect_instances_json,
         pets_json,
         house_summary,
@@ -5863,6 +5887,8 @@ pub(crate) async fn write_snapshot(
         .await?;
     mud_db::characters::save_cooldowns(&mut *tx, cid, snap.cooldowns_json.as_ref()).await?;
     mud_db::characters::save_ignore_list(&mut *tx, cid, snap.ignore_list_json.as_ref()).await?;
+    mud_db::characters::save_command_grants(&mut *tx, cid, snap.command_grants_json.as_ref())
+        .await?;
     mud_db::characters::save_effect_instances(&mut *tx, cid, snap.effect_instances_json.as_ref())
         .await?;
     mud_db::characters::save_pets(&mut *tx, cid, snap.pets_json.as_ref()).await?;
@@ -11507,6 +11533,7 @@ mod tests {
             "spell_cooldowns",
             "cooldowns",
             "ignore_list",
+            "command_grants",
             "effect_instances",
             "pets",
             "player_houses",
@@ -11554,6 +11581,7 @@ mod tests {
             "trophy_data",
             "spell_cooldowns",
             "ignore_list",
+            "command_grants",
             "cooldowns",
             "effect_instances",
             "pets",
@@ -11561,8 +11589,8 @@ mod tests {
         for column in columns {
             mud_db::sqlx::query(
                 "UPDATE \"Characters\" SET script_vars = NULL, trophy_data = NULL, \
-                 spell_cooldowns = NULL, ignore_list = NULL, cooldowns = NULL, \
-                 effect_instances = NULL, pets = NULL WHERE id = $1",
+                 spell_cooldowns = NULL, ignore_list = NULL, command_grants = NULL, \
+                 cooldowns = NULL, effect_instances = NULL, pets = NULL WHERE id = $1",
             )
             .bind(&c.id)
             .execute(&pool)
@@ -11604,8 +11632,8 @@ mod tests {
         // Empty values are allowed.
         mud_db::sqlx::query(
             "UPDATE \"Characters\" SET script_vars = '{}', trophy_data = '[]', \
-             spell_cooldowns = '{}', ignore_list = '[]', cooldowns = '{}', \
-             effect_instances = '{}', pets = NULL WHERE id = $1",
+             spell_cooldowns = '{}', ignore_list = '[]', command_grants = '{}', \
+             cooldowns = '{}', effect_instances = '{}', pets = NULL WHERE id = $1",
         )
         .bind(&c.id)
         .execute(&pool)
@@ -11614,6 +11642,48 @@ mod tests {
         load_persisted(&pool, &c, &user, None)
             .await
             .unwrap_or_else(|f| panic!("empty columns refused: {f}"));
+        temp_cleanup(&pool, &[], &[&c.id], &[]).await;
+    }
+
+    /// `grant` / `revoke` lists survive the save and load path, and an
+    /// empty list is stored as NULL.
+    #[tokio::test(flavor = "current_thread")]
+    async fn command_grants_round_trip_through_the_column() {
+        let Some((pool, _db_lock)) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let (user, c) = temp_unlinked_char(&pool, "cg").await;
+        let grants = mud_world::CommandGrants {
+            grants: vec![mud_world::GrantEntry {
+                command: "send".into(),
+                grantor: "Boss".into(),
+                level: 105,
+            }],
+            revokes: vec![mud_world::GrantEntry {
+                command: "goto".into(),
+                grantor: "Boss".into(),
+                level: 105,
+            }],
+        };
+        let json = serde_json::to_value(&grants).unwrap();
+        mud_db::characters::save_command_grants(&pool, &c.id, Some(&json))
+            .await
+            .unwrap();
+        let loaded = load_persisted(&pool, &c, &user, None)
+            .await
+            .unwrap_or_else(|f| panic!("load failed at {f}"));
+        let back: mud_world::CommandGrants =
+            serde_json::from_value(loaded.command_grants_json.unwrap()).unwrap();
+        assert_eq!(back, grants);
+
+        mud_db::characters::save_command_grants(&pool, &c.id, None)
+            .await
+            .unwrap();
+        let loaded = load_persisted(&pool, &c, &user, None)
+            .await
+            .unwrap_or_else(|f| panic!("load failed at {f}"));
+        assert!(loaded.command_grants_json.is_none());
         temp_cleanup(&pool, &[], &[&c.id], &[]).await;
     }
 

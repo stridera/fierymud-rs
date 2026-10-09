@@ -718,6 +718,37 @@ pub async fn save_ignore_list<'e, E: PgExecutor<'e>>(
     Ok(())
 }
 
+/// Read the JSON `command_grants` blob — the character's `grant` /
+/// `revoke` lists. Returns `Ok(None)` when NULL (no grants).
+pub async fn load_command_grants(
+    pool: &PgPool,
+    character_id: &str,
+) -> sqlx::Result<Option<serde_json::Value>> {
+    let row = sqlx::query!(
+        r#"SELECT command_grants FROM "Characters" WHERE id = $1"#,
+        character_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.and_then(|r| r.command_grants))
+}
+
+/// Persist the `command_grants` blob. Pass `None` to clear.
+pub async fn save_command_grants<'e, E: PgExecutor<'e>>(
+    executor: E,
+    character_id: &str,
+    blob: Option<&serde_json::Value>,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        r#"UPDATE "Characters" SET command_grants = $1 WHERE id = $2"#,
+        blob,
+        character_id,
+    )
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
 /// Read the JSON `effect_instances` blob — wall-clock-stamped list of
 /// active `EffectInstance`s at the time of save. Returns `Ok(None)` when
 /// NULL. Caller filters expired entries against the configured

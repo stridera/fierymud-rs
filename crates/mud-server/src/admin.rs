@@ -110,6 +110,7 @@ pub enum AdminRequest {
         spell_cooldowns_json: Option<serde_json::Value>,
         cooldowns_json: Option<serde_json::Value>,
         ignore_list_json: Option<serde_json::Value>,
+        command_grants_json: Option<serde_json::Value>,
         effect_instances_json: Option<serde_json::Value>,
     },
     SessionDestroy {
@@ -485,6 +486,9 @@ async fn handle_session_create(
     let ignore_list_json = characters::load_ignore_list(&state.pool, &character.id)
         .await
         .unwrap_or_default();
+    let command_grants_json = characters::load_command_grants(&state.pool, &character.id)
+        .await
+        .unwrap_or_default();
     let effect_instances_json = characters::load_effect_instances(&state.pool, &character.id)
         .await
         .unwrap_or_default();
@@ -504,6 +508,7 @@ async fn handle_session_create(
                 spell_cooldowns_json,
                 cooldowns_json,
                 ignore_list_json,
+                command_grants_json,
                 effect_instances_json,
             },
         )
@@ -954,6 +959,7 @@ fn service(world: &mut World, req: AdminRequest) -> AdminResponse {
             spell_cooldowns_json,
             cooldowns_json,
             ignore_list_json,
+            command_grants_json,
             effect_instances_json,
         } => session_create(
             world,
@@ -969,6 +975,7 @@ fn service(world: &mut World, req: AdminRequest) -> AdminResponse {
             spell_cooldowns_json,
             cooldowns_json,
             ignore_list_json,
+            command_grants_json,
             effect_instances_json,
         ),
         AdminRequest::SessionDestroy { player_name } => session_destroy(world, &player_name),
@@ -1746,6 +1753,7 @@ fn session_create(
     spell_cooldowns_json: Option<serde_json::Value>,
     cooldowns_json: Option<serde_json::Value>,
     ignore_list_json: Option<serde_json::Value>,
+    command_grants_json: Option<serde_json::Value>,
     effect_instances_json: Option<serde_json::Value>,
 ) -> AdminResponse {
     // Reject duplicate by name.
@@ -1863,6 +1871,12 @@ fn session_create(
             && !list.is_empty()
         {
             e.insert(mud_world::IgnoreList(list));
+        }
+        if let Some(json) = command_grants_json
+            && let Ok(grants) = serde_json::from_value::<mud_world::CommandGrants>(json)
+            && !grants.is_empty()
+        {
+            e.insert(grants);
         }
         if let Some(json) = cooldowns_json
             && let Ok(map) = serde_json::from_value::<std::collections::HashMap<String, i64>>(json)
