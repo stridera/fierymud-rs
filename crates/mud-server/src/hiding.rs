@@ -108,16 +108,15 @@ pub(crate) fn same_group(world: &World, a: Entity, b: Entity) -> bool {
 
 /// True when `target` is hiding well enough that `viewer` does not see
 /// it (legacy `GET_HIDDENNESS(obj) <= GET_PERCEPTION(sub)` failing).
-/// Never for the character itself, a group mate, an immortal or a
-/// `HOLY_LIGHT` viewer.
+/// Never for the character itself, a group mate or a `HOLY_LIGHT`
+/// viewer (legacy `IMM_CAN_SEE`: staff rank alone is no bypass).
 #[must_use]
 pub(crate) fn hidden_from(world: &World, viewer: Entity, target: Entity) -> bool {
     let hid = hiddenness(world, target);
     if hid == 0 || viewer == target {
         return false;
     }
-    if crate::room_access::is_immortal(world, viewer)
-        || crate::commands::has_flag(world, viewer, mud_db::enums::PlayerFlag::HolyLight)
+    if crate::commands::has_flag(world, viewer, mud_db::enums::PlayerFlag::HolyLight)
         || same_group(world, viewer, target)
     {
         return false;

@@ -11221,13 +11221,12 @@ pub(crate) fn sees_characters_in_dark(world: &World, entity: Entity) -> bool {
 }
 
 /// True when `observer` perceives through magical invisibility: the
-/// `DetectInvis` marker (spell/flag), `HOLY_LIGHT`, or an Immortal+
-/// account (gods see all). Legacy `INVIS_OK` / `PRF_HOLYLIGHT`.
+/// `DetectInvis` marker (spell/flag) or `HOLY_LIGHT`. Legacy
+/// `INVIS_OK` / `IMM_CAN_SEE`: staff rank alone does not pierce.
 #[must_use]
 pub(crate) fn pierces_invisibility(world: &World, observer: Entity) -> bool {
     world.get::<mud_world::DetectInvis>(observer).is_some()
         || has_flag(world, observer, PlayerFlag::HolyLight)
-        || crate::room_access::is_immortal(world, observer)
 }
 
 /// True when `target` is magically invisible and `viewer` cannot
@@ -11242,19 +11241,22 @@ pub(crate) fn hidden_by_magic_from(world: &World, viewer: Entity, target: Entity
 }
 
 /// THE shared visibility predicate (legacy `CAN_SEE`): may `viewer`
-/// perceive `target`? An actor always sees itself; a blind viewer
+/// perceive `target`? An actor always sees itself and its group mates
+/// (legacy `SELF` / `IS_IN_GROUP`, checked before blindness, darkness
+/// and invisibility); a blind viewer
 /// ([`senses::is_blind`]) sees nobody else; a magically
 /// invisible `target` (`Invisible`) is hidden from anyone who does not
 /// pierce invisibility ([`pierces_invisibility`]); a `WizInvis(N)`
 /// target is hidden from viewers whose `Profile.level` is below `N`; a
 /// hiding target ([`crate::hiding::hidden_from`]) is hidden from a viewer whose
 /// perception falls short of its hiddenness, unless the viewer is the
-/// target, in its group, an immortal or on `HOLY_LIGHT`.
+/// target, in its group or on `HOLY_LIGHT` (staff rank alone is no
+/// bypass, as in legacy `IMM_CAN_SEE`).
 /// Every room listing, name-based target resolver, aggro check and
 /// per-observer message goes through this one function.
 #[must_use]
 pub(crate) fn can_see_player(world: &World, viewer: Entity, target: Entity) -> bool {
-    if viewer == target {
+    if viewer == target || crate::hiding::same_group(world, viewer, target) {
         return true;
     }
     !senses::is_blind(world, viewer)
@@ -18392,7 +18394,18 @@ pub(crate) fn invoke_ability_with(
         if target_entity != player {
             except.push(target_entity);
         }
-        broadcast_room_except_rendered(world, located.0, &except, &format!("{rendered}\r\n"));
+        // Observers who cannot see the caster or the target get "someone".
+        let mut actors: Vec<(Entity, &str)> = vec![(player, actor_name.as_str())];
+        if target_entity != player {
+            actors.push((target_entity, target_name_raw.as_str()));
+        }
+        broadcast_room_anonymised(
+            world,
+            located.0,
+            &except,
+            &actors,
+            &format!("{rendered}\r\n"),
+        );
     }
     // Per-condition cleanse lines (Cure Blind's "Your vision returns!").
     // Legacy `act(to_room, TO_ROOM)` reaches everyone in the room except
@@ -18402,10 +18415,15 @@ pub(crate) fn invoke_ability_with(
         if let Some(room_line) = to_room
             && let Some(located) = world.get::<Located>(target_entity).copied()
         {
-            broadcast_room_except_rendered(
+            let mut actors: Vec<(Entity, &str)> = vec![(target_entity, target_name_raw.as_str())];
+            if target_entity != player {
+                actors.push((player, actor_name.as_str()));
+            }
+            broadcast_room_anonymised(
                 world,
                 located.0,
                 &[target_entity],
+                &actors,
                 &format!("{room_line}\r\n"),
             );
         }

@@ -97,7 +97,7 @@ fn perception_group_staff_and_holy_light_see_a_hidden_character() {
     assert!(can_see_player(&fx.world, mate, lurker));
     assert!(can_see_player(&fx.world, lurker, mate));
 
-    // Immortals and HOLY_LIGHT see everything.
+    // Staff rank alone is no bypass (legacy `IMM_CAN_SEE`); HOLY_LIGHT is.
     let (god, _grx) = player(&mut fx.world, a, "God");
     fx.world.entity_mut(god).insert(Account {
         user_id: String::new(),
@@ -106,6 +106,11 @@ fn perception_group_staff_and_holy_light_see_a_hidden_character() {
         account_role: UserRole::Immortal,
         perms: vec![],
     });
+    fx.world.entity_mut(god).insert(Perception(0));
+    assert!(!can_see_player(&fx.world, god, lurker));
+    fx.world
+        .entity_mut(god)
+        .insert(PlayerFlags(vec![PlayerFlag::HolyLight]));
     assert!(can_see_player(&fx.world, god, lurker));
     fx.world
         .entity_mut(seeker)

@@ -97,8 +97,10 @@ pub(crate) enum Perceived {
 /// What `viewer` perceives of `target` standing in a room, given
 /// whether the viewer can make out that room (`room_seen`, from
 /// [`viewer_sees_room`]). Exactly the `look` rules: [`can_see_player`]
-/// (magic invisibility, `WizInvis`; gods and `HOLY_LIGHT` pierce) first,
+/// (magic invisibility, `WizInvis`; `HOLY_LIGHT` pierces) first,
 /// then darkness, where only infravision still gives a red shape.
+/// A group mate is always `Clear`, in the dark or blind (legacy
+/// `CAN_SEE` passes `IS_IN_GROUP` before light and blindness).
 /// Every GMCP panel that names a character goes through this.
 ///
 /// [`can_see_player`]: super::can_see_player
@@ -110,7 +112,7 @@ pub(crate) fn perceives(
 ) -> Perceived {
     if !super::can_see_player(world, viewer, target) {
         Perceived::Unseen
-    } else if room_seen {
+    } else if room_seen || (viewer != target && crate::hiding::same_group(world, viewer, target)) {
         Perceived::Clear
     } else if super::senses::has_infravision(world, viewer) {
         Perceived::Shape

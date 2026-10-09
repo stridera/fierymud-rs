@@ -110,11 +110,17 @@ fn look_shows_an_invisible_player_to_detect_invisibility() {
 }
 
 #[test]
-fn look_shows_an_invisible_player_to_gods() {
+fn look_shows_an_invisible_player_to_gods_on_holylight_only() {
     let mut fx = Fx::new();
     fx.world
         .entity_mut(fx.watcher)
         .insert(account(UserRole::Immortal));
+    dispatch(&mut fx.world, fx.watcher, "look");
+    let out = drain(&mut fx.wrx);
+    assert!(!out.contains("Ghost"), "{out}");
+    fx.world
+        .entity_mut(fx.watcher)
+        .insert(PlayerFlags(vec![PlayerFlag::HolyLight]));
     dispatch(&mut fx.world, fx.watcher, "look");
     let out = drain(&mut fx.wrx);
     assert!(out.contains("Ghost"), "{out}");
@@ -412,9 +418,10 @@ fn where_name_hides_invisible_players_from_mortals_but_not_gods() {
     dispatch(&mut fx.world, fx.watcher, "where ghost");
     let out = drain(&mut fx.wrx);
     assert!(out.contains("isn't online"), "{out}");
-    fx.world
-        .entity_mut(fx.watcher)
-        .insert(account(UserRole::Immortal));
+    fx.world.entity_mut(fx.watcher).insert((
+        account(UserRole::Immortal),
+        PlayerFlags(vec![PlayerFlag::HolyLight]),
+    ));
     dispatch(&mut fx.world, fx.watcher, "where ghost");
     let out = drain(&mut fx.wrx);
     assert!(out.contains("Ghost is in"), "{out}");

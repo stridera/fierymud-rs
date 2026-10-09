@@ -1485,8 +1485,19 @@ mod tests {
         // The caster needs detect-invisible to name Bob as a target.
         world.entity_mut(caster).insert(mud_world::DetectInvis);
         // Staff recognise the spell and its target, but gods see
-        // invisible actors, so the real name shows for them ...
+        // invisible actors on holylight, so the real name shows ...
         let mut wrx = staff_watcher(&mut world, room);
+        // Staff rank alone does not pierce invisibility (legacy
+        // `INVIS_OK`); this watcher is on holylight like real staff.
+        let watcher = world
+            .query_filtered::<Entity, With<mud_world::Account>>()
+            .single(&world)
+            .unwrap();
+        world
+            .entity_mut(watcher)
+            .insert(mud_world::PlayerFlags(vec![
+                mud_db::enums::PlayerFlag::HolyLight,
+            ]));
         start_mend(&mut world, caster);
         let out = drain(&mut wrx);
         assert!(out.contains("Bob"), "{out:?}");

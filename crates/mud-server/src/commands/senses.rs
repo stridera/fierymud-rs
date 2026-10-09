@@ -22,14 +22,12 @@ pub(crate) const YOU_ARE_BLIND: &str = "You can't see a damned thing; you're bli
 
 /// Legacy `EFF_BLIND`: `viewer` carries the [`Blinded`] marker (a
 /// `blinded` flag or a `blind` effect) and nothing overrides it.
-/// `HOLY_LIGHT` and staff see regardless, like legacy `CAN_SEE`'s
-/// holylight / immortal bypass, so `player_can_see_in_dark` stays the
+/// Only `HOLY_LIGHT` sees regardless (legacy `IMM_CAN_SEE`; `LIGHT_OK`
+/// has no staff-rank bypass), so `player_can_see_in_dark` stays the
 /// single bypass for every way of not seeing.
 #[must_use]
 pub(crate) fn is_blind(world: &World, viewer: Entity) -> bool {
-    world.get::<Blinded>(viewer).is_some()
-        && !super::player_can_see_in_dark(world, viewer)
-        && !crate::room_access::is_immortal(world, viewer)
+    world.get::<Blinded>(viewer).is_some() && !super::player_can_see_in_dark(world, viewer)
 }
 
 /// Legacy `MOB_NOBLIND`: the mob proto lists `blind: 0` in its

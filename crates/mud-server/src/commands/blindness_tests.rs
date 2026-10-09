@@ -282,7 +282,7 @@ fn holylight_and_staff_see_through_blindness() {
         out.contains("Bystander") && !out.contains(BLIND_TEXT),
         "{out}"
     );
-    // Staff, without the flag.
+    // Staff rank without the flag is still blind (legacy `LIGHT_OK`).
     fx.world.entity_mut(seer).remove::<PlayerFlags>();
     assert!(!can_see_player(&fx.world, seer, other));
     fx.world.entity_mut(seer).insert(Account {
@@ -292,6 +292,13 @@ fn holylight_and_staff_see_through_blindness() {
         account_role: UserRole::Immortal,
         perms: vec![],
     });
+    assert!(!can_see_player(&fx.world, seer, other));
+    let out = run(&mut fx, seer, &mut srx, "exits");
+    assert!(out.contains(BLIND_TEXT), "{out}");
+    // Staff on holylight see.
+    fx.world
+        .entity_mut(seer)
+        .insert(PlayerFlags(vec![PlayerFlag::HolyLight]));
     assert!(can_see_player(&fx.world, seer, other));
     let out = run(&mut fx, seer, &mut srx, "exits");
     assert!(!out.contains(BLIND_TEXT), "{out}");
@@ -890,4 +897,155 @@ fn cleanse_messages_come_from_the_row_override_then_default() {
     );
     assert_eq!(resolve_cleanse_messages(Some(&bare), None), (None, None));
     assert_eq!(resolve_cleanse_messages(None, None), (None, None));
+}
+
+// -- group mates stay targetable while blind (legacy CAN_SEE: IS_IN_GROUP) --
+
+const HEAL: i32 = 14;
+
+/// A level-20 "Caster" who knows Heal and Cure Blind, both with room lines.
+fn blind_cleric() -> (Fx, Entity, Rx) {
+    let (mut fx, caster, crx) = caster_with_spells(vec![
+        (
+            1,
+            "Heal",
+            vec![(HEAL, Some(serde_json::json!({ "amount": "20" })))],
+        ),
+        (
+            2,
+            "Cure Blind",
+            vec![(
+                CLEANSE,
+                Some(serde_json::json!({
+                    "condition": "blind",
+                    "scope": "all",
+                    "message": "Your vision returns!",
+                    "roomMessage": "There's a momentary gleam in {target.name}'s eyes.",
+                })),
+            )],
+        ),
+    ]);
+    fx.world.resource_mut::<EffectCatalog>().by_id.insert(
+        HEAL,
+        EffectDef {
+            id: HEAL,
+            name: "heal".into(),
+            description: None,
+            effect_type: "heal".into(),
+            tags: Vec::new(),
+            presence_override: None,
+            default_params: serde_json::json!({}),
+            prevents_speaking: false,
+            prevents_casting: false,
+            prevents_movement: false,
+            on_apply: None,
+            on_tick: None,
+            on_remove: None,
+        },
+    );
+    fx.world
+        .resource_mut::<mud_world::AbilityCatalog>()
+        .messages
+        .insert(
+            1,
+            mud_world::AbilityMessageSet {
+                success_to_room: Some("{actor.name} heals {target.name}.".into()),
+                ..mud_world::AbilityMessageSet::default()
+            },
+        );
+    (fx, caster, crx)
+}
+
+fn hp_of(world: &World, e: Entity) -> i32 {
+    world.get::<Health>(e).unwrap().hp
+}
+
+#[test]
+fn a_blind_cleric_can_heal_and_cure_a_groupmate_but_not_a_stranger() {
+    let (mut fx, caster, mut crx) = blind_cleric();
+    let a = fx.a;
+    let (mate, _mrx) = player(&mut fx.world, a, "Mate");
+    let (stranger, _srx) = player(&mut fx.world, a, "Stranger");
+    fx.world
+        .entity_mut(stranger)
+        .insert((Health { hp: 30, max: 100 }, CombatStats::default()));
+    let rat = target_mob(&mut fx, "a sewer rat");
+    fx.world
+        .entity_mut(mate)
+        .insert((Health { hp: 30, max: 100 }, CombatStats::default()));
+    fx.world
+        .entity_mut(mate)
+        .insert(mud_world::Follower(caster));
+    blind(&mut fx.world, caster);
+    blind(&mut fx.world, mate);
+    blind(&mut fx.world, rat);
+    assert!(can_see_player(&fx.world, caster, mate));
+    assert!(!can_see_player(&fx.world, caster, rat));
+
+    let _ = drain(&mut crx);
+    cast(&mut fx, caster, "cast 'heal' mate");
+    assert!(hp_of(&fx.world, mate) > 30, "{}", drain(&mut crx));
+    cast(&mut fx, caster, "cast 'cure blind' mate");
+    assert!(
+        fx.world.get::<Blinded>(mate).is_none(),
+        "{}",
+        drain(&mut crx)
+    );
+
+    // A mob outside the group is still unseen, so it can't be targeted.
+    cast(&mut fx, caster, "cast 'cure blind' rat");
+    assert!(fx.world.get::<Blinded>(rat).is_some(), "rat stays blind");
+    // (An unseen target falls back to a self cast, which cured the caster.)
+    blind(&mut fx.world, caster);
+    let _ = drain(&mut crx);
+    cast(&mut fx, caster, "cast 'heal' stranger");
+    let said = drain(&mut crx);
+    assert_eq!(hp_of(&fx.world, stranger), 30, "{said}");
+}
+
+#[test]
+fn gmcp_perceives_a_groupmate_clearly_while_blind_and_a_stranger_not_at_all() {
+    use super::gmcp::{Perceived, perceives};
+    let (mut fx, seer, _srx, other, _orx) = two_players();
+    let a = fx.a;
+    let (mate, _mrx) = player(&mut fx.world, a, "Mate");
+    fx.world.entity_mut(mate).insert(mud_world::Follower(seer));
+    blind(&mut fx.world, seer);
+    assert_eq!(perceives(&fx.world, seer, mate, false), Perceived::Clear);
+    assert_eq!(perceives(&fx.world, seer, other, false), Perceived::Unseen);
+}
+
+// -- cleanse / success room lines name only what the observer can see ------
+
+#[test]
+fn room_lines_say_someone_for_an_invisible_target() {
+    let (mut fx, caster, mut crx) = blind_cleric();
+    let a = fx.a;
+    let (seer, mut srx) = player(&mut fx.world, a, "Seer");
+    let (_other, mut orx) = player(&mut fx.world, a, "Bystander");
+    fx.world
+        .entity_mut(seer)
+        .insert((Health { hp: 50, max: 100 }, CombatStats::default()));
+    fx.world.entity_mut(seer).insert(mud_world::Invisible);
+    // The caster needs detect-invisible to name the target at all.
+    fx.world.entity_mut(caster).insert(mud_world::DetectInvis);
+    blind(&mut fx.world, seer);
+    let _ = (drain(&mut crx), drain(&mut srx), drain(&mut orx));
+
+    cast(&mut fx, caster, "cast 'cure blind' seer");
+    assert!(fx.world.get::<Blinded>(seer).is_none(), "cured");
+    let (caster_saw, bystander) = (drain(&mut crx), drain(&mut orx));
+    assert!(
+        bystander.contains("momentary gleam in someone's eyes"),
+        "{bystander}"
+    );
+    assert!(!bystander.contains("Seer"), "{bystander}");
+    // The caster detects invisible and still reads the name.
+    assert!(caster_saw.contains("gleam in Seer's eyes"), "{caster_saw}");
+
+    cast(&mut fx, caster, "cast 'heal' seer");
+    let (caster_saw, bystander) = (drain(&mut crx), drain(&mut orx));
+    assert!(bystander.contains("Caster heals someone."), "{bystander}");
+    assert!(!bystander.contains("Seer"), "{bystander}");
+    assert!(caster_saw.contains("Seer"), "{caster_saw}");
 }
