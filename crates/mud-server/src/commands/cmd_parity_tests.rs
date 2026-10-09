@@ -659,3 +659,46 @@ fn play_plays_a_held_instrument() {
     let out = drain(&mut rx);
     assert!(out.contains("You play a silver flute."), "{out}");
 }
+
+/// Legacy `cmd_info[]` had no `sneak` and no `accept`, so `sn`/`sne` were
+/// snicker/sneeze and `ac`/`acc` ack/accuse there. Here those two verbs
+/// exist, and a command the legacy table never had outranks every social
+/// that shares its first letters; the socials keep their longer prefixes.
+#[test]
+fn rust_only_commands_beat_the_socials_that_share_their_first_letters() {
+    let reg = legacy_socials();
+    for (typed, want) in [
+        ("sn", "sneak"),
+        ("sne", "sneak"),
+        ("snea", "sneak"),
+        ("ac", "accept"),
+        ("acc", "accept"),
+        ("acce", "accept"),
+        // The longer social prefixes are still the socials.
+        ("snic", "snicker"),
+        ("snee", "sneeze"),
+        ("ack", "ack"),
+        ("accu", "accuse"),
+        // Legacy order between two legacy entries is untouched: sulk (835)
+        // precedes summon (836) and subclass (843) in `cmd_info[]`.
+        ("su", "sulk"),
+        ("sul", "sulk"),
+        ("sub", "subclass"),
+    ] {
+        assert_eq!(
+            abbrev_name(typed, UserRole::Player, &reg).as_deref(),
+            Some(want),
+            "'{typed}'"
+        );
+    }
+}
+
+#[test]
+fn abbreviated_sneak_and_accept_run_the_commands() {
+    let (mut world, _room, player, mut rx) = base_world();
+    world.insert_resource(legacy_socials());
+    dispatch(&mut world, player, "ac");
+    let out = drain(&mut rx);
+    assert!(out.contains("no pending group invites"), "{out}");
+    assert!(!out.contains("You ack"), "{out}");
+}

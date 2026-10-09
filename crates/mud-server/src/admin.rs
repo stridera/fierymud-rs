@@ -2163,6 +2163,7 @@ pub(crate) fn spawn_into(
                 bundle.insert(AttachedTriggers(keys));
             }
             let entity = bundle.id();
+            mud_world::attach_proto_charges(world, entity, proto.zone_id, proto.id);
             Ok(json!({
                 "success": true,
                 "kind": "object",

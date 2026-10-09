@@ -2389,11 +2389,11 @@ inventory::submit! {
         category: Category::Group,
         help: Help {
             usage: "group",
-            summary: "List your current group (follow chain).",
-            long: "Shows the chain leader and every member, with HP \
-                   and same-room indicator. Group membership today is \
-                   informally derived from 'follow' chains; an \
-                   explicit invite/consent system can land later.",
+            summary: "List your current group.",
+            long: "Shows the group leader and every member, with HP \
+                   and same-room indicator. Joining a group takes the \
+                   leader's 'invite' and your 'accept'; merely \
+                   following someone does not put you in their group.",
         },
         run: cmd_group,
     }
@@ -2430,9 +2430,8 @@ inventory::submit! {
             usage: "dismiss <player>",
             summary: "Drop a single direct follower from your group.",
             long: "Equivalent to 'group dismiss <player>' — removes the \
-                   target's 'Follower' link to you (must be following \
-                   you directly, not transitively). 'disband' clears \
-                   everyone at once.",
+                   target from your group and ends their follow link to \
+                   you. 'disband' clears everyone at once.",
         },
         run: cmd_dismiss,
     }
@@ -2466,10 +2465,9 @@ inventory::submit! {
         category: Category::Group,
         help: Help {
             usage: "disband",
-            summary: "Dismiss everyone directly following you.",
-            long: "Breaks the group apart at your level. Followers' \
-                   own followers stay attached unless they too \
-                   'disband' or 'unfollow'.",
+            summary: "Dismiss your group and everyone following you.",
+            long: "Breaks your group apart and drops everyone \
+                   directly following you.",
         },
         run: cmd_disband,
     }
@@ -2502,8 +2500,8 @@ inventory::submit! {
         help: Help {
             usage: "accept",
             summary: "Accept a pending group invite.",
-            long: "Installs Follower(inviter) on you, joining their \
-                   group. No-op if you have no pending invite.",
+            long: "Joins the inviter's group and starts you following \
+                   them. No-op if you have no pending invite.",
         },
         run: cmd_accept,
     }
@@ -4541,6 +4539,7 @@ pub(crate) fn cmd_inspect(world: &mut World, player: Entity, args: &str) {
             });
         }
         let temp = bundle.id();
+        mud_world::attach_proto_charges(world, temp, proto.zone_id, proto.id);
         let block = render_identify_block(world, player, temp);
         world.despawn(temp);
         let Some(block) = block else {
@@ -4761,6 +4760,8 @@ pub(crate) fn cmd_buy(world: &mut World, player: Entity, args: &str) {
             remaining: fuel.remaining,
         });
     }
+    let bought = bundle.id();
+    mud_world::attach_proto_charges(world, bought, proto.zone_id, proto.id);
     let price_str = format_wealth(price_copper).unwrap_or_else(|| "free".to_string());
     let item_name = proto.name.clone();
     send_rendered(
@@ -13824,9 +13825,25 @@ pub(crate) fn cmd_chants(world: &mut World, player: Entity, args: &str) {
     cmd_abilities_kind(world, player, args, mud_db::abilities::AbilityKind::Chant);
 }
 
+/// Legacy `do_group` preconditions for `leader` enrolling `joiner`: only
+/// the head of a group enrols, and the joiner must not already belong to
+/// (or lead) another group. `None` means the join is allowed.
+fn group_join_refusal(world: &mut World, leader: Entity, joiner: Entity) -> Option<&'static str> {
+    if group_root(world, leader) != leader {
+        return Some("You cannot enroll group members without being head of a group.\r\n");
+    }
+    if group_root(world, joiner) != joiner {
+        return Some("That person is already in a group.\r\n");
+    }
+    if group_members(world, joiner).len() > 1 {
+        return Some("That person is leading a group.\r\n");
+    }
+    None
+}
+
 /// `invite <player>`: send a group invite. Recipient gets a
 /// `GroupInvite` component carrying the inviter's entity; their
-/// `accept` will install Follower(self) for the sender.
+/// `accept` will make them a member of the sender's group.
 pub(crate) fn cmd_invite(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
     if arg.is_empty() {
@@ -13851,9 +13868,16 @@ pub(crate) fn cmd_invite(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "You can only invite other players.\r\n");
         return;
     }
-    if world.get::<Follower>(target).is_some_and(|f| f.0 == player) {
+    if world
+        .get::<mud_world::GroupMember>(target)
+        .is_some_and(|g| g.0 == player)
+    {
         let n = name_of(world, target);
         send_rendered(world, player, &format!("{n} is already in your group.\r\n"));
+        return;
+    }
+    if let Some(refusal) = group_join_refusal(world, player, target) {
+        send_to(world, player, refusal);
         return;
     }
     try_insert(
@@ -14000,16 +14024,18 @@ pub(crate) fn cmd_accept(world: &mut World, player: Entity, _args: &str) {
         send_to(world, player, "The inviter has gone away.\r\n");
         return;
     }
-    if would_create_cycle(world, invite.from, player) {
+    // Membership may have changed since the invite went out.
+    if let Some(refusal) = group_join_refusal(world, invite.from, player) {
         try_remove::<mud_world::GroupInvite>(world, player);
-        send_to(
-            world,
-            player,
-            "Joining that group would create a follow cycle — refused.\r\n",
-        );
+        send_to(world, player, refusal);
         return;
     }
-    try_insert(world, player, Follower(invite.from));
+    try_insert(world, player, mud_world::GroupMember(invite.from));
+    // The new member falls in behind the leader, unless the leader is
+    // already following them (a follow cycle would stall movement).
+    if !would_create_cycle(world, invite.from, player) {
+        try_insert(world, player, Follower(invite.from));
+    }
     try_remove::<mud_world::GroupInvite>(world, player);
     let inviter_name = name_of(world, invite.from);
     let player_name = name_of(world, player);
@@ -14340,16 +14366,21 @@ pub(crate) fn cmd_split(world: &mut World, player: Entity, args: &str) {
     }
 }
 
-/// `disband`: clear every direct `Follower(self)` link, breaking the
-/// group apart. Members deeper in the chain stay connected to each
-/// other unless they too disband. Self has no Follower component to
-/// touch — only entities pointing at self.
+/// `disband`: drop every group member and direct `Follower(self)` link.
+/// Followers' own followers stay attached. Self has no component to
+/// touch: only entities pointing at self.
 pub(crate) fn cmd_disband(world: &mut World, player: Entity, _args: &str) {
     let to_release: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Follower), With<Player>>();
+        let mut q = world.query_filtered::<(
+            Entity,
+            Option<&Follower>,
+            Option<&mud_world::GroupMember>,
+        ), With<Player>>();
         q.iter(world)
-            .filter(|(_, f)| f.0 == player)
-            .map(|(e, _)| e)
+            .filter(|(_, f, g)| {
+                f.is_some_and(|f| f.0 == player) || g.is_some_and(|g| g.0 == player)
+            })
+            .map(|(e, _, _)| e)
             .collect()
     };
     if to_release.is_empty() {
@@ -14358,7 +14389,7 @@ pub(crate) fn cmd_disband(world: &mut World, player: Entity, _args: &str) {
     }
     let player_name = name_of(world, player);
     for member in &to_release {
-        try_remove::<Follower>(world, *member);
+        release_from(world, *member, player);
         let m_name = name_of(world, *member);
         send_rendered(
             world,
@@ -14403,6 +14434,13 @@ pub(crate) fn cmd_follow(world: &mut World, player: Entity, args: &str) {
         return;
     }
 
+    // Falling in behind someone other than the group leader leaves the group.
+    if world
+        .get::<mud_world::GroupMember>(player)
+        .is_some_and(|g| g.0 != target)
+    {
+        try_remove::<mud_world::GroupMember>(world, player);
+    }
     try_insert(world, player, Follower(target));
     let target_name = name_of(world, target);
     let player_name = name_of(world, player);
@@ -14434,6 +14472,8 @@ pub(crate) fn cmd_unfollow(world: &mut World, player: Entity, _args: &str) {
     let prev = world.get::<Follower>(player).copied();
     try_remove::<Follower>(world, player);
     if let Some(Follower(prev_target)) = prev {
+        // Walking away from your group leader leaves the group.
+        release_from(world, player, prev_target);
         let target_name = name_of(world, prev_target);
         send_rendered(
             world,

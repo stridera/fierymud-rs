@@ -93,7 +93,9 @@ fn perception_group_staff_and_holy_light_see_a_hidden_character() {
     let a = fx.a;
     let (mate, _mrx) = player(&mut fx.world, a, "Mate");
     assert!(!can_see_player(&fx.world, mate, lurker));
-    fx.world.entity_mut(mate).insert(Follower(lurker));
+    fx.world
+        .entity_mut(mate)
+        .insert((Follower(lurker), mud_world::GroupMember(lurker)));
     assert!(can_see_player(&fx.world, mate, lurker));
     assert!(can_see_player(&fx.world, lurker, mate));
 
@@ -210,7 +212,9 @@ fn search_skips_group_mates_and_staff_find_everyone() {
     let a = fx.a;
     let (other, _orx) = player(&mut fx.world, a, "Other");
     fx.world.entity_mut(other).insert(Hiddenness(800));
-    fx.world.entity_mut(lurker).insert(Follower(seeker));
+    fx.world
+        .entity_mut(lurker)
+        .insert((Follower(seeker), mud_world::GroupMember(seeker)));
     search_with_roll(&mut fx.world, seeker, "", &mut |_| 0);
     let out = drain(&mut srx);
     assert!(
@@ -694,7 +698,7 @@ fn a_halfling_hiding_in_a_group_multiplies_its_dex_bonus() {
     let (friend, _frx) = player_in(&mut world, room);
     world
         .entity_mut(friend)
-        .insert((account(), Follower(hider)));
+        .insert((account(), Follower(hider), mud_world::GroupMember(hider)));
     advance(&mut world, 40);
     hide_with_roll(&mut world, hider, &mut |lo, _| lo);
     // Grouped: bonus 13 * (65 / 30 + 1) = 39.

@@ -18,17 +18,17 @@ pub use components::{
     CorpseOriginLevel, DeathTrap, Decomposing, Description, DetectAlign, DetectInvis, Drunkenness,
     EffectInstance, EffectSource, Empowered, EntryRestriction, EquippedSlot, ExamineText, ExitData,
     Exits, Falling, Familiar, Feared, Fighting, Flying, Focus, Follower, FromMobReset,
-    FromObjectReset, Frozen, Ghost, GodZone, GrantedByItem, GroupInvite, Guarding, GuildhallRoom,
-    Haste, Health, Hiddenness, HouseExitEntry, HouseGuestEntry, HouseItem, HouseItemEntry,
-    HouseRoom, HouseRoomEntry, HouseSummary, Hunger, Identified, IgnoreList, IndoorRoom,
-    Infravision, InnRoom, InnTier, Invisible, InvisibleSource, Item, ItemCustomization, ItemTimer,
-    Keywords, KillStats, KnownAbilities, LastInputAt, LastPersistedAt, LastTeller, LifeForceTag,
-    LightFuel, LiquidContainer, Lit, Located, LoggedInAt, LooseCoins, LootClaim, MAX_HIDDENNESS,
-    MailDraft, MaxAbsorbCircle, Meditating, Mob, MobBehaviors, MobTraits, ModifyDelta, Mountable,
-    Mounted, MovementModeTag, MovementPoints, NameApprovalPending, Named, NaturalAttackType,
-    NaturalDamage, NoMagicRoom, NoMobsRoom, NoPortalsRoom, NoRecallRoom, NoScanningRoom,
-    NoSummonRoom, NoTeleportRoom, NoTrackingRoom, ObjectFlags, ObjectRestrictions, Online,
-    PENDING_WAKE_KIT_KEY, PREF_CHARSET_KEY, PREF_COLOR_KEY, PREF_COLUMNS_KEY, PeacefulRoom,
+    FromObjectReset, Frozen, Ghost, GodZone, GrantedByItem, GroupInvite, GroupMember, Guarding,
+    GuildhallRoom, Haste, Health, Hiddenness, HouseExitEntry, HouseGuestEntry, HouseItem,
+    HouseItemEntry, HouseRoom, HouseRoomEntry, HouseSummary, Hunger, Identified, IgnoreList,
+    IndoorRoom, Infravision, InnRoom, InnTier, Invisible, InvisibleSource, Item, ItemCustomization,
+    ItemTimer, Keywords, KillStats, KnownAbilities, LastInputAt, LastPersistedAt, LastTeller,
+    LifeForceTag, LightFuel, LiquidContainer, Lit, Located, LoggedInAt, LooseCoins, LootClaim,
+    MAX_HIDDENNESS, MailDraft, MaxAbsorbCircle, Meditating, Mob, MobBehaviors, MobTraits,
+    ModifyDelta, Mountable, Mounted, MovementModeTag, MovementPoints, NameApprovalPending, Named,
+    NaturalAttackType, NaturalDamage, NoMagicRoom, NoMobsRoom, NoPortalsRoom, NoRecallRoom,
+    NoScanningRoom, NoSummonRoom, NoTeleportRoom, NoTrackingRoom, ObjectFlags, ObjectRestrictions,
+    Online, PENDING_WAKE_KIT_KEY, PREF_CHARSET_KEY, PREF_COLOR_KEY, PREF_COLUMNS_KEY, PeacefulRoom,
     PendingSave, PendingSummon, PendingWakeAttachments, Perception, PersistedItemId, PersistentPet,
     Player, PlayerCorpse, PlayerCorpseId, PlayerFlags, Poofs, Posture, PostureKind, PreviousLogin,
     Profile, Prompt, ProtectFromEvil, ProtectFromGood, RecallPoint, RefreshedBonus, RegenBonus,
@@ -39,8 +39,8 @@ pub use components::{
     SpellCooldown, SpellResistanceDelta, SpellSlots, Stamina, Stealth, Stunned, SwitchedFrom,
     SwitchedInto, SyslogMinLevel, TellLog, Thirst, TimePlayed, Title, Trophy, TrophyEntry,
     TrophyKind, UiStyle, WallTraversal, WatchingSyslog, WaterWalk, Wealth, WearableIn,
-    WimpyThreshold, WizInvis, WorldKey, Zone, ZoneClimate, ZoneVisits, is_lit, room_in_god_zone,
-    wear_keyword_slot, zone_is_god,
+    WimpyThreshold, WizInvis, WorldKey, Zone, ZoneClimate, ZoneVisits, group_members, group_root,
+    is_lit, room_in_god_zone, wear_keyword_slot, zone_is_god,
 };
 pub use loader::{
     LoadStats, ReloadStats, default_weather_for_climate, load_ability_catalog, load_effect_catalog,
@@ -49,8 +49,8 @@ pub use loader::{
 };
 pub use mob_spawn::spawn_mob_from_proto;
 pub use reset_gear::{
-    ContentEntry, GearStats, MobGearCatalog, MobGearEntry, ObjectContentsCatalog, fill_container,
-    gear_cap, object_world_counts, outfit_mob,
+    ContentEntry, GearStats, MobGearCatalog, MobGearEntry, ObjectContentsCatalog,
+    attach_proto_charges, fill_container, gear_cap, object_world_counts, outfit_mob, proto_charges,
 };
 pub use resources::{
     AbilityCatalog, AbilityComponentReq, AbilityDef, AbilityMessageSet, AchievementCatalog,

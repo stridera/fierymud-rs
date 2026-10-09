@@ -129,7 +129,9 @@ fn invigorate_group_scope_fills_the_caster_and_the_grouped_allies_in_the_room() 
             drained,
         ));
         if grouped {
-            fx.world.entity_mut(e).insert(mud_world::Follower(p));
+            fx.world
+                .entity_mut(e)
+                .insert((mud_world::Follower(p), mud_world::GroupMember(p)));
         }
         members.push(e);
     }
@@ -141,6 +143,54 @@ fn invigorate_group_scope_fills_the_caster_and_the_grouped_allies_in_the_room() 
     assert_eq!(current(&fx, members[0]), 300, "grouped ally: {said}");
     assert_eq!(current(&fx, members[1]), 1, "ungrouped stranger: {said}");
     assert_eq!(current(&fx, members[2]), 1, "grouped but elsewhere: {said}");
+}
+
+/// The leak this guards: `follow` needs no consent, so a stalker trailing the
+/// leader must not be swept up by a group spell (Group Recall, Invigorate...)
+/// that the leader casts; only players who accepted an `invite` are.
+#[test]
+fn a_group_spell_skips_a_follower_who_never_joined_the_group() {
+    let (mut fx, p, mut rx) = invigorate_caster();
+    fx.world
+        .resource_mut::<mud_world::AbilityCatalog>()
+        .by_name
+        .get_mut("invigorate")
+        .unwrap()
+        .target_scope = "ROOM_ALLIES".to_string();
+    let drained = Stamina {
+        current: 1,
+        max: 300,
+    };
+    let a = fx.a;
+    let mut rxs = Vec::new();
+    let mut people = Vec::new();
+    for name in ["Member", "Mallory"] {
+        let (e, mrx) = player(&mut fx.world, a, name);
+        rxs.push(mrx);
+        fx.world.entity_mut(e).insert((
+            Health { hp: 100, max: 100 },
+            CombatStats::default(),
+            drained,
+        ));
+        people.push(e);
+    }
+    let (member, mallory) = (people[0], people[1]);
+    // Mallory just follows; Member is invited and accepts.
+    super::dispatch(&mut fx.world, mallory, "follow caster");
+    super::dispatch(&mut fx.world, p, "invite member");
+    super::dispatch(&mut fx.world, member, "accept");
+    assert!(
+        fx.world.get::<mud_world::Follower>(mallory).is_some(),
+        "control: Mallory is following the caster"
+    );
+    fx.world.entity_mut(p).insert(drained);
+    let _ = drain(&mut rx);
+    cast(&mut fx, p, "cast 'invigorate'");
+    let said = drain(&mut rx);
+    let current = |fx: &Fx, e: Entity| fx.world.get::<Stamina>(e).unwrap().current;
+    assert_eq!(current(&fx, p), 300, "caster: {said}");
+    assert_eq!(current(&fx, member), 300, "grouped member: {said}");
+    assert_eq!(current(&fx, mallory), 1, "mere follower untouched: {said}");
 }
 
 // ---- Nature's Embrace ---------------------------------------------------
@@ -383,6 +433,7 @@ fn outdoors_room_wide_spell_is_refused_once_before_anyone_is_touched() {
             max: 90,
         },
         mud_world::Follower(p),
+        mud_world::GroupMember(p),
     ));
     let _ = drain(&mut rx);
     cast(&mut fx, p, "cast 'invigorate'");

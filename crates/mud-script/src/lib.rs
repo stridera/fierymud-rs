@@ -1840,37 +1840,13 @@ fn pronoun_for(entity: Entity, lua: &Lua, pick: fn(&str) -> &'static str) -> mlu
     })
 }
 
-/// Walk the Follower chain starting at `actor`, find the root, and
-/// BFS every entity that follows back to it. Returns a vec with the
-/// root at index 0; solo actors return `[actor]`. Used by Lua
-/// `actor.group_size` and `actor.group_member[N]` so they share the
-/// same chain-walking logic.
+/// Everyone in `actor`'s real group (leader at index 0); solo actors
+/// return `[actor]`. Used by Lua `actor.group_size` and
+/// `actor.group_member[N]`. Follow links do not count: only players who
+/// accepted the leader's invite are members.
 fn group_for_actor(world: &mut World, actor: Entity) -> Vec<Entity> {
-    let mut root = actor;
-    let mut steps = 0;
-    while let Some(f) = world.get::<Follower>(root) {
-        if steps > 32 {
-            break;
-        }
-        root = f.0;
-        steps += 1;
-    }
-    let mut group = vec![root];
-    let mut frontier = vec![root];
-    while let Some(parent) = frontier.pop() {
-        let children: Vec<Entity> = {
-            let mut q = world.query_filtered::<(Entity, &Follower), With<Player>>();
-            q.iter(world)
-                .filter(|(e, f)| f.0 == parent && !group.contains(e))
-                .map(|(e, _)| e)
-                .collect()
-        };
-        for c in &children {
-            group.push(*c);
-            frontier.push(*c);
-        }
-    }
-    group
+    let root = mud_world::group_root(world, actor);
+    mud_world::group_members(world, root)
 }
 
 /// Insert / overwrite a single key in an actor's `ScriptVars` map.
@@ -4991,7 +4967,9 @@ fn spawn_obj_proto(lua: &Lua, room: Entity, zone: i32, id: i32) -> mlua::Result<
         if let Some(keys) = trigger_keys {
             em.insert(AttachedTriggers(keys));
         }
-        Some(em.id())
+        let item = em.id();
+        mud_world::attach_proto_charges(world, item, zone, id);
+        Some(item)
     })?;
     match entity {
         Some(e) => Ok(Value::UserData(

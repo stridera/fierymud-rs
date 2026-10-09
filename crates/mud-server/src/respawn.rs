@@ -310,6 +310,7 @@ pub fn respawn_tick(world: &mut World) {
             bundle.insert(h);
         }
         let spawned = bundle.id();
+        mud_world::attach_proto_charges(world, spawned, proto.zone_id, proto.id);
         crate::item_decay::attach_timer_if_decaying(world, spawned, &proto);
         // A container that comes back gets its authored contents again,
         // minus any whose world-wide cap is already met. The container
@@ -678,6 +679,101 @@ mod tests {
             world
                 .get::<mud_world::ObjectFlags>(gem)
                 .is_some_and(|f| f.has(mud_db::enums::ObjectFlag::NoFall))
+        );
+    }
+
+    /// `base_world` plus a charged wand, an unbound-charge staff (a binding
+    /// whose `charges` is NULL) and a plain sword's binding-less proto.
+    fn add_charged_protos(world: &mut World) -> (i32, i32) {
+        const WAND: i32 = 30;
+        const STAFF: i32 = 31;
+        {
+            let mut objs = world.resource_mut::<ObjectPrototypes>();
+            objs.by_key
+                .insert((1, WAND), object_proto(1, WAND, ObjectType::Wand));
+            objs.by_key
+                .insert((1, STAFF), object_proto(1, STAFF, ObjectType::Staff));
+        }
+        let mut bindings = mud_world::ObjectAbilityCatalog::default();
+        let bind = |charges| mud_world::resources::ObjectAbilityBinding {
+            ability_id: 1,
+            level: 10,
+            charges,
+        };
+        bindings.by_key.insert((1, WAND), vec![bind(Some(3))]);
+        bindings.by_key.insert((1, STAFF), vec![bind(None)]);
+        world.insert_resource(bindings);
+        (WAND, STAFF)
+    }
+
+    fn charges_of(world: &mut World, obj: i32) -> Vec<Option<i32>> {
+        let mut q = world.query_filtered::<(&WorldKey, Option<&mud_world::Charges>), With<Item>>();
+        q.iter(world)
+            .filter(|(k, _)| k.id == obj)
+            .map(|(_, c)| c.map(|c| c.0))
+            .collect()
+    }
+
+    #[test]
+    fn a_wand_respawned_by_an_object_reset_has_the_prototypes_charges() {
+        let (mut world, room) = base_world();
+        let (wand, staff) = add_charged_protos(&mut world);
+        for (reset_id, obj) in [(40, wand), (41, staff), (42, SWORD)] {
+            world
+                .resource_mut::<ObjectResetCatalog>()
+                .entries
+                .push(ObjectResetEntry {
+                    reset_id,
+                    object_zone_id: 1,
+                    object_id: obj,
+                    room_entity: room,
+                    max_instances: 1,
+                });
+        }
+        run_respawn(&mut world, 6000);
+        assert_eq!(charges_of(&mut world, wand), vec![Some(3)]);
+        // No charge count in the data, or no binding at all: left unlimited
+        // on purpose (no `Charges` component).
+        assert_eq!(charges_of(&mut world, staff), vec![None]);
+        assert_eq!(charges_of(&mut world, SWORD), vec![None]);
+    }
+
+    #[test]
+    fn mob_gear_and_container_contents_get_charges_too() {
+        let (mut world, room) = base_world();
+        let (wand, _) = add_charged_protos(&mut world);
+        add_mob_reset(
+            &mut world,
+            room,
+            1,
+            &[eq_row(1, 1, wand, Some("WIELD"), 0.99)],
+        );
+        let _mob = boot_mob(&mut world, room, 1);
+        assert_eq!(charges_of(&mut world, wand), vec![Some(3)], "mob gear");
+
+        let chest = world.spawn((Item, Located(room))).id();
+        let rows = vec![ObjectResetContent {
+            id: 1,
+            reset_id: 9,
+            parent_content_id: None,
+            object_zone_id: 1,
+            object_id: wand,
+            quantity: 1,
+            max_instances: 99,
+        }];
+        let entries = mud_world::reset_gear::build_content_entries(&rows)
+            .remove(&9)
+            .unwrap();
+        world
+            .resource_mut::<ObjectContentsCatalog>()
+            .by_reset
+            .insert(9, entries);
+        let mut counts = std::collections::HashMap::new();
+        mud_world::fill_container(&mut world, &[chest], 9, &mut counts);
+        assert_eq!(
+            charges_of(&mut world, wand),
+            vec![Some(3), Some(3)],
+            "container contents"
         );
     }
 

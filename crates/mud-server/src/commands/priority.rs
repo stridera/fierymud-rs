@@ -16,7 +16,10 @@
 //!
 //! Socials sit inline in the table, as they did in `cmd_info[]`, so they
 //! abbreviate by the same rule (`gig` is giggle, `ha` is halo). A social
-//! the legacy table never had ranks after every legacy name. An exact
+//! the legacy table never had ranks after every legacy name. A command the
+//! legacy table never had (`sneak`, `accept`) ranks before every social,
+//! so `sn` is sneak and `ac` accept although legacy, lacking both, gave
+//! snicker and ack. An exact
 //! command name always beats a social; the legacy `qui` guard entry (a
 //! hidden command that refuses to quit) is handled by the dispatcher.
 

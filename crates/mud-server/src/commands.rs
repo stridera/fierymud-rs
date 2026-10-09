@@ -345,6 +345,8 @@ pub fn drain_player_updates(world: &mut World) {
                     if let Some(desc) = proto.examine_description.clone() {
                         bundle.insert(Description(desc));
                     }
+                    let rewarded = bundle.id();
+                    mud_world::attach_proto_charges(world, rewarded, proto.zone_id, proto.id);
                 }
                 send_to(
                     world,
@@ -532,6 +534,9 @@ mod god_zone_tests;
 #[path = "commands/goto_tests.rs"]
 mod goto_tests;
 #[cfg(test)]
+#[path = "commands/group_tests.rs"]
+mod group_tests;
+#[cfg(test)]
 #[path = "commands/hiding_tests.rs"]
 mod hiding_tests;
 #[cfg(test)]
@@ -578,6 +583,9 @@ mod multi_hit_tests;
 #[cfg(test)]
 #[path = "commands/norepeat_tests.rs"]
 mod norepeat_tests;
+#[cfg(test)]
+#[path = "commands/wand_charge_tests.rs"]
+mod wand_charge_tests;
 
 #[cfg(test)]
 #[path = "commands/identify_actor_tests.rs"]
@@ -1820,7 +1828,10 @@ pub(crate) fn resolve_by_prefix(
 /// [`resolve_by_prefix`] with the DB socials taking part: legacy kept
 /// socials in `cmd_info[]`, so `gig` is giggle and `ha` is halo. Socials
 /// share the one ranking with commands ([`priority`]); a social the
-/// legacy table never had ranks after every legacy name.
+/// legacy table never had ranks after every legacy name, and a command
+/// the legacy table never had (Rust-only `sneak`, `accept`) ranks before
+/// every social: legacy resolved `sn` to snicker only because it had no
+/// sneak command to resolve it to.
 pub(crate) fn resolve_abbrev<'a>(
     typed: &str,
     role: UserRole,
@@ -1831,11 +1842,15 @@ pub(crate) fn resolve_abbrev<'a>(
         return None;
     }
     let needle = typed; // already lowercased at call site
-    let mut best: Option<(PrefixKey<'_>, Abbrev<'a>)> = None;
+    let mut best_cmd: Option<(PrefixKey<'_>, &'static Command)> = None;
+    // Best match among commands the legacy table never had at all (no name
+    // of theirs has a table position), by their primary name.
+    let mut best_new_cmd: Option<(PrefixKey<'_>, &'static Command)> = None;
     for cmd in all_commands() {
         if !visible(cmd, role, perms) {
             continue;
         }
+        let new_to_rust = cmd.names.iter().all(|n| priority::legacy_rank(n).is_none());
         for &name in cmd.names {
             // Multi-word names (`clan storage list`) only match whole,
             // through `longest_prefix_match`.
@@ -1846,11 +1861,18 @@ pub(crate) fn resolve_abbrev<'a>(
                 continue;
             }
             let key = prefix_rank(name, false);
-            if best.as_ref().is_none_or(|(b, _)| key < *b) {
-                best = Some((key, Abbrev::Command(cmd)));
+            if best_cmd.as_ref().is_none_or(|(b, _)| key < *b) {
+                best_cmd = Some((key, cmd));
+            }
+            if new_to_rust
+                && name == cmd.names[0]
+                && best_new_cmd.as_ref().is_none_or(|(b, _)| key < *b)
+            {
+                best_new_cmd = Some((key, cmd));
             }
         }
     }
+    let mut best_social: Option<(PrefixKey<'_>, &'a str)> = None;
     if let Some(reg) = socials {
         for name in reg.by_name.keys() {
             if !name.starts_with(needle)
@@ -1859,12 +1881,32 @@ pub(crate) fn resolve_abbrev<'a>(
                 continue;
             }
             let key = prefix_rank(name, true);
-            if best.as_ref().is_none_or(|(b, _)| key < *b) {
-                best = Some((key, Abbrev::Social(name)));
+            if best_social.as_ref().is_none_or(|(b, _)| key < *b) {
+                best_social = Some((key, name.as_str()));
             }
         }
     }
-    best.map(|(_, a)| a)
+    match (best_cmd, best_social) {
+        (Some((ck, cmd)), Some((sk, social))) => {
+            // Legacy kept socials and commands in one table, so where both
+            // come from it the earlier entry wins (`su` is sulk, `ha` halo).
+            // A command the legacy table never had (`sneak`, `accept`) has
+            // no table position, and must not lose to a social that merely
+            // shares its first letters (`sn` snicker, `ac` ack).
+            if ck.0 == usize::MAX
+                && let Some((_, new_cmd)) = best_new_cmd
+            {
+                Some(Abbrev::Command(new_cmd))
+            } else if ck < sk {
+                Some(Abbrev::Command(cmd))
+            } else {
+                Some(Abbrev::Social(social))
+            }
+        }
+        (Some((_, cmd)), None) => Some(Abbrev::Command(cmd)),
+        (None, Some((_, social))) => Some(Abbrev::Social(social)),
+        (None, None) => None,
+    }
 }
 
 pub(crate) fn skip_n_tokens(s: &str, n: usize) -> &str {
@@ -3976,6 +4018,7 @@ mod tests {
                 },
                 mud_world::Located(room_a),
                 mud_world::Follower(caster),
+                mud_world::GroupMember(caster),
             ))
             .id();
         // Two mobs in room_a — both should appear as enemies.
@@ -4177,6 +4220,7 @@ mod tests {
                 },
                 mud_world::Located(room_a),
                 mud_world::Follower(caster),
+                mud_world::GroupMember(caster),
             ))
             .id();
         let _far_teammate = world
@@ -4187,6 +4231,7 @@ mod tests {
                 },
                 mud_world::Located(room_b),
                 mud_world::Follower(caster),
+                mud_world::GroupMember(caster),
             ))
             .id();
         let _mob = world
@@ -4252,6 +4297,7 @@ mod tests {
                 },
                 mud_world::Located(room),
                 mud_world::Follower(caster),
+                mud_world::GroupMember(caster),
             ))
             .id();
         let _mob = world
@@ -4343,6 +4389,7 @@ mod tests {
                 },
                 mud_world::Located(room),
                 mud_world::Follower(leader),
+                mud_world::GroupMember(leader),
             ))
             .id();
         let mob = |world: &mut World, name: &str, master: Option<Entity>| {
@@ -12823,9 +12870,9 @@ pub(crate) fn invoke_item_abilities(
         return;
     }
     // Empty Charges → refuse before any output. Without a Charges
-    // component, treat as unlimited (covers freshly-spawned items
-    // until `Charges` populates from binding.charges on every
-    // spawn site).
+    // component, treat as unlimited: every proto-based spawn site calls
+    // `mud_world::attach_proto_charges`, so only items whose binding has no
+    // charge count (NULL in the data) are unlimited.
     if !single_use {
         let charges = world.get::<mud_world::Charges>(item).copied();
         if matches!(charges, Some(mud_world::Charges(0))) {
@@ -13846,6 +13893,7 @@ pub(crate) fn spawn_house_item(
         bundle.insert(mud_world::ObjectRestrictions(proto.restrictions.clone()));
     }
     let item = bundle.id();
+    mud_world::attach_proto_charges(world, item, proto.zone_id, proto.id);
     if custom.name.is_some() || custom.examine.is_some() || custom.keywords.is_some() {
         crate::item_custom::install(
             world,
@@ -16674,6 +16722,8 @@ pub(crate) fn invoke_ability_with(
                 if let Some(desc) = proto.examine_description.clone() {
                     bundle.insert(Description(desc));
                 }
+                let created = bundle.id();
+                mud_world::attach_proto_charges(world, created, proto.zone_id, proto.id);
                 applied_msgs.push(format!("{} ({} appears in your hands)", pretty, proto.name));
             }
             "portal" => {
@@ -16730,6 +16780,7 @@ pub(crate) fn invoke_ability_with(
                     bundle.insert(Description(desc));
                 }
                 let portal_entity = bundle.id();
+                mud_world::attach_proto_charges(world, portal_entity, proto.zone_id, proto.id);
                 // Decay duration: the schema's `decay` is in hours
                 // (matches other duration units). Convert to seconds
                 // for the EffectInstance.
@@ -22621,50 +22672,28 @@ pub(crate) fn engage_skill_shim(
     }
 }
 
-/// Find the root of a follow chain — walks `Follower` upward until
-/// it hits an entity with no `Follower` component. Returns `start`
-/// itself if it's already a root.
-pub(crate) fn group_root(world: &World, start: Entity) -> Entity {
-    let mut current = start;
-    let mut steps = 0;
-    while let Some(f) = world.get::<Follower>(current) {
-        // Cycle guard — `cmd_follow` rejects cycles, but defend in
-        // case data drifts.
-        if steps > 32 {
-            return start;
-        }
-        current = f.0;
-        steps += 1;
+/// Group membership (not the follow tree): who leads `start`'s group.
+pub(crate) use mud_world::{group_members, group_root};
+
+/// Drop `member`'s tie to `leader`: the follow edge and the group
+/// membership, whichever point at `leader`. Other groups / leaders are
+/// left alone.
+pub(crate) fn release_from(world: &mut World, member: Entity, leader: Entity) {
+    if world.get::<Follower>(member).is_some_and(|f| f.0 == leader) {
+        try_remove::<Follower>(world, member);
     }
-    current
+    if world
+        .get::<mud_world::GroupMember>(member)
+        .is_some_and(|g| g.0 == leader)
+    {
+        try_remove::<mud_world::GroupMember>(world, member);
+    }
 }
 
-/// Walk every entity transitively following `root` (directly or via
-/// chain). Includes `root` itself in the returned vec. The order is
-/// breadth-first; the leader is always position 0.
-pub(crate) fn group_members(world: &mut World, root: Entity) -> Vec<Entity> {
-    let mut group = vec![root];
-    let mut frontier = vec![root];
-    while let Some(parent) = frontier.pop() {
-        let children: Vec<Entity> = {
-            let mut q = world.query_filtered::<(Entity, &Follower), With<Player>>();
-            q.iter(world)
-                .filter(|(e, f)| f.0 == parent && !group.contains(e))
-                .map(|(e, _)| e)
-                .collect()
-        };
-        for c in &children {
-            group.push(*c);
-            frontier.push(*c);
-        }
-    }
-    group
-}
-
-/// Remove one direct follower by name. Used by `group dismiss`. The
-/// named player must currently be following `dismisser` (Follower
-/// component pointing at them); deeper-chain members can't be
-/// dismissed without their direct leader's cooperation.
+/// Remove one direct follower / group member by name. Used by
+/// `group dismiss`. The named player must be following `dismisser` or be
+/// in their group; deeper-chain followers can't be dismissed without
+/// their direct leader's cooperation.
 pub(crate) fn group_dismiss_one(world: &mut World, dismisser: Entity, target_name: &str) {
     if target_name.is_empty() {
         send_to(world, dismisser, "Dismiss whom?\r\n");
@@ -22672,13 +22701,18 @@ pub(crate) fn group_dismiss_one(world: &mut World, dismisser: Entity, target_nam
     }
     let needle = target_name.to_ascii_lowercase();
     let target: Option<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Follower, &Named), With<Player>>();
+        let mut q = world.query_filtered::<(
+            Entity,
+            Option<&Follower>,
+            Option<&mud_world::GroupMember>,
+            &Named,
+        ), With<Player>>();
         q.iter(world)
-            .find(|(_, f, n)| {
-                f.0 == dismisser
+            .find(|(_, f, g, n)| {
+                (f.is_some_and(|f| f.0 == dismisser) || g.is_some_and(|g| g.0 == dismisser))
                     && mud_world::targeting::names_match(&needle, std::iter::once(n.name.as_str()))
             })
-            .map(|(e, _, _)| e)
+            .map(|(e, _, _, _)| e)
     };
     let Some(target) = target else {
         send_to(
@@ -22693,7 +22727,7 @@ pub(crate) fn group_dismiss_one(world: &mut World, dismisser: Entity, target_nam
     };
     let target_name_canonical = name_of(world, target);
     let dismisser_name = name_of(world, dismisser);
-    try_remove::<Follower>(world, target);
+    release_from(world, target, dismisser);
     send_rendered(
         world,
         dismisser,

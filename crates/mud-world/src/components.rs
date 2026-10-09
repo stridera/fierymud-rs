@@ -1893,6 +1893,38 @@ pub struct GroupInvite {
     pub at: std::time::Instant,
 }
 
+/// Real group membership: this player agreed (`invite` then `accept`) to
+/// join the group led by the wrapped entity. Flat, like legacy
+/// `group_master`: members point straight at the leader, who carries no
+/// marker. Deliberately separate from `Follower`, which needs no consent;
+/// everything group-scoped (gsay, XP split, group spells, `split`) reads
+/// this, never the follow tree.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct GroupMember(pub Entity);
+
+/// The leader of `start`'s group, or `start` itself when it is ungrouped
+/// (or its leader has gone away).
+#[must_use]
+pub fn group_root(world: &World, start: Entity) -> Entity {
+    match world.get::<GroupMember>(start) {
+        Some(GroupMember(leader)) if world.get_entity(*leader).is_ok() => *leader,
+        _ => start,
+    }
+}
+
+/// Every player in `root`'s group, leader first. A lone leader returns
+/// just `[root]`.
+pub fn group_members(world: &mut World, root: Entity) -> Vec<Entity> {
+    let mut group = vec![root];
+    let mut q = world.query_filtered::<(Entity, &GroupMember), With<Player>>();
+    group.extend(
+        q.iter(world)
+            .filter(|(e, m)| m.0 == root && *e != root)
+            .map(|(e, _)| e),
+    );
+    group
+}
+
 /// Per-room map of magical walls blocking specific exits. Installed
 /// by `WALL_OF_STONE` / `WALL_OF_ICE` (and any future opaque barriers);
 /// consulted by `cmd_move` before a player can leave the room

@@ -2181,10 +2181,16 @@ pub(crate) fn cmd_tripup(world: &mut World, player: Entity, args: &str) {
 /// forbids `player` to attack (silently, as legacy `mass_attack_ok`).
 fn skip_forbidden_pets(world: &mut World, player: Entity, targets: Vec<Entity>) -> Vec<Entity> {
     let my_root = super::group_root(world, player);
+    let party = super::group_members(world, my_root);
+    // Whoever the attacker follows is spared too, grouped or not.
+    let followed = world.get::<mud_world::Follower>(player).map(|f| f.0);
     targets
         .into_iter()
         .filter(|t| {
-            super::group_root(world, *t) != my_root
+            let master = world.get::<mud_world::Follower>(*t).map(|f| f.0);
+            !party.contains(t)
+                && Some(*t) != followed
+                && !master.is_some_and(|m| m == player || party.contains(&m))
                 && (super::attack_ok::pet_owner(world, *t).is_none()
                     || super::attack_ok::attack_ok(world, player, *t, false))
         })

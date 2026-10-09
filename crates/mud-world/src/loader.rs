@@ -1186,6 +1186,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             .get(&proto_key)
             .cloned();
         let primary_slot = wear_flags_primary_slot(&proto.wear_flags);
+        let spawned_item;
         {
             let mut bundle = world.spawn((
                 Item,
@@ -1242,9 +1243,11 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             if let Some(h) = proto.initial_hiddenness() {
                 bundle.insert(h);
             }
-            objects_by_reset.insert(r.id, vec![bundle.id()]);
+            spawned_item = bundle.id();
+            objects_by_reset.insert(r.id, vec![spawned_item]);
             stats.object_resets_spawned += 1;
         }
+        crate::reset_gear::attach_proto_charges(world, spawned_item, proto.zone_id, proto.id);
         *object_world_count.entry(proto_key).or_insert(0) += 1;
     }
     world.insert_resource(ObjectResetCatalog {

@@ -138,6 +138,32 @@ pub fn object_world_counts(world: &mut World) -> HashMap<(i32, i32), i32> {
     counts
 }
 
+/// The finite charge count a fresh instance of object prototype
+/// `(zone, id)` starts with: the first `ObjectAbilities` binding's
+/// `charges`. `None` for items without a charged binding (scrolls,
+/// potions, plain gear); wands, staves and instruments in the data
+/// always carry one.
+#[must_use]
+pub fn proto_charges(world: &World, zone: i32, id: i32) -> Option<i32> {
+    world
+        .get_resource::<crate::resources::ObjectAbilityCatalog>()?
+        .by_key
+        .get(&(zone, id))
+        .and_then(|v| v.first().and_then(|b| b.charges))
+}
+
+/// Give a freshly spawned instance of prototype `(zone, id)` its starting
+/// `Charges`. Every proto-based spawn site calls this: an item with no
+/// `Charges` component is treated as unlimited, so a spawn that skipped it
+/// would hand out an endless wand.
+pub fn attach_proto_charges(world: &mut World, item: Entity, zone: i32, id: i32) {
+    if let Some(charges) = proto_charges(world, zone, id)
+        && let Ok(mut e) = world.get_entity_mut(item)
+    {
+        e.insert(crate::components::Charges(charges));
+    }
+}
+
 /// Spawn one item instance of `proto` inside `parent` (a mob, or a
 /// container). Worn when `slot` is set. Never gives the item any
 /// persistence marker: items on mobs belong to the world, not to a
@@ -198,7 +224,9 @@ fn spawn_item(
             proto.restrictions.clone(),
         ));
     }
-    bundle.id()
+    let item = bundle.id();
+    attach_proto_charges(world, item, proto.zone_id, proto.id);
+    item
 }
 
 /// Equip and stock `mob` (spawned by `MobResets` row `reset_id`) from

@@ -975,7 +975,7 @@ fn a_blind_cleric_can_heal_and_cure_a_groupmate_but_not_a_stranger() {
         .insert((Health { hp: 30, max: 100 }, CombatStats::default()));
     fx.world
         .entity_mut(mate)
-        .insert(mud_world::Follower(caster));
+        .insert((mud_world::Follower(caster), mud_world::GroupMember(caster)));
     blind(&mut fx.world, caster);
     blind(&mut fx.world, mate);
     blind(&mut fx.world, rat);
@@ -1009,7 +1009,9 @@ fn gmcp_perceives_a_groupmate_clearly_while_blind_and_a_stranger_not_at_all() {
     let (mut fx, seer, _srx, other, _orx) = two_players();
     let a = fx.a;
     let (mate, _mrx) = player(&mut fx.world, a, "Mate");
-    fx.world.entity_mut(mate).insert(mud_world::Follower(seer));
+    fx.world
+        .entity_mut(mate)
+        .insert((mud_world::Follower(seer), mud_world::GroupMember(seer)));
     blind(&mut fx.world, seer);
     assert_eq!(perceives(&fx.world, seer, mate, false), Perceived::Clear);
     assert_eq!(perceives(&fx.world, seer, other, false), Perceived::Unseen);

@@ -5558,6 +5558,7 @@ mod tests {
         let killer = credit_player(&mut world, room, "Killer", 0);
         world.entity_mut(killer).insert((
             mud_world::Follower(leader),
+            mud_world::GroupMember(leader),
             Fighting(goblin),
             mud_world::PlayerFlags(vec![
                 mud_db::enums::PlayerFlag::AutoLoot,
@@ -5586,7 +5587,9 @@ mod tests {
         let killer = credit_player(&mut world, room, "Killer", 0);
         let third = credit_player(&mut world, room, "Third", 0);
         for m in [killer, third] {
-            world.entity_mut(m).insert(mud_world::Follower(leader));
+            world
+                .entity_mut(m)
+                .insert((mud_world::Follower(leader), mud_world::GroupMember(leader)));
         }
         world.entity_mut(killer).insert((
             Fighting(goblin),
@@ -5710,7 +5713,9 @@ mod tests {
         let extreme = credit_player(&mut world, room, "Extreme", 1000);
         let absent = credit_player(&mut world, away, "Absent", 0);
         for m in [killer, extreme, absent] {
-            world.entity_mut(m).insert(mud_world::Follower(leader));
+            world
+                .entity_mut(m)
+                .insert((mud_world::Follower(leader), mud_world::GroupMember(leader)));
         }
         world.entity_mut(killer).insert(Fighting(goblin));
 

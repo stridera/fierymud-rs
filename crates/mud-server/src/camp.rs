@@ -60,13 +60,10 @@ const CAMP_TIER_MAX: i32 = 3;
 /// clamp tier to 3
 /// ```
 ///
-/// Today we don't have a runtime party concept beyond the follow-
-/// chain `group_members` helper, so the "party member is
-/// Ranger/Druid" check walks the follow root and inspects each
-/// member's `Profile.class_id` against the `Class.campcraft_bonus`
-/// flag in the [`ClassCatalog`] (Ranger and Druid in the seeded
-/// data). When the party API hardens this is the right place to
-/// widen the check.
+/// The "party member is Ranger/Druid" check walks the player's real group
+/// (`invite` + `accept`, not the follow tree) and inspects each member's
+/// `Profile.class_id` against the `Class.campcraft_bonus` flag in the
+/// [`ClassCatalog`] (Ranger and Druid in the seeded data).
 fn compute_camp_tier(world: &mut World, player: Entity, kit_tier_bonus: i32) -> i32 {
     let mut tier = 1;
     let root = crate::commands::group_root(world, player);
