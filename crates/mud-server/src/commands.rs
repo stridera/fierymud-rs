@@ -21385,11 +21385,11 @@ fn act_room_with_subject(
 /// ally it will assist whose opponent is above level 20 gets help,
 /// unless the opponent is under familiarity and the roll sends the helper
 /// away confused. Opponents of level 20 or less are only watched.
-fn mob_assist(world: &mut World, helper: Entity, room: Entity, pairs: [(Entity, Entity); 2]) {
+fn mob_assist(world: &mut World, helper: Entity, room: Entity, pairs: &[(Entity, Entity)]) {
     let helper_name = name_of(world, helper);
     let cap_helper = cap_sentence_start(&helper_name);
     let mut watched: Option<(Entity, Entity)> = None;
-    for (vict, target) in pairs {
+    for &(vict, target) in pairs {
         // Legacy `mob_attack`: `victim == ch->master` returns. A pet (charmed
         // or otherwise following) never turns on whoever it follows.
         if world.get::<Follower>(helper).is_some_and(|f| f.0 == target) {
@@ -21515,8 +21515,80 @@ pub(crate) fn mob_helpers_engage(
                 world,
                 helper,
                 room,
-                [(defender, attacker), (attacker, defender)],
+                &[(defender, attacker), (attacker, defender)],
             );
+        }
+    }
+}
+
+/// Periodic mob assist (legacy `mobile_activity`, every `PULSE_MOBILE`):
+/// the same `mob_assist` rules as [`mob_helpers_engage`], but driven by
+/// the fights already in progress, so a helper that walks into a brawl, or
+/// is there when a mob starts one through aggro rather than `cmd_attack`,
+/// still joins. As in legacy the watch lines ("chuckles", "watches the
+/// battle") and the familiarity "stops, confused" line print on every
+/// pulse the helper is still free.
+///
+/// Cost is O(fighters + mobs): fights are bucketed by room first and only
+/// assister mobs standing in one of those rooms are considered; with no
+/// fight anywhere it is a single `Fighting` scan.
+pub(crate) fn mob_assist_pulse(world: &mut World) {
+    let mut fights: HashMap<Entity, Vec<(Entity, Entity)>> = HashMap::new();
+    {
+        let mut q = world.query::<(Entity, &Located, &Fighting)>();
+        for (vict, loc, fighting) in q.iter(world) {
+            // `will_assist`: the opponent must be in the same room.
+            if world
+                .get::<Located>(fighting.0)
+                .is_some_and(|l| l.0 == loc.0)
+            {
+                fights.entry(loc.0).or_default().push((vict, fighting.0));
+            }
+        }
+    }
+    fights.retain(|room, _| world.get::<mud_world::PeacefulRoom>(*room).is_none());
+    if fights.is_empty() {
+        return;
+    }
+    let helpers: Vec<(Entity, Entity)> = {
+        let mut q = world.query_filtered::<(
+            Entity,
+            &Located,
+            &mud_world::MobBehaviors,
+            Option<&Fighting>,
+            Option<&Follower>,
+        ), With<Mob>>();
+        q.iter(world)
+            .filter(|(_, l, beh, fighting, follower)| {
+                fights.contains_key(&l.0)
+                    && fighting.is_none()
+                    && is_mob_assister(beh)
+                    // Legacy: a charmed mob away from its master does nothing.
+                    && follower.is_none_or(|f| {
+                        world.get::<Located>(f.0).is_some_and(|m| m.0 == l.0)
+                    })
+            })
+            .map(|(e, l, _, _, _)| (e, l.0))
+            .collect()
+    };
+    for (helper, room) in helpers {
+        if !crate::mob_ai::mob_can_act(world, helper) {
+            continue;
+        }
+        let pairs: Vec<(Entity, Entity)> = fights[&room]
+            .iter()
+            .copied()
+            .filter(|&(vict, target)| vict != helper && target != helper)
+            .collect();
+        if pairs.is_empty() {
+            continue;
+        }
+        mob_assist(world, helper, room, &pairs);
+        // A mob that just joined is itself an ally for the next helper.
+        if let Some(Fighting(target)) = world.get::<Fighting>(helper).copied()
+            && let Some(list) = fights.get_mut(&room)
+        {
+            list.push((helper, target));
         }
     }
 }
@@ -22041,6 +22113,14 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
             // one without a boat, wings or waterwalk stays behind.
             if crate::room_access::deep_water_blocks(world, f, from_room, target) {
                 send_to(world, f, crate::room_access::NEED_BOAT);
+                // Legacy tells only the follower; the leader would never
+                // learn the pet was left behind, so say so.
+                let fname = cap_sentence_start(&name_of(world, f));
+                send_to(
+                    world,
+                    leader,
+                    format!("{fname} can't follow you there.\r\n"),
+                );
                 continue;
             }
             // A follower the room refuses stays behind (legacy checks each

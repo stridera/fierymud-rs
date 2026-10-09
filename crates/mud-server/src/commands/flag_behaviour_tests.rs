@@ -408,3 +408,107 @@ fn a_charmed_pet_of_the_target_stays_out() {
     super::mob_helpers_engage(&mut fx.world, victim, master, room);
     assert!(fx.world.get::<mud_world::Fighting>(thrall).is_none());
 }
+
+/// A level-`level` player already fighting a level-50 cityguard in room
+/// `a`, with a Helper deputy waiting in room `b`. Returns the fixture, the
+/// player, the guard, the deputy and the player's output.
+fn brawl_with_helper_next_door(level: i32) -> (Fx, Entity, Entity, Entity, Rx) {
+    use mud_db::enums::MobBehavior::Helper;
+    let (mut fx, p, rx) = caster_with_flag_spell("familiarity");
+    fx.world.get_mut::<mud_world::Profile>(p).unwrap().level = level;
+    let guard = mob_in(&mut fx, "a hapless cityguard", 0);
+    fx.world.entity_mut(guard).insert(level_50_profile());
+    fx.world.entity_mut(p).insert(mud_world::Fighting(guard));
+    fx.world.entity_mut(guard).insert(mud_world::Fighting(p));
+    let deputy = mob_in(&mut fx, "a loyal deputy", 0);
+    fx.world.entity_mut(deputy).insert((
+        mud_world::MobBehaviors(vec![Helper]),
+        mud_world::Located(fx.b),
+    ));
+    fx.world
+        .insert_resource(crate::TickCount(crate::wander::SCAVENGER_PERIOD_TICKS));
+    (fx, p, guard, deputy, rx)
+}
+
+#[test]
+fn a_helper_entering_a_fight_joins_on_the_next_pulse() {
+    let (mut fx, p, _guard, deputy, mut rx) = brawl_with_helper_next_door(50);
+    // Next door the deputy knows nothing of the fight.
+    crate::wander::assist_tick(&mut fx.world);
+    assert!(fx.world.get::<mud_world::Fighting>(deputy).is_none());
+    // Walks in; between pulses nothing happens.
+    fx.world.entity_mut(deputy).insert(mud_world::Located(fx.a));
+    fx.world
+        .insert_resource(crate::TickCount(crate::wander::SCAVENGER_PERIOD_TICKS + 1));
+    crate::wander::assist_tick(&mut fx.world);
+    assert!(fx.world.get::<mud_world::Fighting>(deputy).is_none());
+    let _ = drain(&mut rx);
+    fx.world
+        .insert_resource(crate::TickCount(crate::wander::SCAVENGER_PERIOD_TICKS * 2));
+    crate::wander::assist_tick(&mut fx.world);
+    assert_eq!(
+        fx.world.get::<mud_world::Fighting>(deputy).map(|f| f.0),
+        Some(p)
+    );
+    let seen = drain(&mut rx);
+    assert!(
+        seen.contains("A loyal deputy jumps to the aid of"),
+        "{seen}"
+    );
+    // Already fighting: later pulses are silent.
+    fx.world
+        .insert_resource(crate::TickCount(crate::wander::SCAVENGER_PERIOD_TICKS * 3));
+    crate::wander::assist_tick(&mut fx.world);
+    assert_eq!(drain(&mut rx), "");
+}
+
+#[test]
+fn the_assist_pulse_only_watches_a_low_level_fighter_and_skips_peaceful_rooms() {
+    let (mut fx, _p, _guard, deputy, mut rx) = brawl_with_helper_next_door(20);
+    fx.world.entity_mut(deputy).insert(mud_world::Located(fx.a));
+    for _ in 0..40 {
+        crate::wander::assist_tick(&mut fx.world);
+    }
+    assert!(
+        fx.world.get::<mud_world::Fighting>(deputy).is_none(),
+        "level 20 target is only watched"
+    );
+    // Legacy prints the chuckle lines on every pulse (3 in 10 odds; 40
+    // pulses make a silent run vanishingly unlikely).
+    let seen = drain(&mut rx);
+    assert!(
+        seen.contains("watches the battle in amusement")
+            || seen.contains("chuckles as")
+            || seen.contains("takes note of"),
+        "{seen}"
+    );
+
+    let (mut fx, _p, _guard, deputy, _rx) = brawl_with_helper_next_door(50);
+    fx.world.entity_mut(deputy).insert(mud_world::Located(fx.a));
+    fx.world.entity_mut(fx.a).insert(mud_world::PeacefulRoom);
+    crate::wander::assist_tick(&mut fx.world);
+    assert!(fx.world.get::<mud_world::Fighting>(deputy).is_none());
+}
+
+#[test]
+fn the_assist_pulse_keeps_a_pet_off_its_master_and_runs_the_familiarity_roll() {
+    // The deputy follows the player: it must not join against its master.
+    let (mut fx, p, _guard, deputy, _rx) = brawl_with_helper_next_door(50);
+    fx.world
+        .entity_mut(deputy)
+        .insert((mud_world::Located(fx.a), mud_world::Follower(p)));
+    crate::wander::assist_tick(&mut fx.world);
+    assert!(fx.world.get::<mud_world::Fighting>(deputy).is_none());
+
+    // Familiar player: a roll under 50 sends the helper away confused.
+    let (mut fx, p, _guard, deputy, mut rx) = brawl_with_helper_next_door(50);
+    fx.world.entity_mut(p).insert(mud_world::Familiar);
+    fx.world.entity_mut(deputy).insert(mud_world::Located(fx.a));
+    let _ = drain(&mut rx);
+    super::FORCED_FAMILIARITY_ROLL.with(|c| c.set(Some(10)));
+    crate::wander::assist_tick(&mut fx.world);
+    super::FORCED_FAMILIARITY_ROLL.with(|c| c.set(None));
+    assert!(fx.world.get::<mud_world::Fighting>(deputy).is_none());
+    let seen = drain(&mut rx);
+    assert!(seen.contains("gets a good look at you and stops"), "{seen}");
+}

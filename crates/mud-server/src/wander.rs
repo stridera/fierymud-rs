@@ -302,6 +302,17 @@ pub fn scavenger_tick(world: &mut World) {
     }
 }
 
+/// Mob assist pulse (legacy `mobile_activity` -> `mob_assist`, every
+/// `PULSE_MOBILE` = [`SCAVENGER_PERIOD_TICKS`]): lets helper, protector and
+/// peacekeeper mobs join fights already underway in their room.
+pub fn assist_tick(world: &mut World) {
+    let tick = world.resource::<TickCount>().0;
+    if !tick.is_multiple_of(SCAVENGER_PERIOD_TICKS) {
+        return;
+    }
+    crate::commands::mob_assist_pulse(world);
+}
+
 #[cfg(test)]
 mod tests {
     //! Room-flag wander gating tests. Verifies the

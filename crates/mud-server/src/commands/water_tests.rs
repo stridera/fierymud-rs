@@ -9,9 +9,9 @@ use mud_db::enums::{
     effective_rank,
 };
 use mud_world::{
-    Account, EquippedSlot, ExitData, Exits, Flying, Follower, Item, Located, Mob, MobTraits,
-    Mounted, MovementModeTag, Named, ObjectPrototypes, Online, Player, Profile, Room, RoomSector,
-    Slot, WaterWalk, WorldKey,
+    Account, Corpse, EquippedSlot, ExitData, Exits, Flying, Follower, Item, Keywords, Located, Mob,
+    MobTraits, Mounted, MovementModeTag, Named, ObjectPrototypes, Online, Player, PlayerFlags,
+    Posture, PostureKind, Profile, Room, RoomSector, Slot, WaterWalk, WorldKey,
 };
 
 use super::Connection;
@@ -262,6 +262,62 @@ fn a_follower_without_the_means_stays_behind() {
     assert_eq!(fx.at(flier), fx.lake, "a follower who can fly goes along");
     assert_eq!(fx.at(pup), fx.shore, "legacy: follower is left behind");
     assert!(drain(&mut prx).contains(NEED_BOAT.trim_end()));
+}
+
+#[test]
+fn the_leader_hears_which_follower_was_left_at_the_water() {
+    let mut fx = Fx::new();
+    let (leader, mut lrx) = fx.mortal("Leader");
+    fx.world.entity_mut(leader).insert(WaterWalk);
+    let (pup, _prx) = fx.mortal("Pup");
+    fx.world.entity_mut(pup).insert(Follower(leader));
+    let (flier, _frx) = fx.mortal("Flier");
+    fx.world
+        .entity_mut(flier)
+        .insert((Follower(leader), Flying));
+
+    fx.walk(leader, Direction::North);
+    let out = drain(&mut lrx);
+    assert!(out.contains("Pup can't follow you there."), "{out}");
+    assert!(!out.contains("Flier can't follow"), "{out}");
+}
+
+/// Legacy `do_drag` pulls the dragged character or object out of the room
+/// and drops it in the destination with `char_to_room` / `obj_to_room`;
+/// only the dragger goes through `perform_move`, so only the dragger faces
+/// the "need a boat" gate. The body is deliberately not gated.
+#[test]
+fn dragging_a_body_or_corpse_into_deep_water_is_not_gated_like_legacy() {
+    let mut fx = Fx::new();
+    let (dragger, mut drx) = fx.mortal("Dragger");
+    fx.world.entity_mut(dragger).insert(WaterWalk);
+    let corpse = fx
+        .world
+        .spawn((
+            Item,
+            Corpse,
+            Named {
+                name: "the corpse of a rat".into(),
+            },
+            Keywords(vec!["corpse".into()]),
+            Located(fx.shore),
+        ))
+        .id();
+    let (body, _brx) = fx.mortal("Bob");
+    fx.world.entity_mut(body).insert((
+        Keywords(vec!["bob".into()]),
+        PlayerFlags(vec![mud_db::enums::PlayerFlag::Consent]),
+        Posture(PostureKind::Sitting),
+    ));
+
+    crate::commands::dispatch(&mut fx.world, dragger, "drag corpse north");
+    assert_eq!(fx.at(dragger), fx.lake, "{}", drain(&mut drx));
+    assert_eq!(fx.at(corpse), fx.lake);
+
+    fx.walk(dragger, Direction::South);
+    crate::commands::dispatch(&mut fx.world, dragger, "drag bob north");
+    assert_eq!(fx.at(dragger), fx.lake, "{}", drain(&mut drx));
+    assert_eq!(fx.at(body), fx.lake, "the boatless body is hauled in");
 }
 
 #[test]
