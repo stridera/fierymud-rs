@@ -503,6 +503,71 @@ async fn character_name_approval_round_trip() {
         .expect("cleanup");
 }
 
+/// `rename_pending` (`reject_name`) renames and approves a pending name and
+/// leaves an approved character alone.
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn rename_pending_only_touches_unapproved_names() {
+    let pool = pool().await;
+    let user_id = testplayer_user_id(&pool).await;
+    let suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let name = format!("RejTest{suffix}");
+    let new_char = mud_db::characters::NewCharacter {
+        user_id: &user_id,
+        name: &name,
+        race: "HUMAN",
+        gender: "neutral",
+        class_id: 1,
+        strength: 13,
+        intelligence: 13,
+        wisdom: 13,
+        dexterity: 13,
+        constitution: 13,
+        charisma: 13,
+        name_approved: false,
+        password_hash: "",
+    };
+    let char_id = mud_db::characters::create(&pool, &new_char)
+        .await
+        .expect("create unapproved");
+
+    // A pending name is renamed and approved...
+    let renamed = format!("{name}R");
+    let n = mud_db::characters::rename_pending(&pool, &char_id, &renamed)
+        .await
+        .expect("rename pending");
+    assert_eq!(n, 1, "a pending name is renamed");
+    let row = mud_db::characters::find_by_name(&pool, &renamed)
+        .await
+        .expect("find renamed")
+        .expect("present under the new name");
+    assert!(row.name_approved, "the staff-chosen name is approved");
+    // ...and leaves an already-approved character alone.
+    let again = format!("{name}S");
+    let n = mud_db::characters::rename_pending(&pool, &char_id, &again)
+        .await
+        .expect("rename approved");
+    assert_eq!(n, 0, "an approved name is not renamed");
+    assert!(
+        mud_db::characters::find_by_name(&pool, &again)
+            .await
+            .expect("find again")
+            .is_none()
+    );
+    let n = mud_db::characters::rename_pending(&pool, "no-such-id", &again)
+        .await
+        .expect("rename missing id");
+    assert_eq!(n, 0);
+
+    sqlx::query!(r#"DELETE FROM "Characters" WHERE id = $1"#, char_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}
+
 /// Default-true grandfathering: a character created without an
 /// explicit `name_approved` override must land at `true`. The schema
 /// default carries this, but the test pins it so a future migration

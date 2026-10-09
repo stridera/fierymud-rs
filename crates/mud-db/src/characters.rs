@@ -329,6 +329,29 @@ pub async fn rename(pool: &PgPool, character_id: &str, new_name: &str) -> sqlx::
     Ok(res.rows_affected())
 }
 
+/// Rename a character whose name is still awaiting approval and mark the
+/// new, staff-chosen name approved, in one statement. The `name_approved =
+/// false` condition is part of the `UPDATE`, so a character whose name was
+/// already approved (or was approved between the lookup and this call) is
+/// untouched. Returns the rows changed: 0 means the id is missing or its
+/// name is not pending. A taken `new_name` surfaces as the unique-index
+/// error, as with [`rename`].
+pub async fn rename_pending(
+    pool: &PgPool,
+    character_id: &str,
+    new_name: &str,
+) -> sqlx::Result<u64> {
+    let res = sqlx::query(
+        r#"UPDATE "Characters" SET name = $1, name_approved = true
+           WHERE id = $2 AND name_approved = false"#,
+    )
+    .bind(new_name)
+    .bind(character_id)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
+}
+
 /// Payload for `save_state`. Fifteen fields including four
 /// `Option<i32>` room-pair coordinates (current zone/id +
 /// recall zone/id) make the positional shape regression-prone:

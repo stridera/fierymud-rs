@@ -19,7 +19,10 @@
 //! - a mortal (effective role Player) can only be granted a command that is
 //!   on the `grants.mortal_allowlist` `GameConfig` row (a JSON array of command
 //!   names, empty by default), has no permission requirement, is no higher than
-//!   [`MORTAL_GRANT_CAP`] and is not a delegation command;
+//!   [`MORTAL_GRANT_CAP`], is not a delegation command, is not an
+//!   `Admin`-category command (bar the harmless [`MORTAL_ADMIN_EXEMPT`]
+//!   petition reply) and is not on the hard-coded [`MORTAL_DENIED`] list.
+//!   These two checks hold whatever the allowlist says;
 //! - a grant is re-checked every time the command is used
 //!   ([`grant_honoured`]), not just when it is made, so a demotion, a command
 //!   raised since, or a hand-edited row cannot keep access the rules would
@@ -48,6 +51,47 @@ pub(crate) const MORTAL_GRANT_CAP: UserRole = UserRole::Immortal;
 /// Commands that hand out or take back access. Granting these would let a
 /// grantee mint further grants, so they are never grantable.
 const DELEGATION_COMMANDS: &[&str] = &["grant", "revoke", "ungrant"];
+
+/// `Admin`-category commands a mortal may still hold a grant for: harmless
+/// communication only. `ptell` answers a petition and touches no data.
+const MORTAL_ADMIN_EXEMPT: &[&str] = &["ptell"];
+
+/// Backstop deny-list: commands a mortal is never granted, whatever their
+/// category, rank or the allowlist say. It repeats the `Admin` category rule
+/// so a recategorised or newly added staff command stays out of mortal hands.
+/// `reject_name` renames characters, `approve_name`/`users`/`aggrodebug`
+/// expose or change staff-side state; the rest are the staff tools that act
+/// on other characters or on the world.
+const MORTAL_DENIED: &[&str] = &[
+    "approve_name",
+    "reject_name",
+    "users",
+    "aggrodebug",
+    "grant",
+    "revoke",
+    "ungrant",
+    "rename",
+    "set",
+    "snoop",
+    "switch",
+    "force",
+    "ban",
+    "unban",
+    "shutdown",
+    "restart",
+    "advance",
+    "purge",
+    "freeze",
+    "mute",
+];
+
+/// Whether a mortal may ever hold a grant for `cmd`, before the allowlist.
+fn mortal_may_hold(cmd: &Command) -> bool {
+    if cmd.names.iter().any(|n| MORTAL_DENIED.contains(n)) {
+        return false;
+    }
+    cmd.category != Category::Admin || cmd.names.iter().any(|n| MORTAL_ADMIN_EXEMPT.contains(n))
+}
 
 /// `GameConfig` `(category, key)` of the mortal allowlist: a JSON array of
 /// command names a mortal may hold a grant for. Empty (no mortal grants)
@@ -91,15 +135,17 @@ pub(crate) fn mortal_allowlist_for(
 /// role is `role`. Evaluated on every use and again when a grant is made,
 /// so `grant` refuses exactly what use would ignore.
 /// - delegation commands are never honoured;
-/// - a mortal needs the command on the allowlist, no `required_perm`, and a
-///   `min_role` no higher than [`MORTAL_GRANT_CAP`];
+/// - a mortal needs the command on the allowlist, no `required_perm`, a
+///   `min_role` no higher than [`MORTAL_GRANT_CAP`], and to pass
+///   [`mortal_may_hold`] (not `Admin` category bar `ptell`, not denied);
 /// - staff need a role of at least [`MORTAL_GRANT_CAP`].
 pub(crate) fn grant_honoured(cmd: &Command, role: UserRole, mortal_allowlist: &[String]) -> bool {
     if DELEGATION_COMMANDS.contains(&cmd.names[0]) {
         return false;
     }
     if role == UserRole::Player {
-        cmd.required_perm.is_none()
+        mortal_may_hold(cmd)
+            && cmd.required_perm.is_none()
             && MORTAL_GRANT_CAP.at_least(cmd.min_role)
             && cmd
                 .names
@@ -138,7 +184,7 @@ const GRANT_LONG: &str = "Coder+. Per-character command access. A grant lets a c
 command above their rank; a revoke takes a command away. Only online players strictly below \
 your level, and only commands you can use yourself. 'grant <name>' lists a character's grants \
 and revokes; 'grant <name> clear' drops the ones at or below your level. A mortal can only be \
-granted commands on the grants.mortal_allowlist config row (empty by default). Command groups and privilege flags do not exist \
+granted commands on the grants.mortal_allowlist config row (empty by default), and never an admin command. Command groups and privilege flags do not exist \
 on this server.";
 
 macro_rules! grant_command {
@@ -365,7 +411,7 @@ fn grant_refusal(
         return Some(if target_role == UserRole::Player {
             format!(
                 "{target_name} is a mortal; mortals can only be granted commands on the mortal \
-                 allowlist (up to immortal rank, no permission requirement).\r\n"
+                 allowlist (up to immortal rank, no permission requirement, and never an admin command bar ptell).\r\n"
             )
         } else {
             format!(

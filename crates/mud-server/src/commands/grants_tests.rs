@@ -10,6 +10,7 @@ use mud_world::{
 };
 
 use super::dispatch;
+use super::grants::grant_honoured;
 use super::test_support::{Rx, drain};
 use crate::commands::{Abbrev, Command, Connection, all_commands, grant_usability, resolve_abbrev};
 
@@ -449,4 +450,94 @@ fn authority_ignores_a_character_level_above_the_implementor_cap() {
     w.get_mut::<Profile>(coder).unwrap().level = 130;
     w.get_mut::<Account>(coder).unwrap().role = UserRole::Coder;
     assert_eq!(authority_level(&w, coder), 104);
+}
+
+/// Every command a mortal could possibly be granted today: rank at or below
+/// immortal, no permission requirement, and passing the hard checks, with the
+/// allowlist set to "everything".
+fn mortal_grantable() -> Vec<&'static str> {
+    let all: Vec<String> = all_commands()
+        .flat_map(|c| c.names.iter().map(|n| (*n).to_string()))
+        .collect();
+    let mut out: Vec<&'static str> = all_commands()
+        .filter(|c| c.min_role != UserRole::Player)
+        .filter(|c| grant_honoured(c, UserRole::Player, &all))
+        .map(|c| c.names[0])
+        .collect();
+    out.sort_unstable();
+    out
+}
+
+#[test]
+fn a_mortal_can_only_ever_be_granted_harmless_communication() {
+    // Even with every command name on the allowlist, only these two qualify.
+    assert_eq!(mortal_grantable(), vec!["ptell", "wiznet"]);
+}
+
+#[test]
+fn admin_commands_are_never_granted_to_a_mortal() {
+    let (mut w, room) = world();
+    let names = [
+        "reject_name",
+        "approve_name",
+        "users",
+        "aggrodebug",
+        "goto",
+        "snoop",
+    ];
+    let json = format!(
+        "[{}]",
+        names
+            .iter()
+            .map(|n| format!("\"{n}\""))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    allow(&mut w, &json);
+    let (boss, mut boss_rx) = person(&mut w, room, "Boss", 105);
+    let (mort, mut mort_rx) = person(&mut w, room, "Mort", 20);
+    for cmd in &names[..4] {
+        dispatch(&mut w, boss, &format!("grant mort command {cmd}"));
+        let out = drain(&mut boss_rx);
+        assert!(out.contains("mortals can only be granted"), "{cmd}: {out}");
+    }
+    assert!(w.get::<CommandGrants>(mort).is_none());
+
+    // Hand-edited rows are ignored at use too, allowlist notwithstanding.
+    w.entity_mut(mort).insert(CommandGrants {
+        grants: names.iter().map(|n| entry(n)).collect(),
+        revokes: vec![],
+    });
+    for line in [
+        "reject_name boss Foo",
+        "approve_name boss",
+        "users",
+        "aggrodebug",
+    ] {
+        dispatch(&mut w, mort, line);
+        assert!(drain(&mut mort_rx).contains("You can't do that."), "{line}");
+    }
+    // The same commands stay with staff.
+    let all: Vec<String> = names.iter().map(|n| (*n).to_string()).collect();
+    for n in &names[..4] {
+        assert!(grant_honoured(find(n), UserRole::Immortal, &all), "{n}");
+        assert!(!grant_honoured(find(n), UserRole::Player, &all), "{n}");
+    }
+}
+
+#[test]
+fn the_deny_list_holds_even_for_a_recategorised_command() {
+    let all = vec!["reject_name".to_string(), "ptell".to_string()];
+    let reject = Command {
+        category: crate::commands::Category::Communication,
+        ..*find("reject_name")
+    };
+    assert!(!grant_honoured(&reject, UserRole::Player, &all));
+    // A non-denied command moved out of Admin is grantable (the category rule
+    // is the only thing that kept it out).
+    let ptell = Command {
+        category: crate::commands::Category::Communication,
+        ..*find("ptell")
+    };
+    assert!(grant_honoured(&ptell, UserRole::Player, &all));
 }

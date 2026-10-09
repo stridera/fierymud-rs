@@ -12,8 +12,10 @@
 //! * `approve_name <character>` — keep the chosen name. Flips
 //!   `name_approved = true`, drops the marker on the live entity if
 //!   the player is online, and DMs them.
-//! * `reject_name <character> <new-name>` — force-rename. Refuses
-//!   while the target is online (renames need the in-memory Named
+//! * `reject_name <character> <new-name>` — force-rename. Only acts on a
+//!   character whose name is still pending approval (legacy `ndecline`
+//!   likewise only touches players waiting for approval); an approved
+//!   character is refused. Refuses while the target is online (renames need the in-memory Named
 //!   cache to rebuild via reconnect). The new staff-chosen name is
 //!   self-approving, so the same flow renames + flips
 //!   `name_approved` back to `true`.
@@ -61,7 +63,9 @@ inventory::submit! {
         help: Help {
             usage: "reject_name <character> <new-name>",
             summary: "Force-rename a pending character and approve.",
-            long: "Immortal+. Renames the named character to the \
+            long: "Immortal+. Only for a character whose name is \
+                   awaiting approval; an approved character is refused. \
+                   Renames the named character to the \
                    staff-chosen replacement and flips name_approved \
                    to true (the new name is by definition staff-\
                    approved). Refuses while the target is online — \
@@ -251,14 +255,31 @@ async fn cmd_reject_name_async(
             return;
         }
     };
-    // Rename first; if the new name is taken we don't want to half-
-    // commit a flag flip against a still-pending character.
-    match mud_db::characters::rename(pool, &row.id, new_name).await {
+    // Legacy `ndecline` only acts on a player waiting for (or auto-accepted
+    // and still pending) name approval. An approved character is never
+    // renamed this way; that is `rename`'s job and needs the rename rights.
+    if row.name_approved {
+        send_to(
+            world,
+            player,
+            format!(
+                "'{}' has no name awaiting approval — nothing to reject.\r\n",
+                row.name
+            ),
+        );
+        return;
+    }
+    // Rename and approve in one statement that re-checks the pending state,
+    // so nothing is half-committed and a racing approval wins.
+    match mud_db::characters::rename_pending(pool, &row.id, new_name).await {
         Ok(0) => {
             send_to(
                 world,
                 player,
-                format!("Character row '{old_name}' vanished mid-rename.\r\n"),
+                format!(
+                    "'{}' has no name awaiting approval — nothing to reject.\r\n",
+                    row.name
+                ),
             );
             return;
         }
@@ -276,26 +297,6 @@ async fn cmd_reject_name_async(
             }
             return;
         }
-    }
-    // Flip the gate. A failure here leaves the character renamed-
-    // but-still-pending — staff can recover with `approve_name
-    // <new-name>` and the player is silenced in the meantime, so
-    // this isn't catastrophic. Log loudly so the operator notices.
-    if let Err(e) = mud_db::characters::set_name_approved(pool, &row.id, true).await {
-        tracing::warn!(
-            error = %e,
-            target = %new_name,
-            "reject_name: rename succeeded but name_approved flip failed",
-        );
-        send_to(
-            world,
-            player,
-            format!(
-                "Renamed to '{new_name}' but failed to clear the gate: {e}. \
-                 Recover with 'approve_name {new_name}'.\r\n",
-            ),
-        );
-        return;
     }
     let admin_name = name_of(world, player);
     send_rendered(
