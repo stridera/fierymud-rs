@@ -534,6 +534,9 @@ mod god_zone_tests;
 #[path = "commands/goto_tests.rs"]
 mod goto_tests;
 #[cfg(test)]
+#[path = "commands/group_spell_tests.rs"]
+mod group_spell_tests;
+#[cfg(test)]
 #[path = "commands/group_tests.rs"]
 mod group_tests;
 #[cfg(test)]
@@ -14179,6 +14182,26 @@ fn aoe_refusal(scope: AoeScope, verb: &str, def: &mud_world::AbilityDef) -> Stri
     }
 }
 
+/// Legacy `MAG_GROUP` (`cast_spell`, `chant`, `perform`): the `grouped`
+/// rule's refusal while the caster is in no group. Checked once up front for
+/// a room-wide cast, like [`aoe_outdoors_refusal`]. Legacy refuses at the
+/// end of the wind-up and charges nothing, so the caller releases the slot.
+fn aoe_group_refusal(
+    world: &mut World,
+    player: Entity,
+    def: &mud_world::AbilityDef,
+) -> Option<String> {
+    let rules: Vec<serde_json::Value> = world
+        .resource::<AbilityCatalog>()
+        .restriction_rules
+        .get(&def.id)?
+        .iter()
+        .filter(|r| r.get("type").and_then(serde_json::Value::as_str) == Some("grouped"))
+        .cloned()
+        .collect();
+    check_ability_restrictions(world, player, player, &rules)
+}
+
 /// Legacy `TAR_OUTDOORS` for a room-wide cast: the caster-side
 /// `outdoors` rule's refusal, if it fails. A room-wide cast does not go
 /// through `resolve_and_gate_target` (it would repeat the refusal once
@@ -14224,6 +14247,10 @@ fn aoe_preflight(
         return false;
     }
     if let Some(refusal) = aoe_outdoors_refusal(world, player, def) {
+        send_to(world, player, format!("{refusal}\r\n"));
+        return false;
+    }
+    if let Some(refusal) = aoe_group_refusal(world, player, def) {
         send_to(world, player, format!("{refusal}\r\n"));
         return false;
     }
@@ -15300,6 +15327,20 @@ pub(crate) fn invoke_ability_with(
     {
         send_to(world, player, format!("{refusal}\r\n"));
         settle_slot(world, player, slot_hold, false);
+        return;
+    }
+    if !aoe_repeat
+        && inferred_scope.is_some()
+        && let Some(refusal) = aoe_group_refusal(world, player, &def)
+    {
+        // A scroll, wand or staff of a group spell used outside a group does
+        // nothing, quietly, and is still used up (legacy `mag_group` returns
+        // `CAST_RESULT_CHARGE` before any message). A cast refuses with the
+        // legacy line and, like legacy, charges no slot.
+        if !from_item {
+            send_to(world, player, format!("{refusal}\r\n"));
+        }
+        settle_slot(world, player, slot_hold, from_item);
         return;
     }
     if !aoe_repeat && let Some(scope) = inferred_scope {
@@ -19187,6 +19228,8 @@ pub(crate) fn check_target_type(
 /// - `has_weapon` — caster has any item equipped in `Slot::Wield`.
 /// - `outdoors` — the caster's room is not indoors (see
 ///   [`room_is_indoors`]); legacy `TAR_OUTDOORS`.
+/// - `grouped` — the caster is in a group ([`is_grouped`]); legacy
+///   `MAG_GROUP`.
 pub(crate) fn check_ability_restrictions(
     world: &mut World,
     caster: Entity,
@@ -19242,6 +19285,9 @@ pub(crate) fn check_ability_restrictions(
             // Legacy `TAR_OUTDOORS` (spell_parser.cpp check_spell_target):
             // the caster's room must not be indoors.
             "outdoors" => !caster_room_is_indoors(world, caster),
+            // Legacy `MAG_GROUP` (cast_spell: "You can't cast this spell
+            // if you're not in a group!"): the caster must be grouped.
+            "grouped" => is_grouped(world, caster),
             // `has_shield` and other equipment-flag rules need
             // wear-flag plumbing not yet modeled — pass for now.
             // Unknown type → pass (don't refuse) so adding new rule
@@ -22686,6 +22732,21 @@ pub(crate) fn engage_skill_shim(
 
 /// Group membership (not the follow tree): who leads `start`'s group.
 pub(crate) use mud_world::{group_members, group_root};
+
+/// Legacy `IS_GROUPED(ch)` (`group_master || groupees`): `ch` belongs to a
+/// group, as a member of someone's or as a leader somebody joined. Real
+/// membership (`GroupMember`), never the follow tree; a lone leader nobody
+/// has joined is not grouped.
+pub(crate) fn is_grouped(world: &mut World, ch: Entity) -> bool {
+    if world
+        .get::<mud_world::GroupMember>(ch)
+        .is_some_and(|m| world.get_entity(m.0).is_ok())
+    {
+        return true;
+    }
+    let mut q = world.query::<&mud_world::GroupMember>();
+    q.iter(world).any(|m| m.0 == ch)
+}
 
 /// Drop `member`'s tie to `leader`: the follow edge and the group
 /// membership, whichever point at `leader`. Other groups / leaders are

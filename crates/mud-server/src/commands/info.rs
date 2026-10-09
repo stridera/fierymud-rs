@@ -12848,11 +12848,18 @@ pub(crate) fn cmd_remove(world: &mut World, player: Entity, args: &str) {
         };
         // Legacy `do_remove` walks `where = 0..NUM_WEARS`, so the strip
         // (and its messages) follow equipment slot order, not query order.
+        // Legacy `WEAR_OBELT` is 26, after `WEAR_WAIST` (13), but here the
+        // waist item drops whatever hangs from the belt as it comes off.
+        // The belt item goes first so it is removed normally (message,
+        // unapply, Remove trigger, counted) rather than falling off.
         worn.sort_by_key(|(_, _, s)| {
-            Slot::ORDER
+            let slot = if *s == Slot::Belt { Slot::Waist } else { *s };
+            let pos = Slot::ORDER
                 .iter()
-                .position(|x| x == s)
-                .unwrap_or(usize::MAX)
+                .position(|x| *x == slot)
+                .unwrap_or(usize::MAX);
+            // Belt sorts just ahead of the waist slot it borrowed.
+            (pos, u8::from(*s != Slot::Belt))
         });
         let items: Vec<(Entity, String)> = worn.into_iter().map(|(e, n, _)| (e, n)).collect();
         if items.is_empty() {
@@ -14656,7 +14663,12 @@ pub(crate) fn render_identify_block(
 
     // What wearing it does (legacy identify's `Item provides:` and
     // `Apply:` lines): effect flags it grants and stat applies.
-    let grants = crate::equip_apply::describe_item_grants(world, &p);
+    let mut grants = crate::equip_apply::describe_item_grants(world, &p);
+    // Enchant Weapon's per-instance applies ride on the item, not the
+    // prototype, but wearing it delivers them all the same.
+    grants
+        .applies
+        .extend(crate::equip_apply::describe_instance_applies(world, item));
     if !grants.provides.is_empty() || !grants.applies.is_empty() {
         out.push_str("\r\n  <b:cyan>Worn Effects</>\r\n");
         if !grants.provides.is_empty() {
@@ -14808,8 +14820,18 @@ pub(crate) fn render_identify_block(
     // through the `ClassCatalog`, races by raw name. An empty
     // section is omitted entirely so unrestricted gear stays clean.
     let mut restrictions: Vec<(&'static str, String)> = Vec::new();
-    if !p.restricted_alignments.is_empty() {
-        let labels: Vec<&'static str> = p.restricted_alignments.iter().map(|a| a.label()).collect();
+    // Alignments barred on the proto, plus any a spell barred on this
+    // instance (Enchant Weapon; legacy set `ITEM_ANTI_*`).
+    let mut barred_alignments = p.restricted_alignments.clone();
+    if let Some(b) = world.get::<mud_world::components::ItemBarredAlignments>(item) {
+        for a in &b.0 {
+            if !barred_alignments.contains(a) {
+                barred_alignments.push(*a);
+            }
+        }
+    }
+    if !barred_alignments.is_empty() {
+        let labels: Vec<&'static str> = barred_alignments.iter().map(|a| a.label()).collect();
         restrictions.push(("Alignments", labels.join(", ")));
     }
     if !p.restricted_class_ids.is_empty() {

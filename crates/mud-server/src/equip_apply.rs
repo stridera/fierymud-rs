@@ -506,6 +506,22 @@ pub fn describe_item_grants(world: &World, proto: &mud_world::ObjectProto) -> It
     out
 }
 
+/// The per-instance stat applies on `item` (Enchant Weapon's
+/// [`mud_world::components::ItemApplies`]), worded like the proto ones in
+/// [`describe_item_grants`] (legacy `format_apply`: `+2 to accuracy`).
+#[must_use]
+pub fn describe_instance_applies(world: &World, item: Entity) -> Vec<String> {
+    world
+        .get::<mud_world::components::ItemApplies>(item)
+        .map(|a| {
+            a.0.iter()
+                .filter(|(_, amount)| *amount != 0)
+                .map(|(target, amount)| format!("{amount:+} to {}", apply_label(target)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Legacy `do_remove` tail: whatever hangs from a belt falls into the pack
 /// once no belt is worn. Every way of taking a `Waist` item off funnels
 /// through [`unapply_object_from_wearer`] / [`release_gear`], so the rule

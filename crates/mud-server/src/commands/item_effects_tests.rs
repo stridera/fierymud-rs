@@ -559,6 +559,31 @@ fn identify_of_a_plain_item_has_no_worn_effects_section() {
     assert!(!out.contains("Apply:"), "{out}");
 }
 
+#[test]
+fn identify_shows_enchant_weapon_applies_and_barred_alignments() {
+    use mud_world::components::{ItemApplies, ItemBarredAlignments};
+    let (mut world, p, mut rx) = setup();
+    let sword = ring(&mut world, p, 10, "blade", vec![]);
+    world.entity_mut(sword).insert((
+        ItemApplies(vec![("accuracy".into(), 4), ("attack_power".into(), 10)]),
+        ItemBarredAlignments(vec![mud_db::enums::Alignment::Evil]),
+    ));
+    dispatch(&mut world, p, "identify blade");
+    let out = drain(&mut rx);
+    assert!(out.contains("Worn Effects"), "{out}");
+    assert!(out.contains("+4 to accuracy"), "{out}");
+    assert!(out.contains("+10 to attack power"), "{out}");
+    assert!(out.contains("Forbidden to"), "{out}");
+    assert!(out.contains("Alignments:") && out.contains("evil"), "{out}");
+    // A second, unenchanted copy shows neither.
+    let plain = ring(&mut world, p, 11, "stick", vec![]);
+    assert!(world.get::<ItemApplies>(plain).is_none());
+    dispatch(&mut world, p, "identify stick");
+    let out = drain(&mut rx);
+    assert!(!out.contains("accuracy"), "{out}");
+    assert!(!out.contains("Forbidden to"), "{out}");
+}
+
 fn reset_ring(world: &mut World, holder: Entity, id: i32, keyword: &str) -> Entity {
     let r = ring(world, holder, id, keyword, vec![modify("str_bonus", 2)]);
     world.get_mut::<WorldKey>(r).unwrap().zone = 30;

@@ -142,7 +142,9 @@ fn removing_the_belt_drops_what_hangs_from_it() {
 }
 
 #[test]
-fn remove_all_takes_the_belt_item_off_once() {
+fn remove_all_takes_the_belt_item_off_normally() {
+    // Legacy `do_remove` walks the slots and strips `WEAR_OBELT` in the
+    // loop like any other item; it does not "fall off" with the belt.
     let (mut world, p, mut rx) = setup();
     let girdle = gear(
         &mut world,
@@ -160,8 +162,59 @@ fn remove_all_takes_the_belt_item_off_once() {
     let out = drain(&mut rx);
     assert_eq!(worn_in(&world, girdle), None, "{out}");
     assert_eq!(worn_in(&world, pouch), None, "{out}");
-    assert!(out.contains("falls off as you remove your belt"), "{out}");
-    assert!(!out.contains("You remove a belt pouch"), "{out}");
+    assert!(out.contains("You remove a belt pouch"), "{out}");
+    assert!(out.contains("You remove a leather girdle"), "{out}");
+    assert!(!out.contains("falls off as you remove your belt"), "{out}");
+    assert!(
+        out.find("You remove a belt pouch") < out.find("You remove a leather girdle"),
+        "belt item comes off before the waist item: {out}"
+    );
+}
+
+#[test]
+fn remove_all_fires_the_remove_trigger_on_a_belt_item() {
+    use mud_world::{AttachedTriggers, TriggerAttach, TriggerCatalog, TriggerDef, TriggerEvent};
+    let (mut world, p, mut rx) = setup();
+    let mut catalog = TriggerCatalog::default();
+    catalog.by_key.insert(
+        (99, 1),
+        TriggerDef {
+            zone_id: 99,
+            id: 1,
+            name: "t".to_string(),
+            attach_type: TriggerAttach::Object,
+            commands: "return".to_string(),
+            flags: vec![TriggerEvent::Remove],
+            arg_list: vec![],
+            num_args: 0,
+        },
+    );
+    world.insert_resource(catalog);
+    world.insert_resource(mud_script::LuaHost::new());
+    let girdle = gear(
+        &mut world,
+        p,
+        1,
+        "a leather girdle",
+        "girdle",
+        &[WearFlag::Waist],
+    );
+    let pouch = gear(&mut world, p, 2, "a belt pouch", "pouch", &[WearFlag::Belt]);
+    world
+        .entity_mut(pouch)
+        .insert(AttachedTriggers(vec![(99, 1)]));
+    dispatch(&mut world, p, "wear girdle");
+    dispatch(&mut world, p, "wear pouch");
+    drain(&mut rx);
+    dispatch(&mut world, p, "remove all");
+    let out = drain(&mut rx);
+    assert_eq!(worn_in(&world, girdle), None, "{out}");
+    assert_eq!(worn_in(&world, pouch), None, "{out}");
+    let fired = world
+        .get_resource::<crate::triggers::TriggerStats>()
+        .and_then(|s| s.by_event.get("Remove"))
+        .map_or(0, |c| c.fired);
+    assert_eq!(fired, 1, "belt item's Remove trigger fires once: {out}");
 }
 
 #[test]
