@@ -1754,6 +1754,13 @@ pub struct Invisible;
 #[derive(Component, Debug, Clone, Copy)]
 pub struct DetectInvis;
 
+/// Marker: the bearer is blind (`blinded` flag or a `blind` effect
+/// instance; legacy `EFF_BLIND`). A blind actor sees no other character
+/// (`can_see_player`), no room (`viewer_sees_room`) and cannot start a
+/// fight; `HOLY_LIGHT` and staff bypass (`senses::is_blind`).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Blinded;
+
 /// Marker: the bearer sees living creatures by their body heat
 /// (`infravision`; legacy `EFF_INFRAVISION`). In a dark room `look`
 /// lists them as red shapes, and their actions are still made out.

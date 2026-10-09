@@ -709,6 +709,11 @@ pub fn combat_tick(world: &mut World) {
             )>();
         q.iter(world)
             .filter_map(|(mob, loc, hate)| {
+                // Legacy `hit`: a blind attacker can't start a new fight, so
+                // a blind mob does not act on its hate list.
+                if crate::commands::senses::is_blind(world, mob) {
+                    return None;
+                }
                 hate.0
                     .iter()
                     .rev()

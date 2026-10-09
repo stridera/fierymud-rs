@@ -73,8 +73,11 @@ fn strip(s: &str) -> String {
 }
 
 /// Whether `viewer` can make out `room`'s contents. The same predicate
-/// `look` uses for its pitch-black gate.
+/// `look` uses for its pitch-black gate; a blind viewer sees no room.
 pub(crate) fn viewer_sees_room(world: &mut World, viewer: Entity, room: Entity) -> bool {
+    if super::senses::is_blind(world, viewer) {
+        return false;
+    }
     !(super::room_is_dark(world, room)
         && !super::room_has_light(world, room)
         && !super::player_can_see_in_dark(world, viewer))

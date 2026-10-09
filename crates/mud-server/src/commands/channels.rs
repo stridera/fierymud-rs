@@ -237,7 +237,12 @@ fn broadcast_global(
         }
         // Wizinvis: hide the speaker entirely from observers below
         // their invis level. Sender always sees their own line.
-        if t != player && !crate::commands::can_see_player(world, t, player) {
+        // Blindness does not silence the channels: only invisibility and
+        // wizinvis hide the speaker.
+        if t != player
+            && (crate::commands::hidden_by_magic_from(world, t, player)
+                || crate::commands::wiz_hidden_from(world, t, player))
+        {
             continue;
         }
         // Channel tag colors the verb + body together so the line

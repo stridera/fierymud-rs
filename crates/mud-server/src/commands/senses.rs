@@ -6,14 +6,52 @@
 use bevy_ecs::prelude::{Entity, With, World};
 use mud_db::enums::{Alignment, LifeForce, Size};
 use mud_world::{
-    CombatStats, DetectAlign, Infravision, LifeForceTag, Located, Mob, ObjectPrototypes, Player,
-    SenseLife, Sized, WorldKey,
+    Blinded, CombatStats, DetectAlign, Infravision, LifeForceTag, Located, Mob, ObjectPrototypes,
+    Player, SenseLife, Sized, WorldKey,
 };
 
 use super::{can_see_player, hidden_by_magic_from, wiz_hidden_from};
 
 /// Legacy `IS_GOOD` / `IS_EVIL`: alignment at or beyond +/-350.
 const AURA_ALIGNMENT: i32 = 350;
+
+/// Legacy `YOU_ARE_BLIND` (act.hpp): what look, exits, read and scan
+/// say to a blind character.
+pub(crate) const YOU_ARE_BLIND: &str = "You can't see a damned thing; you're blind!\r\n";
+
+/// Legacy `EFF_BLIND`: `viewer` carries the [`Blinded`] marker (a
+/// `blinded` flag or a `blind` effect) and nothing overrides it.
+/// `HOLY_LIGHT` and staff see regardless, like legacy `CAN_SEE`'s
+/// holylight / immortal bypass, so `player_can_see_in_dark` stays the
+/// single bypass for every way of not seeing.
+#[must_use]
+pub(crate) fn is_blind(world: &World, viewer: Entity) -> bool {
+    world.get::<Blinded>(viewer).is_some()
+        && !super::player_can_see_in_dark(world, viewer)
+        && !crate::room_access::is_immortal(world, viewer)
+}
+
+/// Legacy `MOB_NOBLIND`: the mob proto lists `blind: 0` in its
+/// resistances (the fierylib importer turns `NO_BLIND` into that entry,
+/// like `NO_SLEEP` / `NO_CHARM`), so blindness can never land on it.
+/// Players are never immune.
+#[must_use]
+pub(crate) fn is_noblind(world: &World, actor: Entity) -> bool {
+    if world.get::<Mob>(actor).is_none() {
+        return false;
+    }
+    let Some(key) = world.get::<mud_world::WorldKey>(actor) else {
+        return false;
+    };
+    world
+        .get_resource::<mud_world::MobPrototypes>()
+        .and_then(|protos| protos.by_key.get(&(key.zone, key.id)))
+        .and_then(|p| p.resistances.as_object())
+        .is_some_and(|m| {
+            m.iter()
+                .any(|(k, v)| k.eq_ignore_ascii_case("blind") && v.as_i64() == Some(0))
+        })
+}
 
 /// True for a viewer that makes out characters in the dark by body heat.
 #[must_use]

@@ -63,6 +63,16 @@ fn invisible_tag_backed(world: &mut World, target: Entity) -> bool {
     q.iter(world).any(|a| a.0 == target)
 }
 
+/// Every spelling of the blindness flag: `blinded` (mob / race / item
+/// rows), `blind` (the spell and eye-gouge instance name) and `blindness`.
+const BLIND_FLAGS: &[&str] = &["blinded", "blind", "blindness"];
+
+/// True for a status flag that blinds its bearer.
+#[must_use]
+pub fn is_blind_flag(flag: &str) -> bool {
+    BLIND_FLAGS.contains(&flag)
+}
+
 const FLAG_MARKERS: &[FlagMarker] = &[
     FlagMarker {
         flags: &["hidden", "sneak", "concealment"],
@@ -171,6 +181,19 @@ const FLAG_MARKERS: &[FlagMarker] = &[
         },
         remove: Some(|e| {
             e.remove::<crate::components::Familiar>();
+        }),
+        tag_backed: None,
+    },
+    // Legacy `EFF_BLIND`: the blindness spell and eye gouge name their
+    // instance `blind`, mob / race / worn-item rows carry the `blinded`
+    // flag.
+    FlagMarker {
+        flags: BLIND_FLAGS,
+        insert: |e| {
+            e.insert(crate::components::Blinded);
+        },
+        remove: Some(|e| {
+            e.remove::<crate::components::Blinded>();
         }),
         tag_backed: None,
     },
@@ -353,8 +376,7 @@ pub fn row_flags(
 ///   legacy: the mob stays visible until it respawns.
 /// * Flags with neither a marker component nor an instance-read
 ///   behaviour ([`is_name_behaviour_flag`]) (permanent debuffs such as
-///   `blinded` / `poisoned` / `sleeping`, vision and the other detect_*
-///   flags) are skipped with a debug log and spawn nothing, so no
+///   `poisoned` / `sleeping`, vision and the other detect_* flags) are skipped with a debug log and spawn nothing, so no
 ///   source-less poison tick or fight with the mob's position can
 ///   arise; sleeping mobs get that from the proto's default position.
 /// * `empowered` is a consume-on-cast charge, not a permanent state:
@@ -567,6 +589,9 @@ mod tests {
             ("blur", |w, e| w.get::<Blur>(e).is_some()),
             ("familiarity", |w, e| w.get::<Familiar>(e).is_some()),
             ("waterwalk", |w, e| w.get::<WaterWalk>(e).is_some()),
+            ("blinded", |w, e| w.get::<Blinded>(e).is_some()),
+            ("blind", |w, e| w.get::<Blinded>(e).is_some()),
+            ("blindness", |w, e| w.get::<Blinded>(e).is_some()),
         ];
         for (flag, has) in mapped {
             let target = world.spawn_empty().id();
@@ -581,7 +606,6 @@ mod tests {
             "coldshield",
             "language_fluency",
             "poisoned",
-            "blinded",
             "",
         ] {
             let target = world.spawn_empty().id();

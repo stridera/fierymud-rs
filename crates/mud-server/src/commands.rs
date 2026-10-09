@@ -444,8 +444,11 @@ mod gmcp_visibility_tests;
 #[path = "commands/magic_focus.rs"]
 mod magic_focus;
 #[path = "commands/senses.rs"]
-mod senses;
+pub(crate) mod senses;
 pub(crate) use magic_focus::Concentrating;
+#[cfg(test)]
+#[path = "commands/blindness_tests.rs"]
+mod blindness_tests;
 #[cfg(test)]
 #[path = "commands/effects_list_tests.rs"]
 mod effects_list_tests;
@@ -11169,10 +11172,9 @@ pub(crate) fn room_is_dark(world: &World, room: Entity) -> bool {
 
 /// True when `entity` perceives through normal darkness, magical
 /// darkness, and blind effects. Today the only source is the
-/// `HOLY_LIGHT` player flag (admin/staff toggle). When magical
-/// darkness / blindness effects land in the perception pipeline,
-/// they should also gate through this helper so `HOLY_LIGHT` keeps
-/// being the single bypass.
+/// `HOLY_LIGHT` player flag (admin/staff toggle). Blindness
+/// ([`senses::is_blind`]) and darkness both gate through this helper
+/// so `HOLY_LIGHT` keeps being the single bypass.
 #[must_use]
 pub(crate) fn player_can_see_in_dark(world: &World, entity: Entity) -> bool {
     has_flag(world, entity, PlayerFlag::HolyLight)
@@ -11208,7 +11210,8 @@ pub(crate) fn hidden_by_magic_from(world: &World, viewer: Entity, target: Entity
 }
 
 /// THE shared visibility predicate (legacy `CAN_SEE`): may `viewer`
-/// perceive `target`? An actor always sees itself; a magically
+/// perceive `target`? An actor always sees itself; a blind viewer
+/// ([`senses::is_blind`]) sees nobody else; a magically
 /// invisible `target` (`Invisible`) is hidden from anyone who does not
 /// pierce invisibility ([`pierces_invisibility`]); a `WizInvis(N)`
 /// target is hidden from viewers whose `Profile.level` is below `N`.
@@ -11219,7 +11222,9 @@ pub(crate) fn can_see_player(world: &World, viewer: Entity, target: Entity) -> b
     if viewer == target {
         return true;
     }
-    !hidden_by_magic_from(world, viewer, target) && !wiz_hidden_from(world, viewer, target)
+    !senses::is_blind(world, viewer)
+        && !hidden_by_magic_from(world, viewer, target)
+        && !wiz_hidden_from(world, viewer, target)
 }
 
 /// True when `target`'s `WizInvis` level hides it from `viewer`
@@ -17901,6 +17906,19 @@ pub(crate) fn invoke_ability_with(
                     applied_msgs.push(format!("{pretty} (immune to fear)"));
                     continue;
                 }
+                // Legacy `MOB_NOBLIND`: blindness never lands on such a mob.
+                if mud_world::mob_effects::is_blind_flag(&flag)
+                    && senses::is_noblind(world, target_entity)
+                {
+                    let victim = name_of(world, target_entity);
+                    send_to(
+                        world,
+                        player,
+                        format!("{victim} is immune to blindness.\r\n"),
+                    );
+                    applied_msgs.push(format!("{pretty} (immune to blindness)"));
+                    continue;
+                }
                 let mut dur_secs = resolve_effect_duration(
                     override_params,
                     Some(&spec.default_params),
@@ -18470,7 +18488,8 @@ pub(crate) fn check_target_type(
 /// - `alignment` — `value`: "good"|"evil"|"neutral", `target`: "caster"|"victim",
 ///   `prohibited`/`required`: bool. Threshold: ±350.
 /// - `target_standing` / `position` — target's `Posture` is `Standing`.
-/// - `not_blind` — caster lacks any `EffectInstance` named "blind"
+/// - `not_blind` — caster lacks any `EffectInstance` named "blind" and
+///   carries no `Blinded` marker (a `blinded` flag from a mob, race or item)
 ///   (override with `"target": "victim"` to check the target instead).
 /// - `in_combat` / `not_in_combat` — caster has / lacks `Fighting`
 ///   (override with `"target": "victim"` to check the target).
@@ -18509,7 +18528,7 @@ pub(crate) fn check_ability_restrictions(
                 } else {
                     caster
                 };
-                !has_effect_named(world, who, "blind")
+                !(has_effect_named(world, who, "blind") || senses::is_blind(world, who))
             }
             "in_combat" => {
                 let who = if target_kind == Some("victim") {
@@ -21391,6 +21410,12 @@ fn act_room_with_subject(
 /// unless the opponent is under familiarity and the roll sends the helper
 /// away confused. Opponents of level 20 or less are only watched.
 fn mob_assist(world: &mut World, helper: Entity, room: Entity, pairs: &[(Entity, Entity)]) {
+    // Legacy `hit` refuses a blind attacker a new fight, so a blind
+    // helper has nobody to jump to the aid of (covers `mob_helpers_engage`
+    // and the periodic `mob_assist_pulse`).
+    if senses::is_blind(world, helper) {
+        return;
+    }
     let helper_name = name_of(world, helper);
     let cap_helper = cap_sentence_start(&helper_name);
     let mut watched: Option<(Entity, Entity)> = None;
@@ -22269,7 +22294,7 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         // per-mover render for any Ghost so the death message
         // isn't immediately drowned by a room description.
         if world.get::<Ghost>(mover).is_none() {
-            cmd_look(world, mover, "");
+            info::look_after_move(world, mover);
         }
         // Hide-on-move semantics: footsteps break `hide` but not
         // `sneak`. If a mover has a `hidden` EffectInstance and
@@ -22605,6 +22630,15 @@ pub(crate) fn sector_movement_cost(s: Sector) -> i32 {
 /// catalog (`Option<String>`) and the caller needs the result by
 /// value anyway.
 pub(crate) fn race_movement_verb(world: &World, mover: Entity, is_arrival: bool) -> String {
+    // Legacy `movewords`: a blind mover stumbles, whatever its race says.
+    if senses::is_blind(world, mover) {
+        return if is_arrival {
+            "stumbles in"
+        } else {
+            "stumbles"
+        }
+        .to_string();
+    }
     let default: &str = if is_arrival { "arrives" } else { "leaves" };
     // Players carry the raw enum text; mob prototypes store it
     // lower-cased, so fall back to the upper-cased key.

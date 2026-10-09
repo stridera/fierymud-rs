@@ -1114,6 +1114,19 @@ fn try_switch_opponent(world: &mut World, player: Entity, old: Entity, roll: i32
     }
     true
 }
+/// Legacy "You can't see a thing!" refusal of the offensive commands
+/// (`do_hit`, `do_backstab`, `do_bash`, `do_tripup`, ...): a blind
+/// attacker cannot open a fight. A fight already under way carries on
+/// in `combat_tick` (legacy `hit` only refuses `FIGHTING(ch) != victim`).
+/// Returns true when the command must stop.
+fn refuse_if_blind(world: &mut World, player: Entity) -> bool {
+    if !crate::commands::senses::is_blind(world, player) {
+        return false;
+    }
+    send_to(world, player, "You can't see a thing!\r\n");
+    true
+}
+
 /// `kill`: legacy `do_kill` (act.offensive.cpp). Everyone is refused in
 /// magical darkness and peaceful rooms; below `LVL_GOD` (here: below
 /// `Builder`, the role levels 101+ map to) or when the line was not typed
@@ -1199,6 +1212,9 @@ pub(crate) fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
 #[allow(clippy::too_many_lines)]
 fn attack_with_switch_roll(world: &mut World, player: Entity, target_name: &str, switch_roll: i32) {
     if !require_alert_posture(world, player, "attack") {
+        return;
+    }
+    if refuse_if_blind(world, player) {
         return;
     }
     let cost = skill_stamina_cost(world, "attack", ATTACK_COST);
@@ -1554,6 +1570,9 @@ fn perform_class_strike(
     verb_self: &str,
     verb_other: &str,
 ) {
+    if refuse_if_blind(world, player) {
+        return;
+    }
     let arg = args.trim();
     let target_word = if arg.is_empty() {
         // No arg → attack current combat target if any.
@@ -2156,6 +2175,9 @@ pub(crate) fn cmd_tripup(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "tripup") {
         return;
     }
+    if refuse_if_blind(world, player) {
+        return;
+    }
     let arg = args.trim();
     // Empty-arg shortcut: current Fighting target. The data path
     // doesn't synthesize this; we resolve it here and pass the name
@@ -2385,6 +2407,9 @@ pub(crate) fn cmd_springleap(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "springleap") {
         return;
     }
+    if refuse_if_blind(world, player) {
+        return;
+    }
     if world.get::<Fighting>(player).is_some() {
         send_to(
             world,
@@ -2451,6 +2476,9 @@ pub(crate) fn cmd_throatcut(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "throatcut") {
         return;
     }
+    if refuse_if_blind(world, player) {
+        return;
+    }
     if world.get::<Fighting>(player).is_some() {
         send_to(world, player, "Your target is already aware of you.\r\n");
         return;
@@ -2505,6 +2533,9 @@ pub(crate) fn cmd_throatcut(world: &mut World, player: Entity, args: &str) {
 }
 pub(crate) fn cmd_backstab(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "backstab") {
+        return;
+    }
+    if refuse_if_blind(world, player) {
         return;
     }
     if world.get::<Fighting>(player).is_some() {
@@ -2562,6 +2593,9 @@ pub(crate) fn cmd_backstab(world: &mut World, player: Entity, args: &str) {
 }
 pub(crate) fn cmd_hitall(world: &mut World, player: Entity, _args: &str) {
     if !require_alert_posture(world, player, "hitall") {
+        return;
+    }
+    if refuse_if_blind(world, player) {
         return;
     }
     let cost = skill_stamina_cost(world, "hitall", HITALL_COST);
@@ -2636,6 +2670,9 @@ pub(crate) fn cmd_hitall(world: &mut World, player: Entity, _args: &str) {
 }
 pub(crate) fn cmd_disarm(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "disarm") {
+        return;
+    }
+    if refuse_if_blind(world, player) {
         return;
     }
     let cost = skill_stamina_cost(world, "disarm", DISARM_COST);
@@ -3133,6 +3170,9 @@ pub(crate) fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
     if !require_alert_posture(world, player, "bash") {
         return;
     }
+    if refuse_if_blind(world, player) {
+        return;
+    }
     let cost = skill_stamina_cost(world, "bash", BASH_COST);
     if !check_stamina(world, player, cost, "bash") {
         return;
@@ -3235,6 +3275,9 @@ pub(crate) fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
 /// you taunt them — the gate stays consistent with `cmd_attack`).
 pub(crate) fn cmd_taunt(world: &mut World, player: Entity, target_word: &str) {
     if !require_alert_posture(world, player, "taunt") {
+        return;
+    }
+    if refuse_if_blind(world, player) {
         return;
     }
     let cost = skill_stamina_cost(world, "taunt", TAUNT_COST);

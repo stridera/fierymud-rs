@@ -3214,6 +3214,9 @@ fn run_help(world: &mut World, player: Entity, args: &str, scope: HelpScope) {
 
 #[allow(clippy::too_many_lines)]
 pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
+    if refuse_if_blind(world, player) {
+        return;
+    }
     let target_word = args.trim();
     if target_word.is_empty() {
         send_to(world, player, "Examine whom or what?\r\n");
@@ -5524,6 +5527,9 @@ fn scan_room_actors(
 }
 
 pub(crate) fn cmd_scan(world: &mut World, player: Entity, _args: &str) {
+    if refuse_if_blind(world, player) {
+        return;
+    }
     let Some(located) = world.get::<Located>(player).copied() else {
         send_to(world, player, "You are nowhere.\r\n");
         return;
@@ -5724,6 +5730,12 @@ pub(crate) fn search_with_roll(
     args: &str,
     roll: &mut dyn FnMut(i32) -> i32,
 ) {
+    // Legacy `do_search` words its own refusal (staff are exempt, which
+    // `is_blind` already covers).
+    if crate::commands::senses::is_blind(world, player) {
+        send_to(world, player, "You're blind and can't see a thing!\r\n");
+        return;
+    }
     if world.get::<Fighting>(player).is_some() {
         send_to(world, player, "You're too busy fighting to search!\r\n");
         return;
@@ -6001,8 +6013,36 @@ pub(crate) fn cmd_glance(world: &mut World, player: Entity, args: &str) {
     send_rendered(world, player, &line);
 }
 
+/// Tell a blind `player` so and return true (legacy `YOU_ARE_BLIND`
+/// guard of look, exits, read and scan). False for anyone who can see.
+fn refuse_if_blind(world: &mut World, player: Entity) -> bool {
+    if !crate::commands::senses::is_blind(world, player) {
+        return false;
+    }
+    send_to(world, player, crate::commands::senses::YOU_ARE_BLIND);
+    true
+}
+
+/// The look a mover gets on arriving in a new room (legacy
+/// `look_at_room`): a blind mover sees "infinite darkness" instead of
+/// the room, anyone else gets a normal `look`.
+pub(crate) fn look_after_move(world: &mut World, player: Entity) {
+    if crate::commands::senses::is_blind(world, player) {
+        send_to(
+            world,
+            player,
+            "You see nothing but infinite darkness...\r\n",
+        );
+        return;
+    }
+    cmd_look(world, player, "");
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
+    if refuse_if_blind(world, player) {
+        return;
+    }
     let arg = args.trim();
     // `look at <x>` ≡ `look <x>` for every target. Only strip when
     // something follows ("at" alone stays a literal needle).
@@ -8726,6 +8766,9 @@ pub(crate) fn cmd_flags(world: &mut World, player: Entity, _args: &str) {
 }
 
 pub(crate) fn cmd_exits(world: &mut World, player: Entity, _args: &str) {
+    if refuse_if_blind(world, player) {
+        return;
+    }
     let Some(located) = world.get::<Located>(player).copied() else {
         send_to(world, player, "You are nowhere.\r\n");
         return;
@@ -9093,6 +9136,9 @@ pub(crate) fn cmd_lock(world: &mut World, player: Entity, args: &str) {
 /// `ObjectPrototypes.examine_description` feeds at load time, so books
 /// / signs / scrolls all surface their text via this path.
 pub(crate) fn cmd_read(world: &mut World, player: Entity, args: &str) {
+    if refuse_if_blind(world, player) {
+        return;
+    }
     let needle = args.trim();
     if needle.is_empty() {
         send_to(world, player, "Read what?\r\n");
