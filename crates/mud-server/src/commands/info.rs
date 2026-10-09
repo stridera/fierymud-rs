@@ -12845,6 +12845,41 @@ pub(super) fn format_effect_hours(remaining_secs: i32) -> String {
     }
 }
 
+/// `(name, remaining_secs, ability_id, modify delta, permanent-effect origin)`.
+type ActiveEffectRow = (String, i32, Option<i32>, Option<i32>, Option<String>);
+
+/// Where a permanent effect comes from, for the `effects` listing:
+/// race innates read "racial (Elf)", worn-item grants name the item,
+/// mob defaults read "innate". `None` for sources with nothing useful
+/// to say (the caller falls back to the spawning ability, if any).
+fn permanent_origin(
+    world: &World,
+    owner: Entity,
+    source: &mud_world::EffectSource,
+    item: Option<Entity>,
+) -> Option<String> {
+    use mud_world::mob_effects::{is_race_effect, is_worn_item_effect};
+    if is_worn_item_effect(source) {
+        let raw = item.map(|i| name_of(world, i)).filter(|n| !n.is_empty())?;
+        return Some(format!(
+            "from {}",
+            render_color_tags(&raw, ColorMode::Strip)
+        ));
+    }
+    if is_race_effect(source) {
+        let race = world
+            .get::<Profile>(owner)
+            .map(|p| p.race.as_str())
+            .filter(|r| !r.is_empty());
+        return Some(race.map_or_else(
+            || "racial".to_string(),
+            |r| format!("racial ({})", pretty_ability(r)),
+        ));
+    }
+    matches!(source, mud_world::EffectSource::Other(s) if s == "mob_default")
+        .then(|| "innate".to_string())
+}
+
 /// `cancel [<effect>]`: drop a non-permanent effect from yourself.
 /// Empty arg lists cancellable effects; named arg matches by
 /// case-insensitive substring on the effect's name.
@@ -12852,17 +12887,31 @@ pub(crate) fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
     // Snapshot effects on the player; pull the optional ModifyDelta
     // companion in the same query so the renderer can show
     // "ward (+60) (2245s)" for stat-bonus effects.
-    let active: Vec<(String, i32, Option<i32>, Option<i32>)> = {
-        let mut q = world.query::<(&EffectInstance, &AppliedTo, Option<&mud_world::ModifyDelta>)>();
-        q.iter(world)
-            .filter(|(_, a, _)| a.0 == player)
-            .map(|(inst, _, delta)| {
+    let active: Vec<ActiveEffectRow> = {
+        let mut q = world.query::<(
+            &EffectInstance,
+            &AppliedTo,
+            Option<&mud_world::ModifyDelta>,
+            Option<&mud_world::GrantedByItem>,
+        )>();
+        let rows: Vec<_> = q
+            .iter(world)
+            .filter(|(_, a, _, _)| a.0 == player)
+            .map(|(inst, _, delta, granted)| {
                 (
                     inst.name.clone(),
                     inst.remaining_secs,
                     inst.ability_id,
                     delta.map(|d| d.amount),
+                    (inst.remaining_secs < 0).then(|| (inst.source.clone(), granted.map(|g| g.0))),
                 )
+            })
+            .collect();
+        rows.into_iter()
+            .map(|(name, remaining, ability, delta, perm)| {
+                let origin =
+                    perm.and_then(|(src, item)| permanent_origin(world, player, &src, item));
+                (name, remaining, ability, delta, origin)
             })
             .collect()
     };
@@ -12872,7 +12921,7 @@ pub(crate) fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
         format!("\r\n<b:cyan>{} active effect(s):</>\r\n", active.len())
     };
     let catalog = world.resource::<AbilityCatalog>();
-    for (name, remaining, ability_id, delta_amount) in active {
+    for (name, remaining, ability_id, delta_amount, origin) in active {
         let pretty_name = effect_display_name(&name);
         // Look up the spawning ability's plain_name when known so
         // players can see "Bleed (45s) — from Rend" instead of
@@ -12890,7 +12939,9 @@ pub(crate) fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
         let suffix = from
             .as_deref()
             .filter(|n| *n != pretty_name)
-            .map_or(String::new(), |n| format!(" <dim>— from {n}</>"));
+            .map(|n| format!("from {n}"))
+            .or(origin)
+            .map_or(String::new(), |n| format!(" <dim>— {n}</>"));
         // Modifier delta colored by sign — green for buffs, red for
         // debuffs. A bless (+2 STR) reads green; a curse (-3 DEX)
         // reads red. Player can scan the list and immediately see

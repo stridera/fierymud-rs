@@ -3,7 +3,9 @@
 //! permanent effects flagged.
 
 use bevy_ecs::prelude::*;
-use mud_world::{AppliedTo, EffectInstance, EffectSource, ModifyDelta, Room};
+use mud_world::{
+    AppliedTo, EffectInstance, EffectSource, GrantedByItem, ModifyDelta, Named, Profile, Room,
+};
 
 use super::info::cmd_effects;
 use super::test_support::{Rx, drain, player_in};
@@ -133,6 +135,61 @@ fn permanent_effect_is_flagged_not_timed() {
     let out = effects_output(&mut world, player, &mut rx);
     assert!(out.contains("Infravision (permanent)"), "{out}");
     assert!(!out.contains("remaining"), "{out}");
+}
+
+fn add_sourced(world: &mut World, player: Entity, name: &str, tag: &str, item: Option<Entity>) {
+    let mut e = world.spawn((
+        EffectInstance {
+            kind: 1,
+            name: name.to_string(),
+            strength: 1,
+            remaining_secs: -1,
+            source: EffectSource::Other(tag.to_string()),
+            ability_id: None,
+        },
+        AppliedTo(player),
+    ));
+    if let Some(item) = item {
+        e.insert(GrantedByItem(item));
+    }
+}
+
+#[test]
+fn permanent_effects_show_their_source() {
+    let (mut world, player, mut rx) = setup();
+    world.entity_mut(player).insert(Profile {
+        level: 5,
+        class_id: None,
+        race: "HALF_ELF".to_string(),
+        experience: 0,
+        gender: "male".to_string(),
+    });
+    let ring = world
+        .spawn(Named {
+            name: "a <red>glowing</> ring".to_string(),
+        })
+        .id();
+    add_sourced(&mut world, player, "infravision", "race", None);
+    add_sourced(&mut world, player, "fly", "worn_item", Some(ring));
+    add_sourced(&mut world, player, "sanctuary", "mob_default", None);
+    let out = effects_output(&mut world, player, &mut rx);
+    assert!(
+        out.contains("Infravision (permanent) — racial (Half Elf)"),
+        "{out}"
+    );
+    assert!(
+        out.contains("Fly (permanent) — from a glowing ring"),
+        "{out}"
+    );
+    assert!(out.contains("Sanctuary (permanent) — innate"), "{out}");
+}
+
+#[test]
+fn permanent_effect_without_known_source_has_no_suffix() {
+    let (mut world, player, mut rx) = setup();
+    add_effect(&mut world, player, "infravision", -1, None);
+    let out = effects_output(&mut world, player, &mut rx);
+    assert!(!out.contains('—'), "{out}");
 }
 
 #[test]
