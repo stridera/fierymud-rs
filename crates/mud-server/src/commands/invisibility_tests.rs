@@ -763,3 +763,35 @@ fn shopkeepers_refuse_a_customer_they_cannot_see() {
     dispatch(&mut fx.world, fx.ghost, "list");
     assert!(!drain(&mut fx.grx).contains("can't see"));
 }
+
+// -- aggro opens with a blow (issue #100) -------------------------------------
+
+#[test]
+fn aggro_mob_lands_its_first_blow_on_engage_not_a_round_later() {
+    let mut fx = Fx::new();
+    fx.world.entity_mut(fx.ghost).remove::<Invisible>();
+    let wolf = fx.mob("a wolf", -1000);
+    let _ = drain(&mut fx.grx);
+    try_engage_aggressive_mob(&mut fx.world, fx.ghost, fx.room);
+    assert_eq!(fx.world.get::<Fighting>(wolf).map(|f| f.0), Some(fx.ghost));
+    // No combat_tick has run: the swing came with the engagement.
+    let out = drain(&mut fx.grx);
+    assert!(out.contains("sees you and attacks!"), "{out}");
+    let swung = out.contains("wolf hits you")
+        || out.contains("wolf misses you")
+        || out.contains("wolf's attack");
+    assert!(swung, "first blow on engage: {out}");
+}
+
+#[test]
+fn aggro_mob_that_cannot_act_still_waits_for_the_round() {
+    let mut fx = Fx::new();
+    fx.world.entity_mut(fx.ghost).remove::<Invisible>();
+    let wolf = fx.mob("a wolf", -1000);
+    fx.world.entity_mut(wolf).insert(mud_world::Stunned);
+    let _ = drain(&mut fx.grx);
+    try_engage_aggressive_mob(&mut fx.world, fx.ghost, fx.room);
+    let out = drain(&mut fx.grx);
+    assert!(out.contains("sees you and attacks!"), "{out}");
+    assert!(!out.contains("wolf hits you"), "{out}");
+}

@@ -23503,7 +23503,7 @@ pub(crate) fn try_engage_remembered_mob(world: &mut World, player: Entity, room:
             .map(|(e, _, _)| e)
     };
     let Some(mob) = grudger else { return false };
-    engage_combat(world, mob, player, room);
+    engage_and_strike(world, mob, player, room);
     true
 }
 
@@ -23736,7 +23736,23 @@ pub(crate) fn try_engage_aggressive_mob(world: &mut World, player: Entity, room:
         );
     }
     let Some(mob) = chosen else { return };
-    engage_combat(world, mob, player, room);
+    engage_and_strike(world, mob, player, room);
+}
+
+/// A mob picking a fight on sight (aggro, grudge): legacy
+/// `mobile_activity` calls `mob_attack` -> `attack()` -> `hit()`, so the
+/// first blow lands the moment the mob decides, and only the following
+/// rounds wait for the global violence pulse. [`engage_combat`] alone
+/// would publish `Fighting` (prompt tank / target, GMCP combat stats) and
+/// then stay silent until the next `combat_tick`, up to a round away.
+/// Gates that keep a mob from swinging (casting, stunned, not standing)
+/// are shared with `combat_tick` inside [`crate::combat::engage_swing_now`].
+pub(crate) fn engage_and_strike(world: &mut World, mob: Entity, victim: Entity, room: Entity) {
+    engage_combat(world, mob, victim, room);
+    if world.get_entity(victim).is_ok() && world.get::<Fighting>(mob).is_some_and(|f| f.0 == victim)
+    {
+        crate::combat::engage_swing_now(world, mob, victim);
+    }
 }
 
 /// Stamina drained when moving INTO a room of this sector. The mapping
