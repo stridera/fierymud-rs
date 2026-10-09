@@ -158,6 +158,7 @@ pub(crate) fn ability_def(id: i32, name: &str, kind: AbilityKind) -> AbilityDef 
         damage_type: None,
         memorization_time: 0,
         passive: false,
+        short_cast: false,
     }
 }
 

@@ -2622,6 +2622,11 @@ pub struct AbilityDef {
     /// command to invoke. Surfaced as `passive` in `Char.Skills` so
     /// clients do not draw an activation button for it.
     pub passive: bool,
+    /// True when the ability row carries the `short_cast` tag: legacy
+    /// `CAST_SPEED1`, a quarter round that the integer
+    /// `cast_time_rounds` column stores as 0. The spell still goes
+    /// through the casting wind-up instead of landing at once.
+    pub short_cast: bool,
 }
 
 /// Cached `MobResets` rows the loader ran, keyed by `reset_id`. The

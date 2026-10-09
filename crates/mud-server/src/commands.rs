@@ -3970,6 +3970,7 @@ mod tests {
             damage_type: Some("fire".to_string()),
             memorization_time: 0,
             passive: false,
+            short_cast: false,
         };
         let _ = AbilityCatalog::default();
         // The property under test is a one-line conditional; the
@@ -4157,6 +4158,7 @@ mod tests {
                 damage_type: Some("fire".to_string()),
                 memorization_time: 0,
                 passive: false,
+                short_cast: false,
             },
         );
         world.insert_resource(catalog);
@@ -14925,13 +14927,28 @@ pub(crate) fn invoke_ability_with(
         && !from_item
         && !aoe_repeat
         && !matches!(kind, mud_db::abilities::AbilityKind::Skill)
-        && def.cast_time_rounds > 0
+        && crate::casting::winds_up(&def)
         && world.get::<mud_world::Casting>(player).is_some()
     {
         send_to(
             world,
             player,
             "You're already casting something — finish or 'cancel' first.\r\n",
+        );
+        return;
+    }
+    // A chant that was broken off leaves the caster in a short wait state
+    // (legacy `STOP_CASTING`); no new cast until it passes.
+    if !skip_queue
+        && !from_item
+        && !aoe_repeat
+        && !matches!(kind, mud_db::abilities::AbilityKind::Skill)
+        && crate::casting::cast_lag_active(world, player)
+    {
+        send_to(
+            world,
+            player,
+            "You are still recovering your concentration.\r\n",
         );
         return;
     }
@@ -15077,7 +15094,7 @@ pub(crate) fn invoke_ability_with(
         && !from_item
         && !aoe_repeat
         && !matches!(kind, mud_db::abilities::AbilityKind::Skill)
-        && def.cast_time_rounds > 0
+        && crate::casting::winds_up(&def)
         && !god_instant_cast;
     let mut cast_target = mud_world::CastTarget::Area;
     if queue_wind_up && aoe_scope_for(&def).is_none() {

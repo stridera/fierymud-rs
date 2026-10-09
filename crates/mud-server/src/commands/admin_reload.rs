@@ -1448,6 +1448,7 @@ mod tests {
             damage_type: None,
             memorization_time: 0,
             passive: false,
+            short_cast: false,
         }
     }
 

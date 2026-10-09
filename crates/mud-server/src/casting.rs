@@ -39,9 +39,17 @@
 //! (`wind_up_ticks`).
 //!
 //! `cast_time_rounds = 0` is treated as instant — call site routes
-//! straight into `invoke_ability_with`. Item-driven casts (scrolls /
-//! wands / potions) also skip the queue: the item itself is the
-//! delay-bearer, the resulting cast lands instantly.
+//! straight into `invoke_ability_with` — unless the spell carries the
+//! `short_cast` tag ([`is_short_cast`]): legacy `CAST_SPEED1` (a quarter
+//! round, which the integer column truncates to 0) still goes through
+//! `casting_handler`, so it winds up for [`SHORT_CAST_STARS`] star
+//! (4s, 2s after a quick chant). Item-driven casts (scrolls / wands /
+//! potions) skip the queue: the item itself is the delay-bearer, the
+//! resulting cast lands instantly.
+//!
+//! An interrupted or aborted wind-up leaves a 2s lag ([`impose_cast_lag`];
+//! legacy `STOP_CASTING` = `WAIT_STATE(PULSE_VIOLENCE / 2)`) during which
+//! the caster can't start another cast.
 
 use bevy_ecs::prelude::*;
 use mud_world::{
@@ -81,6 +89,65 @@ const HANDLER_PERIOD_TICKS: i32 = 2 * TICKS_PER_STAR;
 #[must_use]
 pub(crate) fn handler_ticks(stars: i32) -> i32 {
     (1 + (stars.max(0) + 1) / 2) * HANDLER_PERIOD_TICKS
+}
+
+/// Legacy `CAST_SPEED1`: the cast time, in stars, of a spell tagged
+/// the `short_cast` tag.
+const SHORT_CAST_STARS: i32 = 1;
+
+/// Whether `def` is a spell legacy casts at `CAST_SPEED1` (the
+/// `short_cast` tag, [`AbilityDef::short_cast`]): its `cast_time_rounds`
+/// is 0 (a quarter round truncates to 0 in the integer column) but it
+/// still winds up like any other `casting_handler` cast.
+#[must_use]
+pub(crate) fn is_short_cast(def: &AbilityDef) -> bool {
+    def.cast_time_rounds == 0
+        && matches!(def.kind, mud_db::abilities::AbilityKind::Spell)
+        && def.short_cast
+}
+
+/// Whether casting `def` from the command line queues a wind-up
+/// (otherwise it lands at once).
+#[must_use]
+pub(crate) fn winds_up(def: &AbilityDef) -> bool {
+    def.cast_time_rounds > 0 || is_short_cast(def)
+}
+
+/// Legacy `STOP_CASTING` sets `WAIT_STATE(ch, PULSE_VIOLENCE / 2)`: half a
+/// combat round of 10 Hz ticks.
+const CAST_LAG_TICKS: u64 = 20;
+
+/// Tick before which a caster whose chant broke off may not start another
+/// cast.
+#[derive(Component, Debug, Clone, Copy)]
+pub(crate) struct CastLag {
+    until: u64,
+}
+
+fn now_tick(world: &World) -> u64 {
+    world.get_resource::<crate::TickCount>().map_or(0, |t| t.0)
+}
+
+/// Whether `caster` is still in the lag left by a broken-off cast.
+#[must_use]
+pub(crate) fn cast_lag_active(world: &World, caster: Entity) -> bool {
+    let now = now_tick(world);
+    world.get::<CastLag>(caster).is_some_and(|l| l.until > now)
+}
+
+/// Leave the caster of a wind-up that was just stopped in the legacy
+/// post-`STOP_CASTING` wait state. Staff have no wait states (`WAIT_STATE`
+/// clears theirs).
+fn impose_cast_lag(world: &mut World, caster: Entity) {
+    if is_staff(world, caster) {
+        return;
+    }
+    let lag = CastLag {
+        until: now_tick(world) + CAST_LAG_TICKS,
+    };
+    if let Ok(mut em) = world.get_entity_mut(caster) {
+        em.insert(lag);
+    }
 }
 
 /// Catalog key (lowercased `plain_name`) of the Quick Chant skill.
@@ -224,7 +291,11 @@ pub(crate) fn wind_up_ticks(
     def: &AbilityDef,
     roll: i32,
 ) -> (i32, bool) {
-    let base = def.cast_time_rounds * COMBAT_ROUND_TICKS;
+    let base = if is_short_cast(def) {
+        SHORT_CAST_STARS * TICKS_PER_STAR
+    } else {
+        def.cast_time_rounds * COMBAT_ROUND_TICKS
+    };
     // Only a legacy `SCMD_CAST` rides the event-handler cadence; chants
     // and songs keep their flat wind-up.
     if !matches!(def.kind, mud_db::abilities::AbilityKind::Spell) {
@@ -562,6 +633,7 @@ pub(crate) fn abort_casting(world: &mut World, caster: Entity) -> bool {
     if end_cast(world, caster).is_none() {
         return false;
     }
+    impose_cast_lag(world, caster);
     send_to(world, caster, "You stop chanting abruptly!\r\n");
     announce_stop(world, caster);
     true
@@ -646,6 +718,7 @@ pub(crate) fn interrupt_cast(world: &mut World, caster: Entity, reason: &str) ->
     let Some(snap) = end_cast(world, caster) else {
         return false;
     };
+    impose_cast_lag(world, caster);
     send_to(
         world,
         caster,
@@ -2036,5 +2109,126 @@ mod tests {
             "target sees the number: {bob_out:?}"
         );
         assert_eq!(hp(&world, bob), 4500);
+    }
+
+    // ---- legacy CAST_SPEED1 spells ("short_cast") and the lag after an abort
+
+    fn tag_mend_short_cast(world: &mut World) {
+        let mut catalog = world.resource_mut::<AbilityCatalog>();
+        let mend = catalog.by_name.get_mut("mend").unwrap();
+        mend.short_cast = true;
+    }
+
+    #[test]
+    fn a_short_cast_spell_winds_up_for_the_minimum_legacy_cast() {
+        let (mut world, room, _) = world_with_spell(0);
+        tag_mend_short_cast(&mut world);
+        let (caster, mut rx) = caster_in(&mut world, room);
+        let (bob, _b) = bob_in(&mut world, room);
+        drain(&mut rx);
+        start_mend(&mut world, caster);
+        let casting = world.get::<Casting>(caster).expect("queued, not instant");
+        // One star: the handler's lead-in run plus one more, 4s.
+        assert_eq!(casting.ticks_total, 40);
+        assert_eq!(hp(&world, bob), 5, "nothing lands yet");
+        run_ticks(&mut world, 39);
+        assert!(world.get::<Casting>(caster).is_some());
+        run_ticks(&mut world, 1);
+        assert!(world.get::<Casting>(caster).is_none());
+        assert!(hp(&world, bob) > 5, "the spell landed");
+    }
+
+    #[test]
+    fn a_zero_round_spell_without_the_tag_stays_instant() {
+        let (mut world, room, _) = world_with_spell(0);
+        let (caster, _rx) = caster_in(&mut world, room);
+        let (bob, _b) = bob_in(&mut world, room);
+        start_mend(&mut world, caster);
+        assert!(world.get::<Casting>(caster).is_none());
+        assert!(hp(&world, bob) > 5);
+    }
+
+    #[test]
+    fn quick_chant_halves_a_short_cast_to_the_two_second_floor() {
+        let (mut world, caster) = quick_chant_world(0);
+        tag_mend_short_cast(&mut world);
+        let def = world.resource::<AbilityCatalog>().by_name["mend"].clone();
+        let (ticks, quick) = wind_up_ticks(&world, caster, &def, 1);
+        assert!(quick);
+        assert_eq!(ticks, handler_ticks(0), "legacy 1 / 2 = 0 stars, 2s");
+        let (ticks, quick) = wind_up_ticks(&world, caster, &def, 110);
+        assert!(!quick);
+        assert_eq!(ticks, handler_ticks(1));
+    }
+
+    #[test]
+    fn a_short_cast_blocks_a_second_cast_while_winding_up() {
+        let (mut world, room, _) = world_with_spell(0);
+        tag_mend_short_cast(&mut world);
+        let (caster, mut rx) = caster_in(&mut world, room);
+        let (_bob, _b) = bob_in(&mut world, room);
+        start_mend(&mut world, caster);
+        drain(&mut rx);
+        start_mend(&mut world, caster);
+        assert!(drain(&mut rx).contains("already casting"));
+    }
+
+    #[test]
+    fn an_aborted_cast_leaves_a_two_second_lag() {
+        let (mut world, room, _) = world_with_spell(2);
+        world.insert_resource(crate::TickCount(100));
+        let (caster, mut rx) = caster_in(&mut world, room);
+        let (bob, _b) = bob_in(&mut world, room);
+        start_mend(&mut world, caster);
+        assert!(abort_casting(&mut world, caster));
+        drain(&mut rx);
+        start_mend(&mut world, caster);
+        let out = drain(&mut rx);
+        assert!(
+            out.contains("still recovering your concentration"),
+            "{out:?}"
+        );
+        assert!(world.get::<Casting>(caster).is_none());
+        world.insert_resource(crate::TickCount(119));
+        start_mend(&mut world, caster);
+        assert!(world.get::<Casting>(caster).is_none(), "still lagged");
+        world.insert_resource(crate::TickCount(120));
+        start_mend(&mut world, caster);
+        assert!(world.get::<Casting>(caster).is_some(), "lag is over");
+        assert_eq!(hp(&world, bob), 5);
+    }
+
+    #[test]
+    fn an_interrupted_cast_leaves_the_same_lag() {
+        let (mut world, room, _) = world_with_spell(2);
+        world.insert_resource(crate::TickCount(0));
+        let (caster, mut rx) = caster_in(&mut world, room);
+        let (_bob, _b) = bob_in(&mut world, room);
+        start_mend(&mut world, caster);
+        assert!(interrupt_cast(&mut world, caster, "the blow rattles you"));
+        assert!(cast_lag_active(&world, caster));
+        drain(&mut rx);
+        start_mend(&mut world, caster);
+        assert!(drain(&mut rx).contains("still recovering"));
+    }
+
+    #[test]
+    fn staff_and_completed_casts_get_no_lag() {
+        let (mut world, room, _) = world_with_spell(2);
+        world.insert_resource(crate::TickCount(0));
+        let (caster, _rx) = caster_in(&mut world, room);
+        make_staff(&mut world, caster, 50, mud_db::enums::UserRole::Builder);
+        let (_bob, _b) = bob_in(&mut world, room);
+        // Staff below god level still wind up, then abort without a wait.
+        start_mend(&mut world, caster);
+        assert!(abort_casting(&mut world, caster));
+        assert!(!cast_lag_active(&world, caster));
+        let (mortal, _rx2) = caster_in(&mut world, room);
+        start_mend(&mut world, mortal);
+        run_ticks(&mut world, 200);
+        assert!(
+            !cast_lag_active(&world, mortal),
+            "a landed spell is no abort"
+        );
     }
 }

@@ -1713,6 +1713,10 @@ pub async fn load_ability_catalog(pool: &PgPool) -> sqlx::Result<AbilityCatalog>
                 damage_type: row.damage_type,
                 memorization_time: row.memorization_time,
                 passive: row.tags.iter().any(|t| t.eq_ignore_ascii_case("passive")),
+                short_cast: row
+                    .tags
+                    .iter()
+                    .any(|t| t.eq_ignore_ascii_case("short_cast")),
             },
         );
     }
