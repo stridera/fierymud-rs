@@ -40,6 +40,9 @@ pub struct ClassRow {
     /// default `0`) added to the killer's alignment inside the kill
     /// alignment formula. Positive for "good" classes, negative for "bad".
     pub alignment_bias: i32,
+    /// `Class.campcraft_bonus`: classes whose holders (or whose group
+    /// members) grant the camp "fieldcraft" rest-tier bonus.
+    pub campcraft_bonus: bool,
     /// JSON map of element name → mitigation percent. Folds into
     /// the wearer's `Resistances` at spawn time alongside race
     /// resistances and gear bookkeeping.
@@ -62,6 +65,7 @@ pub async fn list_all(pool: &PgPool) -> sqlx::Result<Vec<ClassRow>> {
             hp_per_level,
             exp_gain_factor,
             alignment_bias,
+            campcraft_bonus,
             COALESCE(resistances, '{}'::jsonb) AS "resistances!: serde_json::Value"
         FROM "Class"
         ORDER BY id

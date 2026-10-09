@@ -3118,21 +3118,6 @@ fn run_help(world: &mut World, player: Entity, args: &str, scope: HelpScope) {
         HelpLookup::NotFound => {}
     }
 
-    // Static topic help: bridges the gap until the HelpEntry table
-    // is populated with builder-authored articles. Covers the
-    // questions a new player most often asks ("how does combat
-    // work? how do spells work? what happens when I die?").
-    if let Some(article) = TOPIC_HELP_ARTICLES
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case(topic.as_str()))
-    {
-        let mut out = format!("\r\n<b:cyan>{topic}</>\r\n\r\n");
-        out.push_str(article.1);
-        out.push_str("\r\n");
-        send_rendered(world, player, &out);
-        return;
-    }
-
     // Spell / chant / song / skill fallback (G2.6 + G2.7). The
     // HelpEntry table is sparsely authored — most ability rows have
     // no help article — so `help web` returns nothing. Render the
@@ -7875,111 +7860,6 @@ pub(crate) fn begin_quit(world: &mut World, player: Entity, farewell: &str) -> b
 /// fallback isn't relied on by the defaults — the plumbing
 /// works either way, but plain forms read better in clients
 /// without color support.
-/// Static topic-help articles. Render under the same path as
-/// HelpEntry rows; live here in-code until builders author a real
-/// catalog. Each entry is `(slug, body)` — body uses XML-Lite
-/// color tags that render_color_tags resolves on the way out.
-const TOPIC_HELP_ARTICLES: &[(&str, &str)] = &[
-    (
-        "combat",
-        "Combat uses an accuracy-vs-evasion d100 contest.\r\n\
-         \r\n\
-         <b:yellow>Hit chance</> = 50 + (attacker.accuracy - defender.evasion) / 2,\r\n\
-         clamped to [1, 99]. Each point of <cyan>Acc</> or <cyan>Eva</> on your score sheet\r\n\
-         shifts hit chance by 0.5%. <cyan>Atk</> is a percent multiplier on weapon damage:\r\n\
-         Atk=+50 means swings deal +50% damage.\r\n\
-         \r\n\
-         Posture matters — sitting, resting, kneeling, or sleeping subtracts from\r\n\
-         your evasion (Sleeping = -30, full reset).\r\n\
-         \r\n\
-         A swing every <b:cyan>4 seconds</> per side; 'kill X' fires one immediate\r\n\
-         opening swing then continues on cadence. 'consider <target>' shows your\r\n\
-         predicted hit rates and the target's current HP.\r\n\
-         \r\n\
-         <b:yellow>Class tools</>: warriors taunt and bash; rogues hide then\r\n\
-         backstab for a +50% opener; clerics heal allies; mages cast for fire/ice/\r\n\
-         lightning damage.",
-    ),
-    (
-        "magic",
-        "Spells are gated by <b:yellow>circles</> (1-14). Your class's\r\n\
-         SpellSlotProgression decides how many slots of each circle you have at\r\n\
-         your level; higher-circle spells unlock as you level. Burning Hands and\r\n\
-         Magic Missile are circle 1; Heal and Harm are circle 5 (unlocks ~L33 for\r\n\
-         Cleric).\r\n\
-         \r\n\
-         Use '<cyan>spells</>' to see what you know grouped by circle.\r\n\
-         'spells 1-2' filters to circles 1-2; 'spells dam' keyword-filters.\r\n\
-         \r\n\
-         Cast with <cyan>cast 'spell name' [target]</>. In combat without a\r\n\
-         target, hostile spells auto-target your current opponent. 'slots'\r\n\
-         shows how many slots of each circle are spent vs. ready.\r\n\
-         \r\n\
-         <b:yellow>spell_power</> on your gear / from buffs adds a percent\r\n\
-         multiplier to magical damage and heals; <b:yellow>ward%</> mitigates\r\n\
-         incoming magical damage on the defender side.",
-    ),
-    (
-        "death",
-        "When you die, your spirit lingers where you fell while your corpse drops\r\n\
-         at the death scene. Type <cyan>release</> to return to your recall point\r\n\
-         at full HP.\r\n\
-         \r\n\
-         <b:yellow>Release precedence</>:\r\n\
-           1. Last touchstone you 'touch'ed\r\n\
-           2. Your race's home room (where character creation spawns)\r\n\
-           3. The Void (last resort)\r\n\
-         \r\n\
-         <b:yellow>Corpse decay</>: a player's corpse keeps for several days, so\r\n\
-         take your time — log off, sleep on it, come back. Mob corpses decay in\r\n\
-         10 minutes. You'll lose some XP on death (the standard fierymud-tier\r\n\
-         penalty); items stay on the corpse for you to retrieve.",
-    ),
-    (
-        "recall",
-        "<cyan>recall</> teleports you to your bound touchstone. Bind a new one\r\n\
-         by walking to a recall stone and typing <cyan>touch</>. Most major town\r\n\
-         halls and temples carry a stone.\r\n\
-         \r\n\
-         If you've never touched a stone, 'recall' will nudge you toward one.\r\n\
-         Newbies start with the Mielikki temple bound by default. Some rooms\r\n\
-         have <cyan>NoRecallRoom</> set — recall refuses to teleport out of those\r\n\
-         (dungeons, quest cells).",
-    ),
-    (
-        "stealth",
-        "<cyan>hide</> rolls how well you hide from your hide skill, Dexterity and\r\n\
-         Intelligence. Anyone whose perception is below that number cannot see\r\n\
-         you; your group always can. Anything but looking around, hiding, moving\r\n\
-         and the like gives you away, and walking wears it down (<cyan>sneak</>\r\n\
-         slows that). <cyan>search</> can find a hider; <cyan>point</> gives one\r\n\
-         away.\r\n\
-         \r\n\
-         While hidden, your next swing lands an opening-strike bonus:\r\n\
-         <b:yellow>+acc, +50% damage</>, softened by the defender's <cyan>Perception</>.\r\n\
-         It is gone after that first swing regardless of outcome.\r\n\
-         \r\n\
-         <cyan>backstab</> is the rogue's specialty stealth strike: pierce-weapon\r\n\
-         only, big multiplier on the weapon roll, even bigger when paired with\r\n\
-         <cyan>hide</> first. <cyan>visible</> drops your hiding without swinging.",
-    ),
-    (
-        "tank",
-        "The tank role pulls a mob's attention so the healer can keep them alive\r\n\
-         while the DPS burns the mob down.\r\n\
-         \r\n\
-         <cyan>taunt [target]</> forces the target to focus on you,\r\n\
-         regardless of who they were previously engaging. You're also pushed to\r\n\
-         the front of the target's grudge list, so when the current victim falls\r\n\
-         the target re-engages you first.\r\n\
-         \r\n\
-         <cyan>rescue [ally]</> swaps the target's attention to you for one\r\n\
-         pull (less reliable than taunt but doesn't require facing the mob).\r\n\
-         <cyan>guard [ally]</> intercepts swings aimed at the protected\r\n\
-         ally — they hit you instead.",
-    ),
-];
-
 const PROMPT_TEMPLATES: &[(&str, &str)] = &[
     ("classic", "<%h/%H hp %v/%V mv> "),
     ("compact", "[%h/%H %v/%V] "),

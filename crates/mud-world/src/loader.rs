@@ -269,6 +269,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 hp_per_level: row.hp_per_level,
                 exp_gain_factor: row.exp_gain_factor,
                 alignment_bias: row.alignment_bias,
+                campcraft_bonus: row.campcraft_bonus,
                 resistances,
             },
         );

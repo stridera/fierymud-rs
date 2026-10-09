@@ -13,7 +13,7 @@
 
 use bevy_ecs::prelude::*;
 use mud_db::enums::{RestSource, Sector};
-use mud_world::{Camping, Item, Located, PendingWakeAttachments, Profile, RestState};
+use mud_world::{Camping, ClassCatalog, Item, Located, PendingWakeAttachments, Profile, RestState};
 
 use crate::TickCount;
 use crate::commands::{Camped, Quitting, send_rendered};
@@ -48,22 +48,12 @@ pub const CAMP_DURATION_TICKS: u64 = 350;
 /// this; matches the `restTier` schema range (1..=3).
 const CAMP_TIER_MAX: i32 = 3;
 
-/// Class IDs whose holders self-grant the "fieldcraft" bonus in
-/// `compute_camp_tier` (Ranger + Druid in the legacy class table).
-/// **TUNABLE** scaffolding per the design doc — R8 follow-up
-/// migrates this to a `Class.campcraftBonus` DB column read.
-const CAMPCRAFT_CLASS_IDS: &[i32] = &[
-    // Ranger
-    9, // Druid
-    7,
-];
-
 /// Compute the rest tier earned at camp completion. Mirrors the
 /// design doc §"Camp tier computation":
 ///
 /// ```text
 /// tier = 1
-/// if class is Ranger/Druid OR a party member is Ranger/Druid:
+/// if class has Class.campcraft_bonus OR a party member's class does:
 ///     tier += 1     (fieldcraft bonus, not double-counted)
 /// if kit was consumed:
 ///     tier += kit.camp_kit_tier   (1 basic, 2 premium)
@@ -73,18 +63,22 @@ const CAMPCRAFT_CLASS_IDS: &[i32] = &[
 /// Today we don't have a runtime party concept beyond the follow-
 /// chain `group_members` helper, so the "party member is
 /// Ranger/Druid" check walks the follow root and inspects each
-/// member's `Profile.class_id` for membership in
-/// [`CAMPCRAFT_CLASS_IDS`]. When the party API hardens this is
-/// the right place to widen the check.
+/// member's `Profile.class_id` against the `Class.campcraft_bonus`
+/// flag in the [`ClassCatalog`] (Ranger and Druid in the seeded
+/// data). When the party API hardens this is the right place to
+/// widen the check.
 fn compute_camp_tier(world: &mut World, player: Entity, kit_tier_bonus: i32) -> i32 {
     let mut tier = 1;
     let root = crate::commands::group_root(world, player);
     let members = crate::commands::group_members(world, root);
     let fieldcraft = members.iter().any(|m| {
-        world
-            .get::<Profile>(*m)
-            .and_then(|p| p.class_id)
-            .is_some_and(|cid| CAMPCRAFT_CLASS_IDS.contains(&cid))
+        let class_id = world.get::<Profile>(*m).and_then(|p| p.class_id);
+        class_id.is_some_and(|cid| {
+            world
+                .get_resource::<ClassCatalog>()
+                .and_then(|c| c.by_id.get(&cid))
+                .is_some_and(|c| c.campcraft_bonus)
+        })
     });
     if fieldcraft {
         tier += 1;
@@ -213,6 +207,68 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(TickCount(tick));
         world
+    }
+
+    fn class(id: i32, plain_name: &str, campcraft_bonus: bool) -> mud_world::ClassDef {
+        mud_world::ClassDef {
+            id,
+            name: plain_name.into(),
+            plain_name: plain_name.into(),
+            is_subclass: false,
+            parent_class_id: None,
+            description: None,
+            hit_dice: "1d8".into(),
+            primary_stat: None,
+            hp_per_level: 10,
+            exp_gain_factor: 1.0,
+            alignment_bias: 0,
+            campcraft_bonus,
+            resistances: std::collections::HashMap::new(),
+        }
+    }
+
+    fn player_of_class(world: &mut World, class_id: i32) -> Entity {
+        world
+            .spawn((
+                Player,
+                Profile {
+                    level: 10,
+                    class_id: Some(class_id),
+                    race: "Human".into(),
+                    experience: 0,
+                    gender: "neutral".into(),
+                },
+            ))
+            .id()
+    }
+
+    #[test]
+    fn camp_tier_reads_the_class_catalog_flag() {
+        // Ids and flags as seeded in fierydev: Druid is 8 and gets the bonus,
+        // Shaman is 9 and does not (the old hard-coded list had them swapped).
+        let mut world = World::new();
+        let mut catalog = ClassCatalog::default();
+        for c in [
+            class(7, "Ranger", true),
+            class(8, "Druid", true),
+            class(9, "Shaman", false),
+        ] {
+            catalog.by_id.insert(c.id, c);
+        }
+        world.insert_resource(catalog);
+        let druid = player_of_class(&mut world, 8);
+        let shaman = player_of_class(&mut world, 9);
+        assert_eq!(compute_camp_tier(&mut world, druid, 0), 2);
+        assert_eq!(compute_camp_tier(&mut world, shaman, 0), 1);
+        // Clamped at the tier cap with a premium kit.
+        assert_eq!(compute_camp_tier(&mut world, druid, 5), CAMP_TIER_MAX);
+    }
+
+    #[test]
+    fn camp_tier_without_a_catalog_has_no_bonus() {
+        let mut world = World::new();
+        let druid = player_of_class(&mut world, 8);
+        assert_eq!(compute_camp_tier(&mut world, druid, 0), 1);
     }
 
     #[test]

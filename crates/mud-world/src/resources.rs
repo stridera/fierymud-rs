@@ -2044,6 +2044,10 @@ pub struct ClassDef {
     /// kill alignment formula: positive for "good" classes, negative for
     /// "bad", `0` for neutral.
     pub alignment_bias: i32,
+    /// Camp "fieldcraft" bonus (`Class.campcraft_bonus`): a camp earns
+    /// +1 rest tier when the camper or a group member has a class with
+    /// this set (Ranger and Druid in the seeded data).
+    pub campcraft_bonus: bool,
     /// Per-element resistance map distilled from the schema's
     /// `Class.resistances` JSON: keys are `ElementType` variants
     /// the runtime models, unrecognized strings are dropped at

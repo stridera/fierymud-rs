@@ -638,6 +638,9 @@ mod subclass;
 mod belt_slot_tests;
 
 #[cfg(test)]
+#[path = "commands/help_tests.rs"]
+mod help_tests;
+#[cfg(test)]
 #[path = "commands/symbol_cmd_tests.rs"]
 mod symbol_cmd_tests;
 #[path = "commands/tells.rs"]
@@ -23653,6 +23656,7 @@ mod scroll_recall_tests {
             hp_per_level: 10,
             exp_gain_factor: 1.0,
             alignment_bias: 0,
+            campcraft_bonus: false,
             resistances: HashMap::new(),
         }
     }

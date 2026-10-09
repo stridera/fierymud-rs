@@ -54,6 +54,7 @@ fn class(id: i32, name: &str, factor: f64) -> ClassDef {
         hp_per_level: 0,
         exp_gain_factor: factor,
         alignment_bias: 0,
+        campcraft_bonus: false,
         resistances: HashMap::new(),
     }
 }

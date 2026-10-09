@@ -2324,6 +2324,7 @@ mod players_tests {
                 hp_per_level: 10,
                 exp_gain_factor: 1.0,
                 alignment_bias: 0,
+                campcraft_bonus: false,
                 resistances: HashMap::new(),
             },
         );

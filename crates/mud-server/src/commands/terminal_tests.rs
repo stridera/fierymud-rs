@@ -62,6 +62,7 @@ fn world() -> World {
             hp_per_level: 0,
             exp_gain_factor: 1.0,
             alignment_bias: 0,
+            campcraft_bonus: false,
             resistances: std::collections::HashMap::new(),
         },
     );
