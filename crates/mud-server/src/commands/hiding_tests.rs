@@ -791,3 +791,354 @@ fn a_character_without_the_hide_skill_cannot_hide_and_score_says_so() {
     dispatch(&mut fx.world, lurker, "sc");
     assert!(!drain(&mut lrx).contains("Stealth: hidden"));
 }
+
+// ---- mob auto-hide (legacy mobact.cpp:181), the hide wait state, and
+// ---- sensing a hidden mover's departure (act.movement.cpp:115)
+
+const THIEF: i32 = 4;
+const MAGE: i32 = 5;
+const NOVICE: i32 = 6;
+
+/// A catalog where THIEF and MAGE (but not NOVICE) learn `hide` at level 1.
+fn mob_hide_world() -> (World, Entity) {
+    let mut world = bare_world();
+    let room = world.spawn((Room, Exits::default())).id();
+    let mut abilities = mud_world::AbilityCatalog::default();
+    abilities.by_name.insert(
+        "hide".into(),
+        ability_def(HIDE_ABILITY, "Hide", AbilityKind::Skill),
+    );
+    world.insert_resource(abilities);
+    let mut skills = mud_world::ClassSkillsData::default();
+    for class in [THIEF, MAGE] {
+        skills.min_level.insert((class, HIDE_ABILITY), 1);
+    }
+    world.insert_resource(skills);
+    let mut classes = mud_world::ClassCatalog::default();
+    for (id, name) in [(THIEF, "Thief"), (MAGE, "Mage"), (NOVICE, "Novice")] {
+        classes.by_id.insert(
+            id,
+            mud_world::ClassDef {
+                id,
+                name: name.into(),
+                plain_name: name.into(),
+                is_subclass: false,
+                parent_class_id: None,
+                description: None,
+                hit_dice: "1d8".into(),
+                primary_stat: None,
+                hp_per_level: 0,
+                exp_gain_factor: 1.0,
+                alignment_bias: 0,
+                resistances: HashMap::new(),
+            },
+        );
+    }
+    world.insert_resource(classes);
+    world.insert_resource(mud_world::MobPrototypes::default());
+    (world, room)
+}
+
+/// A prototype-backed mob of `class` and `level` in `room`.
+fn class_mob(world: &mut World, room: Entity, id: i32, class: i32, level: i32) -> Entity {
+    let mut proto = super::test_support::mob_proto(30, id, mud_db::enums::MobProfession::Trainer);
+    proto.class_id = Some(class);
+    proto.level = level;
+    world
+        .resource_mut::<mud_world::MobPrototypes>()
+        .by_key
+        .insert((30, id), proto);
+    world
+        .spawn((
+            Mob,
+            Named {
+                name: "a cutpurse".into(),
+            },
+            Located(room),
+            mud_world::WorldKey { zone: 30, id },
+            CoreStats {
+                dexterity: 80,
+                intelligence: 60,
+                ..CoreStats::default()
+            },
+        ))
+        .id()
+}
+
+#[test]
+fn a_mob_that_knows_hide_hides_on_the_mob_pulse() {
+    let (mut world, room) = mob_hide_world();
+    let thief = class_mob(&mut world, room, 1, THIEF, 20);
+    let novice = class_mob(&mut world, room, 2, NOVICE, 20);
+    // Off the pulse nothing happens, on it only the mob with the skill hides.
+    world.insert_resource(crate::TickCount(101));
+    crate::wander::mob_hide_tick(&mut world);
+    assert!(!hiding::is_hidden(&world, thief));
+    world.insert_resource(crate::TickCount(100));
+    crate::wander::mob_hide_tick(&mut world);
+    // Skill 26 (the legacy mob roll's mean at level 20), DEX 80 / INT 60:
+    // random(.., 195) + DEX bonus 13, so a roll can floor at 0; try a few.
+    for _ in 0..50 {
+        if hiding::is_hidden(&world, thief) {
+            break;
+        }
+        advance(&mut world, 100);
+        crate::wander::mob_hide_tick(&mut world);
+    }
+    assert!(hiding::is_hidden(&world, thief), "the thief hides");
+    assert!(
+        !hiding::is_hidden(&world, novice),
+        "no hide skill, no hiding"
+    );
+}
+
+#[test]
+fn mob_auto_hide_skips_the_mobs_legacy_skips() {
+    let (mut world, room) = mob_hide_world();
+    let fighting = class_mob(&mut world, room, 1, THIEF, 20);
+    let target = class_mob(&mut world, room, 2, NOVICE, 20);
+    world
+        .entity_mut(fighting)
+        .insert(mud_world::Fighting(target));
+    let no_ai = class_mob(&mut world, room, 3, THIEF, 20);
+    world.entity_mut(no_ai).insert(mud_world::MobBehaviors(vec![
+        mud_db::enums::MobBehavior::NoClassAi,
+    ]));
+    let god = class_mob(&mut world, room, 4, THIEF, 100);
+    let asleep = class_mob(&mut world, room, 5, THIEF, 20);
+    world
+        .entity_mut(asleep)
+        .insert(mud_world::Posture(mud_world::PostureKind::Sleeping));
+    let elsewhere = world.spawn(Room).id();
+    let owner = world.spawn((mud_world::Player, Located(elsewhere))).id();
+    let pet = class_mob(&mut world, room, 6, THIEF, 20);
+    world.entity_mut(pet).insert(Follower(owner));
+    world.insert_resource(crate::TickCount(100));
+    for _ in 0..60 {
+        crate::wander::mob_hide_tick(&mut world);
+        advance(&mut world, 100);
+    }
+    for (mob, why) in [
+        (fighting, "fighting"),
+        (no_ai, "NO_CLASS_AI"),
+        (god, "immortal level"),
+        (asleep, "asleep"),
+        (pet, "charmed, master elsewhere"),
+    ] {
+        assert!(!hiding::is_hidden(&world, mob), "{why} mob hid");
+    }
+}
+
+#[test]
+fn mob_skill_and_class_come_from_the_prototype() {
+    let (mut world, room) = mob_hide_world();
+    let thief = class_mob(&mut world, room, 1, THIEF, 20);
+    let novice = class_mob(&mut world, room, 2, NOVICE, 20);
+    assert_eq!(hiding::skill_pct(&world, thief, "hide"), 26);
+    assert_eq!(hiding::skill_pct(&world, novice, "hide"), 0);
+    assert_eq!(
+        hiding::class_plain_name(&world, thief).as_deref(),
+        Some("thief")
+    );
+}
+
+#[test]
+fn a_thief_mob_is_lagged_half_as_long_after_hiding() {
+    let (mut world, room) = mob_hide_world();
+    let thief = class_mob(&mut world, room, 1, THIEF, 20);
+    let mage = class_mob(&mut world, room, 2, MAGE, 20);
+    for mob in [thief, mage] {
+        hide_with_roll(&mut world, mob, &mut |_, hi| hi);
+        assert!(hiding::is_hidden(&world, mob));
+        hiding::set_hiddenness(&mut world, mob, 0);
+    }
+    // 2 s on: the thief's 20-tick lag is over, the mage's 40 is not.
+    advance(&mut world, 20);
+    for mob in [thief, mage] {
+        hide_with_roll(&mut world, mob, &mut |_, hi| hi);
+    }
+    assert!(
+        hiding::is_hidden(&world, thief),
+        "thief free after 20 ticks"
+    );
+    assert!(!hiding::is_hidden(&world, mage), "mage still lagged");
+    advance(&mut world, 20);
+    hide_with_roll(&mut world, mage, &mut |_, hi| hi);
+    assert!(hiding::is_hidden(&world, mage), "mage free after 40 ticks");
+}
+
+#[test]
+fn a_hide_wait_state_binds_a_thief_player_for_half_a_round() {
+    let (mut world, hider, mut rx) = hide_world(1000);
+    let mut classes = mud_world::ClassCatalog::default();
+    classes.by_id.insert(
+        THIEF,
+        mud_world::ClassDef {
+            id: THIEF,
+            name: "Thief".into(),
+            plain_name: "Thief".into(),
+            is_subclass: false,
+            parent_class_id: None,
+            description: None,
+            hit_dice: "1d8".into(),
+            primary_stat: None,
+            hp_per_level: 0,
+            exp_gain_factor: 1.0,
+            alignment_bias: 0,
+            resistances: HashMap::new(),
+        },
+    );
+    world.insert_resource(classes);
+    world.entity_mut(hider).insert(mud_world::Profile {
+        level: 20,
+        class_id: Some(THIEF),
+        race: "human".into(),
+        experience: 0,
+        gender: "male".into(),
+    });
+    hide_with_roll(&mut world, hider, &mut |lo, _| lo);
+    let _ = drain(&mut rx);
+    advance(&mut world, 19);
+    hide_with_roll(&mut world, hider, &mut |lo, _| lo);
+    assert!(drain(&mut rx).contains("still recovering"), "lagged at 19");
+    advance(&mut world, 1);
+    hide_with_roll(&mut world, hider, &mut |lo, _| lo);
+    assert!(drain(&mut rx).contains("better hiding spot"), "free at 20");
+}
+
+fn named_actor(world: &mut World, name: &str) -> Entity {
+    let mut q = world.query::<(Entity, &Named)>();
+    q.iter(world)
+        .find(|(_, n)| n.name == name)
+        .map(|(e, _)| e)
+        .expect("named actor")
+}
+
+/// `walkers` with Bob (perception 0) sensing life.
+fn sensing_walkers(hid: i32) -> (World, Entity, Rx, Rx, Rx, Rx) {
+    let (mut world, mover, mrx, brx, hrx, crx) = walkers(hid, true);
+    let bob = named_actor(&mut world, "Bob");
+    world.entity_mut(bob).insert(mud_world::SenseLife);
+    (world, mover, mrx, brx, hrx, crx)
+}
+
+const FELT: &str = "You feel that a living creature has departed.";
+
+#[test]
+fn a_sensing_observer_feels_a_sneaker_it_missed_depart() {
+    let (mut world, mover, _m, mut bob, mut hawk, mut cara) = sensing_walkers(500);
+    super::senses::force_sense_roll(Some(49));
+    cmd_move(&mut world, mover, Direction::North);
+    super::senses::force_sense_roll(None);
+    // Bob missed the departure but senses it; Hawk simply saw it.
+    let got = drain(&mut bob);
+    assert!(got.contains(FELT) && !got.contains("leaves"), "{got:?}");
+    let got = drain(&mut hawk);
+    assert!(got.contains("Tester leaves north.") && !got.contains(FELT));
+    assert_eq!(drain(&mut cara), "");
+}
+
+#[test]
+fn sensing_a_departure_is_a_fifty_percent_roll_that_fighting_dulls() {
+    let (mut world, mover, _m, mut bob, ..) = sensing_walkers(500);
+    super::senses::force_sense_roll(Some(50));
+    cmd_move(&mut world, mover, Direction::North);
+    assert!(!drain(&mut bob).contains(FELT), "50 is not below 50");
+
+    // Busy with a fight: 67% of 50 is 33.
+    let (mut world, mover, _m, mut bob, ..) = sensing_walkers(500);
+    let b = named_actor(&mut world, "Bob");
+    let foe = world
+        .spawn((Mob, Located(world.get::<Located>(b).unwrap().0)))
+        .id();
+    world.entity_mut(b).insert(mud_world::Fighting(foe));
+    super::senses::force_sense_roll(Some(34));
+    cmd_move(&mut world, mover, Direction::North);
+    assert!(!drain(&mut bob).contains(FELT), "34 misses while fighting");
+    let (mut world, mover, _m, mut bob, ..) = sensing_walkers(500);
+    let b = named_actor(&mut world, "Bob");
+    let foe = world
+        .spawn((Mob, Located(world.get::<Located>(b).unwrap().0)))
+        .id();
+    world.entity_mut(b).insert(mud_world::Fighting(foe));
+    super::senses::force_sense_roll(Some(32));
+    cmd_move(&mut world, mover, Direction::North);
+    super::senses::force_sense_roll(None);
+    assert!(drain(&mut bob).contains(FELT), "32 lands while fighting");
+}
+
+#[test]
+fn nothing_is_felt_without_the_sense_or_from_the_lifeless_or_the_unhidden() {
+    // No SenseLife: silence, as before.
+    let (mut world, mover, _m, mut bob, ..) = walkers(500, true);
+    super::senses::force_sense_roll(Some(1));
+    cmd_move(&mut world, mover, Direction::North);
+    assert_eq!(drain(&mut bob), "");
+    // An undead mover carries no life to feel.
+    let (mut world, mover, _m, mut bob, ..) = sensing_walkers(500);
+    world
+        .entity_mut(mover)
+        .insert(mud_world::LifeForceTag(mud_db::enums::LifeForce::Undead));
+    cmd_move(&mut world, mover, Direction::North);
+    assert_eq!(drain(&mut bob), "");
+    // An unhidden mover is seen, not sensed.
+    let (mut world, mover, _m, mut bob, ..) = sensing_walkers(0);
+    world.entity_mut(mover).remove::<Sneaking>();
+    cmd_move(&mut world, mover, Direction::North);
+    super::senses::force_sense_roll(None);
+    let got = drain(&mut bob);
+    assert!(
+        got.contains("Tester leaves north.") && !got.contains(FELT),
+        "{got:?}"
+    );
+}
+
+#[test]
+fn a_hidden_wandering_mob_is_felt_leaving_too() {
+    let (mut world, a, b) = {
+        let mut world = bare_world();
+        let a = world.spawn((Room, Exits::default())).id();
+        let b = world.spawn((Room, Exits::default())).id();
+        (world, a, b)
+    };
+    world.entity_mut(a).insert(Exits(HashMap::from([(
+        Direction::North,
+        ExitData {
+            to: Some(b),
+            state: ExitState::Open,
+            key: None,
+            description: None,
+            keywords: vec![],
+            is_hidden: false,
+            is_pickproof: false,
+            is_bashable: false,
+            hit_points: None,
+        },
+    )])));
+    let (watcher, mut rx) = player_in(&mut world, a);
+    world
+        .entity_mut(watcher)
+        .insert((account(), mud_world::SenseLife));
+    let mob = world
+        .spawn((
+            Mob,
+            Named {
+                name: "a cutpurse".into(),
+            },
+            Located(a),
+            Hiddenness(900),
+        ))
+        .id();
+    super::senses::force_sense_roll(Some(1));
+    world.insert_resource(crate::TickCount(300));
+    for _ in 0..200 {
+        crate::wander::wander_tick(&mut world);
+        if world.get::<Located>(mob).is_some_and(|l| l.0 == b) {
+            break;
+        }
+    }
+    super::senses::force_sense_roll(None);
+    assert_eq!(world.get::<Located>(mob).map(|l| l.0), Some(b));
+    let got = drain(&mut rx);
+    assert!(got.contains(FELT) && !got.contains("leaves"), "{got:?}");
+}

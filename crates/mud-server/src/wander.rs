@@ -177,7 +177,7 @@ pub fn wander_tick(world: &mut World) {
         // A hiding mob wears its hiding down as it walks, and observers
         // who cannot see it through that hear nothing of it.
         crate::hiding::decay_on_move(world, mob, &mut |lo, hi| rand::random_range(lo..=hi));
-        crate::commands::broadcast_room_visible(
+        crate::commands::broadcast_room_visual(
             world,
             from_room,
             mob,
@@ -188,6 +188,7 @@ pub fn wander_tick(world: &mut World) {
                 direction_name(dir),
             ),
         );
+        crate::commands::senses::sense_departure(world, from_room, mob, &[mob]);
         crate::combat::relocate(world, mob, target_room);
         let arrival_dir = arrival_from(dir);
         crate::commands::broadcast_room_visible(
@@ -202,6 +203,65 @@ pub fn wander_tick(world: &mut World) {
         );
     }
 }
+
+/// Mob auto-hide (legacy `mobile_activity`, mobact.cpp:181, every
+/// `PULSE_MOBILE` = [`SCAVENGER_PERIOD_TICKS`]): a mob that knows `hide`
+/// and is not hidden calls `do_hide`. Like legacy it skips mobs that are
+/// fighting, `NO_CLASS_AI`, immortal-level, unable to act, or charmed
+/// with their master elsewhere. Skills come from the prototype's class or
+/// race ([`crate::mob_ai::mob_skill_pct`]); the cheap filters (not
+/// hidden, not fighting) run in the query and the skill lookup only for
+/// what is left, so a world without the `hide` ability does no work. The
+/// `hide` wait state ([`crate::commands::info::hide_with_roll`]) stops a
+/// mob re-rolling while it is still lagged.
+pub fn mob_hide_tick(world: &mut World) {
+    let tick = world.resource::<TickCount>().0;
+    if !tick.is_multiple_of(SCAVENGER_PERIOD_TICKS) {
+        return;
+    }
+    let Some(hide_id) = world
+        .get_resource::<mud_world::AbilityCatalog>()
+        .and_then(|c| c.by_name.get("hide"))
+        .map(|d| d.id)
+    else {
+        return;
+    };
+    let candidates: Vec<Entity> = {
+        let mut q = world.query_filtered::<
+            (Entity, Option<&MobBehaviors>),
+            (With<Mob>, Without<mud_world::Hiddenness>, Without<Fighting>),
+        >();
+        q.iter(world)
+            .filter(|(_, beh)| !beh.is_some_and(|b| b.has(MobBehavior::NoClassAi)))
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for mob in candidates {
+        if !crate::mob_ai::mob_can_act(world, mob)
+            || mud_world::effective_level(world, mob) >= IMMORTAL_LEVEL
+            || crate::mob_ai::mob_skill_pct(world, mob, hide_id) == 0
+        {
+            continue;
+        }
+        if crate::commands::is_servant(world, mob) {
+            let room = world.get::<Located>(mob).map(|l| l.0);
+            let master_here = world
+                .get::<Follower>(mob)
+                .and_then(|f| world.get::<Located>(f.0))
+                .map(|l| l.0)
+                == room;
+            if !master_here {
+                continue;
+            }
+        }
+        crate::commands::info::hide_with_roll(world, mob, &mut |lo, hi| {
+            rand::random_range(lo..=hi)
+        });
+    }
+}
+
+/// Legacy `LVL_IMMORT`: mobs at or above it never run the rogue AI.
+const IMMORTAL_LEVEL: i32 = 100;
 
 /// Mob `Scavenger` behavior (legacy `mobile_activity`, every
 /// `PULSE_MOBILE` = 10 s = [`SCAVENGER_PERIOD_TICKS`]): each

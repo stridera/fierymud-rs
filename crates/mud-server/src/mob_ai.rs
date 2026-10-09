@@ -59,6 +59,55 @@ pub(crate) fn mob_can_act(world: &World, mob: Entity) -> bool {
         && world.get::<mud_world::Ghost>(mob).is_none()
 }
 
+/// A mob's percent in a skill at `level` once it has it. Legacy
+/// `roll_mob_skill` (chars.cpp:247) gives an NPC `random(50,100)` plus
+/// `random(5,15)` per level above the first, capped at 1000, and
+/// `GET_SKILL` divides by 10. Rust mobs carry no stored skill rows, so
+/// this is that roll's mean, `75 + 10 * (level - 1)` tenths, as a
+/// percent.
+pub(crate) fn mob_skill_percent_at(level: i32) -> i32 {
+    let tenths = 75 + 10 * (level.max(1) - 1);
+    (tenths / 10).clamp(0, 100)
+}
+
+/// A mob's percent in `ability_id`, 0 when it lacks the skill. Legacy
+/// `update_skills` (skills.cpp:252) grants a skill when the class
+/// learns it at or below the mob's level OR the race grants it
+/// (`min_race_level`, races.cpp `assign_race_skills`); both branches
+/// give a mob the same `roll_mob_skill(level)` (skills.cpp:271,
+/// :292-:299), and everything else is zeroed. Here: the mob prototype's
+/// `class_id` against `ClassSkillsData`, or its `race` against
+/// `RaceAbilitiesData` (no per-row level in the schema: legacy racial
+/// skills are level 1).
+pub(crate) fn mob_skill_pct(world: &World, mob: Entity, ability_id: i32) -> i32 {
+    let Some(proto) = proto_of_mob(world, mob) else {
+        return 0;
+    };
+    let level = mud_world::effective_level(world, mob);
+    let by_class = proto.class_id.is_some_and(|class_id| {
+        world
+            .get_resource::<mud_world::ClassSkillsData>()
+            .and_then(|d| d.min_level_for(class_id, ability_id))
+            .is_some_and(|min| min <= level)
+    });
+    let by_race = world
+        .get_resource::<mud_world::RaceAbilitiesData>()
+        .is_some_and(|d| d.grants(&proto.race, ability_id));
+    if by_class || by_race {
+        mob_skill_percent_at(level)
+    } else {
+        0
+    }
+}
+
+fn proto_of_mob(world: &World, mob: Entity) -> Option<&mud_world::MobProto> {
+    let key = world.get::<WorldKey>(mob)?;
+    world
+        .get_resource::<MobPrototypes>()?
+        .by_key
+        .get(&(key.zone, key.id))
+}
+
 fn proto_of(world: &World, item: Entity) -> Option<&ObjectProto> {
     let key = world.get::<WorldKey>(item)?;
     world
@@ -68,7 +117,7 @@ fn proto_of(world: &World, item: Entity) -> Option<&ObjectProto> {
 }
 
 /// The mob's class id (from its spawn prototype), for `NOWEAR_CLASS`.
-fn class_of(world: &World, mob: Entity) -> Option<i32> {
+pub(crate) fn mob_class_id(world: &World, mob: Entity) -> Option<i32> {
     let key = world.get::<WorldKey>(mob)?;
     world
         .get_resource::<MobPrototypes>()?
@@ -374,7 +423,7 @@ fn value_obj_flags(
     // another -100 (`NOWEAR_CLASS`).
     let classes = i32::try_from(proto.restricted_class_ids.len()).unwrap_or(0);
     value -= 2 * classes;
-    if class_of(world, mob).is_some_and(|c| proto.restricted_class_ids.contains(&c)) {
+    if mob_class_id(world, mob).is_some_and(|c| proto.restricted_class_ids.contains(&c)) {
         value -= 100;
     }
     value

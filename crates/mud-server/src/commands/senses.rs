@@ -224,6 +224,68 @@ fn is_living(world: &World, e: Entity) -> bool {
     })
 }
 
+thread_local! {
+    /// Test hook: pins the `senses_living` roll (per test thread).
+    static FORCED_SENSE_ROLL: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
+}
+
+/// Pin the `senses_living` roll for the current thread (tests only).
+#[cfg(test)]
+pub(crate) fn force_sense_roll(roll: Option<i32>) {
+    FORCED_SENSE_ROLL.with(|c| c.set(roll));
+}
+
+/// Legacy `senses_living` (act.informative.cpp:71): `ch` picks up the
+/// life force of `vict` when it has `SENSE_LIFE`, is awake and `vict` is
+/// not wizinvis above its level. Fighting or casting dulls the sense to
+/// 67% of `basepct`; undead, magical and elemental things carry no life.
+/// `roll` is the legacy `random_number(1, 100)`.
+fn senses_living(world: &World, ch: Entity, vict: Entity, basepct: i32, roll: i32) -> bool {
+    if world.get::<SenseLife>(ch).is_none()
+        || world
+            .get::<mud_world::Posture>(ch)
+            .is_some_and(|p| p.0 == mud_world::PostureKind::Sleeping)
+        || wiz_hidden_from(world, ch, vict)
+        || !is_living(world, vict)
+    {
+        return false;
+    }
+    let busy = world.get::<mud_world::Fighting>(ch).is_some()
+        || world.get::<mud_world::Casting>(ch).is_some();
+    let basepct = if busy { 67 * basepct / 100 } else { basepct };
+    roll < basepct
+}
+
+/// Legacy `try_to_sense_departure` (act.movement.cpp:115), run for each
+/// observer of `mover` leaving `room` who did not get the departure line
+/// (the mover is hidden or sneaking past their perception, invisible, or
+/// the room is too dark): a `SENSE_LIFE` observer has a 50% chance of
+/// feeling a living creature depart. `except` are the movers themselves.
+pub(crate) fn sense_departure(world: &mut World, room: Entity, mover: Entity, except: &[Entity]) {
+    let visible_here = !super::room_is_dark(world, room) || super::room_has_light(world, room);
+    let observers: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located), (With<Player>, With<SenseLife>)>();
+        q.iter(world)
+            .filter(|(e, l)| l.0 == room && *e != mover && !except.contains(e))
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for observer in observers {
+        let noticed = can_see_player(world, observer, mover)
+            && (visible_here || super::sees_characters_in_dark(world, observer));
+        let roll = FORCED_SENSE_ROLL
+            .with(std::cell::Cell::get)
+            .unwrap_or_else(|| rand::random_range(1..=100));
+        if !noticed && senses_living(world, observer, mover, 50, roll) {
+            super::send_to(
+                world,
+                observer,
+                "You feel that a living creature has departed.\r\n",
+            );
+        }
+    }
+}
+
 /// Other players and mobs standing in `room`, minus anyone a `WizInvis`
 /// level hides entirely.
 fn others_in(world: &mut World, viewer: Entity, room: Entity) -> Vec<Entity> {

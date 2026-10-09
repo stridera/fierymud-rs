@@ -1235,9 +1235,9 @@ fn apply_swing(world: &mut World, s: &Swing) {
     let attacker_hidden = world.get::<mud_world::Stealth>(s.attacker).is_some()
         || crate::hiding::is_hidden(world, s.attacker);
     crate::hiding::reveal(world, s.attacker);
-    let defender_perception = world
-        .get::<mud_world::Perception>(s.target)
-        .map_or(0, |p| p.0);
+    // Full perception (level/INT/WIS base for a player, plus gear and
+    // spells), the same value that decides who sees a hider.
+    let defender_perception = crate::hiding::perception_of(world, s.target);
     let (stealth_acc_bonus, stealth_dmg_bonus_pct) = if attacker_hidden {
         let acc = (25 - defender_perception / 4).max(0);
         let dmg = (50 - defender_perception / 2).max(0);
@@ -3192,6 +3192,56 @@ mod tests {
         FORCED_VARIANCE_DELTA.with(|c| c.set(None));
         assert_eq!(open, 5, "open swing deals the base damage");
         assert_eq!(hidden, 7, "hidden swing gets the +50% opening bonus");
+    }
+
+    /// The opening bonus is softened by the defender's full perception
+    /// (level/INT/WIS base plus the `Perception` gear total), not just the
+    /// component: a level-50 player with 60 INT and WIS spots the attacker
+    /// (base 100) without wearing any perception gear at all.
+    #[test]
+    fn the_opening_bonus_is_softened_by_the_defenders_full_perception() {
+        let hp_lost = |defender: &dyn Fn(&mut World, Entity)| -> i32 {
+            let mut world = World::new();
+            let room = make_room(&mut world);
+            let target = make_target(&mut world, room, 1000);
+            let attacker = make_attacker(&mut world, room, target, 5);
+            defender(&mut world, target);
+            world
+                .get_entity_mut(attacker)
+                .unwrap()
+                .insert(mud_world::Hiddenness(400));
+            FORCED_VARIANCE_DELTA.with(|c| c.set(Some(0)));
+            run_combat_tick(&mut world);
+            FORCED_VARIANCE_DELTA.with(|c| c.set(None));
+            1000 - world.get::<Health>(target).unwrap().hp
+        };
+        let wits = |w: &mut World, t: Entity| {
+            w.entity_mut(t).insert((
+                Player,
+                mud_world::Profile {
+                    level: 50,
+                    class_id: None,
+                    race: "human".to_string(),
+                    experience: 0,
+                    gender: "neutral".to_string(),
+                },
+                mud_world::CoreStats {
+                    intelligence: 30,
+                    wisdom: 30,
+                    ..Default::default()
+                },
+            ));
+        };
+        assert_eq!(hp_lost(&|_, _| {}), 7, "an unwary mob gets the full bonus");
+        assert_eq!(hp_lost(&wits), 5, "the base perception cancels the bonus");
+        assert_eq!(
+            hp_lost(&|w, t| {
+                wits(w, t);
+                w.entity_mut(t).insert(mud_world::Perception(100));
+            }),
+            5,
+            "gear on top stays clamped"
+        );
     }
 
     /// Blur gives one extra swing pass per round, like Haste: summed over

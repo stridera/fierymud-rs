@@ -1001,56 +1001,13 @@ fn stamp_reengage(world: &mut World, actor: Entity, opponent: Option<Entity>) {
     try_insert(world, actor, lag);
 }
 
-/// A mob's Switch percent at `level` once it has the skill. Legacy
-/// `roll_mob_skill` (chars.cpp:247) gives an NPC `random(50,100)` plus
-/// `random(5,15)` per level above the first, capped at 1000, and
-/// `GET_SKILL` divides by 10. Rust mobs carry no stored skill rows, so
-/// this is that roll's mean, `75 + 10 * (level - 1)` tenths, as a
-/// percent.
-fn mob_switch_percent(level: i32) -> i32 {
-    let tenths = 75 + 10 * (level.max(1) - 1);
-    (tenths / 10).clamp(0, 100)
-}
-
-/// A mob's Switch percent, 0 when it lacks the skill. Legacy
-/// `update_skills` (skills.cpp:252) grants a skill when the class
-/// learns it at or below the mob's level OR the race grants it
-/// (`min_race_level`, races.cpp `assign_race_skills`); both branches
-/// give a mob the same `roll_mob_skill(level)` (skills.cpp:271,
-/// :292-:299), and everything else is zeroed, so `switch_ok` refuses
-/// at skill 0. Here: the mob prototype's `class_id` against
-/// `ClassSkillsData`, or its `race` against `RaceAbilitiesData`
-/// (no per-row level in the schema: legacy racial skills are level 1).
+/// A mob's Switch percent, 0 when it lacks the skill (legacy
+/// `update_skills`, skills.cpp:252; see [`crate::mob_ai::mob_skill_pct`]).
 fn mob_switch_skill(world: &World, mob: Entity) -> i32 {
-    let Some(proto) = world.get::<mud_world::WorldKey>(mob).and_then(|wk| {
-        world
-            .get_resource::<mud_world::MobPrototypes>()?
-            .by_key
-            .get(&(wk.zone, wk.id))
-    }) else {
-        return 0;
-    };
-    let Some(ability_id) = world
+    world
         .get_resource::<mud_world::CoreAbilities>()
         .and_then(|c| c.switch)
-    else {
-        return 0;
-    };
-    let level = mud_world::effective_level(world, mob);
-    let by_class = proto.class_id.is_some_and(|class_id| {
-        world
-            .get_resource::<mud_world::ClassSkillsData>()
-            .and_then(|d| d.min_level_for(class_id, ability_id))
-            .is_some_and(|min| min <= level)
-    });
-    let by_race = world
-        .get_resource::<mud_world::RaceAbilitiesData>()
-        .is_some_and(|d| d.grants(&proto.race, ability_id));
-    if by_class || by_race {
-        mob_switch_percent(level)
-    } else {
-        0
-    }
+        .map_or(0, |id| crate::mob_ai::mob_skill_pct(world, mob, id))
 }
 
 /// Legacy `switch_ok`: moving to a new opponent mid-fight needs the
@@ -3532,12 +3489,16 @@ mod attack_while_fighting_tests {
     #[test]
     fn mob_switch_percent_follows_the_legacy_mob_roll_mean() {
         // 75 + 10 per level above the first, in tenths of a percent.
-        assert_eq!(mob_switch_percent(1), 7);
-        assert_eq!(mob_switch_percent(10), 16);
-        assert_eq!(mob_switch_percent(50), 56);
-        assert_eq!(mob_switch_percent(94), 100);
-        assert_eq!(mob_switch_percent(200), 100);
-        assert_eq!(mob_switch_percent(0), 7, "level floors at 1");
+        assert_eq!(crate::mob_ai::mob_skill_percent_at(1), 7);
+        assert_eq!(crate::mob_ai::mob_skill_percent_at(10), 16);
+        assert_eq!(crate::mob_ai::mob_skill_percent_at(50), 56);
+        assert_eq!(crate::mob_ai::mob_skill_percent_at(94), 100);
+        assert_eq!(crate::mob_ai::mob_skill_percent_at(200), 100);
+        assert_eq!(
+            crate::mob_ai::mob_skill_percent_at(0),
+            7,
+            "level floors at 1"
+        );
     }
 
     const MOB_CLASS: i32 = 3;

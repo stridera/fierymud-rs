@@ -15,7 +15,7 @@
 use bevy_ecs::prelude::*;
 use mud_world::{
     AbilityCatalog, ClassCatalog, CoreStats, Hiddenness, KnownAbilities, Located, MAX_HIDDENNESS,
-    Perception, Player, Profile,
+    Mob, Perception, Player, Profile,
 };
 
 /// Current hiddenness, 0 when not hidden.
@@ -143,7 +143,9 @@ pub(crate) fn rogue_skill_bonus(dex: i32) -> i32 {
 }
 
 /// The 0..=100 proficiency `e` has in the ability called `name`
-/// (`GET_SKILL`), 0 when unknown.
+/// (`GET_SKILL`), 0 when unknown. A mob has no stored skills: it knows
+/// what its class or race teaches, at the legacy mob-roll mean
+/// ([`crate::mob_ai::mob_skill_pct`]).
 #[must_use]
 pub(crate) fn skill_pct(world: &World, e: Entity, name: &str) -> i32 {
     let Some(id) = world
@@ -153,6 +155,9 @@ pub(crate) fn skill_pct(world: &World, e: Entity, name: &str) -> i32 {
     else {
         return 0;
     };
+    if world.get::<Mob>(e).is_some() {
+        return crate::mob_ai::mob_skill_pct(world, e, id);
+    }
     world
         .get::<KnownAbilities>(e)
         .and_then(|k| k.entries.iter().find(|(a, _, _)| *a == id))
@@ -348,7 +353,11 @@ pub(crate) fn decay_on_move(
 /// Lowercase name of the class `e` belongs to (not its parents).
 #[must_use]
 pub(crate) fn class_plain_name(world: &World, e: Entity) -> Option<String> {
-    let id = world.get::<Profile>(e)?.class_id?;
+    // A mob carries its class on the prototype, not in a `Profile`.
+    let id = match world.get::<Profile>(e).and_then(|p| p.class_id) {
+        Some(id) => id,
+        None => crate::mob_ai::mob_class_id(world, e)?,
+    };
     world
         .get_resource::<ClassCatalog>()?
         .by_id

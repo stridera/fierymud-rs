@@ -22851,6 +22851,8 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
             &movers,
             &format!("{} {verb} {dir_name}.\r\n", cap_sentence_start(&mover_name),),
         );
+        // Observers who missed it but sense life feel it go.
+        senses::sense_departure(world, from_room, mover, &movers);
     }
 
     // Fire PREENTRY triggers on the destination room before any

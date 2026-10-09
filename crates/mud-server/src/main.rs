@@ -554,6 +554,7 @@ async fn main() {
             (
                 timed!(wander::wander_tick),
                 timed!(wander::scavenger_tick),
+                timed!(wander::mob_hide_tick),
                 timed!(wander::assist_tick),
                 timed!(idle::idle_kick_tick),
                 timed!(camp::camp_tick),
