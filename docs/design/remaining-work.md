@@ -63,13 +63,19 @@ Features the legacy MUD had that we still need.
   into the FOOD-only sublist + small jitter so back-to-back casts
   don't duplicate; falls back to waybread (185, 8) when the
   class's zone has zero FOOD entries. Live-verified TestCleric
-  L20 → "a sugar cookie" (zone 120 FOOD). Migrating to a
-  `CreationRecipe` table (fierylib doc §8) is still the proper
-  long-term home but the current scaffold ships food cleanly.
-- **Minor Creation arg lookup.** ✅ Shipped (verified 2026-05-17;
-  found already in place under `MINOR_CREATION_KEYWORDS` const +
-  `create` arm dispatch). Cast arg matched as abbreviation against
-  the 40-keyword table, picks `(10, idx)`.
+  L20 → "a sugar cookie" (zone 120 FOOD). The class → zone map
+  now lives in the `CreationRecipe` table (one keyword-less row per
+  class, `object_id` NULL = any FOOD in the zone) and the waybread
+  fallback in the ability's `objectZoneId` / `objectId` params
+  (fierylib `2026-10-09-creation-recipes.sql`).
+- **Minor Creation arg lookup.** ✅ Shipped. Cast arg matched as an
+  abbreviation against the ability's `CreationRecipe` keyword rows
+  (40 rows seeded from legacy `minor_creation_items[]`, in `id`
+  order); each row names its own object `(zone, id)`.
+- **Summon mobs.** The `summon` effect spawns the mob named by
+  `mobZone` / `mobId` in its `override_params` (fierylib
+  `2026-10-09-summon-mobs.sql`); a missing pair logs a warning
+  naming the ability and nothing spawns.
 - **CREATE_WATER / CREATE_SPRING.** No-op until liquid mechanics
   land. Legacy CREATE_SPRING spawns a fountain proto into the
   room (vnum 75 — "a clear pool of water"); CREATE_WATER fills

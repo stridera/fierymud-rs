@@ -444,6 +444,11 @@ mod channels;
 mod clan_chat;
 #[path = "commands/combat.rs"]
 mod combat_commands;
+#[path = "commands/conjuration.rs"]
+mod conjuration;
+#[cfg(test)]
+#[path = "commands/conjuration_tests.rs"]
+mod conjuration_tests;
 #[cfg(test)]
 pub(crate) use combat_commands::cmd_flee;
 pub(crate) use combat_commands::flee_through_exit;
@@ -1668,63 +1673,6 @@ pub(crate) fn longest_prefix_match(tokens: &[&str]) -> Option<(&'static Command,
     }
     None
 }
-
-/// Minor Creation keyword table — index drives the proto id under
-/// zone 10 (`Objects` zone 10 ids 0..39). Mirrors legacy
-/// `minor_creation_items[]` in `fierymud_legacy/src/constants.cpp:28`.
-/// Order matters: the index IS the proto id. Match is abbreviation-
-/// style (`is_abbrev`), so `cast 'minor creation' dag` resolves to
-/// "dagger".
-///
-/// TODO (data-over-code): migrate to a builder-editable
-/// `CreationRecipe` table keyed by `(ability_id, keyword)` →
-/// `(object_zone_id, object_id)` + optional `min_skill` / `class_id`.
-/// See `fierylib/remaining_work.md` "Creation recipes table" and the
-/// data-over-code rule in /home/strider/Code/mud/CLAUDE.md. This
-/// hard-coded array exists only as a bridge so `cast 'minor creation'
-/// dagger` works today.
-const MINOR_CREATION_KEYWORDS: [&str; 40] = [
-    "backpack",
-    "sack",
-    "robe",
-    "hood",
-    "lantern",
-    "torch",
-    "waterskin",
-    "barrel",
-    "rations",
-    "raft",
-    "club",
-    "mace",
-    "dagger",
-    "greatsword",
-    "longsword",
-    "staff",
-    "shield",
-    "shortsword",
-    "jacket",
-    "pants",
-    "leggings",
-    "gauntlets",
-    "sleeves",
-    "gloves",
-    "helmet",
-    "skullcap",
-    "boots",
-    "sandals",
-    "cloak",
-    "book",
-    "quill",
-    "belt",
-    "ring",
-    "bracelet",
-    "bottle",
-    "keg",
-    "mask",
-    "earring",
-    "scarf",
-    "bracer",
-];
 
 /// Commands that never fire from an abbreviation: the player has to type
 /// the full verb. Picked for blast radius: an inadvertent `q` must not log
@@ -16437,91 +16385,44 @@ pub(crate) fn invoke_ability_with(
                     .and_then(|p| p.get("objectId"))
                     .and_then(serde_json::Value::as_i64)
                     .map(|v| i32::try_from(v).unwrap_or(0));
-                // Minor Creation: cast arg selects from the 40-keyword
-                // table (legacy `minor_creation_items[]` in
-                // constants.cpp). All 40 protos live under zone 10,
-                // ids 0..39. Match the arg as an abbreviation of any
-                // keyword and override the default proto with the
-                // matching index. Skipped when there's no arg or the
-                // arg doesn't match any keyword — falls through to
-                // the (zone, id) default.
-                //
-                // Create Food: legacy `spell_creations` picks a base
-                // zone by caster class (Cleric/default → 120,
-                // Paladin → 110, Priest → 100, Anti-Paladin → 130,
-                // Druid → 140), then id 0..9 with `zplus = skill/16
-                // + small random`. Falls back to waybread (185, 8)
-                // when the per-class zone proto isn't loaded — keeps
-                // CREATE_FOOD playable even on a partial-content DB
-                // where zones 100/110/130/140 are sparse. Future
-                // cleanup migrates this table into `CreationRecipe`
-                // (fierylib doc §8 already drafted the schema).
-                let (proto_zone, proto_id) = {
-                    let mut z = default_zone;
-                    let mut i = default_id;
-                    if def.plain_name.eq_ignore_ascii_case("MINOR_CREATION")
-                        && let Some(word) = target_word
-                        && !word.trim().is_empty()
-                    {
-                        let lc = word.trim().to_ascii_lowercase();
-                        if let Some(idx) = MINOR_CREATION_KEYWORDS
-                            .iter()
-                            .position(|kw| kw.starts_with(&lc))
+                // The `CreationRecipe` table says what each creation
+                // spell conjures (data over code): Minor Creation's cast
+                // arg picks a keyword row (abbreviation match, legacy
+                // `minor_creation_items[]`); Create Food picks the row for
+                // the caster's class, which names a zone of FOOD protos
+                // chosen by skill (legacy `spell_creations`). A spell with
+                // no matching row falls back to the ability's own
+                // objectZoneId / objectId params (Create Food: waybread).
+                let choice = world
+                    .get_resource::<mud_world::CreationRecipes>()
+                    .and_then(|r| {
+                        conjuration::creation_choice(
+                            r,
+                            &def.plain_name,
+                            target_word,
+                            caster_class_id,
+                        )
+                    });
+                let (proto_zone, proto_id) = match choice {
+                    None => (default_zone, default_id),
+                    Some(conjuration::Conjured::Fixed(z, i)) => (Some(z), Some(i)),
+                    Some(conjuration::Conjured::FoodIn(zone)) => {
+                        let foods =
+                            conjuration::foods_in_zone(world.resource::<ObjectPrototypes>(), zone);
+                        if let Some((fz, fi)) =
+                            conjuration::pick_food(&foods, caster_skill, rand::random_range(0..=2))
                         {
-                            z = Some(10);
-                            i = Some(i32::try_from(idx).unwrap_or(0));
-                        }
-                    }
-                    if def.plain_name.eq_ignore_ascii_case("CREATE_FOOD") {
-                        let base_zone = match caster_class_id {
-                            Some(5) => 110,  // Paladin
-                            Some(16) => 100, // Priest
-                            Some(6) => 130,  // Anti-Paladin
-                            Some(8) => 140,  // Druid
-                            _ => 120,        // Cleric / default
-                        };
-                        // Filter to FOOD protos in the class's zone —
-                        // legacy assumed `zplus 0..9` always landed on
-                        // food, but the imported zones mix in other
-                        // proto types (armor, fountains) so the strict
-                        // index dance would conjure absurd gear.
-                        // Walk the zone for typed FOOD entries; pick
-                        // one weighted toward higher levels by caster
-                        // skill, then plus a small jitter so back-to-
-                        // back casts don't duplicate.
-                        let mut foods: Vec<(i32, i32)> = world
-                            .resource::<ObjectPrototypes>()
-                            .by_key
-                            .iter()
-                            .filter(|((zid, _), p)| {
-                                *zid == base_zone && p.r#type == mud_db::enums::ObjectType::Food
-                            })
-                            .map(|((zid, iid), _)| (*zid, *iid))
-                            .collect();
-                        foods.sort_by_key(|(_, iid)| *iid);
-                        if foods.is_empty() {
-                            // Fallback: waybread (185, 8). Sparse
-                            // per-class food zones in the dev DB
-                            // shouldn't drop the cast entirely.
-                            z = Some(185);
-                            i = Some(8);
+                            (Some(fz), Some(fi))
                         } else {
-                            // Pick deterministically by skill then
-                            // jitter into adjacent indices. Caster
-                            // skill 0..100 maps to the lower vs upper
-                            // half of the foods list; a small random
-                            // shift keeps repeated casts varied.
-                            let n = foods.len();
-                            #[allow(clippy::cast_sign_loss)]
-                            let base_idx = (caster_skill as usize).saturating_mul(n) / 101; // 0..n-1
-                            let jitter = rand::random_range(0..=2);
-                            let idx = (base_idx + jitter).min(n - 1);
-                            let (fz, fi) = foods[idx];
-                            z = Some(fz);
-                            i = Some(fi);
+                            tracing::warn!(
+                                ability = %def.plain_name,
+                                zone,
+                                "CreationRecipe names a zone with no FOOD objects; \
+                                 falling back to the ability's objectZoneId/objectId"
+                            );
+                            (default_zone, default_id)
                         }
                     }
-                    (z, i)
                 };
                 let (Some(proto_zone), Some(proto_id)) = (proto_zone, proto_id) else {
                     applied_msgs.push(format!("{pretty} (no object proto specified)"));
@@ -18027,21 +17928,13 @@ pub(crate) fn invoke_ability_with(
                 applied_msgs.push(format!("{pretty} (globe ≤ circle {max_circle})"));
             }
             "summon" => {
-                // L3 v1: conjuration spells (SUMMON_DEMON,
-                // SUMMON_ELEMENTAL, SPHERE_SUMMON, etc.). Read
-                // `mobType` from override_params, look it up in a
-                // hardcoded mob-proto table, spawn the mob into the
-                // caster's room as a Follower(caster) so it tags
-                // along, and spawn a duration-tracked EffectInstance
-                // pointing at the new mob so the teardown despawns
+                // Conjuration spells (SUMMON_DEMON, SUMMON_ELEMENTAL,
+                // SPHERE_SUMMON, ANIMATE_DEAD, ...). The effect's
+                // override_params name the mob prototype to spawn
+                // (`mobZone` / `mobId`; `mobType` is only a label). The
+                // mob joins the caster's room as a Follower(caster), and a
+                // duration-tracked EffectInstance pointing at it despawns
                 // it on expiry.
-                //
-                // Future cleanup: migrate the table to a
-                // `SummonRecipe` DB row keyed on (ability_id,
-                // class_id, min_skill, mob_zone, mob_id) — see
-                // fierylib doc §8. Today's hardcoded fallback ships
-                // playable conjurations without blocking on schema
-                // work.
                 let mob_type = spec
                     .override_params
                     .as_ref()
@@ -18049,33 +17942,21 @@ pub(crate) fn invoke_ability_with(
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("")
                     .to_ascii_lowercase();
-                let proto_key: Option<(i32, i32)> = match mob_type.as_str() {
-                    "mount" => Some((324, 21)),         // a well trained horse
-                    "elemental" => Some((52, 12)),      // the flame elemental
-                    "demon" => Some((510, 24)),         // an Astral Demon
-                    "greater_demon" => Some((160, 11)), // the Demon Lord
-                    "dracolich" => Some((533, 11)),     // a dragon cult guardian
-                    "simulacrum" => Some((163, 8)),     // the Knight Errant
-                    // ANIMATE_DEAD / CLONE: no mobType in override_params,
-                    // but they share the "summon" effect_type and need a
-                    // default mob proto. Disambiguate by ability name.
-                    "" => match def.plain_name.to_ascii_uppercase().as_str() {
-                        "ANIMATE_DEAD" => Some((54, 20)), // the Large Skeleton
-                        "CLONE" => Some((163, 8)),        // the Knight Errant (placeholder)
-                        _ => None,
-                    },
-                    _ => None,
-                };
-                let Some(key) = proto_key else {
-                    send_to(
-                        world,
-                        player,
-                        format!(
-                            "The summoning fails — no mob type registered for '{mob_type}'.\r\n"
-                        ),
-                    );
-                    applied_msgs.push(format!("{pretty} (unknown mobType '{mob_type}')"));
-                    continue;
+                let key = match conjuration::summon_mob_key(
+                    &def.plain_name,
+                    spec.override_params.as_ref(),
+                ) {
+                    Ok(key) => key,
+                    Err(builder_msg) => {
+                        tracing::warn!(ability = %def.plain_name, "{builder_msg}");
+                        send_to(
+                            world,
+                            player,
+                            "The summoning fails — nothing answers the call.\r\n",
+                        );
+                        applied_msgs.push(format!("{pretty} (no mob configured)"));
+                        continue;
+                    }
                 };
                 let Some(caster_room) = world.get::<Located>(player).map(|l| l.0) else {
                     applied_msgs.push(format!("{pretty} (caster has no room)"));
@@ -18166,6 +18047,12 @@ pub(crate) fn invoke_ability_with(
                     .get(&key)
                     .cloned();
                 let Some(proto) = proto else {
+                    tracing::warn!(
+                        ability = %def.plain_name,
+                        mob_zone = key.0,
+                        mob_id = key.1,
+                        "summon effect names a mob prototype that is not loaded"
+                    );
                     applied_msgs.push(format!("{pretty} (proto {key:?} not loaded)"));
                     continue;
                 };

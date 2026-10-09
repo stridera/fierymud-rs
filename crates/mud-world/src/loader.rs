@@ -384,6 +384,21 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     }
     world.insert_resource(effect_auras);
 
+    // CreationRecipe: what Minor Creation / Create Food conjure.
+    let mut creation_recipes = crate::resources::CreationRecipes::default();
+    for r in mud_db::creation_recipes::list_all(pool).await? {
+        creation_recipes.insert(
+            &r.ability,
+            crate::resources::CreationRecipe {
+                keyword: r.keyword.map(|k| k.to_ascii_lowercase()),
+                class_id: r.class_id,
+                object_zone_id: r.object_zone_id,
+                object_id: r.object_id,
+            },
+        );
+    }
+    world.insert_resource(creation_recipes);
+
     // Pass 4c.6: race defaults + full catalog. `RaceDefaults` carries
     // the narrow size + start-room maps that older callers consult.
     // `RaceCatalog` hydrates the full Race row — stat caps,

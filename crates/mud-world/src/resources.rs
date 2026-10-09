@@ -1212,6 +1212,67 @@ pub struct EffectAuraCatalog {
     pub auras: Vec<EffectAura>,
 }
 
+/// One `CreationRecipe` row: what a creation spell conjures. See
+/// [`CreationRecipes`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreationRecipe {
+    /// Word the caster types, lowercase; `None` for spells with no word.
+    pub keyword: Option<String>,
+    /// Caster class the row is limited to; `None` applies to every class.
+    pub class_id: Option<i32>,
+    pub object_zone_id: i32,
+    /// Object to create; `None` means "any FOOD object in `object_zone_id`".
+    pub object_id: Option<i32>,
+}
+
+/// `CreationRecipe` rows per spell (keyed by uppercase `Ability.plain_name`),
+/// in table order, loaded at boot. Read by the `create` spell effect (Minor
+/// Creation keywords, Create Food by class).
+#[derive(Resource, Default, Debug)]
+pub struct CreationRecipes {
+    pub by_ability: HashMap<String, Vec<CreationRecipe>>,
+}
+
+impl CreationRecipes {
+    pub fn insert(&mut self, ability: &str, recipe: CreationRecipe) {
+        self.by_ability
+            .entry(ability.to_ascii_uppercase())
+            .or_default()
+            .push(recipe);
+    }
+
+    fn rows(&self, ability: &str) -> &[CreationRecipe] {
+        self.by_ability
+            .get(&ability.to_ascii_uppercase())
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// The first keyword row (in table order) whose keyword the typed `word`
+    /// abbreviates, as legacy `is_abbrev` over `minor_creation_items[]` did.
+    #[must_use]
+    pub fn for_keyword(&self, ability: &str, word: &str) -> Option<&CreationRecipe> {
+        let word = word.trim().to_ascii_lowercase();
+        if word.is_empty() {
+            return None;
+        }
+        self.rows(ability).iter().find(|r| {
+            r.keyword
+                .as_deref()
+                .is_some_and(|k| k.to_ascii_lowercase().starts_with(&word))
+        })
+    }
+
+    /// The keyword-less row for the caster's class, else the all-classes
+    /// default row.
+    #[must_use]
+    pub fn for_class(&self, ability: &str, class_id: Option<i32>) -> Option<&CreationRecipe> {
+        let rows = || self.rows(ability).iter().filter(|r| r.keyword.is_none());
+        class_id
+            .and_then(|id| rows().find(|r| r.class_id == Some(id)))
+            .or_else(|| rows().find(|r| r.class_id.is_none()))
+    }
+}
+
 /// One `RaceEffects` row: a permanent effect every member of the race
 /// carries.
 #[derive(Debug, Clone)]
