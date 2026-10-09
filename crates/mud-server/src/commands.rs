@@ -535,6 +535,9 @@ mod goto_tests;
 #[path = "commands/hiding_tests.rs"]
 mod hiding_tests;
 #[cfg(test)]
+#[path = "commands/house_item_tests.rs"]
+mod house_item_tests;
+#[cfg(test)]
 #[path = "commands/invisibility_tests.rs"]
 mod invisibility_tests;
 #[cfg(test)]
@@ -13786,6 +13789,7 @@ pub(crate) fn synthesize_house_rooms(world: &mut World, summary: &mud_world::Hou
             placed.object_zone_id,
             placed.object_id,
             room_entity,
+            &placed.custom,
         );
     }
 }
@@ -13794,13 +13798,16 @@ pub(crate) fn synthesize_house_rooms(world: &mut World, summary: &mud_world::Hou
 /// room. Mirrors `respawn::spawn_item_into` but without the
 /// reset bookkeeping — placed items are persistent via
 /// `PlayerHouseItem`, not via the reset cycle. The `house_item_id`
-/// FK is attached so `house take` can DELETE the right row.
+/// FK is attached so `house take` can DELETE the right row. `custom` is the
+/// per-instance state stored with the row (label, examine text, keywords,
+/// enchantment / curse), re-applied once on top of the prototype.
 pub(crate) fn spawn_house_item(
     world: &mut World,
     house_item_id: i32,
     proto_zone: i32,
     proto_id: i32,
     parent: Entity,
+    custom: &mud_db::housing::HouseItemCustom,
 ) {
     let proto = world
         .resource::<ObjectPrototypes>()
@@ -13823,6 +13830,44 @@ pub(crate) fn spawn_house_item(
     ));
     if let Some(desc) = proto.examine_description.clone() {
         bundle.insert(Description(desc));
+    }
+    // The prototype's own flags and restrictions, so the stored delta
+    // (`flags_added`, `restrictions_added`) lands on the same base a
+    // carried item has.
+    if !proto.flags.is_empty() {
+        bundle.insert(mud_world::ObjectFlags(proto.flags.clone()));
+    }
+    if !proto.restrictions.is_empty() {
+        bundle.insert(mud_world::ObjectRestrictions(proto.restrictions.clone()));
+    }
+    let item = bundle.id();
+    if custom.name.is_some() || custom.examine.is_some() || custom.keywords.is_some() {
+        crate::item_custom::install(
+            world,
+            item,
+            mud_world::ItemCustomization {
+                name: custom.name.clone(),
+                examine: custom.examine.clone(),
+                keywords: custom.keywords.clone(),
+                dirty: false,
+            },
+        );
+    }
+    if let Some(alter) = &custom.alter {
+        crate::item_alter::restore(world, item, alter, false);
+    }
+}
+
+/// The per-instance state of `item` as stored with a placed house item:
+/// what `CharacterItems` would persist for it.
+pub(crate) fn house_item_custom(world: &World, item: Entity) -> mud_db::housing::HouseItemCustom {
+    let custom = world.get::<mud_world::ItemCustomization>(item);
+    let alter = crate::item_alter::snapshot(world, item);
+    mud_db::housing::HouseItemCustom {
+        name: custom.and_then(|c| c.name.clone()),
+        examine: custom.and_then(|c| c.examine.clone()),
+        keywords: custom.and_then(|c| c.keywords.clone()),
+        alter: (!alter.is_empty()).then_some(alter),
     }
 }
 
@@ -15777,6 +15822,7 @@ pub(crate) fn invoke_ability_with(
                         spec.override_params.as_ref(),
                         Some(&spec.default_params),
                         &per_target_ctx,
+                        &spec.name,
                     )
                 } else {
                     1
@@ -15796,7 +15842,8 @@ pub(crate) fn invoke_ability_with(
                 let mut victim_dead = false;
                 for bolt in 0..bolt_count {
                     // Legacy `spell_magic_missile`: a missile at a victim
-                    // who is already dead just pelts the corpse.
+                    // who is already dead just pelts the corpse. Say so
+                    // once and stop: the remaining bolts have no target.
                     if victim_dead {
                         send_to(
                             world,
@@ -15805,7 +15852,7 @@ pub(crate) fn invoke_ability_with(
                                 "You're pelting {target_name_pre} with missiles but they're dead already!\r\n"
                             ),
                         );
-                        continue;
+                        break;
                     }
                     if bolt_count > 1 {
                         // Per-missile messages: the caster template for every
@@ -19726,20 +19773,54 @@ pub(crate) fn resolve_cleanse_noop_message(
     }
 }
 
+/// Most bolts one cast of a `multihit` row may fire. The count is a
+/// builder-editable formula, and each bolt runs the whole damage pipeline
+/// and sends messages, so a typo (`boltCount: "1000"`) must not turn one
+/// cast into a flood. The legacy spells top out at 7.
+pub(crate) const MAX_BOLT_COUNT: i32 = 10;
+
 /// Number of bolts a `multihit` damage row fires: its `boltCount` formula
-/// (override wins over default), at least 1. A row without one fires a
-/// single bolt. The formula is re-rolled per cast, so it may use `random`.
+/// (override wins over default), clamped to `1..=MAX_BOLT_COUNT`. A row
+/// without one fires a single bolt. The formula is re-rolled per cast, so
+/// it may use `random`. `ability` names the spell for the one-time
+/// warning logged when the formula exceeds the cap.
 pub(crate) fn resolve_bolt_count(
     override_params: Option<&serde_json::Value>,
     default_params: Option<&serde_json::Value>,
     ctx: &FormulaCtx,
+    ability: &str,
 ) -> i32 {
-    [override_params, default_params]
+    let raw = [override_params, default_params]
         .into_iter()
         .flatten()
         .find_map(|p| p.get("boltCount"))
         .and_then(|v| numeric_or_formula(v, ctx))
-        .map_or(1, |n| n.max(1))
+        .unwrap_or(1);
+    if raw > MAX_BOLT_COUNT {
+        warn_bolt_count_clamped(ability, raw);
+    }
+    raw.clamp(1, MAX_BOLT_COUNT)
+}
+
+/// Log, once per ability for the life of the process, that its `boltCount`
+/// was clamped to [`MAX_BOLT_COUNT`].
+fn warn_bolt_count_clamped(ability: &str, raw: i32) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock, PoisonError};
+    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(|| Mutex::new(HashSet::new()));
+    let first = seen
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(ability.to_ascii_lowercase());
+    if first {
+        warn!(
+            ability,
+            bolt_count = raw,
+            max = MAX_BOLT_COUNT,
+            "boltCount exceeds the cap; clamped (fix the ability's multihit row)"
+        );
+    }
 }
 
 /// Add `amount` to `target.Health.hp`, capped at `max`. Returns the

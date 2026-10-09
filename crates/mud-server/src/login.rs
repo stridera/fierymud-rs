@@ -509,6 +509,12 @@ enum AuthDoneKind {
         identifier: String,
         result: CharLookup,
     },
+    /// Result of the account lookup started by `code` at the email
+    /// prompt; see [`ConnRouter::finish_email_lookup`].
+    EmailLookup {
+        email: String,
+        result: mud_db::sqlx::Result<Option<User>>,
+    },
     /// The poller saw the device-code row leave PENDING (or reach its
     /// deadline); the main loop re-reads it and resolves the login.
     WebApprovalWake { code_id: String },
@@ -1605,6 +1611,10 @@ impl ConnRouter {
     /// every package.
     fn bind_player(&mut self, conn_id: ConnId, entity: Entity, world: &mut World) {
         self.playing.insert(conn_id, entity);
+        // Tell the network layer now, not on the next once-a-second
+        // `sync_authenticated` sweep: a login script's first commands
+        // arrive in that gap and must not meet the pre-login rate limit.
+        mud_net::mark_authenticated(conn_id);
         commands::clear_gmcp_sent(world, entity);
         self.sync_client_width(conn_id, entity, world);
         self.attach_output(conn_id, entity, world);
@@ -2026,8 +2036,7 @@ impl ConnRouter {
             } => {
                 let answer = trimmed.to_ascii_lowercase();
                 if is_email && matches!(answer.as_str(), "code" | "c") {
-                    self.email_login_code(conn_id, identifier, pool, world)
-                        .await;
+                    self.email_login_code(conn_id, identifier, pool, world);
                     return;
                 }
                 let yes = matches!(answer.as_str(), "y" | "yes" | "new");
@@ -2432,7 +2441,7 @@ impl ConnRouter {
                     // Unlinked legacy characters (empty `user.id`) are
                     // allowed too: the website links the character to
                     // the approving account.
-                    self.begin_web_approval(conn_id, user, preselected, pool, world)
+                    self.begin_web_approval(conn_id, user, preselected, false, pool, world)
                         .await;
                     return;
                 }
@@ -3095,6 +3104,10 @@ impl ConnRouter {
             AuthDoneKind::CharLookup { identifier, result } => {
                 self.finish_char_lookup(conn_id, &identifier, result, world);
             }
+            AuthDoneKind::EmailLookup { email, result } => {
+                self.finish_email_lookup(conn_id, email, result, pool, world)
+                    .await;
+            }
             AuthDoneKind::SaveSettled {
                 user,
                 char_row,
@@ -3220,23 +3233,63 @@ impl ConnRouter {
     /// login. A registered address gets a real code; an unregistered one
     /// gets a decoy that looks identical and simply never approves, so
     /// the two outcomes cannot be told apart from the game prompt.
-    async fn email_login_code(
+    ///
+    /// The per-IP code limit is charged first, so a peer past its quota
+    /// costs no query; the account lookup then runs in a task and resumes
+    /// from `on_auth_done` ([`Self::finish_email_lookup`]) rather than
+    /// stalling the world loop on a Postgres round-trip.
+    fn email_login_code(
         &mut self,
         conn_id: ConnId,
         email: String,
         pool: &PgPool,
         world: &mut World,
     ) {
-        let found = users::find_by_email(pool, &email).await;
         let Some(ctx) = self.login.get_mut(&conn_id) else {
             return;
         };
-        match found {
+        let ip = ctx.peer.map_or(IpAddr::from([0u8, 0, 0, 0]), |a| a.ip());
+        if !self.code_limiter.try_acquire(ip, Instant::now()) {
+            info!(conn_id, %ip, "login code rate limit hit");
+            let _ = ctx.outbound.try_send(
+                "Too many login codes requested; try again later.\r\n"
+                    .as_bytes()
+                    .to_vec(),
+            );
+            reprompt_identifier(ctx, world);
+            return;
+        }
+        ctx.stage = Stage::Authenticating;
+        let tx = self.auth_tx.clone();
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            let result = users::find_by_email(&pool, &email).await;
+            let _ = tx.send(AuthDone {
+                conn_id,
+                kind: AuthDoneKind::EmailLookup { email, result },
+            });
+        });
+    }
+
+    /// Continuation of [`Self::email_login_code`] once the off-loop account
+    /// lookup finished. The code quota was already charged there.
+    async fn finish_email_lookup(
+        &mut self,
+        conn_id: ConnId,
+        email: String,
+        result: mud_db::sqlx::Result<Option<User>>,
+        pool: &PgPool,
+        world: &mut World,
+    ) {
+        let Some(ctx) = self.login.get_mut(&conn_id) else {
+            return;
+        };
+        match result {
             Ok(Some(user)) => {
                 let _ = ctx
                     .outbound
                     .try_send(WEBSITE_PASSWORD_NOTICE.as_bytes().to_vec());
-                self.begin_web_approval(conn_id, user, None, pool, world)
+                self.begin_web_approval(conn_id, user, None, true, pool, world)
                     .await;
             }
             Ok(None) => {
@@ -3256,22 +3309,13 @@ impl ConnRouter {
     }
 
     /// Show a plausible login code for an email with no account. Same
-    /// rate limit, text, prompts and timing as [`Self::begin_web_approval`],
-    /// but no `GameLoginCode` row exists, so nothing can approve it.
+    /// text, prompts and timing as [`Self::begin_web_approval`] (the caller
+    /// already charged the code rate limit), but no `GameLoginCode` row
+    /// exists, so nothing can approve it.
     fn begin_decoy_approval(&mut self, conn_id: ConnId, email: String, world: &World) {
         let Some(ctx) = self.login.get_mut(&conn_id) else {
             return;
         };
-        let ip = ctx.peer.map_or(IpAddr::from([0u8, 0, 0, 0]), |a| a.ip());
-        if !self.code_limiter.try_acquire(ip, Instant::now()) {
-            let _ = ctx.outbound.try_send(
-                "Too many login codes requested; try again later.\r\n"
-                    .as_bytes()
-                    .to_vec(),
-            );
-            reprompt_identifier(ctx, world);
-            return;
-        }
         let (timeout_secs, website_url) = web_approval_settings(world);
         let code = generate_login_code();
         let shown = format_login_code(&code);
@@ -3320,7 +3364,8 @@ impl ConnRouter {
     }
 
     /// Start a device-code login for `user` (and, on the character-name
-    /// path, `preselected`): rate-limit, insert the `GameLoginCode`
+    /// path, `preselected`): rate-limit (unless `quota_charged`: the caller
+    /// already spent the IP's quota), insert the `GameLoginCode`
     /// row, spawn its poller, tell the player where to approve it.
     /// `user.id` is empty for an unlinked legacy character, in which
     /// case `preselected` is required and the row is inserted with a
@@ -3331,6 +3376,7 @@ impl ConnRouter {
         conn_id: ConnId,
         user: User,
         preselected: Option<Box<CharacterRow>>,
+        quota_charged: bool,
         pool: &PgPool,
         world: &mut World,
     ) {
@@ -3349,7 +3395,7 @@ impl ConnRouter {
             return;
         }
         let ip = ctx.peer.map_or(IpAddr::from([0u8, 0, 0, 0]), |a| a.ip());
-        if !self.code_limiter.try_acquire(ip, Instant::now()) {
+        if !quota_charged && !self.code_limiter.try_acquire(ip, Instant::now()) {
             info!(conn_id, %ip, "login code rate limit hit");
             let _ = ctx.outbound.try_send(
                 "Too many login codes requested; try again later.\r\n"
@@ -4222,6 +4268,7 @@ impl ConnRouter {
                             room_id: i.room_id,
                             object_zone_id: i.object_zone_id,
                             object_id: i.object_id,
+                            custom: i.custom(),
                         })
                         .collect(),
                     guests: guests
@@ -8844,9 +8891,28 @@ mod tests {
         router.on_connect(1, tx, None, &world);
         drain(&mut rx);
         let email = format!("nobody-{}@example.invalid", std::process::id());
-        router.on_line(1, email, &pool, &mut world).await;
+        router.on_line(1, email.clone(), &pool, &mut world).await;
         drain(&mut rx);
         router.on_line(1, "code".into(), &pool, &mut world).await;
+        // The account lookup runs off the world loop; swallow input until
+        // it resolves (here: no such account).
+        assert!(matches!(
+            router.login.get(&1).unwrap().stage,
+            Stage::Authenticating
+        ));
+        router
+            .on_auth_done(
+                AuthDone {
+                    conn_id: 1,
+                    kind: AuthDoneKind::EmailLookup {
+                        email,
+                        result: Ok(None),
+                    },
+                },
+                &pool,
+                &mut world,
+            )
+            .await;
         let out = drain(&mut rx);
         assert!(out.contains("Your login code is"), "{out}");
         assert!(
@@ -8868,6 +8934,32 @@ mod tests {
             router.login.get(&1).unwrap().stage,
             Stage::AwaitingIdentifier
         ));
+    }
+
+    /// A peer past its login-code quota is refused before any account
+    /// lookup is started.
+    #[tokio::test(flavor = "current_thread")]
+    async fn email_code_over_quota_starts_no_lookup() {
+        let mut world = auth_world(0);
+        let pool = lazy_pool();
+        let mut router = ConnRouter::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        router.on_connect(1, tx, None, &world);
+        drain(&mut rx);
+        let ip = IpAddr::from([0u8, 0, 0, 0]);
+        for _ in 0..CODE_RATE_MAX {
+            assert!(router.code_limiter.try_acquire(ip, Instant::now()));
+        }
+        router
+            .on_line(1, "who@example.invalid".into(), &pool, &mut world)
+            .await;
+        drain(&mut rx);
+        router.on_line(1, "code".into(), &pool, &mut world).await;
+        assert!(drain(&mut rx).contains("Too many login codes requested"));
+        assert!(
+            !matches!(router.login.get(&1).unwrap().stage, Stage::Authenticating),
+            "no lookup may be started"
+        );
     }
 
     fn pending_web(router: &ConnRouter, conn: ConnId) -> (String, String) {
@@ -9397,9 +9489,10 @@ mod tests {
             .id();
         world.entity_mut(sword).insert((
             ItemApplies(vec![("accuracy".into(), 4), ("attack_power".into(), 10)]),
-            mud_world::ObjectFlags(vec![ObjectFlag::Magic]),
             ItemBarredAlignments(vec![Alignment::Evil]),
         ));
+        // Enchant records the flag it adds; only that is persisted.
+        crate::item_alter::add_flag(&mut world, sword, ObjectFlag::Magic);
         crate::item_alter::mark_dirty(&mut world, sword);
         save(&mut world, player, &pool).await;
         let pid = world.get::<mud_world::PersistedItemId>(sword).unwrap().0;

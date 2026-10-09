@@ -15,7 +15,7 @@ use bevy_ecs::prelude::*;
 use mud_db::character_items::{ItemAlter, ItemApply};
 use mud_db::enums::{ObjectFlag, ObjectRestriction};
 use mud_world::components::{
-    ItemAlterDirty, ItemApplies, ItemBarredAlignments, WeaponDiceSizeAdjust,
+    ItemAddedFlags, ItemAlterDirty, ItemApplies, ItemBarredAlignments, WeaponDiceSizeAdjust,
 };
 use mud_world::{ObjectFlags, ObjectPrototypes, ObjectRestrictions, WorldKey};
 
@@ -67,6 +67,29 @@ pub(crate) fn mark_dirty(world: &mut World, item: Entity) {
     }
 }
 
+/// Record that an alteration put `flag` on `item` and set it (a no-op for a
+/// flag the item already has). The record is what `snapshot` persists.
+pub(crate) fn add_flag(world: &mut World, item: Entity, flag: ObjectFlag) {
+    let Ok(mut em) = world.get_entity_mut(item) else {
+        return;
+    };
+    let mut flags = em
+        .get::<ObjectFlags>()
+        .map(|f| f.0.clone())
+        .unwrap_or_default();
+    if flags.contains(&flag) {
+        return;
+    }
+    flags.push(flag);
+    em.insert(ObjectFlags(flags));
+    let mut added = em
+        .get::<ItemAddedFlags>()
+        .map(|a| a.0.clone())
+        .unwrap_or_default();
+    added.push(flag);
+    em.insert(ItemAddedFlags(added));
+}
+
 /// The delta of `item` against its prototype.
 pub(crate) fn snapshot(world: &World, item: Entity) -> ItemAlter {
     let proto = proto_restrictions(world, item);
@@ -88,10 +111,13 @@ pub(crate) fn snapshot(world: &World, item: Entity) -> ItemAlter {
             restrictions_removed.push(name);
         }
     }
+    // Only the flags a deliberate alteration (Enchant Weapon) recorded, never
+    // a diff of the live flags: anything else that sets an object flag at
+    // runtime must not become a permanent part of the saved instance.
     let proto_flags = proto_flags(world, item);
     let mut flags_added: Vec<ObjectFlag> = Vec::new();
     for f in world
-        .get::<ObjectFlags>(item)
+        .get::<ItemAddedFlags>(item)
         .map(|f| f.0.as_slice())
         .unwrap_or_default()
     {
@@ -172,6 +198,7 @@ pub(crate) fn restore(world: &mut World, item: Entity, alter: &ItemAlter, dirty:
             }
         }
         em.insert(ObjectFlags(flags));
+        em.insert(ItemAddedFlags(alter.flags_added.clone()));
     }
     if dirty {
         em.insert(ItemAlterDirty);
@@ -232,6 +259,34 @@ mod tests {
         assert_eq!(r.0, vec![ObjectRestriction::NoDrop]);
         assert_eq!(fresh.get::<WeaponDiceSizeAdjust>(other).unwrap().0, -1);
         assert!(fresh.get::<ItemAlterDirty>(other).is_some());
+        assert_eq!(snapshot(&fresh, other), delta);
+    }
+
+    #[test]
+    fn only_deliberately_added_flags_are_stored() {
+        let (mut world, item) = world_with_proto(Vec::new());
+        // Some other system sets a flag at runtime: not part of the delta.
+        world
+            .entity_mut(item)
+            .insert(ObjectFlags(vec![ObjectFlag::Soulbound]));
+        assert!(snapshot(&world, item).flags_added.is_empty());
+        // Enchant records MAGIC explicitly.
+        add_flag(&mut world, item, ObjectFlag::Magic);
+        add_flag(&mut world, item, ObjectFlag::Magic);
+        let delta = snapshot(&world, item);
+        assert_eq!(delta.flags_added, vec![ObjectFlag::Magic]);
+        let live = world.get::<ObjectFlags>(item).unwrap();
+        assert!(live.has(ObjectFlag::Soulbound) && live.has(ObjectFlag::Magic));
+
+        // Restoring puts MAGIC back and keeps it recorded for the next save.
+        let (mut fresh, other) = world_with_proto(Vec::new());
+        restore(&mut fresh, other, &delta, false);
+        assert!(
+            fresh
+                .get::<ObjectFlags>(other)
+                .unwrap()
+                .has(ObjectFlag::Magic)
+        );
         assert_eq!(snapshot(&fresh, other), delta);
     }
 

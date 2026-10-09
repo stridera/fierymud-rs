@@ -160,7 +160,9 @@ const PRE_LOGIN_FRACTION_DIVISOR: usize = 2;
 const DEFAULT_PRE_LOGIN_LINES_PER_SEC: u32 = 2;
 const DEFAULT_PRE_LOGIN_LINE_BURST: u32 = 10;
 const DEFAULT_LINES_PER_SEC: u32 = 20;
-const DEFAULT_LINE_BURST: u32 = 100;
+/// Large enough for a 130-step speedwalk or a login script pasted in
+/// one write; the sustained rate still bounds a flood.
+const DEFAULT_LINE_BURST: u32 = 300;
 
 impl Limits {
     /// Build limits with the given caps and the default timeouts.
@@ -1139,6 +1141,17 @@ impl LineSplitter {
 /// connection is dropped instead of just having input discarded.
 const MAX_DROPPED_LINE_STREAK: u32 = 1000;
 
+/// A not-yet-logged-in connection is only dropped once it has been
+/// refused this many times the pre-login burst in a row. Short of that
+/// (a Mudlet/TinTin login script, a speedwalk sent the instant the
+/// password is accepted) the excess lines are shed with a notice.
+const PRE_LOGIN_ABUSE_BURST_MULTIPLE: u32 = 3;
+
+/// Consecutive refused lines at which a pre-login connection is dropped.
+fn pre_login_abuse_streak(burst: u32) -> u32 {
+    burst.max(1).saturating_mul(PRE_LOGIN_ABUSE_BURST_MULTIPLE)
+}
+
 /// Token bucket for input lines. `per_sec == 0` disables the limit.
 /// The rate and burst are passed per call so the same bucket follows a
 /// connection from the strict pre-login limits to the relaxed ones once
@@ -1148,6 +1161,9 @@ struct LineBucket {
     last: Instant,
     /// Lines refused since the last accepted one.
     dropped_streak: u32,
+    /// Whether the "input throttled" notice has been sent for the current
+    /// throttling episode (cleared by a read that drops nothing).
+    notified: bool,
 }
 
 impl LineBucket {
@@ -1156,7 +1172,16 @@ impl LineBucket {
             tokens: f64::from(burst),
             last: now,
             dropped_streak: 0,
+            notified: false,
         }
+    }
+
+    /// Top the bucket up to `burst`. Used when a connection finishes
+    /// login: lines it sent during the pre-login window must not eat
+    /// into the in-game allowance.
+    fn refill(&mut self, burst: u32) {
+        self.tokens = f64::from(burst);
+        self.dropped_streak = 0;
     }
 
     /// Spend a token for one line; false when the bucket is empty.
@@ -1300,6 +1325,7 @@ async fn handle_connection<S>(
     let started = Instant::now();
     let mut last_line = started;
     let mut line_bucket = LineBucket::new(started, limits.pre_login_line_burst);
+    let mut was_authed = false;
     // The greeting waits for the client's capabilities, but not forever
     // (raw TCP clients never answer).
     let connect_deadline = started + limits.negotiation_window;
@@ -1390,26 +1416,46 @@ async fn handle_connection<S>(
             }
         }
         let authed = guard.is_authenticated();
+        if authed && !was_authed {
+            // The world marks the connection authenticated synchronously
+            // when the player spawns; start the in-game allowance fresh.
+            was_authed = true;
+            line_bucket.refill(limits.line_burst);
+        }
         let (per_sec, burst) = if authed {
             (limits.lines_per_sec, limits.line_burst)
         } else {
             (limits.pre_login_lines_per_sec, limits.pre_login_line_burst)
         };
+        let mut dropped_now = 0u32;
         for line in lines {
             if !line_bucket.take(Instant::now(), per_sec, burst) {
-                // Pre-login there is no legitimate reason to exceed the
-                // burst, and every line costs the world loop a lookup:
-                // drop the peer. In game, shed the excess and only
-                // disconnect a sustained flood.
-                if !authed || line_bucket.dropped_streak >= MAX_DROPPED_LINE_STREAK {
+                // Shed the excess. Only a sustained flood costs the
+                // connection: far beyond the burst pre-login (every
+                // line costs the world loop a lookup), a long streak
+                // in game.
+                let abusive = if authed {
+                    line_bucket.dropped_streak >= MAX_DROPPED_LINE_STREAK
+                } else {
+                    line_bucket.dropped_streak >= pre_login_abuse_streak(burst)
+                };
+                if abusive {
                     warn!(conn_id, %peer, authed, "input rate limit exceeded; dropping connection");
                     break 'conn;
                 }
+                dropped_now += 1;
                 continue;
             }
             if !sink.send(InboundKind::Line(line)).await {
                 break 'conn;
             }
+        }
+        if dropped_now == 0 {
+            line_bucket.notified = false;
+        } else if !line_bucket.notified {
+            line_bucket.notified = true;
+            let notice = format!("\r\nInput throttled \u{2014} {dropped_now} lines dropped.\r\n");
+            let _ = out_tx.try_send(notice.into_bytes());
         }
         if overflow {
             warn!(
@@ -1865,6 +1911,121 @@ mod limit_tests {
         }
         assert!(disconnected, "flooding peer must be disconnected");
         assert!(lines <= 3, "only the burst gets through, got {lines}");
+    }
+
+    /// Pull every line the server has forwarded until the stream goes
+    /// quiet; stops early on `Disconnected`.
+    async fn drain_lines(rx: &mut InboundRx) -> (usize, bool) {
+        let mut lines = 0usize;
+        while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_millis(400), rx.recv()).await {
+            match ev.kind {
+                InboundKind::Line(_) => lines += 1,
+                InboundKind::Disconnected => return (lines, true),
+                _ => {}
+            }
+        }
+        (lines, false)
+    }
+
+    /// Everything the client has received so far, as lossy text.
+    async fn client_text(c: &mut TcpStream) -> String {
+        let mut got = Vec::new();
+        let mut buf = [0u8; 1024];
+        while let Ok(Ok(n)) =
+            tokio::time::timeout(Duration::from_millis(300), c.read(&mut buf)).await
+        {
+            if n == 0 {
+                break;
+            }
+            got.extend_from_slice(&buf[..n]);
+        }
+        String::from_utf8_lossy(&got).into_owned()
+    }
+
+    async fn connect_and_get_id(addr: SocketAddr, rx: &mut InboundRx) -> (TcpStream, ConnId) {
+        let c = TcpStream::connect(addr).await.unwrap();
+        let conn = match next_event(rx).await {
+            Inbound {
+                conn,
+                kind: InboundKind::Connected { .. },
+            } => conn,
+            other => panic!("unexpected {other:?}"),
+        };
+        (c, conn)
+    }
+
+    #[tokio::test]
+    async fn login_script_right_after_password_stays_connected() {
+        let (addr, gate, mut rx) = start(Limits {
+            pre_login_idle: Duration::from_secs(30),
+            ..fast_limits()
+        })
+        .await;
+        let (mut c, conn) = connect_and_get_id(addr, &mut rx).await;
+        // Name, password and a couple of menu answers use most of the
+        // pre-login burst (10).
+        c.write_all("name\r\npass\r\n1\r\n1\r\n1\r\n1\r\n1\r\n1\r\n".as_bytes())
+            .await
+            .unwrap();
+        assert_eq!(drain_lines(&mut rx).await, (8, false));
+        // The world spawns the player and marks the connection at once;
+        // the script's commands follow immediately.
+        gate.mark_authenticated(conn);
+        c.write_all("look\r\n".repeat(15).as_bytes()).await.unwrap();
+        assert_eq!(
+            drain_lines(&mut rx).await,
+            (15, false),
+            "script lines after auth must all arrive and the peer stay connected"
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_login_excess_is_shed_with_notice_not_disconnect() {
+        let (addr, _gate, mut rx) = start(Limits {
+            pre_login_lines_per_sec: 1,
+            pre_login_line_burst: 5,
+            pre_login_idle: Duration::from_secs(30),
+            ..fast_limits()
+        })
+        .await;
+        let (mut c, _conn) = connect_and_get_id(addr, &mut rx).await;
+        // 12 lines: 5 pass, 7 refused, below the 3x burst (15) abuse mark.
+        c.write_all("look\r\n".repeat(12).as_bytes()).await.unwrap();
+        let (lines, disconnected) = drain_lines(&mut rx).await;
+        assert!(!disconnected, "modest pre-login excess must not disconnect");
+        assert!((5..=6).contains(&lines), "got {lines}");
+        let text = client_text(&mut c).await;
+        assert_eq!(text.matches("Input throttled").count(), 1, "{text:?}");
+    }
+
+    #[tokio::test]
+    async fn speedwalk_of_150_lines_in_one_write_is_fully_accepted() {
+        let (addr, gate, mut rx) = start(fast_limits()).await;
+        let (mut c, conn) = connect_and_get_id(addr, &mut rx).await;
+        gate.mark_authenticated(conn);
+        c.write_all("n\r\n".repeat(150).as_bytes()).await.unwrap();
+        assert_eq!(drain_lines(&mut rx).await, (150, false));
+        assert!(!client_text(&mut c).await.contains("Input throttled"));
+    }
+
+    #[tokio::test]
+    async fn sustained_flood_gets_one_throttle_notice_per_streak() {
+        let (addr, gate, mut rx) = start(Limits {
+            lines_per_sec: 1,
+            line_burst: 5,
+            ..fast_limits()
+        })
+        .await;
+        let (mut c, conn) = connect_and_get_id(addr, &mut rx).await;
+        gate.mark_authenticated(conn);
+        for _ in 0..3 {
+            c.write_all("look\r\n".repeat(20).as_bytes()).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let _ = drain_lines(&mut rx).await;
+        }
+        let text = client_text(&mut c).await;
+        assert_eq!(text.matches("Input throttled").count(), 1, "{text:?}");
+        assert!(text.contains("lines dropped."), "{text:?}");
     }
 
     #[tokio::test]

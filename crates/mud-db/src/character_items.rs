@@ -571,7 +571,7 @@ pub async fn save_inventory_diff(
 /// (only when set), `keywords` (only when overridden) and `curse` (only when
 /// `alter` is non-empty). The UPDATE strips the owned keys from the row and
 /// merges this over the rest.
-fn custom_values_patch(
+pub(crate) fn custom_values_patch(
     lit: bool,
     keywords: Option<&[String]>,
     alter: Option<&ItemAlter>,

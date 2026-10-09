@@ -10,6 +10,10 @@ use super::gmcp_tests::{Fx, player};
 use super::test_support::{Rx, drain};
 
 fn dart_caster(multihit: bool) -> (Fx, Entity, Rx, Entity) {
+    dart_caster_with(multihit, "5")
+}
+
+fn dart_caster_with(multihit: bool, bolt_count: &str) -> (Fx, Entity, Rx, Entity) {
     let (mut fx, p, rx) = caster_with_spells(vec![(
         1,
         "Ice Darts",
@@ -17,7 +21,7 @@ fn dart_caster(multihit: bool) -> (Fx, Entity, Rx, Entity) {
             DAMAGE,
             Some(serde_json::json!({
                 "type": "magic", "amount": "7", "multihit": multihit,
-                "boltCount": "5",
+                "boltCount": bolt_count,
             })),
         )],
     )]);
@@ -95,7 +99,41 @@ fn darts_stop_when_the_victim_dies_and_pelt_the_corpse() {
     cast(&mut fx, p, "cast 'ice darts' rat");
     let out = drain(&mut rx);
     assert_eq!(out.matches("for 7 damage").count(), 2, "{out}");
-    assert!(out.contains("dead already"), "{out}");
+    assert_eq!(out.matches("dead already").count(), 1, "{out}");
+}
+
+#[test]
+fn bolt_count_is_clamped_to_the_cap() {
+    use super::{FormulaCtx, MAX_BOLT_COUNT, resolve_bolt_count};
+    let ctx = FormulaCtx::default();
+    let huge = serde_json::json!({"boltCount": "1000"});
+    assert_eq!(
+        resolve_bolt_count(Some(&huge), None, &ctx, "Test Darts"),
+        MAX_BOLT_COUNT
+    );
+    // A second clamp for the same ability still clamps (the warning is
+    // only logged once, the clamp is not).
+    assert_eq!(
+        resolve_bolt_count(Some(&huge), None, &ctx, "test darts"),
+        MAX_BOLT_COUNT
+    );
+    let at_cap = serde_json::json!({"boltCount": "10"});
+    assert_eq!(resolve_bolt_count(Some(&at_cap), None, &ctx, "x"), 10);
+}
+
+#[test]
+fn an_oversized_bolt_count_fires_at_most_the_cap() {
+    let (mut fx, p, mut rx, rat) = dart_caster_with(true, "1000");
+    {
+        let mut hp = fx.world.get_mut::<Health>(rat).unwrap();
+        hp.hp = 5000;
+        hp.max = 5000;
+    }
+    let _ = drain(&mut rx);
+    cast(&mut fx, p, "cast 'ice darts' rat");
+    let out = drain(&mut rx);
+    assert_eq!(out.matches("for 7 damage").count(), 10, "{out}");
+    assert_eq!(fx.world.get::<Health>(rat).unwrap().hp, 5000 - 10 * 7);
 }
 
 /// The seeded Ice Darts / Magic Missile `boltCount` (legacy `spell_ice_darts`,
@@ -164,11 +202,11 @@ fn bolt_count_comes_from_the_row_and_never_drops_below_one() {
     let ctx = FormulaCtx::default();
     let row = serde_json::json!({"multihit": true, "boltCount": "3"});
     let default = serde_json::json!({"boltCount": "6"});
-    assert_eq!(resolve_bolt_count(Some(&row), Some(&default), &ctx), 3);
-    assert_eq!(resolve_bolt_count(None, Some(&default), &ctx), 6);
-    assert_eq!(resolve_bolt_count(None, None, &ctx), 1);
+    assert_eq!(resolve_bolt_count(Some(&row), Some(&default), &ctx, "t"), 3);
+    assert_eq!(resolve_bolt_count(None, Some(&default), &ctx, "t"), 6);
+    assert_eq!(resolve_bolt_count(None, None, &ctx, "t"), 1);
     let negative = serde_json::json!({"boltCount": "0 - 4"});
-    assert_eq!(resolve_bolt_count(Some(&negative), None, &ctx), 1);
+    assert_eq!(resolve_bolt_count(Some(&negative), None, &ctx, "t"), 1);
     // The seeded formula, live RNG: always within the legacy 1..=7 range.
     let live = serde_json::json!({ "boltCount": LEGACY_BOLTS });
     for _ in 0..200 {
@@ -176,11 +214,11 @@ fn bolt_count_comes_from_the_row_and_never_drops_below_one() {
             skill: 100,
             ..FormulaCtx::default()
         };
-        assert!((1..=7).contains(&resolve_bolt_count(Some(&live), None, &ctx)));
+        assert!((1..=7).contains(&resolve_bolt_count(Some(&live), None, &ctx, "t")));
         let low = FormulaCtx {
             skill: 4,
             ..FormulaCtx::default()
         };
-        assert_eq!(resolve_bolt_count(Some(&live), None, &low), 1);
+        assert_eq!(resolve_bolt_count(Some(&live), None, &low, "t"), 1);
     }
 }

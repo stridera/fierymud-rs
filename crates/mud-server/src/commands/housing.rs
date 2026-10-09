@@ -158,6 +158,7 @@ async fn cmd_visit(world: &mut World, player: Entity, pool: &mud_db::sqlx::PgPoo
                 room_id: i.room_id,
                 object_zone_id: i.object_zone_id,
                 object_id: i.object_id,
+                custom: i.custom(),
             })
             .collect(),
         guests: guests

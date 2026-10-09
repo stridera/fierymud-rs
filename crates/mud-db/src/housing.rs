@@ -13,6 +13,8 @@
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
+use crate::character_items::{ItemAlter, custom_values_patch};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlayerHouseRow {
     pub id: i32,
@@ -53,6 +55,67 @@ pub struct PlayerHouseItemRow {
     pub object_zone_id: i32,
     pub object_id: i32,
     pub condition: i32,
+    /// Player- or staff-given label (`custom_name`).
+    pub custom_name: Option<String>,
+    /// Per-instance examine text (`custom_examine_description`).
+    pub custom_examine_description: Option<String>,
+    /// Same layout as `CharacterItems.custom_values`: the `keywords` override
+    /// and the `curse` key ([`ItemAlter`]).
+    pub custom_values: serde_json::Value,
+}
+
+impl PlayerHouseItemRow {
+    /// The per-instance state stored on this row.
+    #[must_use]
+    pub fn custom(&self) -> HouseItemCustom {
+        HouseItemCustom::from_columns(
+            self.custom_name.clone(),
+            self.custom_examine_description.clone(),
+            &self.custom_values,
+        )
+    }
+}
+
+/// Per-instance item state kept with a placed house item, so what a player
+/// stores is what they get back: label and examine text, keyword override,
+/// and the spell-altered state (a Curse, an Enchant Weapon).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HouseItemCustom {
+    pub name: Option<String>,
+    pub examine: Option<String>,
+    pub keywords: Option<Vec<String>>,
+    pub alter: Option<ItemAlter>,
+}
+
+impl HouseItemCustom {
+    /// Read the stored columns. A malformed `custom_values` reads as none
+    /// rather than failing the house load.
+    #[must_use]
+    pub fn from_columns(
+        name: Option<String>,
+        examine: Option<String>,
+        values: &serde_json::Value,
+    ) -> Self {
+        let keywords = values
+            .get("keywords")
+            .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok());
+        let alter = values
+            .get("curse")
+            .and_then(|v| serde_json::from_value::<ItemAlter>(v.clone()).ok())
+            .filter(|a| !a.is_empty());
+        Self {
+            name,
+            examine,
+            keywords,
+            alter,
+        }
+    }
+
+    /// The `custom_values` JSON for these fields (`{}` when there are none).
+    #[must_use]
+    pub fn values(&self) -> serde_json::Value {
+        custom_values_patch(false, self.keywords.as_deref(), self.alter.as_ref())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,7 +209,8 @@ pub async fn items_for_house(
     sqlx::query_as!(
         PlayerHouseItemRow,
         r#"
-        SELECT i.id, i.room_id, i.object_zone_id, i.object_id, i.condition
+        SELECT i.id, i.room_id, i.object_zone_id, i.object_id, i.condition,
+               i.custom_name, i.custom_examine_description, i.custom_values
         FROM player_house_items i
         JOIN player_house_rooms r ON r.id = i.room_id
         WHERE r.house_id = $1
@@ -175,23 +239,30 @@ pub async fn guests_for_house(
     .await
 }
 
-/// Insert a placed item, returning the new row id so the runtime
-/// can attach it to the spawned ECS entity for later removal.
+/// Insert a placed item with its per-instance state, returning the new row
+/// id so the runtime can attach it to the spawned ECS entity for later
+/// removal.
 pub async fn place_item(
     pool: &PgPool,
     room_id: i32,
     object_zone_id: i32,
     object_id: i32,
+    custom: &HouseItemCustom,
 ) -> sqlx::Result<i32> {
+    let values = custom.values();
     let row = sqlx::query!(
         r#"
-        INSERT INTO player_house_items (room_id, object_zone_id, object_id)
-        VALUES ($1, $2, $3)
+        INSERT INTO player_house_items
+            (room_id, object_zone_id, object_id, custom_name, custom_examine_description, custom_values)
+        VALUES ($1, $2, $3, $4, $5, $6)
         RETURNING id
         "#,
         room_id,
         object_zone_id,
         object_id,
+        custom.name,
+        custom.examine,
+        values,
     )
     .fetch_one(pool)
     .await?;

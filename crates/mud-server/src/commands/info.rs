@@ -14995,6 +14995,9 @@ pub(crate) fn cmd_house_place(
         return;
     };
     let item_name = name_of(world, item);
+    // Captured before the item leaves the player's hands: the label and any
+    // enchantment / curse are stored with the row.
+    let custom = house_item_custom(world, item);
     if world.get::<Located>(item).is_some() {
         world.entity_mut(item).insert(Located(room));
     }
@@ -15008,8 +15011,14 @@ pub(crate) fn cmd_house_place(
     if let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) {
         let outbound_player = player;
         tokio::spawn(async move {
-            match mud_db::housing::place_item(&pool, room_row_id, proto_key.zone, proto_key.id)
-                .await
+            match mud_db::housing::place_item(
+                &pool,
+                room_row_id,
+                proto_key.zone,
+                proto_key.id,
+                &custom,
+            )
+            .await
             {
                 Ok(id) => {
                     tracing::debug!(?outbound_player, item_id = id, "house item placed");

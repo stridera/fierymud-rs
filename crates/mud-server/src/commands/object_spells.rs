@@ -225,15 +225,6 @@ fn apply_enchant(
                 .collect()
         })
         .unwrap_or_default();
-    let mut flags = world
-        .get::<ObjectFlags>(item)
-        .map(|f| f.0.clone())
-        .unwrap_or_default();
-    for f in set_flags {
-        if !flags.contains(&f) {
-            flags.push(f);
-        }
-    }
     let alignment =
         Alignment::from_score(world.get::<CombatStats>(caster).map_or(0, |c| c.alignment));
     let (bars, message) = match alignment {
@@ -241,8 +232,12 @@ fn apply_enchant(
         Alignment::Evil => (param_str(spec, "evilCasterBars"), "messageToCasterEvil"),
         Alignment::Neutral => (None, "messageToCasterNeutral"),
     };
+    // Through `add_flag` so the flags are recorded as this spell's own, the
+    // only ones persisted with the instance.
+    for f in set_flags {
+        crate::item_alter::add_flag(world, item, f);
+    }
     let mut em = world.entity_mut(item);
-    em.insert(ObjectFlags(flags));
     if !applies.is_empty() {
         em.insert(ItemApplies(applies.clone()));
     }

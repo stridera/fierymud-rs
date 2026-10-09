@@ -140,6 +140,9 @@ pub struct HouseItemEntry {
     pub room_id: i32,
     pub object_zone_id: i32,
     pub object_id: i32,
+    /// Label, examine text, keyword override and spell-altered state stored
+    /// with the placed item.
+    pub custom: mud_db::housing::HouseItemCustom,
 }
 
 #[derive(Debug, Clone)]
@@ -374,6 +377,14 @@ pub struct WeaponDiceSizeAdjust(pub i32);
 /// when it comes off. Never part of the saved character stats.
 #[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
 pub struct ItemApplies(pub Vec<(String, i32)>);
+
+/// Object flags a deliberate item alteration put on this one instance
+/// (Enchant Weapon's `MAGIC`), recorded when it is applied. This, not a diff
+/// of the live flags against the prototype, is what gets persisted as
+/// `ItemAlter::flags_added`, so a flag set by anything else at runtime never
+/// becomes permanent by accident.
+#[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
+pub struct ItemAddedFlags(pub Vec<mud_db::enums::ObjectFlag>);
 
 /// Alignments barred from wielding this item by a spell (legacy Enchant
 /// Weapon's `ITEM_ANTI_EVIL` / `ITEM_ANTI_GOOD`), on top of the prototype's

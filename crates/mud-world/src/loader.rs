@@ -9,7 +9,7 @@ use mud_db::{
     objects, races, room_exits, rooms, shops, socials, spell_slots, sqlx::PgPool, system_text,
     triggers, zones,
 };
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::reset_gear::{
     MobGearCatalog, ObjectContentsCatalog, build_content_entries, build_gear_entries,
@@ -63,6 +63,27 @@ pub struct LoadStats {
     /// (builder content not yet imported); the `help` command surfaces
     /// "no help available" rather than crashing.
     pub help_entries_loaded: usize,
+}
+
+/// Postgres `undefined_table` / `undefined_column`: the database schema is
+/// older than this build expects.
+fn is_missing_schema(err: &sqlx::Error) -> bool {
+    err.as_database_error()
+        .and_then(sqlx::error::DatabaseError::code)
+        .is_some_and(|c| c == "42P01" || c == "42703")
+}
+
+/// When `err` is a missing table / column, replace it with one that names
+/// what is missing and how to fix it (the deploy order creates these
+/// objects, so hitting this means the schema step was skipped). Any other
+/// error passes through untouched.
+fn schema_gap(err: sqlx::Error, missing: &str, fix: &str) -> sqlx::Error {
+    if !is_missing_schema(&err) {
+        return err;
+    }
+    sqlx::Error::Configuration(
+        format!("database schema is behind this build: missing {missing} ({err}); {fix}").into(),
+    )
 }
 
 /// Load the persistent world from the database into the ECS World:
@@ -251,7 +272,13 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     // Resistance JSON is distilled into a typed `ElementType` map
     // via the shared `parse_resistance_json` helper so unknown
     // schema labels are dropped consistently with the race catalog.
-    let class_rows = classes::list_all(pool).await?;
+    let class_rows = classes::list_all(pool).await.map_err(|e| {
+        schema_gap(
+            e,
+            "column \"Class\".\"campcraft_bonus\" (read by the class catalog)",
+            "apply fierylib/data/sql/2026-10-09-campcraft.sql (and deploy the muditor schema)",
+        )
+    })?;
     let mut class_catalog = ClassCatalog::default();
     for row in class_rows {
         let resistances = crate::resources::parse_resistance_json(&row.resistances);
@@ -385,8 +412,26 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     world.insert_resource(effect_auras);
 
     // CreationRecipe: what Minor Creation / Create Food conjure.
+    // A database that predates the table boots with no recipes (the
+    // creation spells then conjure nothing) rather than refusing to
+    // start; any other failure is still fatal.
     let mut creation_recipes = crate::resources::CreationRecipes::default();
-    for r in mud_db::creation_recipes::list_all(pool).await? {
+    let recipe_rows = match mud_db::creation_recipes::list_all(pool).await {
+        Ok(rows) => rows,
+        Err(e) if is_missing_schema(&e) => {
+            let e = schema_gap(
+                e,
+                "table \"CreationRecipe\"",
+                "apply fierylib/data/sql/2026-10-09-creation-recipes.sql (and deploy the muditor schema)",
+            );
+            error!(
+                "{e}; booting with NO creation recipes (Minor Creation / Create Food will conjure nothing)"
+            );
+            Vec::new()
+        }
+        Err(e) => return Err(e),
+    };
+    for r in recipe_rows {
         creation_recipes.insert(
             &r.ability,
             crate::resources::CreationRecipe {
@@ -2812,6 +2857,21 @@ mod light_fuel_tests {
         assert_eq!(g.remaining, 0);
         let c = parse_light_fuel(&json!({"Remaining": 30}));
         assert_eq!((c.capacity, c.remaining), (30, 30));
+    }
+}
+
+#[cfg(test)]
+mod schema_gap_tests {
+    use super::{is_missing_schema, schema_gap};
+
+    #[test]
+    fn non_schema_errors_pass_through_untouched() {
+        let e = sqlx::Error::PoolTimedOut;
+        assert!(!is_missing_schema(&e));
+        assert!(matches!(
+            schema_gap(e, "table \"X\"", "fix it"),
+            sqlx::Error::PoolTimedOut
+        ));
     }
 }
 

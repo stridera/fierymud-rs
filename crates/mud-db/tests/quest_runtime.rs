@@ -647,5 +647,36 @@ async fn housing_reward_is_granted_once() {
             .await
             .unwrap();
     assert_eq!(count, 1);
+
+    // A placed item keeps its label and enchantment through the row.
+    let (oz, oid): (i32, i32) =
+        sqlx::query_as("SELECT zone_id, id FROM \"Objects\" ORDER BY zone_id, id LIMIT 1")
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap();
+    let custom = mud_db::housing::HouseItemCustom {
+        name: Some("a sword (Grim)".into()),
+        examine: Some("It hums.".into()),
+        keywords: Some(vec!["sword".into(), "grim".into()]),
+        alter: Some(mud_db::character_items::ItemAlter {
+            applies: vec![mud_db::character_items::ItemApply {
+                target: "accuracy".into(),
+                amount: 2,
+            }],
+            flags_added: vec![mud_db::enums::ObjectFlag::Magic],
+            ..Default::default()
+        }),
+    };
+    let placed = mud_db::housing::place_item(&fx.pool, rooms[0].id, oz, oid, &custom)
+        .await
+        .unwrap();
+    let items = mud_db::housing::items_for_house(&fx.pool, house.id)
+        .await
+        .unwrap();
+    let row = items.iter().find(|i| i.id == placed).expect("placed row");
+    assert_eq!(row.custom(), custom);
+    mud_db::housing::remove_item(&fx.pool, placed)
+        .await
+        .unwrap();
     fx.end().await;
 }
