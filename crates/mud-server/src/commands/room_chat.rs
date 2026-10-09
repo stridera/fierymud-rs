@@ -49,6 +49,23 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
+        names: &["emote's"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Communication,
+        help: Help {
+            usage: "emote's <action>",
+            summary: "Perform a possessive third-person action visible to the room.",
+            long: "Your name plus 's is prepended. 'emote's eyes widen.' \
+                   shows everyone (including you): \
+                   'Strider's eyes widen.'",
+        },
+        run: cmd_emotes,
+    }
+}
+
+inventory::submit! {
+    Command {
         names: &["ask"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -179,6 +196,17 @@ fn cmd_say(world: &mut World, player: Entity, message: &str) {
 }
 
 fn cmd_emote(world: &mut World, player: Entity, args: &str) {
+    emote_as(world, player, args, "");
+}
+
+/// `emote's <action>`: the possessive form, "Strider's eyes widen."
+fn cmd_emotes(world: &mut World, player: Entity, args: &str) {
+    emote_as(world, player, args, "'s");
+}
+
+/// Shared body of `emote` and `emote's` (legacy `do_echo`): the speaker's
+/// name, `suffix` (`'s` for the possessive), a space, then the action.
+fn emote_as(world: &mut World, player: Entity, args: &str, suffix: &str) {
     let action = args.trim();
     if action.is_empty() {
         send_to(world, player, "Emote what?\r\n");
@@ -188,12 +216,13 @@ fn cmd_emote(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let player_name = name_of(world, player);
-    let line = format!("{player_name} {action}\r\n");
+    let shown = format!("{player_name}{suffix}");
+    let line = format!("{shown} {action}\r\n");
     // Emote body is already third-person ("Strider smiles."),
     // so the GMCP frame is just the line minus its trailing
     // CRLF — every recipient sees the same thing in the chat
     // tab regardless of whether they're the speaker.
-    let gmcp_text = format!("{player_name} {action}");
+    let gmcp_text = format!("{shown} {action}");
     let targets: Vec<Entity> = {
         let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
         q.iter(world)

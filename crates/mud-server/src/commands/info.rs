@@ -923,6 +923,40 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
+        names: &["use"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Magic,
+        help: Help {
+            usage: "use <wand|staff> [<target>]",
+            summary: "Use a wand or staff you are holding.",
+            long: "Wands are pointed at a target (or waved when the spell \
+                   needs none); staves are tapped on the ground. Each use \
+                   spends a charge only when the magic lands. The item \
+                   must be held, and not too powerful for you.",
+        },
+        run: cmd_use,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["play"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Magic,
+        help: Help {
+            usage: "play <instrument>",
+            summary: "Play an instrument you are holding.",
+            long: "Plays a held instrument; magical instruments invoke \
+                   their bound abilities and spend a charge when they land.",
+        },
+        run: cmd_play,
+    }
+}
+
+inventory::submit! {
+    Command {
         names: &["tap"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -2196,6 +2230,23 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
+        names: &["alert"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Settings,
+        help: Help {
+            usage: "alert",
+            summary: "Stop resting and pay attention, without standing up.",
+            long: "The opposite of 'rest': you drop the resting stance \
+                   and sit at attention. Does nothing if you are already \
+                   alert.",
+        },
+        run: cmd_alert,
+    }
+}
+
+inventory::submit! {
+    Command {
         names: &["sit"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -2331,7 +2382,7 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
-        names: &["group", "gr"],
+        names: &["group"],
         min_role: UserRole::Player,
         required_perm: None,
         category: Category::Group,
@@ -7828,6 +7879,76 @@ pub(crate) fn cmd_rest(world: &mut World, player: Entity, _args: &str) {
     set_posture(world, player, PostureKind::Resting);
 }
 
+/// Legacy `do_alert`, the opposite of `rest`: drop the resting stance
+/// without getting up. Rust folds legacy position and stance into one
+/// [`PostureKind`], so a resting character ends up sitting at attention
+/// (legacy `POS_SITTING` + `STANCE_ALERT`); every other awake posture is
+/// already alert.
+pub(crate) fn cmd_alert(world: &mut World, player: Entity, _args: &str) {
+    if world.get::<mud_world::Ghost>(player).is_some() {
+        send_to(world, player, "Totally impossible.\r\n");
+        return;
+    }
+    if world.get::<Stunned>(player).is_some() {
+        send_to(
+            world,
+            player,
+            "That is utterly beyond your current abilities.\r\n",
+        );
+        return;
+    }
+    let posture = world
+        .get::<Posture>(player)
+        .map_or(PostureKind::Standing, |p| p.0);
+    if posture == PostureKind::Sleeping {
+        send_to(
+            world,
+            player,
+            "Let's try this in stages.  How about waking up first?\r\n",
+        );
+        return;
+    }
+    if world.get::<Fighting>(player).is_some() {
+        send_to(
+            world,
+            player,
+            "Being as you're in a battle and all, you're pretty alert already!\r\n",
+        );
+        return;
+    }
+    if posture != PostureKind::Resting {
+        send_to(
+            world,
+            player,
+            "You are already about as tense as you can get.\r\n",
+        );
+        return;
+    }
+    if has_effect_named(world, player, "paralyzed") {
+        send_to(
+            world,
+            player,
+            "In your paralyzed state, you find this impossible.\r\n",
+        );
+        return;
+    }
+    try_insert(world, player, Posture(PostureKind::Sitting));
+    send_to(
+        world,
+        player,
+        "You sit up straight and start to pay attention.\r\n",
+    );
+    if let Some(located) = world.get::<Located>(player).copied() {
+        let name = name_of(world, player);
+        broadcast_room_except_players_rendered(
+            world,
+            located.0,
+            &[player],
+            &format!("{name} sits at attention.\r\n"),
+        );
+    }
+}
+
 pub(crate) fn cmd_sleep(world: &mut World, player: Entity, _args: &str) {
     set_posture(world, player, PostureKind::Sleeping);
 }
@@ -12541,6 +12662,171 @@ pub(crate) fn cmd_tap(world: &mut World, player: Entity, args: &str) {
         "You tap",
         false,
     );
+}
+
+/// Legacy `do_use` (`use` and `play`): the first word names an item
+/// being held, the rest is the target handed to the item's magic. Legacy
+/// also took a second hand (`WEAR_HOLD2`); Rust has the one `Hold` slot.
+fn use_held_item(world: &mut World, player: Entity, args: &str, verb: &str) {
+    use mud_db::enums::ObjectType;
+    let args = args.trim();
+    let (item_word, target) = match args.split_once(char::is_whitespace) {
+        Some((w, rest)) => (w, Some(rest.trim()).filter(|t| !t.is_empty())),
+        None => (args, None),
+    };
+    if item_word.is_empty() {
+        send_to(world, player, format!("What do you want to {verb}?\r\n"));
+        return;
+    }
+    let needle = item_word.to_ascii_lowercase();
+    let held = {
+        let mut q = world.query_filtered::<(
+            Entity,
+            &Located,
+            &Named,
+            Option<&Keywords>,
+            &EquippedSlot,
+        ), With<Item>>();
+        q.iter(world)
+            .find(|(_, l, n, kw, slot)| {
+                l.0 == player && slot.0 == Slot::Hold && matches(&needle, n, *kw)
+            })
+            .map(|(e, ..)| e)
+    };
+    let Some(item) = held else {
+        let article = if "aeiou".contains(needle.chars().next().unwrap_or('x')) {
+            "an"
+        } else {
+            "a"
+        };
+        send_to(
+            world,
+            player,
+            format!("You don't seem to be holding {article} {item_word}.\r\n"),
+        );
+        return;
+    };
+    let proto = world.get::<WorldKey>(item).and_then(|k| {
+        world
+            .resource::<ObjectPrototypes>()
+            .by_key
+            .get(&(k.zone, k.id))
+            .map(|p| (p.r#type, p.level))
+    });
+    let (kind, item_level) = proto.unzip();
+    if let (Some(lvl), Some(prof)) = (item_level, world.get::<Profile>(player))
+        && lvl > prof.level
+    {
+        send_to(
+            world,
+            player,
+            "That item is too powerful for you to use.\r\n",
+        );
+        return;
+    }
+    let wanted = if verb == "play" {
+        ObjectType::Instrument
+    } else {
+        // Wand or staff; anything else is refused below.
+        match kind {
+            Some(ObjectType::Staff) => ObjectType::Staff,
+            _ => ObjectType::Wand,
+        }
+    };
+    if kind != Some(wanted) {
+        let msg = if verb == "play" {
+            "You can't seem to figure out how to make sound with it.\r\n"
+        } else {
+            "You can't seem to figure out how to use it.\r\n"
+        };
+        send_to(world, player, msg);
+        return;
+    }
+    let item_name = name_of(world, item);
+    let actor = name_of(world, player);
+    let flavor = match wanted {
+        ObjectType::Staff => UseFlavor {
+            you: format!("You tap {item_name} three times on the ground."),
+            room: format!("{actor} taps {item_name} three times on the ground."),
+            victim: None,
+        },
+        ObjectType::Instrument => UseFlavor {
+            you: format!("You play {item_name}."),
+            room: format!("{actor} plays {item_name}."),
+            victim: None,
+        },
+        _ => wand_flavor(world, player, &item_name, &actor, target),
+    };
+    // The legacy target check and charge rules are the wave / tap ones;
+    // instruments behave like staves (no target).
+    let (cast_verb, intro) = match wanted {
+        ObjectType::Staff => ("tap", "You tap"),
+        ObjectType::Instrument => ("play", "You play"),
+        _ => ("wave", "You wave"),
+    };
+    invoke_item_abilities(
+        world,
+        player,
+        item,
+        target,
+        wanted,
+        cast_verb,
+        intro,
+        false,
+        Some(flavor),
+    );
+}
+
+/// Legacy `mag_objectmagic` wand wording: point at a creature or thing,
+/// at yourself, or wave it in the air when the spell needs no target.
+fn wand_flavor(
+    world: &mut World,
+    player: Entity,
+    item_name: &str,
+    actor: &str,
+    target: Option<&str>,
+) -> UseFlavor {
+    let Some(at) = target else {
+        return UseFlavor {
+            you: format!("You wave {item_name} in the air."),
+            room: format!("{actor} waves {item_name} in the air."),
+            victim: None,
+        };
+    };
+    if matches_self(actor, at) {
+        return UseFlavor {
+            you: format!("You point {item_name} at yourself."),
+            room: format!("{actor} points {item_name} at themself."),
+            victim: None,
+        };
+    }
+    let room = world.get::<Located>(player).map(|l| l.0);
+    if let Some(room) = room
+        && let Some(victim) = find_actor_in_room(world, at, room, player)
+    {
+        let vname = name_of(world, victim);
+        return UseFlavor {
+            you: format!("You point {item_name} at {vname}."),
+            room: format!("{actor} points {item_name} at {vname}."),
+            victim: Some((victim, format!("{actor} points {item_name} at you."))),
+        };
+    }
+    let thing = room
+        .and_then(|r| find_in_room(world, at, r))
+        .map_or_else(|| at.to_string(), |e| name_of(world, e));
+    UseFlavor {
+        you: format!("You point {item_name} at {thing}."),
+        room: format!("{actor} points {item_name} at {thing}."),
+        victim: None,
+    }
+}
+
+pub(crate) fn cmd_use(world: &mut World, player: Entity, args: &str) {
+    use_held_item(world, player, args, "use");
+}
+
+pub(crate) fn cmd_play(world: &mut World, player: Entity, args: &str) {
+    use_held_item(world, player, args, "play");
 }
 
 pub(crate) fn cmd_remove(world: &mut World, player: Entity, args: &str) {

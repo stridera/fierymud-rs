@@ -576,6 +576,10 @@ mod norepeat_tests;
 #[cfg(test)]
 #[path = "commands/identify_actor_tests.rs"]
 mod identify_actor_tests;
+
+#[cfg(test)]
+#[path = "commands/cmd_parity_tests.rs"]
+mod cmd_parity_tests;
 #[cfg(test)]
 #[path = "commands/order_tests.rs"]
 mod order_tests;
@@ -858,10 +862,12 @@ pub async fn try_dispatch_async(
             || (UserRole::Player, Vec::new()),
             |a| (a.role, a.perms.clone()),
         );
-        if let Some(cmd) = resolve_by_prefix(&head, role, &perms)
-            && abbrev_allowed(cmd)
-        {
-            head = cmd.names[0].to_string();
+        match resolve_abbrev(&head, role, &perms, world.get_resource::<SocialRegistry>()) {
+            Some(Abbrev::Command(cmd)) if abbrev_allowed(cmd) => {
+                head = cmd.names[0].to_string();
+            }
+            Some(Abbrev::Social(name)) => head = name.to_string(),
+            _ => {}
         }
     }
 
@@ -1238,19 +1244,25 @@ fn dispatch_line(world: &mut World, player: Entity, line: &str, run: &mut AliasR
     // Exact name first (longest multi-word name wins), then an exact social,
     // then an abbreviation resolved by legacy priority order
     // ([`resolve_by_prefix`]).
+    // An abbreviation can also resolve to a social (`gig` is giggle); the
+    // social path below then runs under the full name.
+    let mut social_word = tokens[0].to_string();
     let cmd_n_consumed = longest_prefix_match(&tokens).or_else(|| {
-        if world
-            .get_resource::<SocialRegistry>()
-            .is_some_and(|r| r.get(tokens[0]).is_some())
-        {
+        let registry = world.get_resource::<SocialRegistry>();
+        if registry.is_some_and(|r| r.get(&social_word).is_some()) {
             return None;
         }
         let (role, perms) = world.get::<Account>(player).map_or_else(
             || (UserRole::Player, Vec::new()),
             |a| (a.role, a.perms.clone()),
         );
-        let winner = resolve_by_prefix(tokens[0], role, &perms)?;
-        Some((winner, usize::from(abbrev_allowed(winner))))
+        match resolve_abbrev(tokens[0], role, &perms, registry)? {
+            Abbrev::Command(winner) => Some((winner, usize::from(abbrev_allowed(winner)))),
+            Abbrev::Social(name) => {
+                social_word = name.to_string();
+                None
+            }
+        }
     });
     // Destructive commands never fire from an abbreviation. `q`/`qu`/`qui`
     // get the legacy safety reply instead of "unknown command".
@@ -1273,21 +1285,24 @@ fn dispatch_line(world: &mut World, player: Entity, line: &str, run: &mut AliasR
     let Some((cmd, n_consumed)) = cmd_n_consumed else {
         // Fall through to socials before declaring unknown.
         if world.get::<mud_world::Casting>(player).is_some()
-            && world.resource::<SocialRegistry>().get(tokens[0]).is_some()
+            && world
+                .resource::<SocialRegistry>()
+                .get(&social_word)
+                .is_some()
         {
             send_to(world, player, CASTING_BUSY_MSG);
             return;
         }
         // A social gives a hiding character away, bar the two legacy
         // hide-safe ones.
-        if crate::hiding::social_reveals(tokens[0])
+        if crate::hiding::social_reveals(&social_word)
             && world
                 .get_resource::<SocialRegistry>()
-                .is_some_and(|r| r.get(tokens[0]).is_some())
+                .is_some_and(|r| r.get(&social_word).is_some())
         {
             crate::hiding::reveal(world, player);
         }
-        if try_dispatch_social(world, player, tokens[0], skip_n_tokens(trimmed, 1)) {
+        if try_dispatch_social(world, player, &social_word, skip_n_tokens(trimmed, 1)) {
             return;
         }
         send_to(
@@ -1696,7 +1711,6 @@ const ABBREV_DENYLIST: &[&str] = &[
     "purge",
     "ban",
     "unban",
-    "kick",
     "freeze",
     "force",
     "transfer",
@@ -1749,17 +1763,33 @@ pub(crate) fn abbrev_blocked(canonical: &str) -> bool {
     ABBREV_DENYLIST.contains(&canonical)
 }
 
+/// Sort key of an abbreviation candidate; lower wins.
+type PrefixKey<'a> = (usize, usize, &'a str, bool);
+
 /// Priority key for a candidate name: its legacy table position. Names
 /// the legacy table never had (Rust-only commands and extra aliases like
 /// `trash`) rank after every legacy name, by length then alphabetically so
 /// the pick never depends on link order. A new alias therefore can't steal
-/// an abbreviation (`tra`) from the legacy command that owned it.
-fn prefix_rank(name: &'static str) -> (usize, usize, &'static str) {
+/// an abbreviation (`tra`) from the legacy command that owned it. The last
+/// field makes a command beat a social of the same name.
+fn prefix_rank(name: &str, is_social: bool) -> PrefixKey<'_> {
     (
         priority::legacy_rank(name).unwrap_or(usize::MAX),
         name.len(),
         name,
+        is_social,
     )
+}
+
+/// Socials only a staff account may reach by abbreviation (legacy gave the
+/// `do_action` row a staff level). Typed in full they behave as before.
+const STAFF_ONLY_SOCIALS: &[&str] = &["snowball"];
+
+/// What a typed abbreviation resolved to.
+pub(crate) enum Abbrev<'a> {
+    Command(&'static Command),
+    /// Full name of a DB social.
+    Social(&'a str),
 }
 
 /// Resolve a typed verb as an abbreviation among the commands the player
@@ -1769,16 +1799,33 @@ fn prefix_rank(name: &'static str) -> (usize, usize, &'static str) {
 /// `None` when nothing matches. The winner may be on the destructive
 /// [`ABBREV_DENYLIST`]; callers check [`abbrev_allowed`] and refuse
 /// instead of running it. Callers try an exact name match first.
+#[cfg(test)]
 pub(crate) fn resolve_by_prefix(
     typed: &str,
     role: UserRole,
     perms: &[Permission],
 ) -> Option<&'static Command> {
+    match resolve_abbrev(typed, role, perms, None) {
+        Some(Abbrev::Command(c)) => Some(c),
+        _ => None,
+    }
+}
+
+/// [`resolve_by_prefix`] with the DB socials taking part: legacy kept
+/// socials in `cmd_info[]`, so `gig` is giggle and `ha` is halo. Socials
+/// share the one ranking with commands ([`priority`]); a social the
+/// legacy table never had ranks after every legacy name.
+pub(crate) fn resolve_abbrev<'a>(
+    typed: &str,
+    role: UserRole,
+    perms: &[Permission],
+    socials: Option<&'a SocialRegistry>,
+) -> Option<Abbrev<'a>> {
     if typed.is_empty() {
         return None;
     }
     let needle = typed; // already lowercased at call site
-    let mut best: Option<((usize, usize, &'static str), &'static Command)> = None;
+    let mut best: Option<(PrefixKey<'_>, Abbrev<'a>)> = None;
     for cmd in all_commands() {
         if !visible(cmd, role, perms) {
             continue;
@@ -1792,13 +1839,26 @@ pub(crate) fn resolve_by_prefix(
             {
                 continue;
             }
-            let key = prefix_rank(name);
-            if best.is_none_or(|(b, _)| key < b) {
-                best = Some((key, cmd));
+            let key = prefix_rank(name, false);
+            if best.as_ref().is_none_or(|(b, _)| key < *b) {
+                best = Some((key, Abbrev::Command(cmd)));
             }
         }
     }
-    best.map(|(_, cmd)| cmd)
+    if let Some(reg) = socials {
+        for name in reg.by_name.keys() {
+            if !name.starts_with(needle)
+                || (role == UserRole::Player && STAFF_ONLY_SOCIALS.contains(&name.as_str()))
+            {
+                continue;
+            }
+            let key = prefix_rank(name, true);
+            if best.as_ref().is_none_or(|(b, _)| key < *b) {
+                best = Some((key, Abbrev::Social(name)));
+            }
+        }
+    }
+    best.map(|(_, a)| a)
 }
 
 pub(crate) fn skip_n_tokens(s: &str, n: usize) -> &str {
@@ -12665,12 +12725,21 @@ pub(crate) fn drink_amount(world: &mut World, player: Entity, args: &str, units:
     }
 }
 
+/// Custom flavor lines for [`invoke_item_abilities`], replacing the generic
+/// "You wave X." / "N waves X." pair (`use` and `play` word the gesture
+/// per item type the way legacy `mag_objectmagic` did).
+pub(crate) struct UseFlavor {
+    pub(crate) you: String,
+    pub(crate) room: String,
+    /// A target who sees their own line instead of `room`.
+    pub(crate) victim: Option<(Entity, String)>,
+}
+
 /// Shared body for `recite` / `wave` / `tap`: look up the held
 /// item's `ObjectAbilities` bindings, dispatch each through the
 /// cast pipeline, then either despawn (`single_use=true`, scrolls)
 /// or decrement `Charges` (`single_use=false`, wands/staves —
 /// despawn at 0).
-#[allow(clippy::too_many_lines)]
 pub(crate) fn invoke_object_abilities(
     world: &mut World,
     player: Entity,
@@ -12696,6 +12765,33 @@ pub(crate) fn invoke_object_abilities(
         );
         return;
     };
+    invoke_item_abilities(
+        world,
+        player,
+        item,
+        target_word,
+        expected_type,
+        verb,
+        intro_phrase,
+        single_use,
+        None,
+    );
+}
+
+/// The part of [`invoke_object_abilities`] that follows finding the item:
+/// `use` and `play` find a held item themselves and enter here.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+pub(crate) fn invoke_item_abilities(
+    world: &mut World,
+    player: Entity,
+    item: Entity,
+    target_word: Option<&str>,
+    expected_type: mud_db::enums::ObjectType,
+    verb: &str,
+    intro_phrase: &str,
+    single_use: bool,
+    flavor: Option<UseFlavor>,
+) {
     let item_name = name_of(world, item);
     let key = world.get::<WorldKey>(item).copied();
     let Some(key) = key else {
@@ -12775,30 +12871,48 @@ pub(crate) fn invoke_object_abilities(
     } else {
         bindings
     };
-    send_rendered(world, player, &format!("{intro_phrase} {item_name}.\r\n"));
-    // Room broadcast — bystanders should see the gesture
-    // (waving a wand, tapping a staff, reciting from a scroll)
-    // even before the spell effects fire. Spell-specific
-    // `success_to_room` lines will follow but they describe the
-    // spell, not the source action. `verb` is the present-tense
-    // gerund stem ("wave"/"tap"/"recite"/"quaff") — add an `s`
-    // for the third-person form, matching the eat/quaff pattern.
-    if let Some(located) = world.get::<Located>(player).copied() {
-        let actor_name = name_of(world, player);
-        let third_verb = match verb {
-            "recite" => "recites from".to_string(),
-            "wave" => "waves".to_string(),
-            "tap" => "taps".to_string(),
-            "quaff" => "quaffs".to_string(),
-            other => format!("{other}s"),
-        };
-        broadcast_room_visual(
-            world,
-            located.0,
-            player,
-            &[player],
-            &cap_sentence_start(&format!("{actor_name} {third_verb} {item_name}.\r\n")),
-        );
+    if let Some(f) = flavor {
+        send_rendered(world, player, &format!("{}\r\n", f.you));
+        if let Some(located) = world.get::<Located>(player).copied() {
+            let mut except = vec![player];
+            if let Some((victim, line)) = f.victim {
+                send_rendered(world, victim, &format!("{line}\r\n"));
+                except.push(victim);
+            }
+            broadcast_room_visual(
+                world,
+                located.0,
+                player,
+                &except,
+                &cap_sentence_start(&format!("{}\r\n", f.room)),
+            );
+        }
+    } else {
+        send_rendered(world, player, &format!("{intro_phrase} {item_name}.\r\n"));
+        // Room broadcast — bystanders should see the gesture
+        // (waving a wand, tapping a staff, reciting from a scroll)
+        // even before the spell effects fire. Spell-specific
+        // `success_to_room` lines will follow but they describe the
+        // spell, not the source action. `verb` is the present-tense
+        // gerund stem ("wave"/"tap"/"recite"/"quaff") — add an `s`
+        // for the third-person form, matching the eat/quaff pattern.
+        if let Some(located) = world.get::<Located>(player).copied() {
+            let actor_name = name_of(world, player);
+            let third_verb = match verb {
+                "recite" => "recites from".to_string(),
+                "wave" => "waves".to_string(),
+                "tap" => "taps".to_string(),
+                "quaff" => "quaffs".to_string(),
+                other => format!("{other}s"),
+            };
+            broadcast_room_visual(
+                world,
+                located.0,
+                player,
+                &[player],
+                &cap_sentence_start(&format!("{actor_name} {third_verb} {item_name}.\r\n")),
+            );
+        }
     }
     // Fire USE on the item before spell dispatch — bodies may
     // gate (return false) or emit additional flavor.

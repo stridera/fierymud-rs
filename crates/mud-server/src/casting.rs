@@ -79,6 +79,7 @@ const KNOW_SPELL_KEY: &str = "know_spell";
 /// Staff commands are always allowed (legacy `CMD_ANY`).
 const CASTING_ALLOWED: &[&str] = &[
     "abort",
+    "alert",
     "cls",
     "world",
     "quest",

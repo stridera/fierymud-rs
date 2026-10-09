@@ -19,7 +19,6 @@ mod tests {
         ("val", "value"),
         ("ass", "assist"),
         ("fol", "follow"),
-        ("gr", "group"),
         ("sk", "skills"),
         ("sh", "shout"),
         ("h", "help"),
