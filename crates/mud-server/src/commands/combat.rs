@@ -330,10 +330,11 @@ inventory::submit! {
     help: Help {
         usage: "gouge [<target>]",
         summary: "Eye gouge — damage plus a temporary blind effect.",
-        long: "Costs 7 stamina, deals weapon damage, applies a \
-               'blind' EffectInstance for 30s. Default target is \
-               your current Fighting target. Refused if the target \
-               is already blinded.",
+        long: "Costs 7 stamina, deals damage scaled by your skill \
+               and blinds the target for one tick (one MUD hour, \
+               about 75 seconds), cutting their accuracy. Default \
+               target is your current Fighting target. Cure Blind \
+               or Heal restores their sight.",
     },
     run: cmd_gouge,
     }

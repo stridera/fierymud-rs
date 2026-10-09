@@ -15099,6 +15099,7 @@ pub(crate) fn invoke_ability_with(
     }
     let halve_duration = matches!(save_action, SaveOutcome::HalfDuration);
     let halve_damage = matches!(save_action, SaveOutcome::HalfDamage);
+    let negate_status = matches!(save_action, SaveOutcome::NegateStatus);
     // Set by the banish arm, which writes all of its own caster / victim /
     // room messages (the generic cast header and success templates would
     // double them).
@@ -15197,6 +15198,31 @@ pub(crate) fn invoke_ability_with(
     } else {
         Some(render_header())
     };
+    if negate_status
+        && effect_specs
+            .iter()
+            .any(|s| is_status_debuff_effect(&s.effect_type))
+    {
+        send_to(
+            world,
+            player,
+            format!(
+                "{} resists the lingering effect of your {}.\r\n",
+                cap_sentence_start(&target_name_pre),
+                def.name,
+            ),
+        );
+        if target_entity != player {
+            send_rendered(
+                world,
+                target_entity,
+                &format!(
+                    "You resist the lingering effect of {}'s {}.\r\n",
+                    actor_name_pre, def.name,
+                ),
+            );
+        }
+    }
     // Legacy `MOB_NOBLIND` refuses the whole blinding cast (magic.cpp
     // SPELL_BLINDNESS / SUNRAY), so the accuracy / evasion penalties that ride
     // with the blind status never land on an immune mob either.
@@ -15219,6 +15245,10 @@ pub(crate) fn invoke_ability_with(
         // "detect_magic"). Matching/dispel paths still want the raw
         // spec.name so they can compare on the underscored token.
         let pretty = pretty_effect_label(&spec.name);
+        if negate_status && is_status_debuff_effect(&spec.effect_type) {
+            applied_msgs.push(format!("{pretty} (resisted)"));
+            continue;
+        }
         match spec.effect_type.as_str() {
             "damage" => {
                 // J1 spell-circle absorb. If the target carries
@@ -18385,6 +18415,16 @@ pub(crate) enum SaveOutcome {
     /// Mirrors legacy `magic.cpp`'s `dam >>= 1` after the saving
     /// throw.
     HalfDamage,
+    /// Target made the save and the action is `NEGATE_STATUS` — the
+    /// debuff effects (`status`, `modify`, `stun`) are skipped while
+    /// damage and everything else lands. Legacy Sunray: the damage is
+    /// never saved against, only the blinding is (`magic.cpp` `mag_affect`).
+    NegateStatus,
+}
+
+/// Effect kinds a `NEGATE_STATUS` save turns away.
+fn is_status_debuff_effect(effect_type: &str) -> bool {
+    matches!(effect_type, "status" | "modify" | "stun")
 }
 
 /// Roll a saving throw against an ability's `AbilitySavingThrow`
@@ -18426,6 +18466,7 @@ pub(crate) fn save_action_for(
         "NEGATE" => SaveOutcome::Negated,
         "HALF_DURATION" => SaveOutcome::HalfDuration,
         "HALF_DAMAGE" => SaveOutcome::HalfDamage,
+        "NEGATE_STATUS" => SaveOutcome::NegateStatus,
         // Unknown / unsupported action: effects apply at full
         // strength as if the save failed. The runtime grows
         // interpretation incrementally.

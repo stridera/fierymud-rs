@@ -404,6 +404,7 @@ fn caster_with_blind_spells() -> (Fx, Entity, Rx) {
 const STATUS: i32 = 10;
 const CLEANSE: i32 = 11;
 const MODIFY: i32 = 12;
+const DAMAGE: i32 = 13;
 
 /// `(effect id, override params)` rows of one ability.
 type EffectRows = Vec<(i32, Option<serde_json::Value>)>;
@@ -441,6 +442,7 @@ fn caster_with_spells(spells: Vec<(i32, &str, EffectRows)>) -> (Fx, Entity, Rx) 
     effects.by_id.insert(STATUS, def(STATUS, "status"));
     effects.by_id.insert(CLEANSE, def(CLEANSE, "cleanse"));
     effects.by_id.insert(MODIFY, def(MODIFY, "modify"));
+    effects.by_id.insert(DAMAGE, def(DAMAGE, "damage"));
     fx.world.insert_resource(effects);
     fx.world
         .insert_resource(mud_world::SpellSlotData::default());
@@ -727,4 +729,89 @@ fn eye_gouge_formula_blinds_with_a_skill_scaled_accuracy_penalty() {
     assert!(fx.world.get::<Blinded>(rat).is_some());
     // The fixture caster's skill resolves to 50: -(2 + 50 / 10) = -7.
     assert_eq!(combat_pair(&fx.world, rat).0, 43);
+}
+
+/// Sunray-shaped data: fire damage plus the blind status with its accuracy /
+/// evasion penalties, and a WILL save whose action is `NEGATE_STATUS`.
+fn sunray_caster(save_dc: &str) -> (Fx, Entity, Rx) {
+    let (mut fx, p, rx) = caster_with_spells(vec![(
+        1,
+        "Sunray",
+        vec![
+            (
+                DAMAGE,
+                Some(serde_json::json!({ "type": "fire", "amount": "10" })),
+            ),
+            (
+                STATUS,
+                Some(serde_json::json!({
+                    "flag": "blind", "duration": 2, "durationUnit": "hours"
+                })),
+            ),
+            (
+                MODIFY,
+                Some(serde_json::json!({
+                    "target": "accuracy", "amount": "-4",
+                    "duration": 2, "durationUnit": "hours"
+                })),
+            ),
+            (
+                MODIFY,
+                Some(serde_json::json!({
+                    "target": "evasion", "amount": "-40",
+                    "duration": 2, "durationUnit": "hours"
+                })),
+            ),
+        ],
+    )]);
+    fx.world
+        .resource_mut::<mud_world::AbilityCatalog>()
+        .saves
+        .insert(
+            1,
+            mud_world::SavingThrow {
+                save_type: "WILL".into(),
+                dc_formula: save_dc.into(),
+                on_save_action: serde_json::json!("NEGATE_STATUS"),
+            },
+        );
+    (fx, p, rx)
+}
+
+#[test]
+fn sunray_damages_and_blinds_when_the_save_fails() {
+    // DC 1000 is never met: the save fails, everything lands.
+    let (mut fx, p, mut rx) = sunray_caster("1000");
+    let rat = target_mob(&mut fx, "a sewer rat");
+    let _ = drain(&mut rx);
+    cast(&mut fx, p, "cast 'sunray' rat");
+    let said = drain(&mut rx);
+    assert!(fx.world.get::<Blinded>(rat).is_some(), "blinded: {said}");
+    assert_eq!(combat_pair(&fx.world, rat), (46, 10));
+    assert_eq!(fx.world.get::<Health>(rat).unwrap().hp, 90, "{said}");
+}
+
+#[test]
+fn a_made_sunray_save_turns_away_only_the_blinding() {
+    // DC 0 is always met: legacy never saves against the damage, only the blind.
+    let (mut fx, p, mut rx) = sunray_caster("0");
+    let rat = target_mob(&mut fx, "a sewer rat");
+    let _ = drain(&mut rx);
+    cast(&mut fx, p, "cast 'sunray' rat");
+    let said = drain(&mut rx);
+    assert!(
+        fx.world.get::<Blinded>(rat).is_none(),
+        "not blinded: {said}"
+    );
+    assert_eq!(combat_pair(&fx.world, rat), (50, 50), "no penalties");
+    assert_eq!(effects_on(&mut fx.world, rat), 0);
+    assert_eq!(
+        fx.world.get::<Health>(rat).unwrap().hp,
+        90,
+        "damage lands: {said}"
+    );
+    assert!(
+        said.contains("resists the lingering effect of your Sunray"),
+        "{said}"
+    );
 }
