@@ -500,6 +500,9 @@ mod look_self_tests;
 #[path = "commands/movement_message_tests.rs"]
 mod movement_message_tests;
 #[cfg(test)]
+#[path = "commands/multi_hit_tests.rs"]
+mod multi_hit_tests;
+#[cfg(test)]
 #[path = "commands/norepeat_tests.rs"]
 mod norepeat_tests;
 #[cfg(test)]
@@ -13156,10 +13159,6 @@ pub(crate) fn wear_item(
     };
 
     try_insert(world, item, EquippedSlot(dest_slot));
-    // Apply gear stat bonuses (ObjectAffects), resistances, and
-    // wear-granted effects (ObjectEffects) to the player. Mirrored
-    // by `cmd_remove`'s unapply path.
-    crate::equip_apply::apply_object_to_wearer(world, item, player);
 
     let (to_actor, to_room) = wear_message_templates(dest_slot);
     let mut msg = format!("{}\r\n", to_actor.replace("{p}", &item_name));
@@ -13187,6 +13186,11 @@ pub(crate) fn wear_item(
             &cap_sentence_start(&format!("{line}\r\n")),
         );
     }
+    // Apply gear stat bonuses (ObjectAffects), resistances, and
+    // wear-granted effects (ObjectEffects) to the player. Mirrored
+    // by `cmd_remove`'s unapply path. After the wear messages above, so
+    // "You wear X." precedes whatever the effects announce (issue #87).
+    crate::equip_apply::apply_object_to_wearer(world, item, player);
     crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Wear);
     true
 }
@@ -15215,6 +15219,9 @@ pub(crate) fn invoke_ability_with(
     // room messages (the generic cast header and success templates would
     // double them).
     let mut custom_messaging = false;
+    // Set by a multi-bolt damage arm, which sends the victim and room
+    // templates once per bolt itself.
+    let mut per_hit_messaging = false;
     let mut applied_msgs: Vec<String> = Vec::with_capacity(effect_specs.len());
     let mut spawn_count: usize = 0;
     // Effects the `cleanse` arm removed so far; Remove Curse only lifts a
@@ -15498,12 +15505,10 @@ pub(crate) fn invoke_ability_with(
                 // a Magic-Missile-style multi-bolt spell. Bolt count
                 // scales with caster level using the classic
                 // 1 + (level - 1)/2, capped at 5 D&D ladder. Each
-                // bolt rolls the damage formula independently and
-                // contributes its own resisted amount; we sum here
-                // and apply once below so a single apply_damage call
-                // handles the kill + death broadcast. Non-multihit
-                // spells take the bolts=1 path (identical to the
-                // pre-I.9 single-roll behavior).
+                // bolt runs the whole damage pipeline on its own roll
+                // and sends its own messages (legacy calls `mag_damage`
+                // once per missile). Non-multihit spells take the
+                // bolts=1 path (identical to the single-roll behavior).
                 let multihit = spec
                     .override_params
                     .as_ref()
@@ -15515,35 +15520,86 @@ pub(crate) fn invoke_ability_with(
                 } else {
                     1
                 };
-                let mut amount = if components.is_empty() {
-                    // Resolve raw amount, then apply the spec's
-                    // element resistance.
-                    let element = resolve_damage_element(
-                        spec.override_params.as_ref(),
-                        Some(&spec.default_params),
-                    );
-                    let resist = target_resists.get(&element).copied().unwrap_or(0);
-                    let mut total = 0i32;
-                    for _ in 0..bolt_count {
+                // Empowered (HARNESS): one-shot +50% on the next
+                // damage spell, so it boosts every bolt of this cast and
+                // is consumed on the first.
+                let empowered_active = world.get::<mud_world::Empowered>(player).is_some();
+                let mut amount: i32 = 0;
+                let mut raw_amount: i32 = 0;
+                let mut post_sp: i32 = 0;
+                let mut post_reagent: i32 = 0;
+                let mut sp_applied: i32 = 0;
+                let mut ward_pct: i32 = 0;
+                // Sum of what every bolt landed, for the diagnostic tail.
+                let mut total_dealt: i32 = 0;
+                let mut victim_dead = false;
+                for bolt in 0..bolt_count {
+                    // Legacy `spell_magic_missile`: a missile at a victim
+                    // who is already dead just pelts the corpse.
+                    if victim_dead {
+                        send_to(
+                            world,
+                            player,
+                            format!(
+                                "You're pelting {target_name_pre} with missiles but they're dead already!\r\n"
+                            ),
+                        );
+                        continue;
+                    }
+                    if bolt_count > 1 {
+                        // Per-missile messages: the caster template for every
+                        // bolt after the first (it went out before the loop),
+                        // victim and room templates for all of them.
+                        if bolt > 0 && emit_header_now {
+                            send_to(world, player, render_header());
+                        }
+                        if !custom_messaging {
+                            per_hit_messaging = true;
+                            send_hit_templates(
+                                world,
+                                player,
+                                target_entity,
+                                messages_pre
+                                    .as_ref()
+                                    .and_then(|m| m.success_to_victim.as_deref()),
+                                if target_entity == player {
+                                    messages_pre.as_ref().and_then(|m| {
+                                        m.success_self_room
+                                            .as_deref()
+                                            .or(m.success_to_room.as_deref())
+                                    })
+                                } else {
+                                    messages_pre
+                                        .as_ref()
+                                        .and_then(|m| m.success_to_room.as_deref())
+                                },
+                                &actor_name_pre,
+                                &target_name_pre,
+                            );
+                        }
+                    }
+                    amount = if components.is_empty() {
+                        // Resolve raw amount, then apply the spec's
+                        // element resistance.
+                        let element = resolve_damage_element(
+                            spec.override_params.as_ref(),
+                            Some(&spec.default_params),
+                        );
+                        let resist = target_resists.get(&element).copied().unwrap_or(0);
                         let raw = resolve_effect_amount(
                             spec.override_params.as_ref(),
                             Some(&spec.default_params),
                             &per_target_ctx,
                         )
                         .unwrap_or(0);
-                        total = total.saturating_add(apply_resistance(raw, resist));
-                    }
-                    total
-                } else {
-                    // Multi-component path: apply each component's
-                    // resistance individually before summing — a
-                    // CONE_OF_COLD (90% COLD / 10% FORCE) split
-                    // hitting a cold-resistant target still takes
-                    // the FORCE portion at full damage. Outer loop
-                    // covers multihit; per-bolt damage is the same
-                    // component sum.
-                    let mut total = 0i32;
-                    for _ in 0..bolt_count {
+                        apply_resistance(raw, resist)
+                    } else {
+                        // Multi-component path: apply each component's
+                        // resistance individually before summing — a
+                        // CONE_OF_COLD (90% COLD / 10% FORCE) split
+                        // hitting a cold-resistant target still takes
+                        // the FORCE portion at full damage.
+                        let mut total = 0i32;
                         for c in &components {
                             let raw = evaluate_simple_formula_ctx(
                                 &normalize_dice_notation(&c.damage_formula),
@@ -15561,320 +15617,339 @@ pub(crate) fn invoke_ability_with(
                             let after = apply_resistance(scaled, resist);
                             total = total.saturating_add(after);
                         }
-                    }
-                    total
-                };
-                // BACKSTAB-style `bonusIfHidden` — extra damage when
-                // the caster has the Stealth marker. Field lives on
-                // the AbilityEffect override; reads as either a
-                // literal int or a formula string (e.g. `hidden * 0.5`).
-                // Skipped when caster.hidden == 0.
-                if formula_ctx.hidden > 0
-                    && let Some(bonus) =
-                        bonus_if_hidden_from_blob(spec.override_params.as_ref(), &formula_ctx)
-                {
-                    amount = amount.saturating_add(bonus);
-                }
-                // Empowered (HARNESS): one-shot +50% on the next
-                // damage spell. Consumed up front so a Magic Missile
-                // multi-bolt or any subsequent component pays only
-                // once. Also despawns the backing "empowered"
-                // EffectInstance(s) so the `effects` list stays
-                // accurate.
-                let mut empowered_consumed = false;
-                if amount > 0 && world.get::<mud_world::Empowered>(player).is_some() {
-                    amount = (amount.saturating_mul(150) / 100).max(1);
-                    try_remove::<mud_world::Empowered>(world, player);
-                    let to_despawn: Vec<Entity> = {
-                        let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
-                        q.iter(world)
-                            .filter(|(_, inst, applied)| {
-                                applied.0 == player && inst.name.eq_ignore_ascii_case("empowered")
-                            })
-                            .map(|(e, _, _)| e)
-                            .collect()
+                        total
                     };
-                    for e in to_despawn {
-                        if let Ok(em) = world.get_entity_mut(e) {
-                            em.despawn();
-                        }
+                    // BACKSTAB-style `bonusIfHidden` — extra damage when
+                    // the caster has the Stealth marker. Field lives on
+                    // the AbilityEffect override; reads as either a
+                    // literal int or a formula string (e.g. `hidden * 0.5`).
+                    // Skipped when caster.hidden == 0.
+                    if bolt == 0
+                        && formula_ctx.hidden > 0
+                        && let Some(bonus) =
+                            bonus_if_hidden_from_blob(spec.override_params.as_ref(), &formula_ctx)
+                    {
+                        amount = amount.saturating_add(bonus);
                     }
-                    empowered_consumed = true;
-                }
-                let _ = empowered_consumed; // future: surface in dice tail
-                // I3: per-target multiplicative conditions. Authored
-                // as a `multipliers` array in override_params:
-                //   "multipliers": [
-                //     { "expr": "(victim_align * -7 + 8000) / 10000",
-                //       "min": 0.1, "max": 1.5 }
-                //   ]
-                // Each entry's expr is evaluated against the per-target
-                // FormulaCtx (so victim_align / target_max_hp / etc.
-                // resolve), divided by 1000 to recover the float
-                // coefficient (the expr stays integer-only — multiply
-                // through by 1000 in the formula), clamped to
-                // [min, max], then multiplied into amount. Both min
-                // and max default to "no clamp on that side" when
-                // missing; expr is required. Lets the divine/unholy
-                // line, class-affinity bonuses, etc. land without
-                // baking the multiplier into the base damage formula.
-                if let Some(multipliers) = spec
-                    .override_params
-                    .as_ref()
-                    .and_then(|v| v.get("multipliers"))
-                    .and_then(serde_json::Value::as_array)
-                {
-                    for m in multipliers {
-                        let Some(expr) = m.get("expr").and_then(serde_json::Value::as_str) else {
-                            continue;
-                        };
-                        let Some(scaled_int) = evaluate_simple_formula_ctx(
-                            &normalize_dice_notation(expr),
-                            &per_target_ctx,
-                        ) else {
-                            continue;
-                        };
-                        // Expr is integer (× 1000 convention) → recover the
-                        // float coefficient. Authors who want a literal
-                        // 0.8 multiplier write `800` in the expr.
-                        let mut factor = f64::from(scaled_int) / 1000.0;
-                        if let Some(min) = m.get("min").and_then(serde_json::Value::as_f64) {
-                            factor = factor.max(min);
-                        }
-                        if let Some(max) = m.get("max").and_then(serde_json::Value::as_f64) {
-                            factor = factor.min(max);
-                        }
-                        if !factor.is_finite() {
-                            continue;
-                        }
-                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                        let scaled = ((f64::from(amount) * factor).round() as i64)
-                            .clamp(i64::from(i32::MIN), i64::from(i32::MAX))
-                            as i32;
-                        // Clamp to 0 floor — a destructive multiplier
-                        // shouldn't let a negative roll heal the target.
-                        // Above-amount multipliers ARE allowed (a fire
-                        // mage's fire affinity could legitimately
-                        // multiply damage > 1.0).
-                        amount = scaled.max(0);
-                    }
-                }
-                // Builder-editable per-caster-class bonus (legacy
-                // `if (GET_CLASS(ch) == CLASS_PRIEST ...) dam *= 1.25`).
-                amount = apply_caster_class_multiplier(
-                    amount,
-                    spec.override_params.as_ref(),
-                    &caster_class_names,
-                );
-                let raw_amount = amount;
-                let mut post_sp = amount;
-                let mut post_reagent = amount;
-                let mut sp_applied: i32 = 0;
-                let mut ward_pct: i32 = 0;
-                if amount > 0 {
-                    // A5: spell_power scales magical damage as an
-                    // additive % multiplier, mirroring how attack_power
-                    // boosts melee swings. Non-magical abilities
-                    // (skills with `is_magical=false`) skip this so
-                    // they don't double-scale with attack_power.
-                    if def.is_magical && caster_spell_power != 0 {
-                        amount = (amount.saturating_mul(100 + caster_spell_power)) / 100;
-                        amount = amount.max(1);
-                        sp_applied = caster_spell_power;
-                    }
-                    post_sp = amount;
-                    // Reagent boost on damage spells.
-                    if reagent_boost_pct > 0 {
-                        amount = amount.saturating_add(amount * reagent_boost_pct / 100);
-                    }
-                    post_reagent = amount;
-                    // Ward (combat pipeline step 5): magical sources
-                    // route through the target's `ward_pct`. Mundane
-                    // on-hit abilities (`is_magical = false`) skip
-                    // ward entirely and route purely through armor /
-                    // resists. Cap at 100 so a runaway ward stack
-                    // can't generate negative damage; floor at 0 so
-                    // negative ward (vulnerability) stays
-                    // armor-side, not ward-side.
-                    ward_pct = world
-                        .get::<CombatStats>(target_entity)
-                        .map_or(0, |c| c.ward_pct);
-                    amount = apply_ward(amount, ward_pct, def.is_magical);
-                    // J2 alignment protection — PROT_FROM_EVIL /
-                    // PROT_FROM_GOOD trims 20% when alignments are
-                    // mutually opposed. Runs after ward / resist so
-                    // it stacks on the magical pipeline rather than
-                    // replacing it.
-                    let align_mult = alignment_protection_factor(world, player, target_entity);
-                    if (align_mult - 1.0).abs() > f32::EPSILON {
-                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                        {
-                            #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-                            {
-                                amount = ((amount as f32) * align_mult) as i32;
+                    // Empowered boost (see `empowered_active`), consumed on the
+                    // first bolt that carries it. Also despawns the backing
+                    // "empowered" EffectInstance(s) so the `effects` list
+                    // stays accurate.
+                    if amount > 0 && empowered_active {
+                        amount = (amount.saturating_mul(150) / 100).max(1);
+                        if world.get::<mud_world::Empowered>(player).is_some() {
+                            try_remove::<mud_world::Empowered>(world, player);
+                            let to_despawn: Vec<Entity> = {
+                                let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
+                                q.iter(world)
+                                    .filter(|(_, inst, applied)| {
+                                        applied.0 == player
+                                            && inst.name.eq_ignore_ascii_case("empowered")
+                                    })
+                                    .map(|(e, _, _)| e)
+                                    .collect()
+                            };
+                            for e in to_despawn {
+                                if let Ok(em) = world.get_entity_mut(e) {
+                                    em.despawn();
+                                }
                             }
                         }
-                        amount = amount.max(1);
                     }
-                    // K2: HALF_DAMAGE on-save action. Mirrors legacy
-                    // `dam >>= 1` — halves the FINAL post-mitigation
-                    // damage so the saved spell still scrapes the
-                    // target but doesn't blast through the way a
-                    // failed save would. Surface a "partially resists"
-                    // line so the target knows their save mattered.
-                    if halve_damage && amount > 0 {
-                        amount = (amount / 2).max(1);
-                        let caster_name = actor_name_pre.clone();
-                        let target_name = name_or(world, target_entity, "the target");
-                        send_to(
-                            world,
-                            player,
-                            format!(
-                                "{} partially resists your {}.\r\n",
-                                cap_sentence_start(&target_name),
-                                def.name,
-                            ),
-                        );
-                        if target_entity != player {
-                            send_rendered(
-                                world,
-                                target_entity,
-                                &format!(
-                                    "You partially resist {}'s {}.\r\n",
-                                    caster_name, def.name,
-                                ),
-                            );
-                        }
-                    }
-                    // Snapshot victim HP for lifesteal — apply_damage
-                    // can clamp at 0, so the *actual* damage dealt
-                    // can be smaller than `amount`. Caster heal uses
-                    // the real delta.
-                    let pre_hp = world.get::<Health>(target_entity).map_or(0, |h| h.hp);
-                    let (dead, threshold_msg) =
-                        crate::commands::apply_damage_from(world, target_entity, amount, player);
-                    // Issue #63: show the damage number on spell hits,
-                    // unconditionally and in the same shape melee uses
-                    // ("... for N damage"), so spells and swings read
-                    // alike. Sent before the death broadcasts below.
+                    // I3: per-target multiplicative conditions. Authored
+                    // as a `multipliers` array in override_params:
+                    //   "multipliers": [
+                    //     { "expr": "(victim_align * -7 + 8000) / 10000",
+                    //       "min": 0.1, "max": 1.5 }
+                    //   ]
+                    // Each entry's expr is evaluated against the per-target
+                    // FormulaCtx (so victim_align / target_max_hp / etc.
+                    // resolve), divided by 1000 to recover the float
+                    // coefficient (the expr stays integer-only — multiply
+                    // through by 1000 in the formula), clamped to
+                    // [min, max], then multiplied into amount. Both min
+                    // and max default to "no clamp on that side" when
+                    // missing; expr is required. Lets the divine/unholy
+                    // line, class-affinity bonuses, etc. land without
+                    // baking the multiplier into the base damage formula.
+                    if let Some(multipliers) = spec
+                        .override_params
+                        .as_ref()
+                        .and_then(|v| v.get("multipliers"))
+                        .and_then(serde_json::Value::as_array)
                     {
-                        let damage_label = match damage_color_tag(amount) {
-                            Some(open) => format!("{open}{amount}</>"),
-                            None => amount.to_string(),
-                        };
-                        if target_entity == player {
-                            send_to(
-                                world,
-                                player,
-                                format!(
-                                    "Your {} hurts you for {damage_label} damage.\r\n",
-                                    def.name
-                                ),
-                            );
-                        } else {
-                            let target_name = name_or(world, target_entity, "the target");
-                            send_to(
-                                world,
-                                player,
-                                format!(
-                                    "Your {} hits <b:cyan>{target_name}</> for {damage_label} damage.\r\n",
-                                    def.name,
-                                ),
-                            );
-                            let caster_to_target = cap_sentence_start(&seen_name(
-                                world,
-                                target_entity,
-                                player,
-                                &actor_name_pre,
-                            ));
-                            send_to(
-                                world,
-                                target_entity,
-                                format!(
-                                    "{caster_to_target}'s {} hits you for {damage_label} damage.\r\n",
-                                    def.name,
-                                ),
-                            );
+                        for m in multipliers {
+                            let Some(expr) = m.get("expr").and_then(serde_json::Value::as_str)
+                            else {
+                                continue;
+                            };
+                            let Some(scaled_int) = evaluate_simple_formula_ctx(
+                                &normalize_dice_notation(expr),
+                                &per_target_ctx,
+                            ) else {
+                                continue;
+                            };
+                            // Expr is integer (× 1000 convention) → recover the
+                            // float coefficient. Authors who want a literal
+                            // 0.8 multiplier write `800` in the expr.
+                            let mut factor = f64::from(scaled_int) / 1000.0;
+                            if let Some(min) = m.get("min").and_then(serde_json::Value::as_f64) {
+                                factor = factor.max(min);
+                            }
+                            if let Some(max) = m.get("max").and_then(serde_json::Value::as_f64) {
+                                factor = factor.min(max);
+                            }
+                            if !factor.is_finite() {
+                                continue;
+                            }
+                            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                            let scaled = ((f64::from(amount) * factor).round() as i64)
+                                .clamp(i64::from(i32::MIN), i64::from(i32::MAX))
+                                as i32;
+                            // Clamp to 0 floor — a destructive multiplier
+                            // shouldn't let a negative roll heal the target.
+                            // Above-amount multipliers ARE allowed (a fire
+                            // mage's fire affinity could legitimately
+                            // multiply damage > 1.0).
+                            amount = scaled.max(0);
                         }
                     }
-                    // Lifesteal: heal the caster by the actual damage
-                    // dealt. At max HP, legacy spills excess into
-                    // overheal via a polynomial that approaches zero
-                    // at hp/max ≈ 5. We mirror that, clamped to a
-                    // 5-10 floor when the polynomial yields under 10.
-                    if lifesteal {
-                        let actual_dmg = (pre_hp
-                            - world.get::<Health>(target_entity).map_or(0, |h| h.hp))
-                        .max(0);
-                        if actual_dmg > 0
-                            && let Some(mut h) = world.get_mut::<Health>(player)
-                        {
-                            if h.hp < h.max {
-                                let new_hp = (h.hp + actual_dmg).min(h.max);
-                                let real_heal = new_hp - h.hp;
-                                h.hp = new_hp;
+                    // Builder-editable per-caster-class bonus (legacy
+                    // `if (GET_CLASS(ch) == CLASS_PRIEST ...) dam *= 1.25`).
+                    amount = apply_caster_class_multiplier(
+                        amount,
+                        spec.override_params.as_ref(),
+                        &caster_class_names,
+                    );
+                    raw_amount = amount;
+                    post_sp = amount;
+                    post_reagent = amount;
+                    sp_applied = 0;
+                    ward_pct = 0;
+                    if amount > 0 {
+                        // A5: spell_power scales magical damage as an
+                        // additive % multiplier, mirroring how attack_power
+                        // boosts melee swings. Non-magical abilities
+                        // (skills with `is_magical=false`) skip this so
+                        // they don't double-scale with attack_power.
+                        if def.is_magical && caster_spell_power != 0 {
+                            amount = (amount.saturating_mul(100 + caster_spell_power)) / 100;
+                            amount = amount.max(1);
+                            sp_applied = caster_spell_power;
+                        }
+                        post_sp = amount;
+                        // Reagent boost on damage spells.
+                        if reagent_boost_pct > 0 {
+                            amount = amount.saturating_add(amount * reagent_boost_pct / 100);
+                        }
+                        post_reagent = amount;
+                        // Ward (combat pipeline step 5): magical sources
+                        // route through the target's `ward_pct`. Mundane
+                        // on-hit abilities (`is_magical = false`) skip
+                        // ward entirely and route purely through armor /
+                        // resists. Cap at 100 so a runaway ward stack
+                        // can't generate negative damage; floor at 0 so
+                        // negative ward (vulnerability) stays
+                        // armor-side, not ward-side.
+                        ward_pct = world
+                            .get::<CombatStats>(target_entity)
+                            .map_or(0, |c| c.ward_pct);
+                        amount = apply_ward(amount, ward_pct, def.is_magical);
+                        // J2 alignment protection — PROT_FROM_EVIL /
+                        // PROT_FROM_GOOD trims 20% when alignments are
+                        // mutually opposed. Runs after ward / resist so
+                        // it stacks on the magical pipeline rather than
+                        // replacing it.
+                        let align_mult = alignment_protection_factor(world, player, target_entity);
+                        if (align_mult - 1.0).abs() > f32::EPSILON {
+                            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                            {
+                                #[allow(
+                                    clippy::cast_precision_loss,
+                                    clippy::cast_possible_truncation
+                                )]
+                                {
+                                    amount = ((amount as f32) * align_mult) as i32;
+                                }
+                            }
+                            amount = amount.max(1);
+                        }
+                        // K2: HALF_DAMAGE on-save action. Mirrors legacy
+                        // `dam >>= 1` — halves the FINAL post-mitigation
+                        // damage so the saved spell still scrapes the
+                        // target but doesn't blast through the way a
+                        // failed save would. Surface a "partially resists"
+                        // line so the target knows their save mattered.
+                        if halve_damage && amount > 0 {
+                            amount = (amount / 2).max(1);
+                            let caster_name = actor_name_pre.clone();
+                            let target_name = name_or(world, target_entity, "the target");
+                            if bolt == 0 {
                                 send_to(
                                     world,
                                     player,
                                     format!(
-                                        "You drain {real_heal} life force from your victim.\r\n"
+                                        "{} partially resists your {}.\r\n",
+                                        cap_sentence_start(&target_name),
+                                        def.name,
                                     ),
                                 );
-                            } else {
-                                // Above-max spillover per legacy
-                                // polynomial: hp += dam * (-0.0457r²
-                                // - 0.0171r + 1.066) where r = hp/max,
-                                // clamped 5..10 floor.
-                                #[allow(
-                                    clippy::cast_precision_loss,
-                                    clippy::cast_possible_truncation,
-                                    clippy::cast_sign_loss
-                                )]
-                                let bonus = {
-                                    let ratio = h.hp as f32 / h.max.max(1) as f32;
-                                    let poly = -0.0457 * ratio * ratio - 0.0171 * ratio + 1.066;
-                                    let raw = ((actual_dmg as f32) * poly) as i32;
-                                    if raw > 10 {
-                                        raw
-                                    } else {
-                                        rand::random_range(5..=10)
-                                    }
-                                };
-                                h.hp = h.hp.saturating_add(bonus);
-                                send_to(
+                            }
+                            if bolt == 0 && target_entity != player {
+                                send_rendered(
                                     world,
-                                    player,
-                                    format!("You overflow with stolen vitality (+{bonus}).\r\n"),
+                                    target_entity,
+                                    &format!(
+                                        "You partially resist {}'s {}.\r\n",
+                                        caster_name, def.name,
+                                    ),
                                 );
                             }
                         }
-                    }
-                    // Surface the apply_damage threshold message
-                    // ("You are hurt." / "...badly hurt!" / "...near
-                    // death!") to the target so they get the same
-                    // feedback melee combat already provides.
-                    // Always to the target — even for self-cast damage,
-                    // the caster benefits from the threshold cue.
-                    if !dead && let Some(line) = threshold_msg {
-                        send_to(world, target_entity, line.to_string());
-                    }
-                    // Engage combat. Without this a sorc lobbing
-                    // burning hands at an orc deals the damage but
-                    // neither side ends up `Fighting` — the orc
-                    // never retaliates, the player keeps casting
-                    // free shots. Mirrors what cmd_attack /
-                    // melee-swing pipelines do. Skipped on self-
-                    // cast (target == caster) and on kill (target
-                    // is being despawned by handle_death below).
-                    if !dead
-                        && target_entity != player
-                        && let Some(room) = world.get::<Located>(target_entity).map(|l| l.0)
-                    {
-                        engage_combat(world, player, target_entity, room);
-                    }
-                    if dead && let Some(located) = world.get::<Located>(target_entity).copied() {
-                        let target_name = name_or(world, target_entity, "(unknown)");
-                        crate::combat::handle_death(world, target_entity, &target_name, located.0);
+                        // Snapshot victim HP for lifesteal — apply_damage
+                        // can clamp at 0, so the *actual* damage dealt
+                        // can be smaller than `amount`. Caster heal uses
+                        // the real delta.
+                        let pre_hp = world.get::<Health>(target_entity).map_or(0, |h| h.hp);
+                        let (dead, threshold_msg) = crate::commands::apply_damage_from(
+                            world,
+                            target_entity,
+                            amount,
+                            player,
+                        );
+                        total_dealt = total_dealt.saturating_add(amount);
+                        victim_dead = dead;
+                        // Issue #63: show the damage number on spell hits,
+                        // unconditionally and in the same shape melee uses
+                        // ("... for N damage"), so spells and swings read
+                        // alike. Sent before the death broadcasts below.
+                        {
+                            let damage_label = match damage_color_tag(amount) {
+                                Some(open) => format!("{open}{amount}</>"),
+                                None => amount.to_string(),
+                            };
+                            if target_entity == player {
+                                send_to(
+                                    world,
+                                    player,
+                                    format!(
+                                        "Your {} hurts you for {damage_label} damage.\r\n",
+                                        def.name
+                                    ),
+                                );
+                            } else {
+                                let target_name = name_or(world, target_entity, "the target");
+                                send_to(
+                                    world,
+                                    player,
+                                    format!(
+                                        "Your {} hits <b:cyan>{target_name}</> for {damage_label} damage.\r\n",
+                                        def.name,
+                                    ),
+                                );
+                                let caster_to_target = cap_sentence_start(&seen_name(
+                                    world,
+                                    target_entity,
+                                    player,
+                                    &actor_name_pre,
+                                ));
+                                send_to(
+                                    world,
+                                    target_entity,
+                                    format!(
+                                        "{caster_to_target}'s {} hits you for {damage_label} damage.\r\n",
+                                        def.name,
+                                    ),
+                                );
+                            }
+                        }
+                        // Lifesteal: heal the caster by the actual damage
+                        // dealt. At max HP, legacy spills excess into
+                        // overheal via a polynomial that approaches zero
+                        // at hp/max ≈ 5. We mirror that, clamped to a
+                        // 5-10 floor when the polynomial yields under 10.
+                        if lifesteal {
+                            let actual_dmg = (pre_hp
+                                - world.get::<Health>(target_entity).map_or(0, |h| h.hp))
+                            .max(0);
+                            if actual_dmg > 0
+                                && let Some(mut h) = world.get_mut::<Health>(player)
+                            {
+                                if h.hp < h.max {
+                                    let new_hp = (h.hp + actual_dmg).min(h.max);
+                                    let real_heal = new_hp - h.hp;
+                                    h.hp = new_hp;
+                                    send_to(
+                                        world,
+                                        player,
+                                        format!(
+                                            "You drain {real_heal} life force from your victim.\r\n"
+                                        ),
+                                    );
+                                } else {
+                                    // Above-max spillover per legacy
+                                    // polynomial: hp += dam * (-0.0457r²
+                                    // - 0.0171r + 1.066) where r = hp/max,
+                                    // clamped 5..10 floor.
+                                    #[allow(
+                                        clippy::cast_precision_loss,
+                                        clippy::cast_possible_truncation,
+                                        clippy::cast_sign_loss
+                                    )]
+                                    let bonus = {
+                                        let ratio = h.hp as f32 / h.max.max(1) as f32;
+                                        let poly = -0.0457 * ratio * ratio - 0.0171 * ratio + 1.066;
+                                        let raw = ((actual_dmg as f32) * poly) as i32;
+                                        if raw > 10 {
+                                            raw
+                                        } else {
+                                            rand::random_range(5..=10)
+                                        }
+                                    };
+                                    h.hp = h.hp.saturating_add(bonus);
+                                    send_to(
+                                        world,
+                                        player,
+                                        format!(
+                                            "You overflow with stolen vitality (+{bonus}).\r\n"
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                        // Surface the apply_damage threshold message
+                        // ("You are hurt." / "...badly hurt!" / "...near
+                        // death!") to the target so they get the same
+                        // feedback melee combat already provides.
+                        // Always to the target — even for self-cast damage,
+                        // the caster benefits from the threshold cue.
+                        if !dead && let Some(line) = threshold_msg {
+                            send_to(world, target_entity, line.to_string());
+                        }
+                        // Engage combat. Without this a sorc lobbing
+                        // burning hands at an orc deals the damage but
+                        // neither side ends up `Fighting` — the orc
+                        // never retaliates, the player keeps casting
+                        // free shots. Mirrors what cmd_attack /
+                        // melee-swing pipelines do. Skipped on self-
+                        // cast (target == caster) and on kill (target
+                        // is being despawned by handle_death below).
+                        if !dead
+                            && target_entity != player
+                            && let Some(room) = world.get::<Located>(target_entity).map(|l| l.0)
+                        {
+                            engage_combat(world, player, target_entity, room);
+                        }
+                        if dead && let Some(located) = world.get::<Located>(target_entity).copied()
+                        {
+                            let target_name = name_or(world, target_entity, "(unknown)");
+                            crate::combat::handle_death(
+                                world,
+                                target_entity,
+                                &target_name,
+                                located.0,
+                            );
+                        }
                     }
                 }
                 if crate::combat::show_dice_for(world, player) {
@@ -15901,13 +15976,13 @@ pub(crate) fn invoke_ability_with(
                     }
                     if bolt_count > 1 {
                         applied_msgs.push(format!(
-                            "{pretty} {detail} → -{amount} HP ×{bolt_count} bolts"
+                            "{pretty} {detail} → -{total_dealt} HP ×{bolt_count} bolts"
                         ));
                     } else {
                         applied_msgs.push(format!("{pretty} {detail} → -{amount} HP"));
                     }
                 } else if bolt_count > 1 {
-                    applied_msgs.push(format!("{pretty} (-{amount} HP ×{bolt_count} bolts)"));
+                    applied_msgs.push(format!("{pretty} (-{total_dealt} HP ×{bolt_count} bolts)"));
                 } else {
                     applied_msgs.push(format!("{pretty} (-{amount} HP)"));
                 }
@@ -18436,7 +18511,11 @@ pub(crate) fn invoke_ability_with(
         crate::commands::cmd_look(world, target_entity, "");
     }
     // Target-side: templated success_to_victim → terse default.
-    if target_entity != player && !applied_msgs.is_empty() && !custom_messaging {
+    if target_entity != player
+        && !applied_msgs.is_empty()
+        && !custom_messaging
+        && !per_hit_messaging
+    {
         let target_template = messages
             .as_ref()
             .and_then(|m| m.success_to_victim.as_deref());
@@ -18469,6 +18548,7 @@ pub(crate) fn invoke_ability_with(
     });
     if !applied_msgs.is_empty()
         && !custom_messaging
+        && !per_hit_messaging
         && let Some(t) = room_template
         && let Some(located) = world.get::<Located>(player).copied()
     {
@@ -18897,6 +18977,45 @@ pub(crate) fn caster_weapon_damage(world: &mut World, caster: Entity) -> i32 {
         .by_key
         .get(&(key.zone, key.id))
         .map_or(0, mud_world::ObjectProto::avg_damage)
+}
+
+/// The victim and bystander halves of an ability's success messages for one
+/// bolt of a multi-bolt spell (Magic Missile, Ice Darts): legacy runs
+/// `mag_damage` once per missile, so each one is announced on its own. The
+/// caster's own line is the caller's job.
+fn send_hit_templates(
+    world: &mut World,
+    player: Entity,
+    target_entity: Entity,
+    victim_template: Option<&str>,
+    room_template: Option<&str>,
+    actor_name: &str,
+    target_name: &str,
+) {
+    if target_entity != player
+        && let Some(t) = victim_template
+    {
+        let line = render_ability_template(t, actor_name, target_name, false);
+        send_rendered(world, target_entity, &format!("{line}\r\n"));
+    }
+    if let Some(t) = room_template
+        && let Some(located) = world.get::<Located>(player).copied()
+    {
+        let rendered = render_ability_template(t, actor_name, target_name, false);
+        let mut except: Vec<Entity> = vec![player];
+        let mut actors: Vec<(Entity, &str)> = vec![(player, actor_name)];
+        if target_entity != player {
+            except.push(target_entity);
+            actors.push((target_entity, target_name));
+        }
+        broadcast_room_anonymised(
+            world,
+            located.0,
+            &except,
+            &actors,
+            &format!("{rendered}\r\n"),
+        );
+    }
 }
 
 /// Substitute `{actor.X}` / `{target.X}` placeholders in an
