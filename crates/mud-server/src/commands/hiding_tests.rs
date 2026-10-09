@@ -756,3 +756,38 @@ fn a_mob_spawns_with_its_prototype_hiding_and_perception() {
     assert!(world.get::<Hiddenness>(mob).is_none());
     assert!(world.get::<Perception>(mob).is_none());
 }
+
+/// Issue #96: legacy `score` is `CMD_ANY` (which includes `CMD_HIDE`), so a
+/// hider can read their sheet without giving themself away.
+#[test]
+fn score_keeps_a_hider_hidden_like_legacy() {
+    let (mut fx, _seeker, _srx, lurker, mut lrx) = hiding_pair(300);
+    fx.world.init_resource::<mud_world::LevelTable>();
+    fx.world.init_resource::<mud_world::AchievementCatalog>();
+    for typed in ["score", "sc"] {
+        drain(&mut lrx);
+        dispatch(&mut fx.world, lurker, typed);
+        assert!(drain(&mut lrx).contains("Stealth: hidden"), "{typed}");
+        assert!(
+            hiding::is_hidden(&fx.world, lurker),
+            "`{typed}` must not reveal"
+        );
+    }
+}
+
+/// Issue #96, the reading that matters: a class without the Hide skill (the
+/// reporter's Cryomancer) must not be able to hide at all, and `score` then
+/// shows no hidden stealth.
+#[test]
+fn a_character_without_the_hide_skill_cannot_hide_and_score_says_so() {
+    let (mut fx, _seeker, _srx, lurker, mut lrx) = hiding_pair(0);
+    fx.world.init_resource::<mud_world::LevelTable>();
+    fx.world.init_resource::<mud_world::AchievementCatalog>();
+    drain(&mut lrx);
+    dispatch(&mut fx.world, lurker, "hide");
+    let out = drain(&mut lrx);
+    assert!(out.contains("leave that art to the rogues"), "{out}");
+    assert!(!hiding::is_hidden(&fx.world, lurker));
+    dispatch(&mut fx.world, lurker, "sc");
+    assert!(!drain(&mut lrx).contains("Stealth: hidden"));
+}

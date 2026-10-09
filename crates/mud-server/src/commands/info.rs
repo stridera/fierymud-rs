@@ -12635,6 +12635,7 @@ pub(crate) fn cmd_remove(world: &mut World, player: Entity, args: &str) {
     crate::equip_apply::unapply_object_from_wearer(world, item, player);
     try_remove::<EquippedSlot>(world, item);
     crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Remove);
+    crate::commands::drop_unsupported_belt_item(world, player);
     refresh_player_items_gmcp(world, player);
 }
 

@@ -580,6 +580,10 @@ mod status_lists;
 mod subclass;
 
 #[cfg(test)]
+#[path = "commands/belt_slot_tests.rs"]
+mod belt_slot_tests;
+
+#[cfg(test)]
 #[path = "commands/symbol_cmd_tests.rs"]
 mod symbol_cmd_tests;
 #[path = "commands/tells.rs"]
@@ -12987,6 +12991,10 @@ fn wear_message_templates(slot: Slot) -> (&'static str, &'static str) {
             "You wear {p} around your waist.",
             "{n} wears {p} around their waist.",
         ),
+        Slot::Belt => (
+            "You attach {p} to your belt.",
+            "{n} attaches {p} to their belt.",
+        ),
         Slot::RightWrist => (
             "You put {p} on your right wrist.",
             "{n} puts {p} on their right wrist.",
@@ -13256,6 +13264,11 @@ pub(crate) fn wear_item(
     };
     let occupied: std::collections::HashSet<Slot> =
         slot_occupants.iter().map(|(s, _)| *s).collect();
+    // Legacy `may_wear_eq`: something is only attached to a belt you wear.
+    if slot == Slot::Belt && !occupied.contains(&Slot::Waist) {
+        say(world, "You'll need to wear a belt first.\r\n");
+        return false;
+    }
     let candidates: &[Slot] = slot.group();
     let Some(&dest_slot) = candidates.iter().find(|s| !occupied.contains(s)) else {
         // Surface the names of the items in the offending slot(s)
@@ -13328,6 +13341,43 @@ pub(crate) fn wear_item(
     crate::equip_apply::apply_object_to_wearer(world, item, player);
     crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Wear);
     true
+}
+
+/// Legacy `do_remove` tail: whatever hangs from a belt falls into the pack
+/// once no belt (`Waist` item) is worn any more.
+pub(crate) fn drop_unsupported_belt_item(world: &mut World, player: Entity) {
+    let worn_in = |world: &mut World, slot: Slot| -> Option<Entity> {
+        let mut q = world.query_filtered::<(Entity, &Located, &EquippedSlot), With<Item>>();
+        q.iter(world)
+            .find(|(_, l, eq)| l.0 == player && eq.0 == slot)
+            .map(|(e, _, _)| e)
+    };
+    if worn_in(world, Slot::Waist).is_some() {
+        return;
+    }
+    let Some(hung) = worn_in(world, Slot::Belt) else {
+        return;
+    };
+    let item_name = name_of(world, hung);
+    crate::equip_apply::unapply_object_from_wearer(world, hung, player);
+    try_remove::<EquippedSlot>(world, hung);
+    send_rendered(
+        world,
+        player,
+        &format!("{item_name} falls off as you remove your belt.\r\n"),
+    );
+    if let Some(located) = world.get::<Located>(player).copied() {
+        let actor_name = name_of(world, player);
+        broadcast_room_visual(
+            world,
+            located.0,
+            player,
+            &[player],
+            &cap_sentence_start(&format!(
+                "{item_name} falls off as {actor_name} removes their belt.\r\n"
+            )),
+        );
+    }
 }
 
 /// Look up `ObjectAbilityCatalog` bindings for `item` and render a

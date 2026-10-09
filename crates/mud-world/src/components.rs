@@ -441,6 +441,9 @@ pub enum Slot {
     LeftFinger,
     RightFinger,
     Waist,
+    /// Legacy `WEAR_OBELT`: something hung from a worn belt. Needs a
+    /// `Waist` item in place (see `Slot::needs_waist`).
+    Belt,
     Legs,
     Feet,
     Wield,
@@ -468,6 +471,7 @@ impl Slot {
         Self::LeftFinger,
         Self::RightFinger,
         Self::Waist,
+        Self::Belt,
         Self::Legs,
         Self::Feet,
         Self::Wield,
@@ -495,6 +499,7 @@ impl Slot {
             Self::LeftFinger => "finger (left)",
             Self::RightFinger => "finger (right)",
             Self::Waist => "waist",
+            Self::Belt => "belt",
             Self::Legs => "legs",
             Self::Feet => "feet",
             Self::Wield => "wielded",
@@ -542,6 +547,7 @@ impl Slot {
             Self::LeftFinger => "FINGER_LEFT",
             Self::RightFinger => "FINGER_RIGHT",
             Self::Waist => "WAIST",
+            Self::Belt => "BELT",
             Self::Legs => "LEGS",
             Self::Feet => "FEET",
             Self::Wield => "WIELD",
@@ -562,7 +568,8 @@ impl Slot {
     ///   `FINGER_L` / `FINGER_R` (left / right as written);
     /// - slots this port does not model separately, collapsed the same way
     ///   the importer does: `WIELD2` / `TWO_HAND_WIELD` to `Wield`,
-    ///   `HOLD2` / `SHIELD` to `Hold`, `OBELT` to `Waist`.
+    ///   `HOLD2` / `SHIELD` to `Hold`. `OBELT` (legacy `WEAR_OBELT`) is its own
+    ///   `Belt` slot.
     ///
     /// Returns None for any label we still don't model.
     #[must_use]
@@ -583,7 +590,8 @@ impl Slot {
             "HANDS" => Some(Self::Hands),
             "FINGER_LEFT" | "FINGER_L" => Some(Self::LeftFinger),
             "FINGER_RIGHT" | "FINGER_R" => Some(Self::RightFinger),
-            "WAIST" | "BELT" | "OBELT" => Some(Self::Waist),
+            "WAIST" => Some(Self::Waist),
+            "BELT" | "OBELT" => Some(Self::Belt),
             "LEGS" => Some(Self::Legs),
             "FEET" => Some(Self::Feet),
             "WIELD" | "WIELD2" | "TWO_HAND_WIELD" => Some(Self::Wield),
@@ -648,6 +656,7 @@ impl Slot {
             Self::Arms => &[Self::Arms],
             Self::Hands => &[Self::Hands],
             Self::Waist => &[Self::Waist],
+            Self::Belt => &[Self::Belt],
             Self::Legs => &[Self::Legs],
             Self::Feet => &[Self::Feet],
             Self::Wield => &[Self::Wield],
@@ -700,7 +709,7 @@ pub const WEAR_KEYWORDS: &[(&str, Slot)] = &[
     ("face", Slot::Face),
     ("ear", Slot::LeftEar),
     ("badge", Slot::Badge),
-    ("belt", Slot::Waist),
+    ("belt", Slot::Belt),
     ("hover", Slot::Hover),
 ];
 
@@ -2984,7 +2993,8 @@ mod tests {
         assert_eq!(wear_keyword_slot("ear"), Some(Slot::LeftEar));
         // `e` hits `eyes` before `ear`, as in legacy's table order.
         assert_eq!(wear_keyword_slot("e"), Some(Slot::Eyes));
-        assert_eq!(wear_keyword_slot("belt"), Some(Slot::Waist));
+        assert_eq!(wear_keyword_slot("belt"), Some(Slot::Belt));
+        assert_eq!(wear_keyword_slot("waist"), Some(Slot::Waist));
         assert_eq!(wear_keyword_slot("!"), None);
         assert_eq!(wear_keyword_slot(""), None);
         assert_eq!(wear_keyword_slot("elbow"), None);
@@ -3065,7 +3075,9 @@ mod tests {
         ] {
             assert!(Slot::from_label(label).is_some(), "unhandled {label}");
         }
-        assert_eq!(Slot::from_label("OBELT"), Some(Slot::Waist));
+        assert_eq!(Slot::from_label("OBELT"), Some(Slot::Belt));
+        assert_eq!(Slot::from_label("BELT"), Some(Slot::Belt));
+        assert_eq!(Slot::from_label("WAIST"), Some(Slot::Waist));
         assert_eq!(Slot::from_label("SHIELD"), Some(Slot::Hold));
         assert_eq!(Slot::from_label("HOLD2"), Some(Slot::Hold));
         assert_eq!(Slot::from_label("WIELD2"), Some(Slot::Wield));

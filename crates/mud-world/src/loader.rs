@@ -2060,7 +2060,7 @@ pub fn wear_flags_slots(flags: &[mud_db::enums::WearFlag]) -> Vec<crate::compone
                 Face => (13, Slot::Face),
                 Ear => (14, Slot::LeftEar),
                 Badge => (15, Slot::Badge),
-                Belt => (16, Slot::Waist),
+                Belt => (16, Slot::Belt),
                 Hover => (17, Slot::Hover),
                 Mainhand | Twohand => (18, Slot::Wield),
                 Tail | Disguise => return None,
