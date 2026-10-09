@@ -26,9 +26,9 @@ use mud_world::{
 
 use crate::TickCount;
 use crate::commands::{
-    apply_damage, broadcast_room_except_rendered, cap_sentence_start, carried_weight,
-    carry_capacity, direction_name, has_effect_named, name_of, opposite, send_to, try_insert,
-    try_remove,
+    Prevent, apply_damage, broadcast_room_except_rendered, cap_sentence_start, carried_weight,
+    carry_capacity, direction_name, effect_prevents, has_effect_named, name_of, opposite, send_to,
+    try_insert, try_remove,
 };
 
 /// Legacy `LVL_IMMORT`: gods neither fall nor feel weight.
@@ -264,7 +264,7 @@ pub(crate) fn refuse_heavy_flier(world: &mut World, caster: Entity, target: Enti
 /// Legacy `falling_yell`: the surprised yell of someone who starts to fall
 /// carries into every adjoining room.
 fn falling_yell(world: &mut World, e: Entity, room: Entity) {
-    if has_effect_named(world, e, "silence") || has_effect_named(world, e, "silenced") {
+    if effect_prevents(world, e, Prevent::Speaking) {
         return;
     }
     let Some(exits) = world.get::<Exits>(room).cloned() else {

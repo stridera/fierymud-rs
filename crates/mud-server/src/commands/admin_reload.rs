@@ -1599,6 +1599,10 @@ mod tests {
         assert_eq!(core.safefall, Some(302));
         assert_eq!(core.pick_lock, Some(266));
         assert_eq!(core.switch, Some(359));
+        assert_eq!(core.steal, Some(345));
+        assert_eq!(core.claw, Some(54));
+        assert_eq!(core.electrify, Some(119));
+        assert_eq!(core.summon_mount, Some(355));
         assert!(core.missing().is_empty());
         // Reloading a catalog that lost the names turns the features off.
         swap_ability_catalogs(
@@ -1671,7 +1675,18 @@ mod tests {
         assert_eq!(core.dodge, Some(108));
         assert_eq!(core.parry, Some(260));
         assert_eq!(core.safefall, None);
-        assert_eq!(core.missing(), vec!["Safefall", "Pick Lock", "Switch"]);
+        assert_eq!(
+            core.missing(),
+            vec![
+                "Safefall",
+                "Pick Lock",
+                "Switch",
+                "Steal",
+                "Claw",
+                "Electrify",
+                "Summon Mount"
+            ]
+        );
         let log = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
         for name in ["Safefall", "Pick Lock", "Switch"] {
             assert!(log.contains(name), "no warning for {name}: {log}");

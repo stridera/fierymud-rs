@@ -830,11 +830,12 @@ fn mob_hide_world() -> (World, Entity) {
                 hp_per_level: 0,
                 exp_gain_factor: 1.0,
                 alignment_bias: 0,
-                resistances: HashMap::new(),
                 campcraft_bonus: false,
+                resistances: HashMap::new(),
             },
         );
     }
+    world.insert_resource(mud_world::CoreClasses::resolve_quiet(&classes));
     world.insert_resource(classes);
     world.insert_resource(mud_world::MobPrototypes::default());
     (world, room)
@@ -937,10 +938,8 @@ fn mob_skill_and_class_come_from_the_prototype() {
     let novice = class_mob(&mut world, room, 2, NOVICE, 20);
     assert_eq!(hiding::skill_pct(&world, thief, "hide"), 26);
     assert_eq!(hiding::skill_pct(&world, novice, "hide"), 0);
-    assert_eq!(
-        hiding::class_plain_name(&world, thief).as_deref(),
-        Some("thief")
-    );
+    assert!(hiding::is_thief(&world, thief));
+    assert!(!hiding::is_thief(&world, novice));
 }
 
 #[test]
@@ -986,10 +985,11 @@ fn a_hide_wait_state_binds_a_thief_player_for_half_a_round() {
             hp_per_level: 0,
             exp_gain_factor: 1.0,
             alignment_bias: 0,
-            resistances: HashMap::new(),
             campcraft_bonus: false,
+            resistances: HashMap::new(),
         },
     );
+    world.insert_resource(mud_world::CoreClasses::resolve_quiet(&classes));
     world.insert_resource(classes);
     world.entity_mut(hider).insert(mud_world::Profile {
         level: 20,

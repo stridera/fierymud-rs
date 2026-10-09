@@ -101,7 +101,7 @@ pub(crate) fn object_proto(zone: i32, id: i32, kind: ObjectType) -> ObjectProto 
     }
 }
 
-/// Catalog holding the five well-known abilities under dev-like ids that
+/// Catalog holding the well-known abilities under dev-like ids that
 /// differ from the old hard-coded ones (Dodge 108, Parry 260, Safefall 302,
 /// Pick Lock 266, Switch 359), plus decoys sitting on the retired ids
 /// (Regeneration 288, Reduce 287).
@@ -113,6 +113,10 @@ pub(crate) fn core_ability_catalog() -> mud_world::AbilityCatalog {
         (302, "Safefall", AbilityKind::Skill),
         (266, "Pick Lock", AbilityKind::Skill),
         (359, "Switch", AbilityKind::Skill),
+        (345, "Steal", AbilityKind::Skill),
+        (54, "Claw", AbilityKind::Skill),
+        (119, "Electrify", AbilityKind::Skill),
+        (355, "Summon Mount", AbilityKind::Skill),
         (288, "Regeneration", AbilityKind::Chant),
         (287, "Reduce", AbilityKind::Spell),
     ] {

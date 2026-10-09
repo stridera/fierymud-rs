@@ -14,8 +14,8 @@
 
 use bevy_ecs::prelude::*;
 use mud_world::{
-    AbilityCatalog, ClassCatalog, CoreStats, Hiddenness, KnownAbilities, Located, MAX_HIDDENNESS,
-    Mob, Perception, Player, Profile,
+    AbilityCatalog, CoreStats, Hiddenness, KnownAbilities, Located, MAX_HIDDENNESS, Mob,
+    Perception, Player, Profile,
 };
 
 /// Current hiddenness, 0 when not hidden.
@@ -350,19 +350,23 @@ pub(crate) fn decay_on_move(
     hiddenness(world, mover)
 }
 
-/// Lowercase name of the class `e` belongs to (not its parents).
+/// True when `e` belongs to the Thief class itself (not a subclass of
+/// it). The class id comes from [`mud_world::CoreClasses`], resolved by
+/// plain name at boot, so it holds on any database.
 #[must_use]
-pub(crate) fn class_plain_name(world: &World, e: Entity) -> Option<String> {
-    // A mob carries its class on the prototype, not in a `Profile`.
-    let id = match world.get::<Profile>(e).and_then(|p| p.class_id) {
-        Some(id) => id,
-        None => crate::mob_ai::mob_class_id(world, e)?,
+pub(crate) fn is_thief(world: &World, e: Entity) -> bool {
+    let Some(thief) = world
+        .get_resource::<mud_world::CoreClasses>()
+        .and_then(|c| c.thief)
+    else {
+        return false;
     };
-    world
-        .get_resource::<ClassCatalog>()?
-        .by_id
-        .get(&id)
-        .map(|c| c.plain_name.to_ascii_lowercase())
+    // A mob carries its class on the prototype, not in a `Profile`.
+    let class_id = match world.get::<Profile>(e).and_then(|p| p.class_id) {
+        Some(id) => Some(id),
+        None => crate::mob_ai::mob_class_id(world, e),
+    };
+    class_id == Some(thief)
 }
 
 /// Commands that do not give a hiding character away: the legacy

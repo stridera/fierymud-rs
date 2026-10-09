@@ -2274,12 +2274,26 @@ pub struct CoreAbilities {
     pub safefall: Option<i32>,
     pub pick_lock: Option<i32>,
     pub switch: Option<i32>,
+    pub steal: Option<i32>,
+    pub claw: Option<i32>,
+    pub electrify: Option<i32>,
+    pub summon_mount: Option<i32>,
 }
 
 impl CoreAbilities {
     /// Canonical `Ability.plain_name` (matched case-insensitively, `_` and
     /// space interchangeable) for each role, in the order of the fields.
-    pub const NAMES: [&'static str; 5] = ["Dodge", "Parry", "Safefall", "Pick Lock", "Switch"];
+    pub const NAMES: [&'static str; 9] = [
+        "Dodge",
+        "Parry",
+        "Safefall",
+        "Pick Lock",
+        "Switch",
+        "Steal",
+        "Claw",
+        "Electrify",
+        "Summon Mount",
+    ];
 
     /// Resolve every role against `catalog`, warning on each missing name
     /// and once per role whose name matches more than one ability.
@@ -2348,6 +2362,10 @@ impl CoreAbilities {
             safefall: find(Self::NAMES[2]),
             pick_lock: find(Self::NAMES[3]),
             switch: find(Self::NAMES[4]),
+            steal: find(Self::NAMES[5]),
+            claw: find(Self::NAMES[6]),
+            electrify: find(Self::NAMES[7]),
+            summon_mount: find(Self::NAMES[8]),
         };
         (found, ambiguous)
     }
@@ -2361,11 +2379,74 @@ impl CoreAbilities {
             self.safefall,
             self.pick_lock,
             self.switch,
+            self.steal,
+            self.claw,
+            self.electrify,
+            self.summon_mount,
         ]
         .iter()
         .zip(Self::NAMES)
         .filter_map(|(id, name)| id.is_none().then_some(name))
         .collect()
+    }
+}
+
+/// Well-known classes the runtime reaches by role (Monk unarmed damage,
+/// the thief's short hide lag), resolved by `Class.plain_name` from the
+/// [`ClassCatalog`] at boot. Class ids are per-database serial values and
+/// differ between dev and prod, so none is ever hard-coded. A role whose
+/// name is missing is `None`: a warning is logged once at resolve time
+/// and the feature stays off.
+#[derive(Resource, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CoreClasses {
+    pub monk: Option<i32>,
+    pub thief: Option<i32>,
+}
+
+impl CoreClasses {
+    /// Canonical `Class.plain_name` (case-insensitive) for each role, in
+    /// the order of the fields.
+    pub const NAMES: [&'static str; 2] = ["Monk", "Thief"];
+
+    /// Resolve every role against `catalog`, warning on each missing name.
+    #[must_use]
+    pub fn resolve(catalog: &ClassCatalog) -> Self {
+        let found = Self::resolve_quiet(catalog);
+        for name in found.missing() {
+            tracing::warn!(
+                class = name,
+                "core class missing from the class catalog; the feature that depends on it is disabled"
+            );
+        }
+        found
+    }
+
+    /// [`Self::resolve`] without the logging. A name matching several
+    /// classes resolves to the lowest id, regardless of map order.
+    #[must_use]
+    pub fn resolve_quiet(catalog: &ClassCatalog) -> Self {
+        let find = |canonical: &str| -> Option<i32> {
+            catalog
+                .by_id
+                .values()
+                .filter(|c| c.plain_name.eq_ignore_ascii_case(canonical))
+                .map(|c| c.id)
+                .min()
+        };
+        Self {
+            monk: find(Self::NAMES[0]),
+            thief: find(Self::NAMES[1]),
+        }
+    }
+
+    /// Canonical names of the roles that did not resolve.
+    #[must_use]
+    pub fn missing(&self) -> Vec<&'static str> {
+        [self.monk, self.thief]
+            .iter()
+            .zip(Self::NAMES)
+            .filter_map(|(id, name)| id.is_none().then_some(name))
+            .collect()
     }
 }
 

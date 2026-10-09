@@ -81,8 +81,9 @@ inventory::submit! {
     category: Category::Combat,
     help: Help {
         usage: "claw <target>",
-        summary: "Slash with bestial claws (Druid / Shaman).",
-        long: "Class-gated to Druid or Shaman. Counts as a violent \
+        summary: "Slash with bestial claws.",
+        long: "Gated on knowing the Claw skill (legacy grants it to \
+               animal shapechange forms). Counts as a violent \
                opening — engages the target if you're not already \
                fighting them. Random damage scaled by your level.",
     },
@@ -115,10 +116,10 @@ inventory::submit! {
     category: Category::Combat,
     help: Help {
         usage: "electrify <target>",
-        summary: "Channel lightning into a target (mage classes).",
-        long: "Class-gated to Sorcerer / Necromancer / Conjurer / \
-               Diabolist. Electric strike — engages combat. Damage \
-               scales with level.",
+        summary: "Channel lightning into a target.",
+        long: "Gated on knowing the Electrify skill (legacy grants it \
+               to the eel shapechange form). Electric strike — \
+               engages combat. Damage scales with level.",
     },
     run: cmd_electrify,
     }
@@ -133,7 +134,8 @@ inventory::submit! {
     help: Help {
         usage: "steal <item|coins> <target>",
         summary: "Pickpocket from a target.",
-        long: "Class-gated to Thief or Assassin. Refused while \
+        long: "Gated on the Steal skill (the classes that teach it, \
+               Thief and Bard in the legacy data). Refused while \
                fighting, against yourself, against a Shopkeeper, \
                and against staff. On failure the target notices \
                and re-aggros on you. Pass 'coins' / 'gold' to \
@@ -1505,17 +1507,6 @@ pub(crate) fn cmd_consider(world: &mut World, player: Entity, target_word: &str)
     }
     send_rendered(world, player, &out);
 }
-/// Class IDs that can `steal`. Thief = 3, Assassin = 10 in the
-/// seeded Class catalog (verified against fierydev). A
-/// "rogue-skill" tag on the class would be the cleaner long-term
-/// shape so subclassing doesn't have to chase the list.
-const STEAL_CLASS_IDS: &[i32] = &[3, 10];
-/// Druid (8) / Shaman (9) for `claw`.
-const CLAW_CLASS_IDS: &[i32] = &[8, 9];
-/// Mage-family classes for `electrify`: Sorcerer (1), Necromancer
-/// (12), Conjurer (13), Diabolist (17).
-const ELECTRIFY_CLASS_IDS: &[i32] = &[1, 12, 13, 17];
-
 /// Body shared by the simple class-skill strikes (claw / peck /
 /// electrify). Verifies the class/race gate, finds a target,
 /// rolls damage, applies it, engages combat. The specifics
@@ -1620,9 +1611,25 @@ fn perform_class_strike(
     }
 }
 
+/// Whether `player` may use the skill `pick` selects from
+/// [`mud_world::CoreAbilities`], per `ClassSkills` / `KnownAbilities`
+/// (see [`crate::commands::skill_access`]).
+fn skill_usable(
+    world: &World,
+    player: Entity,
+    pick: impl Fn(&mud_world::CoreAbilities) -> Option<i32>,
+) -> bool {
+    let ability = world
+        .get_resource::<mud_world::CoreAbilities>()
+        .and_then(pick);
+    crate::commands::skill_access(world, player, ability) == crate::commands::SkillAccess::Allowed
+}
+
 pub(crate) fn cmd_claw(world: &mut World, player: Entity, args: &str) {
-    let class_id = world.get::<Profile>(player).and_then(|p| p.class_id);
-    if !class_id.is_some_and(|id| CLAW_CLASS_IDS.contains(&id)) {
+    // Legacy gives `claw` to shapechanged animal forms, not to any class,
+    // so only a `KnownAbilities` grant (or a `ClassSkills` row, if builders
+    // add one) opens it.
+    if !skill_usable(world, player, |c| c.claw) {
         send_to(world, player, "Grow some longer fingernails first.\r\n");
         return;
     }
@@ -1642,8 +1649,8 @@ pub(crate) fn cmd_peck(world: &mut World, player: Entity, args: &str) {
 }
 
 pub(crate) fn cmd_electrify(world: &mut World, player: Entity, args: &str) {
-    let class_id = world.get::<Profile>(player).and_then(|p| p.class_id);
-    if !class_id.is_some_and(|id| ELECTRIFY_CLASS_IDS.contains(&id)) {
+    // Legacy gives `electrify` to the eel shapechange form, not to a class.
+    if !skill_usable(world, player, |c| c.electrify) {
         send_to(
             world,
             player,
@@ -1660,8 +1667,7 @@ pub(crate) fn cmd_steal(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "You can't steal while fighting.\r\n");
         return;
     }
-    let class_id = world.get::<Profile>(player).and_then(|p| p.class_id);
-    if !class_id.is_some_and(|id| STEAL_CLASS_IDS.contains(&id)) {
+    if !skill_usable(world, player, |c| c.steal) {
         send_to(world, player, "You don't know how to steal.\r\n");
         return;
     }

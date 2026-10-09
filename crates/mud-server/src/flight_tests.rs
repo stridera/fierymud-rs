@@ -470,3 +470,71 @@ fn old_hardcoded_safefall_id_does_not_count() {
     run_falls(&mut f.world);
     assert_eq!(f.world.get::<Health>(f.p).unwrap().hp, 88);
 }
+
+/// Two rooms joined east-west with a listener in the east one, and a
+/// faller in the west one.
+fn yell_fx() -> (World, Entity, Entity, Rx) {
+    let mut fx = fx();
+    let west = room(&mut fx.world, "West", Sector::Field);
+    let east = room(&mut fx.world, "East", Sector::Field);
+    connect(&mut fx.world, west, Direction::East, east);
+    connect(&mut fx.world, east, Direction::West, west);
+    let (_listener, rx) = player_in(&mut fx.world, east);
+    fx.world
+        .insert_resource(mud_world::EffectCatalog::default());
+    (fx.world, fx.p, west, rx)
+}
+
+#[test]
+fn falling_yell_carries_to_adjacent_rooms() {
+    let (mut world, p, west, mut rx) = yell_fx();
+    super::falling_yell(&mut world, p, west);
+    let out = drain(&mut rx);
+    assert!(
+        out.contains("You hear a") && out.contains("from the west"),
+        "{out}"
+    );
+}
+
+#[test]
+fn falling_yell_is_silenced_by_a_prevents_speaking_effect() {
+    let (mut world, p, west, mut rx) = yell_fx();
+    // A data-flagged effect type, under a name the old code never knew.
+    world
+        .resource_mut::<mud_world::EffectCatalog>()
+        .by_id
+        .insert(
+            4,
+            mud_world::EffectDef {
+                id: 4,
+                name: "status".into(),
+                description: None,
+                effect_type: "status".into(),
+                tags: vec![],
+                presence_override: None,
+                default_params: serde_json::json!({}),
+                prevents_speaking: true,
+                prevents_casting: false,
+                prevents_movement: false,
+                on_apply: None,
+                on_tick: None,
+                on_remove: None,
+            },
+        );
+    effect(
+        &mut world,
+        p,
+        "muted_by_data",
+        EffectSource::Other("t".into()),
+    );
+    super::falling_yell(&mut world, p, west);
+    assert_eq!(drain(&mut rx), "");
+}
+
+#[test]
+fn falling_yell_is_silenced_by_the_silence_status() {
+    let (mut world, p, west, mut rx) = yell_fx();
+    effect(&mut world, p, "silence", EffectSource::Other("t".into()));
+    super::falling_yell(&mut world, p, west);
+    assert_eq!(drain(&mut rx), "");
+}

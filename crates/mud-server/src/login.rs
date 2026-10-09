@@ -475,7 +475,7 @@ impl LegacyLoginThrottle {
 pub struct NewCharDraft {
     email: Option<String>,
     character_name: String,
-    race: &'static str,
+    race: String,
     class_id: i32,
     class_plain_name: String,
     gender: &'static str,
@@ -996,7 +996,7 @@ pub enum Stage {
         password_plaintext: String,
     },
     /// Pick a race for the new character. Prompt lists the
-    /// `PLAYABLE_RACES` set; input matches case-insensitively. The
+    /// playable `Races` rows (`Races.playable`); input matches case-insensitively. The
     /// `email` field is `None` when the character-name path skipped
     /// `AwaitingCharacterName` (the identifier was already a name).
     AwaitingRace {
@@ -1013,7 +1013,7 @@ pub enum Stage {
         email: Option<String>,
         character_name: String,
         password_plaintext: String,
-        race: &'static str,
+        race: String,
     },
     /// Pick a gender for the new character. Prompt lists the
     /// schema's `Characters.gender` accepted values (`male`,
@@ -1023,7 +1023,7 @@ pub enum Stage {
         email: Option<String>,
         character_name: String,
         password_plaintext: String,
-        race: &'static str,
+        race: String,
         class_id: i32,
         class_plain_name: String,
     },
@@ -1036,7 +1036,7 @@ pub enum Stage {
         email: Option<String>,
         character_name: String,
         password_plaintext: String,
-        race: &'static str,
+        race: String,
         class_id: i32,
         class_plain_name: String,
         gender: &'static str,
@@ -1056,14 +1056,6 @@ pub enum Stage {
 /// handle these three casings; new options need a code-side
 /// review before adding here.
 const PLAYABLE_GENDERS: &[&str] = &["male", "female", "neutral"];
-
-/// Player-eligible races for the creation flow's race prompt.
-/// A subset of the schema's `Race` enum — monster / NPC variants
-/// (DRAGON, DEMON, GOBLIN, etc.) stay out of the picker. Order
-/// drives the listing the player sees.
-const PLAYABLE_RACES: &[&str] = &[
-    "HUMAN", "ELF", "HALF_ELF", "DWARF", "HALFLING", "GNOME", "GOLIATH",
-];
 
 pub struct LoginCtx {
     pub outbound: Outbound,
@@ -2187,7 +2179,7 @@ impl ConnRouter {
                         character_name: identifier,
                         password_plaintext: first_attempt,
                     };
-                    send_race_prompt(&ctx.outbound);
+                    send_race_prompt(&ctx.outbound, world);
                 }
             }
 
@@ -2238,7 +2230,7 @@ impl ConnRouter {
                             character_name: name.to_string(),
                             password_plaintext,
                         };
-                        send_race_prompt(&ctx.outbound);
+                        send_race_prompt(&ctx.outbound, world);
                     }
                     Err(e) => {
                         warn!(conn_id, error = %e, "character-name uniqueness check failed");
@@ -2266,7 +2258,7 @@ impl ConnRouter {
                 character_name,
                 password_plaintext,
             } => {
-                let Some(race) = match_playable_race(trimmed) else {
+                let Some(race) = match_playable_race(world, trimmed) else {
                     let _ = ctx.outbound.try_send(
                         format!("'{trimmed}' isn't one of the available races.\r\n").into_bytes(),
                     );
@@ -2275,7 +2267,7 @@ impl ConnRouter {
                         character_name,
                         password_plaintext,
                     };
-                    send_race_prompt(&ctx.outbound);
+                    send_race_prompt(&ctx.outbound, world);
                     return;
                 };
                 // Advance to class selection. Catalog comes from the
@@ -2345,7 +2337,7 @@ impl ConnRouter {
                     send_gender_prompt(&ctx.outbound);
                     return;
                 };
-                let stats = roll_starting_stats(world.resource::<mud_world::RaceCatalog>(), race);
+                let stats = roll_starting_stats(world.resource::<mud_world::RaceCatalog>(), &race);
                 send_stat_review(&ctx.outbound, &stats);
                 ctx.stage = Stage::ReviewStatRoll {
                     email,
@@ -2374,7 +2366,7 @@ impl ConnRouter {
                 let rerolled = matches!(answer.as_str(), "r" | "reroll" | "n" | "no");
                 if rerolled {
                     let new_stats =
-                        roll_starting_stats(world.resource::<mud_world::RaceCatalog>(), race);
+                        roll_starting_stats(world.resource::<mud_world::RaceCatalog>(), &race);
                     send_stat_review(&ctx.outbound, &new_stats);
                     ctx.stage = Stage::ReviewStatRoll {
                         email,
@@ -2656,7 +2648,7 @@ impl ConnRouter {
         let new_character = mud_db::characters::NewCharacter {
             user_id: &user_id,
             name: &character_name,
-            race,
+            race: &race,
             gender,
             class_id,
             strength: stats.strength,
@@ -4507,6 +4499,22 @@ pub(crate) fn resolve_login_room(
         .or_else(|| lookup(FALLBACK_START))
 }
 
+/// Monks fight unarmed by design: the dice stamped as their
+/// `NaturalDamage`. `None` for every other class, and for all classes
+/// when the catalog has no Monk. `core` is the boot-resolved
+/// [`mud_world::CoreClasses`].
+pub(crate) fn monk_natural_damage(
+    core: mud_world::CoreClasses,
+    class_id: Option<i32>,
+    level: i32,
+) -> Option<mud_world::NaturalDamage> {
+    (class_id.is_some() && class_id == core.monk).then(|| mud_world::NaturalDamage {
+        num: (level / 10).max(1),
+        size: 6,
+        bonus: level / 5,
+    })
+}
+
 /// Single spawn path for a player entity. The `Located(room_entity)`
 /// component is added in a follow-up insert (after spawn) only when
 /// the starting room resolved — keeping the core bundle one place
@@ -4664,6 +4672,10 @@ pub(crate) fn spawn_player(
             ),
         ))
         .id();
+    let core_classes = world
+        .get_resource::<mud_world::CoreClasses>()
+        .copied()
+        .unwrap_or_default();
     if let Ok(mut e) = world.get_entity_mut(entity) {
         if let Some(re) = room_entity {
             e.insert(Located(re));
@@ -4711,17 +4723,11 @@ pub(crate) fn spawn_player(
         // the `unarmed floor = 1` fallback (combat.rs:677). Other
         // classes stay weapon-dependent on purpose — a Brawling
         // skill (or similar buff) is the right place to grant
-        // temporary unarmed dice to non-monks. Monk class_id = 14
-        // in the seeded Class table; if that ID shifts, this
-        // check needs updating.
-        if c.class_id == Some(14) {
-            let num = (c.level / 10).max(1);
-            let bonus = c.level / 5;
-            e.insert(mud_world::NaturalDamage {
-                num,
-                size: 6,
-                bonus,
-            });
+        // temporary unarmed dice to non-monks. The Monk class id is
+        // resolved by plain name at boot (`CoreClasses`); ids differ
+        // between databases.
+        if let Some(natural) = monk_natural_damage(core_classes, c.class_id, c.level) {
+            e.insert(natural);
         }
     }
     // Body metrics — height (inches) + weight (lbs). Rolled fresh
@@ -6382,16 +6388,28 @@ fn validate_new_character_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Render the race-selection prompt. Lists `PLAYABLE_RACES` in a
+/// Races a new character may pick: every `Races` row flagged `playable`
+/// in the database, as the `Characters.race` enum text (`HUMAN`,
+/// `HALF_ELF`, ...), sorted by that text so the listing is stable.
+fn playable_races(world: &World) -> Vec<String> {
+    let Some(catalog) = world.get_resource::<mud_world::RaceCatalog>() else {
+        return Vec::new();
+    };
+    let mut races: Vec<String> = catalog
+        .by_race
+        .values()
+        .filter(|r| r.playable)
+        .map(|r| r.race.clone())
+        .collect();
+    races.sort_unstable();
+    races
+}
+
+/// Render the race-selection prompt. Lists the playable races in a
 /// single comma-joined line; players type any of the names back.
-fn send_race_prompt(outbound: &Outbound) {
+fn send_race_prompt(outbound: &Outbound, world: &World) {
     let mut msg = String::from("Available races: ");
-    for (i, race) in PLAYABLE_RACES.iter().enumerate() {
-        if i > 0 {
-            msg.push_str(", ");
-        }
-        msg.push_str(race);
-    }
+    msg.push_str(&playable_races(world).join(", "));
     msg.push_str("\r\nRace: ");
     send_prompt(outbound, msg.into_bytes());
 }
@@ -6401,9 +6419,9 @@ fn send_race_prompt(outbound: &Outbound) {
 /// pretty echo and the `Characters.race` enum value at INSERT
 /// time. Case-insensitive equality only; partial-match would be
 /// ambiguous between e.g. ELF and `HALF_ELF`.
-fn match_playable_race(input: &str) -> Option<&'static str> {
+fn match_playable_race(world: &World, input: &str) -> Option<String> {
     let needle = input.trim().to_ascii_uppercase();
-    PLAYABLE_RACES.iter().copied().find(|r| *r == needle)
+    playable_races(world).into_iter().find(|r| *r == needle)
 }
 
 /// Render the class-selection prompt. Lists every `ClassCatalog`
@@ -6939,20 +6957,82 @@ mod tests {
         assert!(validate_new_character_name("MAGES").is_ok());
     }
 
+    /// A world whose `RaceCatalog` holds `(race, playable)` rows.
+    fn world_with_races(rows: &[(&str, bool)]) -> World {
+        let mut world = World::new();
+        let mut catalog = mud_world::RaceCatalog::default();
+        for (race, playable) in rows {
+            catalog.by_race.insert(
+                (*race).to_string(),
+                mud_world::RaceDef {
+                    race: (*race).to_string(),
+                    playable: *playable,
+                    ..Default::default()
+                },
+            );
+        }
+        world.insert_resource(catalog);
+        world
+    }
+
     #[test]
     fn race_match_is_case_insensitive() {
-        assert_eq!(match_playable_race("human"), Some("HUMAN"));
-        assert_eq!(match_playable_race("Half_Elf"), Some("HALF_ELF"));
-        assert_eq!(match_playable_race("ELF"), Some("ELF"));
+        let world = world_with_races(&[("HUMAN", true), ("HALF_ELF", true), ("ELF", true)]);
+        assert_eq!(
+            match_playable_race(&world, "human").as_deref(),
+            Some("HUMAN")
+        );
+        assert_eq!(
+            match_playable_race(&world, "Half_Elf").as_deref(),
+            Some("HALF_ELF")
+        );
+        assert_eq!(match_playable_race(&world, "ELF").as_deref(), Some("ELF"));
     }
 
     #[test]
     fn race_match_rejects_partial_or_unknown() {
+        let world = world_with_races(&[("HUMAN", true), ("ELF", true), ("HALF_ELF", true)]);
         // No prefix matching — ELF and HALF_ELF would collide.
-        assert_eq!(match_playable_race("hu"), None);
-        // Schema enum value but not in the playable subset.
-        assert_eq!(match_playable_race("DEMON"), None);
-        assert_eq!(match_playable_race("DRAGON_FIRE"), None);
+        assert_eq!(match_playable_race(&world, "hu"), None);
+        // Not in the catalog at all.
+        assert_eq!(match_playable_race(&world, "DRAGON_FIRE"), None);
+    }
+
+    #[test]
+    fn race_picker_follows_the_playable_column() {
+        // GNOLL is playable in the data though the old const never listed
+        // it; GOLIATH was in the const but is flagged non-playable here.
+        let world = world_with_races(&[
+            ("HUMAN", true),
+            ("GNOLL", true),
+            ("GOLIATH", false),
+            ("DEMON", false),
+        ]);
+        assert_eq!(playable_races(&world), vec!["GNOLL", "HUMAN"]);
+        assert_eq!(
+            match_playable_race(&world, "gnoll").as_deref(),
+            Some("GNOLL")
+        );
+        assert_eq!(match_playable_race(&world, "GOLIATH"), None);
+        assert_eq!(match_playable_race(&world, "DEMON"), None);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        send_race_prompt(&tx, &world);
+        let text = String::from_utf8_lossy(&rx.try_recv().unwrap()).into_owned();
+        assert!(
+            text.contains("Available races: GNOLL, HUMAN\r\nRace: "),
+            "{text}"
+        );
+        assert!(
+            !text.contains("GOLIATH") && !text.contains("DEMON"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn race_picker_is_empty_without_a_catalog() {
+        let world = World::new();
+        assert!(playable_races(&world).is_empty());
+        assert_eq!(match_playable_race(&world, "HUMAN"), None);
     }
 
     #[test]
@@ -7200,7 +7280,7 @@ mod tests {
             notice_shown: false,
         };
         reprompt_identifier(&mut ctx, &world);
-        send_race_prompt(&ctx.outbound);
+        send_race_prompt(&ctx.outbound, &world);
         send_gender_prompt(&ctx.outbound);
         send_confirm_create_prompt(&ctx.outbound, "Bob", false);
         send_login_prompt(

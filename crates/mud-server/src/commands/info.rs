@@ -1392,8 +1392,9 @@ inventory::submit! {
         help: Help {
             usage: "summonmount",
             summary: "Conjure a mount (Paladin / Anti-Paladin only).",
-            long: "Class-gated to Paladin and Anti-Paladin; refused below \
-                   level 15, indoors, while fighting, or when you \
+            long: "Gated on the Summon Mount skill (Paladin and \
+                   Anti-Paladin from level 15 in the legacy data); \
+                   refused indoors, while fighting, or when you \
                    already have a mount following you. Spawns the \
                    first matching mountable proto as a Follower in \
                    your current room.",
@@ -6990,13 +6991,6 @@ pub(crate) fn cmd_trophy(world: &mut World, player: Entity, args: &str) {
     crate::commands::send_rendered(world, player, &out);
 }
 
-/// Class IDs from the seeded `Class` catalog. Paladin = 5,
-/// Anti-Paladin = 6 (verified against fierydev). Hardcoded for now;
-/// a tag-based "summons-mount" class flag is the cleaner long-term
-/// shape.
-const SUMMON_MOUNT_CLASS_IDS: &[i32] = &[5, 6];
-const SUMMON_MOUNT_MIN_LEVEL: i32 = 15;
-
 pub(crate) fn cmd_summonmount(world: &mut World, player: Entity, _args: &str) {
     if world.get::<Fighting>(player).is_some() {
         send_to(
@@ -7006,26 +7000,32 @@ pub(crate) fn cmd_summonmount(world: &mut World, player: Entity, _args: &str) {
         );
         return;
     }
-    let profile = world.get::<Profile>(player).cloned();
-    let Some(profile) = profile else { return };
-    let class_ok = profile
-        .class_id
-        .is_some_and(|id| SUMMON_MOUNT_CLASS_IDS.contains(&id));
-    if !class_ok {
-        send_to(
-            world,
-            player,
-            "You have no idea what you're trying to accomplish.\r\n",
-        );
+    if world.get::<Profile>(player).is_none() {
         return;
     }
-    if profile.level < SUMMON_MOUNT_MIN_LEVEL {
-        send_to(
-            world,
-            player,
-            "You aren't yet deemed worthy of a mount — gain a few more levels.\r\n",
-        );
-        return;
+    // The Summon Mount skill's class rows (Paladin / Anti-Paladin at level
+    // 15 in the legacy data) decide who may call a mount, and from when.
+    let ability = world
+        .get_resource::<mud_world::CoreAbilities>()
+        .and_then(|c| c.summon_mount);
+    match crate::commands::skill_access(world, player, ability) {
+        crate::commands::SkillAccess::Allowed => {}
+        crate::commands::SkillAccess::NeedsLevel(_) => {
+            send_to(
+                world,
+                player,
+                "You aren't yet deemed worthy of a mount — gain a few more levels.\r\n",
+            );
+            return;
+        }
+        crate::commands::SkillAccess::Refused => {
+            send_to(
+                world,
+                player,
+                "You have no idea what you're trying to accomplish.\r\n",
+            );
+            return;
+        }
     }
     let Some(located) = world.get::<Located>(player).copied() else {
         return;
@@ -12079,7 +12079,7 @@ pub(crate) fn hide_with_roll(
         roll,
     );
     hiding::set_hiddenness(world, player, rolled);
-    let wait = if hiding::class_plain_name(world, player).as_deref() == Some("thief") {
+    let wait = if hiding::is_thief(world, player) {
         params.thief_wait_ticks
     } else {
         params.wait_ticks

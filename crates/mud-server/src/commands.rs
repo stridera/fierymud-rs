@@ -511,6 +511,9 @@ pub(crate) use magic_focus::Concentrating;
 #[path = "commands/blindness_tests.rs"]
 mod blindness_tests;
 #[cfg(test)]
+#[path = "commands/data_over_code_tests.rs"]
+mod data_over_code_tests;
+#[cfg(test)]
 #[path = "commands/effects_list_tests.rs"]
 mod effects_list_tests;
 #[cfg(test)]
@@ -6208,8 +6211,8 @@ mod tests {
         // Caster A: stunned (marker present).
         world.entity_mut(caster_a).insert(Stunned);
         assert!(is_immobilized(&mut world, caster_a));
-        // Caster B: spawn a paralysis effect targeting B.
-        spawn_effect_named(&mut world, caster_b, "paralysis");
+        // Caster B: a paralyzed status targeting B.
+        spawn_effect_named(&mut world, caster_b, "paralyzed");
         assert!(is_immobilized(&mut world, caster_b));
         // Free caster: no stun, no immobilizers.
         let free = world.spawn(()).id();
@@ -19144,27 +19147,60 @@ pub(crate) fn is_being_attacked(world: &mut World, caster: Entity) -> bool {
     q.iter(world).any(|f| f.0 == caster)
 }
 
-const IMMOBILIZER_EFFECT_NAMES: &[&str] = &[
-    "paralysis",
-    "paralyze",
-    "web",
-    "frozen",
-    "freeze",
-    "hold_person",
-    "immobilize",
-];
-
-/// True iff `caster` is immobilized — has the `Stunned` marker or
-/// any active `EffectInstance` named with a recognized immobilizing
-/// effect. Used by the `not_immobilized` restriction rule
-/// (`KICK`, `TRIP_UP`, `DISENGAGE`).
+/// True iff `caster` is immobilized: it has the `Stunned` marker or an
+/// active effect that [`effect_prevents`] says blocks movement (an
+/// `Effect.prevents_movement` row, or one of the status flags the
+/// hold/web/sleep family stamps). Used by the `not_immobilized`
+/// restriction rule (`KICK`, `TRIP_UP`, `DISENGAGE`).
 pub(crate) fn is_immobilized(world: &mut World, caster: Entity) -> bool {
-    if world.get::<Stunned>(caster).is_some() {
-        return true;
+    world.get::<Stunned>(caster).is_some() || effect_prevents(world, caster, Prevent::Movement)
+}
+
+/// Whether a character may use a skill that has a dedicated command
+/// (`steal`, `summon mount`, ...), decided from data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SkillAccess {
+    Allowed,
+    /// The class teaches it, but only from this level.
+    NeedsLevel(i32),
+    /// The character's class does not have it and nothing granted it.
+    Refused,
+}
+
+/// The same gate the mortal SKILL branch of `invoke_ability` applies,
+/// for the commands that run outside it. `ability` is the id resolved by
+/// name into [`mud_world::CoreAbilities`] (`None`: the catalog lacks the
+/// ability, so nobody has the skill).
+///
+/// * The class has a `ClassSkills` row: its `min_level` must be reached,
+///   and a character who has practiced anything must have practiced this.
+/// * No row (or no class): only an explicit `KnownAbilities` entry
+///   (staff `learn`, a granted skill) opens it.
+pub(crate) fn skill_access(world: &World, player: Entity, ability: Option<i32>) -> SkillAccess {
+    let Some(ability) = ability else {
+        return SkillAccess::Refused;
+    };
+    let known = world.get::<KnownAbilities>(player);
+    let practiced = known.is_some_and(|k| k.has_any(ability));
+    let profile = world.get::<Profile>(player);
+    let min_level = profile.and_then(|p| p.class_id).and_then(|class_id| {
+        world
+            .get_resource::<mud_world::ClassSkillsData>()?
+            .min_level_for(class_id, ability)
+    });
+    match (min_level, profile) {
+        (Some(min), Some(p)) => {
+            if p.level < min {
+                SkillAccess::NeedsLevel(min)
+            } else if practiced || known.is_none_or(|k| k.entries.is_empty()) {
+                SkillAccess::Allowed
+            } else {
+                SkillAccess::Refused
+            }
+        }
+        _ if practiced => SkillAccess::Allowed,
+        _ => SkillAccess::Refused,
     }
-    IMMOBILIZER_EFFECT_NAMES
-        .iter()
-        .any(|n| has_effect_named(world, caster, n))
 }
 
 /// True iff `caster` has any item equipped in the named slot.
@@ -20051,13 +20087,15 @@ pub(crate) fn effect_prevents(world: &mut World, target: Entity, kind: Prevent) 
     if active.is_empty() {
         return false;
     }
-    let catalog = world.resource::<EffectCatalog>();
     let type_blocks = active.iter().any(|(id, _)| {
-        catalog.by_id.get(id).is_some_and(|def| match kind {
-            Prevent::Speaking => def.prevents_speaking,
-            Prevent::Casting => def.prevents_casting,
-            Prevent::Movement => def.prevents_movement,
-        })
+        world
+            .get_resource::<EffectCatalog>()
+            .and_then(|catalog| catalog.by_id.get(id))
+            .is_some_and(|def| match kind {
+                Prevent::Speaking => def.prevents_speaking,
+                Prevent::Casting => def.prevents_casting,
+                Prevent::Movement => def.prevents_movement,
+            })
     });
     if type_blocks {
         return true;
