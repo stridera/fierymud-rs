@@ -382,28 +382,45 @@ fn a_permanent_blinded_default_gives_the_marker_and_noblind_is_a_resistance() {
 /// `curespell` that cleanses the `blind` condition, and a level-20 caster
 /// who knows both.
 fn caster_with_blind_spells() -> (Fx, Entity, Rx) {
-    const BLIND_SPELL: i32 = 1;
-    const CURE_SPELL: i32 = 2;
     const STATUS: i32 = 10;
     const CLEANSE: i32 = 11;
+    caster_with_spells(vec![
+        (
+            1,
+            "Flagspell",
+            vec![(
+                STATUS,
+                Some(serde_json::json!({ "flag": "blind", "duration": 60 })),
+            )],
+        ),
+        (
+            2,
+            "Curespell",
+            vec![(CLEANSE, Some(serde_json::json!({ "condition": "blind" })))],
+        ),
+    ])
+}
+
+const STATUS: i32 = 10;
+const CLEANSE: i32 = 11;
+const MODIFY: i32 = 12;
+
+/// `(effect id, override params)` rows of one ability.
+type EffectRows = Vec<(i32, Option<serde_json::Value>)>;
+
+/// A level-20 caster who knows `spells` (id, name, effect rows), with the
+/// `status` / `cleanse` / `modify` effect kinds registered.
+fn caster_with_spells(spells: Vec<(i32, &str, EffectRows)>) -> (Fx, Entity, Rx) {
     let mut fx = fixture();
     let mut catalog = mud_world::AbilityCatalog::default();
-    for (id, name) in [(BLIND_SPELL, "Flagspell"), (CURE_SPELL, "Curespell")] {
+    let mut known = Vec::new();
+    for (id, name, rows) in spells {
         let mut spell = ability_def(id, name, AbilityKind::Spell);
         spell.cast_time_rounds = 0;
         catalog.by_name.insert(name.to_ascii_lowercase(), spell);
+        catalog.effects_for.insert(id, rows);
+        known.push((id, 500, true));
     }
-    catalog.effects_for.insert(
-        BLIND_SPELL,
-        vec![(
-            STATUS,
-            Some(serde_json::json!({ "flag": "blind", "duration": 60 })),
-        )],
-    );
-    catalog.effects_for.insert(
-        CURE_SPELL,
-        vec![(CLEANSE, Some(serde_json::json!({ "condition": "blind" })))],
-    );
     fx.world.insert_resource(catalog);
     let def = |id: i32, kind: &str| EffectDef {
         id,
@@ -423,6 +440,7 @@ fn caster_with_blind_spells() -> (Fx, Entity, Rx) {
     let mut effects = EffectCatalog::default();
     effects.by_id.insert(STATUS, def(STATUS, "status"));
     effects.by_id.insert(CLEANSE, def(CLEANSE, "cleanse"));
+    effects.by_id.insert(MODIFY, def(MODIFY, "modify"));
     fx.world.insert_resource(effects);
     fx.world
         .insert_resource(mud_world::SpellSlotData::default());
@@ -433,9 +451,7 @@ fn caster_with_blind_spells() -> (Fx, Entity, Rx) {
     fx.world.entity_mut(p).insert((
         Health { hp: 50, max: 50 },
         CombatStats::default(),
-        KnownAbilities {
-            entries: vec![(BLIND_SPELL, 500, true), (CURE_SPELL, 500, true)],
-        },
+        KnownAbilities { entries: known },
     ));
     (fx, p, rx)
 }
@@ -556,4 +572,159 @@ fn a_sighted_mover_still_leaves_normally() {
     let _ = drain(&mut orx);
     dispatch(&mut fx.world, seer, "east");
     assert!(drain(&mut orx).contains("Seer leaves east."));
+}
+
+/// The seeded Blindness / Cure Blind rows (fierylib `abilities.json`): a
+/// `blind` status plus the legacy -4 hitroll / -40 AC as accuracy / evasion,
+/// and a `cleanse` of the `blind` condition.
+fn seeded_blind_spells() -> (Fx, Entity, Rx) {
+    caster_with_spells(vec![
+        (
+            1,
+            "Blindness",
+            vec![
+                (
+                    STATUS,
+                    Some(serde_json::json!({
+                        "flag": "blind", "duration": 2, "durationUnit": "hours"
+                    })),
+                ),
+                (
+                    MODIFY,
+                    Some(serde_json::json!({
+                        "target": "accuracy", "amount": "-4",
+                        "duration": 2, "durationUnit": "hours"
+                    })),
+                ),
+                (
+                    MODIFY,
+                    Some(serde_json::json!({
+                        "target": "evasion", "amount": "-40",
+                        "duration": 2, "durationUnit": "hours"
+                    })),
+                ),
+            ],
+        ),
+        (
+            2,
+            "Cure Blind",
+            vec![(
+                CLEANSE,
+                Some(serde_json::json!({ "condition": "blind", "scope": "all" })),
+            )],
+        ),
+    ])
+}
+
+fn target_mob(fx: &mut Fx, name: &str) -> Entity {
+    let a = fx.a;
+    let e = mob_in(&mut fx.world, a, name, 0);
+    fx.world.entity_mut(e).insert(CombatStats {
+        accuracy: 50,
+        evasion: 50,
+        ..CombatStats::default()
+    });
+    e
+}
+
+fn combat_pair(world: &World, e: Entity) -> (i32, i32) {
+    let cs = world.get::<CombatStats>(e).unwrap();
+    (cs.accuracy, cs.evasion)
+}
+
+fn effects_on(world: &mut World, e: Entity) -> usize {
+    let mut q = world.query::<&mud_world::AppliedTo>();
+    q.iter(world).filter(|a| a.0 == e).count()
+}
+
+#[test]
+fn blindness_blinds_a_mob_and_cure_blind_lifts_the_whole_spell() {
+    let (mut fx, p, mut rx) = seeded_blind_spells();
+    let rat = target_mob(&mut fx, "a sewer rat");
+    let _ = drain(&mut rx);
+    cast(&mut fx, p, "cast 'blindness' rat");
+    let said = drain(&mut rx);
+    assert!(fx.world.get::<Blinded>(rat).is_some(), "blinded: {said}");
+    assert_eq!(combat_pair(&fx.world, rat), (46, 10), "legacy -4 / -40");
+    assert_eq!(effects_on(&mut fx.world, rat), 3);
+
+    cast(&mut fx, p, "cast 'cure blind' rat");
+    let said = drain(&mut rx);
+    assert!(fx.world.get::<Blinded>(rat).is_none(), "cured: {said}");
+    assert_eq!(combat_pair(&fx.world, rat), (50, 50), "penalties lifted");
+    assert_eq!(effects_on(&mut fx.world, rat), 0);
+}
+
+#[test]
+fn cure_blind_leaves_unrelated_effects_alone() {
+    let (mut fx, p, _rx) = seeded_blind_spells();
+    let rat = target_mob(&mut fx, "a sewer rat");
+    let other = fx
+        .world
+        .spawn((
+            EffectInstance {
+                kind: STATUS,
+                name: "sleeping".into(),
+                strength: 1,
+                remaining_secs: 60,
+                source: EffectSource::Spell,
+                ability_id: Some(77),
+            },
+            mud_world::AppliedTo(rat),
+        ))
+        .id();
+    cast(&mut fx, p, "cast 'blindness' rat");
+    cast(&mut fx, p, "cast 'cure blind' rat");
+    assert!(fx.world.get_entity(other).is_ok(), "sleep survives");
+    assert!(fx.world.get::<Blinded>(rat).is_none());
+}
+
+#[test]
+fn blindness_on_a_noblind_mob_changes_nothing() {
+    let (mut fx, p, mut rx) = seeded_blind_spells();
+    let mut protos = mud_world::MobPrototypes::default();
+    let mut proto = super::test_support::mob_proto(30, 1, mud_db::enums::MobProfession::Banker);
+    proto.resistances = serde_json::json!({"blind": 0});
+    protos.by_key.insert((30, 1), proto);
+    fx.world.insert_resource(protos);
+    let golem = target_mob(&mut fx, "a stone golem");
+    fx.world
+        .entity_mut(golem)
+        .insert(WorldKey { zone: 30, id: 1 });
+    let _ = drain(&mut rx);
+    cast(&mut fx, p, "cast 'blindness' golem");
+    let said = drain(&mut rx);
+    assert!(fx.world.get::<Blinded>(golem).is_none(), "NOBLIND: {said}");
+    assert_eq!(combat_pair(&fx.world, golem), (50, 50), "no penalties");
+    assert_eq!(effects_on(&mut fx.world, golem), 0);
+    assert!(said.contains("immune to blindness"), "{said}");
+}
+
+#[test]
+fn eye_gouge_formula_blinds_with_a_skill_scaled_accuracy_penalty() {
+    // Legacy eye gouge: -(2 + skill/10) hitroll for one tick, plus EFF_BLIND.
+    let (mut fx, p, _rx) = caster_with_spells(vec![(
+        1,
+        "Gouge",
+        vec![
+            (
+                STATUS,
+                Some(serde_json::json!({
+                    "flag": "blind", "duration": 1, "durationUnit": "hours"
+                })),
+            ),
+            (
+                MODIFY,
+                Some(serde_json::json!({
+                    "target": "accuracy", "amount": "-2 - skill / 10",
+                    "duration": 1, "durationUnit": "hours"
+                })),
+            ),
+        ],
+    )]);
+    let rat = target_mob(&mut fx, "a sewer rat");
+    cast(&mut fx, p, "cast 'gouge' rat");
+    assert!(fx.world.get::<Blinded>(rat).is_some());
+    // The fixture caster's skill resolves to 50: -(2 + 50 / 10) = -7.
+    assert_eq!(combat_pair(&fx.world, rat).0, 43);
 }

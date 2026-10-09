@@ -15197,6 +15197,15 @@ pub(crate) fn invoke_ability_with(
     } else {
         Some(render_header())
     };
+    // Legacy `MOB_NOBLIND` refuses the whole blinding cast (magic.cpp
+    // SPELL_BLINDNESS / SUNRAY), so the accuracy / evasion penalties that ride
+    // with the blind status never land on an immune mob either.
+    let blind_immune = target_entity != player
+        && effect_specs.iter().any(|s| {
+            s.effect_type == "status"
+                && mud_world::mob_effects::is_blind_flag(&s.name.to_ascii_lowercase())
+        })
+        && senses::is_noblind(world, target_entity);
     for spec in &effect_specs {
         warn_unused_caster_class_multiplier(
             def.id,
@@ -16183,6 +16192,10 @@ pub(crate) fn invoke_ability_with(
                 applied_msgs.push(format!("{} ({} appears)", pretty, proto.name));
             }
             "modify" => {
+                if blind_immune {
+                    applied_msgs.push(format!("{pretty} (immune to blindness)"));
+                    continue;
+                }
                 // Stat-bonus stacking. Read `target` (which stat) and
                 // `amount` (signed delta) from params; resolve the
                 // amount through the formula evaluator. Apply the
@@ -19546,18 +19559,48 @@ pub(crate) fn remove_effects_for_condition(
                 .collect()
         })
         .unwrap_or_default();
-    let to_remove: Vec<Entity> = {
+    // Every spelling of the blindness flag answers to the `blind` condition.
+    let blind_condition = mud_world::mob_effects::is_blind_flag(&condition.to_ascii_lowercase());
+    let (mut to_remove, source_abilities): (Vec<Entity>, Vec<i32>) = {
         let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
-        q.iter(world)
+        let hits: Vec<(Entity, Option<i32>)> = q
+            .iter(world)
             .filter(|(_, eff, applied)| {
                 applied.0 == target
                     && !mud_world::mob_effects::is_innate_effect(&eff.source)
                     && (eff.name.eq_ignore_ascii_case(condition)
+                        || (blind_condition
+                            && mud_world::mob_effects::is_blind_flag(
+                                &eff.name.to_ascii_lowercase(),
+                            ))
                         || eff.ability_id.is_some_and(|id| ability_ids.contains(&id)))
             })
-            .map(|(e, _, _)| e)
-            .collect()
+            .map(|(e, eff, _)| (e, eff.ability_id))
+            .collect();
+        (
+            hits.iter().map(|(e, _)| *e).collect(),
+            hits.iter().filter_map(|(_, id)| *id).collect(),
+        )
     };
+    // Legacy `effect_from_char(spell)` unwinds the whole spell: Blindness
+    // carries accuracy / evasion penalties next to its status flag, and
+    // curing the flag must lift those too.
+    if !source_abilities.is_empty() {
+        let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
+        let siblings: Vec<Entity> = q
+            .iter(world)
+            .filter(|(e, eff, applied)| {
+                applied.0 == target
+                    && !mud_world::mob_effects::is_innate_effect(&eff.source)
+                    && !to_remove.contains(e)
+                    && eff
+                        .ability_id
+                        .is_some_and(|id| source_abilities.contains(&id))
+            })
+            .map(|(e, _, _)| e)
+            .collect();
+        to_remove.extend(siblings);
+    }
     despawn_effects_on(world, target, to_remove)
 }
 
