@@ -815,3 +815,79 @@ fn a_made_sunray_save_turns_away_only_the_blinding() {
         "{said}"
     );
 }
+
+/// Cure Blind with the seeded cleanse messages, a caster, a patient "Seer"
+/// and a bystander, all in room A.
+fn cure_blind_with_messages() -> (Fx, Entity, Rx, Entity, Rx, Rx) {
+    let (mut fx, caster, crx) = caster_with_spells(vec![(
+        2,
+        "Cure Blind",
+        vec![(
+            CLEANSE,
+            Some(serde_json::json!({
+                "condition": "blind",
+                "scope": "all",
+                "message": "Your vision returns!",
+                "roomMessage": "There's a momentary gleam in {target.name}'s eyes.",
+            })),
+        )],
+    )]);
+    let a = fx.a;
+    let (seer, srx) = player(&mut fx.world, a, "Seer");
+    let (other, orx) = player(&mut fx.world, a, "Bystander");
+    for p in [seer, other] {
+        fx.world
+            .entity_mut(p)
+            .insert((Health { hp: 100, max: 100 }, CombatStats::default()));
+    }
+    (fx, caster, crx, seer, srx, orx)
+}
+
+#[test]
+fn cure_blind_tells_the_cured_and_the_room_when_sight_returns() {
+    let (mut fx, caster, mut crx, seer, mut srx, mut orx) = cure_blind_with_messages();
+    blind(&mut fx.world, seer);
+    let _ = (drain(&mut crx), drain(&mut srx), drain(&mut orx));
+    cast(&mut fx, caster, "cast 'cure blind' seer");
+    assert!(fx.world.get::<Blinded>(seer).is_none(), "cured");
+    let (cured, caster_saw, bystander) = (drain(&mut srx), drain(&mut crx), drain(&mut orx));
+    assert!(cured.contains("Your vision returns!"), "{cured}");
+    assert!(!cured.contains("momentary gleam"), "{cured}");
+    for room in [&caster_saw, &bystander] {
+        assert!(
+            room.contains("There's a momentary gleam in Seer's eyes."),
+            "{room}"
+        );
+        assert!(!room.contains("Your vision returns!"), "{room}");
+    }
+}
+
+#[test]
+fn a_cleanse_that_removes_nothing_prints_nothing() {
+    let (mut fx, caster, mut crx, _seer, mut srx, mut orx) = cure_blind_with_messages();
+    let _ = (drain(&mut crx), drain(&mut srx), drain(&mut orx));
+    cast(&mut fx, caster, "cast 'cure blind' seer");
+    let (cured, caster_saw, bystander) = (drain(&mut srx), drain(&mut crx), drain(&mut orx));
+    for out in [&cured, &caster_saw, &bystander] {
+        assert!(!out.contains("Your vision returns!"), "{out}");
+        assert!(!out.contains("momentary gleam"), "{out}");
+    }
+}
+
+#[test]
+fn cleanse_messages_come_from_the_row_override_then_default() {
+    use super::resolve_cleanse_messages;
+    let row = serde_json::json!({ "message": "A", "roomMessage": "B" });
+    let default = serde_json::json!({ "message": "D", "roomMessage": "E" });
+    assert_eq!(
+        resolve_cleanse_messages(Some(&row), Some(&default)),
+        (Some("A".into()), Some("B".into()))
+    );
+    let bare = serde_json::json!({ "condition": "poison" });
+    assert_eq!(
+        resolve_cleanse_messages(Some(&bare), Some(&default)),
+        (Some("D".into()), Some("E".into()))
+    );
+    assert_eq!(resolve_cleanse_messages(Some(&bare), None), (None, None));
+    assert_eq!(resolve_cleanse_messages(None, None), (None, None));
+}

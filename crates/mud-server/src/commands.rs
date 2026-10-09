@@ -15142,6 +15142,10 @@ pub(crate) fn invoke_ability_with(
     // Effects the `cleanse` arm removed so far; Remove Curse only lifts a
     // carried object's curse when the person had none (legacy).
     let mut cleansed_total: usize = 0;
+    // Per-condition lines from `cleanse` rows that actually removed
+    // something, `(to the target, to the rest of the room)`, sent once
+    // the cast header and success templates are out.
+    let mut cleanse_notes: Vec<(String, Option<String>)> = Vec::new();
     // Set by the teleport arm so the auto-look fires AFTER the cast
     // confirmation message rather than before it — otherwise the
     // arrival-room description splits "You read aloud from {scroll}"
@@ -15907,6 +15911,20 @@ pub(crate) fn invoke_ability_with(
                     total
                 };
                 cleansed_total += removed;
+                if removed > 0 {
+                    let (to_target, to_room) = resolve_cleanse_messages(
+                        spec.override_params.as_ref(),
+                        Some(&spec.default_params),
+                    );
+                    if let Some(t) = to_target {
+                        let line =
+                            render_ability_template(&t, &actor_name_pre, &target_name_pre, false);
+                        let room = to_room.map(|r| {
+                            render_ability_template(&r, &actor_name_pre, &target_name_pre, false)
+                        });
+                        cleanse_notes.push((line, room));
+                    }
+                }
                 applied_msgs.push(if removed == 0 {
                     format!("{pretty} (nothing to cleanse)")
                 } else {
@@ -18373,6 +18391,22 @@ pub(crate) fn invoke_ability_with(
         }
         broadcast_room_except_rendered(world, located.0, &except, &format!("{rendered}\r\n"));
     }
+    // Per-condition cleanse lines (Cure Blind's "Your vision returns!").
+    // Legacy `act(to_room, TO_ROOM)` reaches everyone in the room except
+    // the cured person, the caster included.
+    for (to_target, to_room) in cleanse_notes {
+        send_rendered(world, target_entity, &format!("{to_target}\r\n"));
+        if let Some(room_line) = to_room
+            && let Some(located) = world.get::<Located>(target_entity).copied()
+        {
+            broadcast_room_except_rendered(
+                world,
+                located.0,
+                &[target_entity],
+                &format!("{room_line}\r\n"),
+            );
+        }
+    }
     // Reagent consumption: only when the cast actually applied at
     // least one effect (mirrors the cooldown gate below). Despawn
     // every entity in `to_consume` collected during the pre-flight
@@ -19164,6 +19198,27 @@ pub(crate) fn resolve_effect_conditions(
     pick(override_params)
         .or_else(|| pick(default_params))
         .unwrap_or_default()
+}
+
+/// The lines a `cleanse` row prints when it removes something:
+/// `message` goes to the cleansed target, `roomMessage` to everyone else in
+/// the room. Both are optional and take the ability-template placeholders
+/// (`{target.name}`, `{actor.name}`). Override wins over default; a row
+/// without `message` stays silent. Callers only ask after a removal, so a
+/// cleanse that finds nothing never prints.
+pub(crate) fn resolve_cleanse_messages(
+    override_params: Option<&serde_json::Value>,
+    default_params: Option<&serde_json::Value>,
+) -> (Option<String>, Option<String>) {
+    let pick = |key: &str| -> Option<String> {
+        [override_params, default_params]
+            .into_iter()
+            .flatten()
+            .find_map(|p| p.get(key).and_then(serde_json::Value::as_str))
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    (pick("message"), pick("roomMessage"))
 }
 
 /// Add `amount` to `target.Health.hp`, capped at `max`. Returns the
