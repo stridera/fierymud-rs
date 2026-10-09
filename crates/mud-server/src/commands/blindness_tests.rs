@@ -401,17 +401,17 @@ fn caster_with_blind_spells() -> (Fx, Entity, Rx) {
     ])
 }
 
-const STATUS: i32 = 10;
-const CLEANSE: i32 = 11;
-const MODIFY: i32 = 12;
+pub(super) const STATUS: i32 = 10;
+pub(super) const CLEANSE: i32 = 11;
+pub(super) const MODIFY: i32 = 12;
 const DAMAGE: i32 = 13;
 
 /// `(effect id, override params)` rows of one ability.
-type EffectRows = Vec<(i32, Option<serde_json::Value>)>;
+pub(super) type EffectRows = Vec<(i32, Option<serde_json::Value>)>;
 
 /// A level-20 caster who knows `spells` (id, name, effect rows), with the
 /// `status` / `cleanse` / `modify` effect kinds registered.
-fn caster_with_spells(spells: Vec<(i32, &str, EffectRows)>) -> (Fx, Entity, Rx) {
+pub(super) fn caster_with_spells(spells: Vec<(i32, &str, EffectRows)>) -> (Fx, Entity, Rx) {
     let mut fx = fixture();
     let mut catalog = mud_world::AbilityCatalog::default();
     let mut known = Vec::new();
@@ -458,7 +458,7 @@ fn caster_with_spells(spells: Vec<(i32, &str, EffectRows)>) -> (Fx, Entity, Rx) 
     (fx, p, rx)
 }
 
-fn cast(fx: &mut Fx, p: Entity, line: &str) {
+pub(super) fn cast(fx: &mut Fx, p: Entity, line: &str) {
     dispatch(&mut fx.world, p, line);
     for _ in 0..10 {
         crate::casting::casting_tick(&mut fx.world);

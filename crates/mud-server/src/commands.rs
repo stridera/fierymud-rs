@@ -530,6 +530,9 @@ mod room_chat;
 #[cfg(test)]
 #[path = "commands/room_objects_tests.rs"]
 mod room_objects_tests;
+#[cfg(test)]
+#[path = "commands/sane_mind_tests.rs"]
+mod sane_mind_tests;
 #[path = "commands/save.rs"]
 mod save;
 #[cfg(test)]
