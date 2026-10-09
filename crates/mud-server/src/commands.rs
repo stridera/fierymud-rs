@@ -4208,6 +4208,11 @@ mod tests {
             names.iter().any(|n| n == "Caster"),
             "caster included in RoomAllies: {names:?}"
         );
+        assert_eq!(
+            names.last().map(String::as_str),
+            Some("Caster"),
+            "legacy mag_group hits the caster last: {names:?}"
+        );
         assert!(
             names.iter().any(|n| n == "Teammate"),
             "co-located teammate included: {names:?}"
@@ -14118,6 +14123,27 @@ fn aoe_refusal(scope: AoeScope, verb: &str, def: &mud_world::AbilityDef) -> Stri
     }
 }
 
+/// Legacy `TAR_OUTDOORS` for a room-wide cast: the caster-side
+/// `outdoors` rule's refusal, if it fails. A room-wide cast does not go
+/// through `resolve_and_gate_target` (it would repeat the refusal once
+/// per victim), so this is checked once up front instead; no other
+/// restriction rule runs here.
+fn aoe_outdoors_refusal(
+    world: &mut World,
+    player: Entity,
+    def: &mud_world::AbilityDef,
+) -> Option<String> {
+    let rules: Vec<serde_json::Value> = world
+        .resource::<AbilityCatalog>()
+        .restriction_rules
+        .get(&def.id)?
+        .iter()
+        .filter(|r| r.get("type").and_then(serde_json::Value::as_str) == Some("outdoors"))
+        .cloned()
+        .collect();
+    check_ability_restrictions(world, player, player, &rules)
+}
+
 /// Upfront checks for a room-wide cast, run before the chant starts
 /// (legacy refuses before `start_chant`, not after the wind-up): a
 /// peaceful room forbids hostile magic, and somebody has to be there to
@@ -14139,6 +14165,10 @@ fn aoe_preflight(
             player,
             "A peaceful aura forbids hostile magic here.\r\n",
         );
+        return false;
+    }
+    if let Some(refusal) = aoe_outdoors_refusal(world, player, def) {
+        send_to(world, player, format!("{refusal}\r\n"));
         return false;
     }
     if aoe_targets_in_room(world, player, room, scope).is_empty() {
@@ -14329,11 +14359,16 @@ fn aoe_targets_in_room(
         AoeScope::RoomAllies => {
             // Group members in the room. Mobs aren't included
             // (no allied-mob tag today). Caster is included.
+            // Legacy `mag_group` hits the caster last, so a group recall
+            // does not move the caster out from under the others.
             let mut q = world.query_filtered::<(Entity, &Located, &Named), With<Player>>();
-            q.iter(world)
+            let mut allies: Vec<(Entity, String)> = q
+                .iter(world)
                 .filter(|(e, l, _)| l.0 == room && group.contains(e))
                 .map(|(e, _, n)| (e, n.name.clone()))
-                .collect()
+                .collect();
+            allies.sort_by_key(|(e, _)| *e == caster);
+            allies
         }
         AoeScope::RoomAll => {
             // Everyone in the room except the caster — Players
@@ -15203,6 +15238,14 @@ pub(crate) fn invoke_ability_with(
     // recursion guard — invoke_ability_aoe iterates back through
     // this function once per target with aoe_repeat = true.
     let inferred_scope = aoe_scope_for(&def);
+    if !aoe_repeat
+        && inferred_scope.is_some()
+        && let Some(refusal) = aoe_outdoors_refusal(world, player, &def)
+    {
+        send_to(world, player, format!("{refusal}\r\n"));
+        settle_slot(world, player, slot_hold, false);
+        return;
+    }
     if !aoe_repeat && let Some(scope) = inferred_scope {
         let refusal = aoe_refusal(scope, verb, &def);
         let dispatched =
@@ -19083,6 +19126,8 @@ pub(crate) fn check_target_type(
 ///   recognized immobilizing effect (`paralysis`, `web`, `hold_person`, ...).
 /// - `npc_only` — target has the `Mob` marker.
 /// - `has_weapon` — caster has any item equipped in `Slot::Wield`.
+/// - `outdoors` — the caster's room is not indoors (see
+///   [`room_is_indoors`]); legacy `TAR_OUTDOORS`.
 pub(crate) fn check_ability_restrictions(
     world: &mut World,
     caster: Entity,
@@ -19135,6 +19180,9 @@ pub(crate) fn check_ability_restrictions(
             "not_immobilized" => !is_immobilized(world, caster),
             "npc_only" => world.get::<Mob>(resolved_target).is_some(),
             "has_weapon" => caster_has_equipped(world, caster, Slot::Wield),
+            // Legacy `TAR_OUTDOORS` (spell_parser.cpp check_spell_target):
+            // the caster's room must not be indoors.
+            "outdoors" => !caster_room_is_indoors(world, caster),
             // `has_shield` and other equipment-flag rules need
             // wear-flag plumbing not yet modeled — pass for now.
             // Unknown type → pass (don't refuse) so adding new rule
@@ -19150,6 +19198,25 @@ pub(crate) fn check_ability_restrictions(
         }
     }
     None
+}
+
+/// Legacy `INDOORS(rnum)` (rooms.hpp): a room flagged indoors
+/// (`IndoorRoom`) or in an underdark / underwater sector. Structure and
+/// cave rooms count only when the builder flagged them, exactly as in
+/// legacy. A room with no sector reads as outdoors.
+pub(crate) fn room_is_indoors(world: &World, room: Entity) -> bool {
+    world.get::<mud_world::IndoorRoom>(room).is_some()
+        || world
+            .get::<RoomSector>(room)
+            .is_some_and(|s| matches!(s.0, Sector::Underdark | Sector::Underwater))
+}
+
+/// `outdoors` rule: true when the caster's room is indoors. A caster
+/// with no room (not placed yet) is not indoors.
+fn caster_room_is_indoors(world: &World, caster: Entity) -> bool {
+    world
+        .get::<Located>(caster)
+        .is_some_and(|l| room_is_indoors(world, l.0))
 }
 
 /// Evaluate the `alignment` rule. Standard MUD thresholds: alignment

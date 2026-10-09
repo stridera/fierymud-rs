@@ -97,6 +97,52 @@ fn invigorate_fills_the_targets_pool_not_the_casters() {
     assert_eq!(fx.world.get::<Stamina>(p).unwrap().current, 10, "{said}");
 }
 
+/// Legacy `MAG_GROUP` (`skills.cpp:969`): `fierylib/data/abilities.json` carries
+/// `targetScope: ROOM_ALLIES` on Invigorate, so a cast fills the caster and
+/// every grouped player in the room, and nobody else.
+#[test]
+fn invigorate_group_scope_fills_the_caster_and_the_grouped_allies_in_the_room() {
+    let (mut fx, p, mut rx) = invigorate_caster();
+    fx.world
+        .resource_mut::<mud_world::AbilityCatalog>()
+        .by_name
+        .get_mut("invigorate")
+        .unwrap()
+        .target_scope = "ROOM_ALLIES".to_string();
+    let drained = Stamina {
+        current: 1,
+        max: 300,
+    };
+    fx.world.entity_mut(p).insert(drained);
+    let (a, b) = (fx.a, fx.b);
+    let mut members = Vec::new();
+    for (name, room, grouped) in [
+        ("Ally", a, true),
+        ("Stranger", a, false),
+        ("Faraway", b, true),
+    ] {
+        let (e, rx) = player(&mut fx.world, room, name);
+        std::mem::forget(rx);
+        fx.world.entity_mut(e).insert((
+            Health { hp: 100, max: 100 },
+            CombatStats::default(),
+            drained,
+        ));
+        if grouped {
+            fx.world.entity_mut(e).insert(mud_world::Follower(p));
+        }
+        members.push(e);
+    }
+    let _ = drain(&mut rx);
+    cast(&mut fx, p, "cast 'invigorate'");
+    let said = drain(&mut rx);
+    let current = |fx: &Fx, e: Entity| fx.world.get::<Stamina>(e).unwrap().current;
+    assert_eq!(current(&fx, p), 300, "caster: {said}");
+    assert_eq!(current(&fx, members[0]), 300, "grouped ally: {said}");
+    assert_eq!(current(&fx, members[1]), 1, "ungrouped stranger: {said}");
+    assert_eq!(current(&fx, members[2]), 1, "grouped but elsewhere: {said}");
+}
+
 // ---- Nature's Embrace ---------------------------------------------------
 
 fn embrace_caster() -> (Fx, Entity, Rx) {
@@ -241,4 +287,107 @@ fn sunray_rolls_30d10_against_a_player_and_20d10_against_a_mob() {
     let mean = |v: &[i32]| v.iter().sum::<i32>() / i32::try_from(v.len()).unwrap();
     assert!(mean(&vs_mob) < 180, "mob mean {}", mean(&vs_mob));
     assert!(mean(&vs_player) > 180, "player mean {}", mean(&vs_player));
+}
+
+// ---- TAR_OUTDOORS (legacy spell_parser.cpp:1559) -------------------------
+
+const TOO_ENCLOSED: &str = "This area is too enclosed to cast that spell!";
+
+fn outdoors_rule() -> serde_json::Value {
+    serde_json::json!({ "type": "outdoors", "message": TOO_ENCLOSED })
+}
+
+fn require_outdoors(fx: &mut Fx, ability: &str) {
+    let mut catalog = fx.world.resource_mut::<mud_world::AbilityCatalog>();
+    let id = catalog.by_name[ability].id;
+    catalog.restriction_rules.insert(id, vec![outdoors_rule()]);
+}
+
+fn embrace_in(
+    sector: Option<mud_db::enums::Sector>,
+    flagged_indoors: bool,
+) -> (Fx, Entity, String) {
+    let (mut fx, p, mut rx) = embrace_caster();
+    require_outdoors(&mut fx, "natures embrace");
+    let room = fx.a;
+    if let Some(sector) = sector {
+        fx.world
+            .entity_mut(room)
+            .insert(mud_world::RoomSector(sector));
+    }
+    if flagged_indoors {
+        fx.world.entity_mut(room).insert(mud_world::IndoorRoom);
+    }
+    let _ = drain(&mut rx);
+    cast(&mut fx, p, "cast 'natures embrace' caster");
+    let said = drain(&mut rx);
+    (fx, p, said)
+}
+
+#[test]
+fn outdoors_spell_is_refused_in_an_indoors_flagged_room_with_the_legacy_line() {
+    let (fx, p, said) = embrace_in(Some(mud_db::enums::Sector::Forest), true);
+    assert!(said.contains(TOO_ENCLOSED), "{said}");
+    assert_eq!(hiding::hiddenness(&fx.world, p), 0, "no effect: {said}");
+}
+
+#[test]
+fn outdoors_spell_is_refused_in_underdark_and_underwater_sectors() {
+    for sector in [
+        mud_db::enums::Sector::Underdark,
+        mud_db::enums::Sector::Underwater,
+    ] {
+        let (fx, p, said) = embrace_in(Some(sector), false);
+        assert!(said.contains(TOO_ENCLOSED), "{sector:?}: {said}");
+        assert_eq!(hiding::hiddenness(&fx.world, p), 0, "{sector:?}");
+    }
+}
+
+#[test]
+fn outdoors_spell_works_outside_and_in_an_unflagged_structure_like_legacy() {
+    // Legacy INDOORS(): ROOM_INDOORS, underdark, underwater. A STRUCTURE or
+    // CAVE room the builder did not flag indoors counts as outdoors.
+    for sector in [
+        None,
+        Some(mud_db::enums::Sector::Forest),
+        Some(mud_db::enums::Sector::Structure),
+        Some(mud_db::enums::Sector::Cave),
+    ] {
+        let (fx, p, said) = embrace_in(sector, false);
+        assert!(!said.contains(TOO_ENCLOSED), "{sector:?}: {said}");
+        assert_eq!(hiding::hiddenness(&fx.world, p), 250, "{sector:?}: {said}");
+    }
+}
+
+#[test]
+fn outdoors_room_wide_spell_is_refused_once_before_anyone_is_touched() {
+    let (mut fx, p, mut rx) = invigorate_caster();
+    {
+        let mut catalog = fx.world.resource_mut::<mud_world::AbilityCatalog>();
+        catalog.by_name.get_mut("invigorate").unwrap().target_scope = "ROOM_ALLIES".to_string();
+    }
+    require_outdoors(&mut fx, "invigorate");
+    let a = fx.a;
+    fx.world.entity_mut(a).insert(mud_world::IndoorRoom);
+    fx.world.entity_mut(p).insert(Stamina {
+        current: 2,
+        max: 90,
+    });
+    let (ally, arx) = player(&mut fx.world, a, "Ally");
+    std::mem::forget(arx);
+    fx.world.entity_mut(ally).insert((
+        Health { hp: 100, max: 100 },
+        CombatStats::default(),
+        Stamina {
+            current: 2,
+            max: 90,
+        },
+        mud_world::Follower(p),
+    ));
+    let _ = drain(&mut rx);
+    cast(&mut fx, p, "cast 'invigorate'");
+    let said = drain(&mut rx);
+    assert_eq!(said.matches(TOO_ENCLOSED).count(), 1, "{said}");
+    assert_eq!(fx.world.get::<Stamina>(p).unwrap().current, 2, "{said}");
+    assert_eq!(fx.world.get::<Stamina>(ally).unwrap().current, 2, "{said}");
 }
