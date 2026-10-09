@@ -666,6 +666,7 @@ async fn housing_reward_is_granted_once() {
             flags_added: vec![mud_db::enums::ObjectFlag::Magic],
             ..Default::default()
         }),
+        charges: Some(0),
     };
     let placed = mud_db::housing::place_item(&fx.pool, rooms[0].id, oz, oid, &custom)
         .await

@@ -2175,10 +2175,12 @@ pub(crate) fn cmd_tripup(world: &mut World, player: Entity, args: &str) {
         "use",
     );
 }
-/// Area attacks hit every mob in the room; drop the attacker's own group
-/// (own pets, followers and group members' pets, as legacy `area_attack_target`
-/// skips `is_grouped` and `master` links) and other players' pets the PK rule
-/// forbids `player` to attack (silently, as legacy `mass_attack_ok`).
+/// Area attacks hit every mob in the room; drop what legacy `area_attack_target`
+/// spares: the attacker's group (`is_grouped`), the attacker's own followers
+/// and the one the attacker follows (`master` links, either way). Anything
+/// else that merely follows a groupmate is fair game. Then drop other
+/// players' pets the PK rule forbids `player` to attack (silently, as legacy
+/// `mass_attack_ok`).
 fn skip_forbidden_pets(world: &mut World, player: Entity, targets: Vec<Entity>) -> Vec<Entity> {
     let my_root = super::group_root(world, player);
     let party = super::group_members(world, my_root);
@@ -2190,7 +2192,7 @@ fn skip_forbidden_pets(world: &mut World, player: Entity, targets: Vec<Entity>) 
             let master = world.get::<mud_world::Follower>(*t).map(|f| f.0);
             !party.contains(t)
                 && Some(*t) != followed
-                && !master.is_some_and(|m| m == player || party.contains(&m))
+                && master != Some(player)
                 && (super::attack_ok::pet_owner(world, *t).is_none()
                     || super::attack_ok::attack_ok(world, player, *t, false))
         })
@@ -3823,5 +3825,44 @@ mod attack_while_fighting_tests {
         crate::commands::disengage_attackers_of(&mut world, ogre);
         cmd_attack(&mut world, p, "rat");
         assert_eq!(hp(&world, rat), 99, "next target swings right away");
+    }
+}
+
+#[cfg(test)]
+mod area_spare_tests {
+    use super::*;
+    use mud_world::{Follower, GroupMember, Mob, Player};
+
+    fn named(world: &mut World, room: Entity, name: &str, player: bool) -> Entity {
+        let e = world
+            .spawn((Named { name: name.into() }, Located(room)))
+            .id();
+        if player {
+            world.entity_mut(e).insert(Player);
+        } else {
+            world.entity_mut(e).insert(Mob);
+        }
+        e
+    }
+
+    /// Legacy `area_attack_target` spares the attacker's group, followers
+    /// and leader, nothing else: a player (or mob) merely trailing a
+    /// groupmate is hit.
+    #[test]
+    fn something_following_a_groupmate_is_not_spared() {
+        let mut world = World::new();
+        let room = world.spawn_empty().id();
+        let me = named(&mut world, room, "Me", true);
+        let mate = named(&mut world, room, "Mate", true);
+        world.entity_mut(mate).insert(GroupMember(me));
+        let tail = named(&mut world, room, "Tail", true);
+        world.entity_mut(tail).insert(Follower(mate));
+        let mine = named(&mut world, room, "Mine", false);
+        world.entity_mut(mine).insert(Follower(me));
+        let boss = named(&mut world, room, "Boss", true);
+        world.entity_mut(me).insert(Follower(boss));
+
+        let hit = skip_forbidden_pets(&mut world, me, vec![mate, tail, mine, boss]);
+        assert_eq!(hit, vec![tail], "only the groupmate's tag-along is hit");
     }
 }

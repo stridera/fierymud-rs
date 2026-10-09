@@ -343,6 +343,7 @@ pub(crate) fn extract_mob(
         }
     }
     disengage_attackers_of(world, mob);
+    super::ungroup_on_despawn(world, mob);
     if let Ok(e) = world.get_entity_mut(mob) {
         e.despawn();
     }

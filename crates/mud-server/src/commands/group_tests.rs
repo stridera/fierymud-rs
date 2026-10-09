@@ -158,3 +158,115 @@ fn a_dead_leader_leaves_no_phantom_group() {
     t.fx.world.despawn(t.leader);
     assert_eq!(group_root(&t.fx.world, t.friend), t.friend);
 }
+
+/// Leader plus two members: Friend and Mallory both accepted.
+fn full_group() -> Trio {
+    let mut t = trio();
+    grouped(
+        &mut t.fx, t.leader, &mut t.lrx, t.friend, &mut t.frx, "friend",
+    );
+    grouped(
+        &mut t.fx, t.leader, &mut t.lrx, t.stalker, &mut t.srx, "mallory",
+    );
+    assert_eq!(group_members(&mut t.fx.world, t.leader).len(), 3);
+    t
+}
+
+#[test]
+fn the_leader_leaving_hands_the_group_to_the_next_member() {
+    let mut t = full_group();
+    let _ = (drain(&mut t.frx), drain(&mut t.srx), drain(&mut t.lrx));
+    super::ungroup(&mut t.fx.world, t.leader, true, false);
+    t.fx.world.despawn(t.leader);
+
+    let (new_lead, other) = if t.fx.world.get::<GroupMember>(t.friend).is_none() {
+        (t.friend, t.stalker)
+    } else {
+        (t.stalker, t.friend)
+    };
+    assert!(t.fx.world.get::<GroupMember>(new_lead).is_none());
+    assert_eq!(group_root(&t.fx.world, other), new_lead);
+    assert_eq!(group_members(&mut t.fx.world, new_lead).len(), 2);
+    assert!(
+        t.fx.world
+            .get::<mud_world::Follower>(new_lead)
+            .is_none_or(|f| f.0 != t.leader),
+        "nobody keeps following the departed leader"
+    );
+    let (lead_rx, other_rx) = if new_lead == t.friend {
+        (&mut t.frx, &mut t.srx)
+    } else {
+        (&mut t.srx, &mut t.frx)
+    };
+    let lead_out = drain(lead_rx);
+    let other_out = drain(other_rx);
+    assert!(
+        lead_out.contains("You're now leading the group!"),
+        "{lead_out}"
+    );
+    assert!(
+        other_out.contains("is now leading your group!"),
+        "{other_out}"
+    );
+}
+
+#[test]
+fn a_member_leaving_leaves_the_group_going() {
+    let mut t = full_group();
+    let _ = (drain(&mut t.lrx), drain(&mut t.srx));
+    super::ungroup(&mut t.fx.world, t.friend, true, false);
+    t.fx.world.despawn(t.friend);
+
+    assert_eq!(group_members(&mut t.fx.world, t.leader).len(), 2);
+    assert_eq!(group_root(&t.fx.world, t.stalker), t.leader);
+    let lead_out = drain(&mut t.lrx);
+    let other_out = drain(&mut t.srx);
+    assert!(
+        lead_out.contains("Friend has left your group!"),
+        "{lead_out}"
+    );
+    assert!(
+        other_out.contains("Friend has left your group!"),
+        "{other_out}"
+    );
+}
+
+#[test]
+fn a_two_person_group_dissolves_when_either_side_leaves() {
+    let mut t = trio();
+    grouped(
+        &mut t.fx, t.leader, &mut t.lrx, t.friend, &mut t.frx, "friend",
+    );
+    let _ = drain(&mut t.frx);
+    super::ungroup(&mut t.fx.world, t.leader, true, false);
+    t.fx.world.despawn(t.leader);
+    assert!(t.fx.world.get::<GroupMember>(t.friend).is_none());
+    assert_eq!(group_members(&mut t.fx.world, t.friend), vec![t.friend]);
+    let out = drain(&mut t.frx);
+    assert!(out.contains("Leader has disbanded the group."), "{out}");
+}
+
+#[test]
+fn a_member_with_no_follow_link_can_still_leave() {
+    let mut t = trio();
+    // The leader is already following Friend, so accepting cannot make
+    // Friend follow back (that would be a cycle).
+    say(&mut t.fx, t.leader, &mut t.lrx, "follow friend");
+    grouped(
+        &mut t.fx, t.leader, &mut t.lrx, t.friend, &mut t.frx, "friend",
+    );
+    assert!(t.fx.world.get::<GroupMember>(t.friend).is_some());
+    assert!(t.fx.world.get::<mud_world::Follower>(t.friend).is_none());
+
+    let out = say(&mut t.fx, t.friend, &mut t.frx, "unfollow");
+    assert!(out.contains("You have left your group!"), "{out}");
+    assert!(t.fx.world.get::<GroupMember>(t.friend).is_none());
+
+    // `follow self` is the same exit.
+    grouped(
+        &mut t.fx, t.leader, &mut t.lrx, t.friend, &mut t.frx, "friend",
+    );
+    assert!(t.fx.world.get::<GroupMember>(t.friend).is_some());
+    say(&mut t.fx, t.friend, &mut t.frx, "follow self");
+    assert!(t.fx.world.get::<GroupMember>(t.friend).is_none());
+}

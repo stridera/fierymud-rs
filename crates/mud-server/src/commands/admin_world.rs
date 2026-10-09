@@ -1232,6 +1232,7 @@ pub(crate) fn cmd_purge(world: &mut World, player: Entity, args: &str) {
         for n in nested {
             crate::equip_apply::despawn_item(world, n);
         }
+        crate::commands::ungroup_on_despawn(world, target);
         if let Ok(e) = world.get_entity_mut(target) {
             e.despawn();
         }
@@ -1502,18 +1503,7 @@ pub(crate) fn cmd_loadobj(world: &mut World, player: Entity, args: &str) {
     }
     let item = bundle.id();
     crate::item_decay::attach_timer_if_decaying(world, item, &proto);
-    // Populate Charges from the first ObjectAbilities binding
-    // (wands and staves carry finite-use charges in the schema's
-    // `charges` column). Items without a binding or without
-    // charges set get no Charges component → treated as unlimited.
-    if let Some(charges) = world
-        .resource::<mud_world::ObjectAbilityCatalog>()
-        .by_key
-        .get(&(proto.zone_id, proto.id))
-        .and_then(|v| v.first().and_then(|b| b.charges))
-    {
-        crate::commands::try_insert(world, item, mud_world::Charges(charges));
-    }
+    mud_world::attach_proto_charges(world, item, proto.zone_id, proto.id);
 
     send_rendered(
         world,
@@ -2007,6 +1997,7 @@ pub(crate) fn cmd_zreset(world: &mut World, player: Entity, args: &str) {
         // Disengage anyone still locked onto this mob so combat
         // doesn't dangle a Fighting reference into the void.
         crate::commands::disengage_attackers_of(world, e);
+        crate::commands::ungroup_on_despawn(world, e);
         if let Ok(em) = world.get_entity_mut(e) {
             em.despawn();
         }

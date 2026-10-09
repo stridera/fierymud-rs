@@ -85,6 +85,10 @@ pub struct HouseItemCustom {
     pub examine: Option<String>,
     pub keywords: Option<Vec<String>>,
     pub alter: Option<ItemAlter>,
+    /// Remaining charges of a wand / staff / instrument (`custom_values`
+    /// key `charges`). `None` for items that carry no charge count; those
+    /// keep whatever the prototype hands a fresh instance.
+    pub charges: Option<i32>,
 }
 
 impl HouseItemCustom {
@@ -103,18 +107,27 @@ impl HouseItemCustom {
             .get("curse")
             .and_then(|v| serde_json::from_value::<ItemAlter>(v.clone()).ok())
             .filter(|a| !a.is_empty());
+        let charges = values
+            .get("charges")
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|c| i32::try_from(c).ok());
         Self {
             name,
             examine,
             keywords,
             alter,
+            charges,
         }
     }
 
     /// The `custom_values` JSON for these fields (`{}` when there are none).
     #[must_use]
     pub fn values(&self) -> serde_json::Value {
-        custom_values_patch(false, self.keywords.as_deref(), self.alter.as_ref())
+        let mut values = custom_values_patch(false, self.keywords.as_deref(), self.alter.as_ref());
+        if let (Some(charges), Some(map)) = (self.charges, values.as_object_mut()) {
+            map.insert("charges".into(), serde_json::json!(charges));
+        }
+        values
     }
 }
 

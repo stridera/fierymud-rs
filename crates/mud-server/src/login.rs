@@ -1332,6 +1332,10 @@ async fn retire_player(world: &mut World, entity: Entity, pool: &PgPool) {
     // items) are despawned, so the state isn't lost with it.
     let outcome = save_player_final(world, entity, pool).await;
     retry_failed_save(world, outcome, pool);
+    // Legacy `extract_char` -> `ungroup`: a leaving leader hands the group to
+    // the next member, a leaving member just drops out. Quit, camp, idle
+    // kicks and linkdead timeouts all land here.
+    commands::ungroup(world, entity, true, false);
     // Despawn the player AND every item they were carrying / wearing
     // (Located(player) catches both inventory and equipped —
     // EquippedSlot is additive), including items nested inside
@@ -6332,26 +6336,15 @@ pub(crate) fn spawn_inventory(
                 worn.insert(slot);
                 e.insert(EquippedSlot(slot));
             }
-            // Charges: prefer the persisted per-instance value when
-            // the row has one (>= 0); fall back to the proto's binding
-            // charges so freshly-inserted-by-admin rows that left
-            // charges at the schema default `-1` still get a sensible
-            // initial pool. Wands that were half-spent before logout
-            // now come back half-spent.
-            let proto_charges = world
-                .resource::<mud_world::ObjectAbilityCatalog>()
-                .by_key
-                .get(&(proto.zone_id, proto.id))
-                .and_then(|v| v.first().and_then(|b| b.charges));
-            let resolved_charges = if row.charges >= 0 {
-                Some(row.charges)
-            } else {
-                proto_charges
-            };
-            if let Some(charges) = resolved_charges
+            // Charges: the proto's starting pool first (so a row left at the
+            // schema default `-1` still gets one), then the persisted
+            // per-instance value when the row has one (>= 0). Wands that were
+            // half-spent before logout come back half-spent.
+            mud_world::attach_proto_charges(world, item_entity, proto.zone_id, proto.id);
+            if row.charges >= 0
                 && let Ok(mut e) = world.get_entity_mut(item_entity)
             {
-                e.insert(mud_world::Charges(charges));
+                e.insert(mud_world::Charges(row.charges));
             }
             // LiquidContainer: if the row has a saved liquid_type, use
             // the saved liquid+remaining; otherwise the proto default
@@ -10505,6 +10498,42 @@ mod tests {
         assert!(world.get_entity(p).is_err(), "player despawned");
         let coordinator = world.resource::<SaveCoordinator>().clone();
         assert_eq!(coordinator.pending(), 1, "retry task owns the snapshot");
+    }
+
+    /// Every exit funnels through `retire_player`: a leader who quits hands
+    /// the group on, a member who quits just drops out.
+    #[tokio::test(flavor = "current_thread")]
+    async fn quitting_hands_the_group_on_or_drops_the_member() {
+        let mut world = World::new();
+        world.insert_resource(SaveCoordinator::default());
+        let room = world.spawn_empty().id();
+        let lead = spawn_player_for(&mut world, "grp-lead", room);
+        let m1 = spawn_player_for(&mut world, "grp-m1", room);
+        let m2 = spawn_player_for(&mut world, "grp-m2", room);
+        for m in [m1, m2] {
+            world.entity_mut(m).insert(mud_world::GroupMember(lead));
+        }
+        let pool = failing_pool();
+        let mut router = ConnRouter::new();
+
+        router.playing.insert(1, lead);
+        router.on_disconnect(&mut world, 1, &pool).await;
+        assert!(world.get_entity(lead).is_err());
+        let still: Vec<Entity> = [m1, m2]
+            .into_iter()
+            .filter(|m| world.get::<mud_world::GroupMember>(*m).is_some())
+            .collect();
+        assert_eq!(still.len(), 1, "one member now leads, the other follows");
+        let new_lead = if still[0] == m1 { m2 } else { m1 };
+        assert_eq!(mud_world::group_root(&world, still[0]), new_lead);
+
+        // The remaining member quits: the two-person group is gone.
+        router.playing.insert(2, still[0]);
+        router.on_disconnect(&mut world, 2, &pool).await;
+        assert_eq!(
+            mud_world::group_members(&mut world, new_lead),
+            vec![new_lead]
+        );
     }
 
     static RELOG_RETRY: &[Duration] = &[Duration::from_millis(150)];

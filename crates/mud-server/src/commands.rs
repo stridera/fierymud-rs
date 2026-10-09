@@ -13894,6 +13894,11 @@ pub(crate) fn spawn_house_item(
     }
     let item = bundle.id();
     mud_world::attach_proto_charges(world, item, proto.zone_id, proto.id);
+    // What is left in the wand, not what a fresh one holds: the stored count
+    // wins over the prototype's.
+    if let Some(charges) = custom.charges {
+        try_insert(world, item, mud_world::Charges(charges));
+    }
     if custom.name.is_some() || custom.examine.is_some() || custom.keywords.is_some() {
         crate::item_custom::install(
             world,
@@ -13921,6 +13926,7 @@ pub(crate) fn house_item_custom(world: &World, item: Entity) -> mud_db::housing:
         examine: custom.and_then(|c| c.examine.clone()),
         keywords: custom.and_then(|c| c.keywords.clone()),
         alter: (!alter.is_empty()).then_some(alter),
+        charges: world.get::<mud_world::Charges>(item).map(|c| c.0),
     }
 }
 
@@ -22687,6 +22693,151 @@ pub(crate) fn release_from(world: &mut World, member: Entity, leader: Entity) {
         .is_some_and(|g| g.0 == leader)
     {
         try_remove::<mud_world::GroupMember>(world, member);
+    }
+}
+
+/// Legacy `ungroup()` (`movement.cpp`): take `ch` out of whatever group it
+/// is in, telling the others with the legacy text. A leader hands the group
+/// to its first member (the rest are retargeted to them); a group that would
+/// be left with a single person is disbanded. A member just leaves. `verbose`
+/// is false only for silent bulk teardown; `forceful` selects the "kicked"
+/// wording. No-op when `ch` is in no group. Called wherever an actor leaves
+/// the world (`retire_player`, mob despawns) and by `unfollow`.
+pub(crate) fn ungroup(world: &mut World, ch: Entity, verbose: bool, forceful: bool) {
+    let others: Vec<Entity> = group_members(world, ch).into_iter().skip(1).collect();
+    if !others.is_empty() {
+        // `ch` leads.
+        if others.len() == 1 {
+            disband_group(world, ch, &others, verbose, false);
+            return;
+        }
+        let new_leader = others[0];
+        for m in &others {
+            release_from(world, *m, ch);
+        }
+        for m in &others[1..] {
+            try_insert(world, *m, mud_world::GroupMember(new_leader));
+        }
+        if verbose {
+            send_to(
+                world,
+                ch,
+                "<green>You're no longer leading your group.</>\r\n",
+            );
+            send_to(
+                world,
+                new_leader,
+                "<green>You're now leading the group!</>\r\n",
+            );
+            let name = name_of(world, new_leader);
+            for m in &others[1..] {
+                send_to(
+                    world,
+                    *m,
+                    format!("<green>{name} is now leading your group!</>\r\n"),
+                );
+            }
+        }
+        return;
+    }
+    let Some(leader) = world
+        .get::<mud_world::GroupMember>(ch)
+        .map(|g| g.0)
+        .filter(|l| world.get_entity(*l).is_ok())
+    else {
+        // No group, or the leader already left: just drop the stale marker.
+        try_remove::<mud_world::GroupMember>(world, ch);
+        return;
+    };
+    let ch_name = name_of(world, ch);
+    let leader_name = name_of(world, leader);
+    let remaining: Vec<Entity> = group_members(world, leader)
+        .into_iter()
+        .skip(1)
+        .filter(|m| *m != ch)
+        .collect();
+    if remaining.is_empty() {
+        // Only one other member: the group dissolves with them.
+        if verbose {
+            let (to_leader, to_ch) = if forceful {
+                (
+                    format!("You remove {ch_name} from the group."),
+                    format!("{leader_name} has removed you from the group."),
+                )
+            } else {
+                (
+                    format!("{ch_name} has left the group."),
+                    "You have left your group!".to_string(),
+                )
+            };
+            send_to(world, leader, format!("<green>{to_leader}</>\r\n"));
+            send_to(world, ch, format!("<green>{to_ch}</>\r\n"));
+        }
+        disband_group(world, leader, &[ch], verbose, true);
+        return;
+    }
+    release_from(world, ch, leader);
+    if verbose {
+        let (to_others, to_ch, to_leader) = if forceful {
+            (
+                format!("{ch_name} has been kicked out of your group!"),
+                "You have been kicked out of your group.".to_string(),
+                format!("You have kicked {ch_name} out of your group."),
+            )
+        } else {
+            (
+                format!("{ch_name} has left your group!"),
+                "You have left your group!".to_string(),
+                format!("{ch_name} has left your group!"),
+            )
+        };
+        for m in &remaining {
+            send_to(world, *m, format!("<green>{to_others}</>\r\n"));
+        }
+        send_to(world, ch, format!("<green>{to_ch}</>\r\n"));
+        send_to(world, leader, format!("<green>{to_leader}</>\r\n"));
+    }
+}
+
+/// Mob despawn hook. Only players lead or join groups, so a mob can at most
+/// carry a stray member marker; a cheap check keeps the per-death cost nil.
+pub(crate) fn ungroup_on_despawn(world: &mut World, mob: Entity) {
+    if world.get::<mud_world::GroupMember>(mob).is_some() {
+        ungroup(world, mob, true, false);
+    }
+}
+
+/// Legacy `disband_group()`: every one of `members` is released from
+/// `leader` (marker and follow link).
+fn disband_group(
+    world: &mut World,
+    leader: Entity,
+    members: &[Entity],
+    verbose: bool,
+    forceful: bool,
+) {
+    if verbose {
+        send_to(
+            world,
+            leader,
+            if forceful {
+                "<green>The group has been disbanded.</>\r\n"
+            } else {
+                "<green>You disband the group.</>\r\n"
+            },
+        );
+    }
+    let leader_name = name_of(world, leader);
+    for m in members {
+        release_from(world, *m, leader);
+        if verbose {
+            let text = if forceful {
+                "The group has been disbanded.".to_string()
+            } else {
+                format!("{leader_name} has disbanded the group.")
+            };
+            send_to(world, *m, format!("<green>{text}</>\r\n"));
+        }
     }
 }
 

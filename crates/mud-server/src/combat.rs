@@ -2330,6 +2330,7 @@ fn finish_mob_death(world: &mut World, victim: Entity) {
             timers.last_death_tick.insert(reset_id, now);
         }
     }
+    crate::commands::ungroup_on_despawn(world, victim);
     if let Ok(e) = world.get_entity_mut(victim) {
         e.despawn();
     }

@@ -14469,11 +14469,22 @@ pub(crate) fn cmd_follow(world: &mut World, player: Entity, args: &str) {
 }
 
 pub(crate) fn cmd_unfollow(world: &mut World, player: Entity, _args: &str) {
+    // A group member can have no follow link at all (the leader was already
+    // following them when they accepted), so leaving the group cannot hinge
+    // on one. Walking away from your group leader leaves the group.
+    let in_group = world
+        .get::<mud_world::GroupMember>(player)
+        .is_some_and(|g| world.get_entity(g.0).is_ok());
+    if in_group {
+        ungroup(world, player, true, false);
+    }
     let prev = world.get::<Follower>(player).copied();
     try_remove::<Follower>(world, player);
+    if prev.is_none() && in_group {
+        // Left the group; there was no follow link to announce.
+        return;
+    }
     if let Some(Follower(prev_target)) = prev {
-        // Walking away from your group leader leaves the group.
-        release_from(world, player, prev_target);
         let target_name = name_of(world, prev_target);
         send_rendered(
             world,
