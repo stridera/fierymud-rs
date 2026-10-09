@@ -666,6 +666,8 @@ mod belt_slot_tests;
 #[cfg(test)]
 #[path = "commands/help_tests.rs"]
 mod help_tests;
+#[path = "commands/staff_find.rs"]
+mod staff_find;
 #[cfg(test)]
 #[path = "commands/symbol_cmd_tests.rs"]
 mod symbol_cmd_tests;

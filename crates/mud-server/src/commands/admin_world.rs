@@ -3065,24 +3065,46 @@ pub(crate) fn cmd_teleport(world: &mut World, player: Entity, args: &str) {
         cmd_look(world, target, "");
     }
 }
+/// Resolve a staff location argument (`goto` / `at`): a room id in the
+/// current zone, `<zone> <id>` or `<zone>:<id>`, `home`, or the name of a
+/// player or mob (their room). Applies the destination's entry restriction
+/// (legacy `find_target_room`'s god-room check). Sends the refusal itself
+/// and returns `None` on any failure.
 #[allow(clippy::too_many_lines)]
-pub(crate) fn cmd_goto(world: &mut World, player: Entity, args: &str) {
-    let parts: Vec<&str> = args.split_whitespace().collect();
-    let target: Option<Entity> = match parts.as_slice() {
+pub(crate) fn resolve_staff_destination(
+    world: &mut World,
+    player: Entity,
+    parts: &[&str],
+) -> Option<Entity> {
+    let target: Option<Entity> = match parts {
         [] => {
             send_to(
                 world,
                 player,
-                "Usage: goto <id> | goto <zone> <id> | goto <name> | goto home\r\n",
+                "You must supply a room number or a name.\r\n",
             );
-            return;
+            return None;
+        }
+        [arg] if arg.contains(':') && parse_zone_id(arg).is_some() => {
+            // `goto 30:45` — the `zone:id` form `vnum` / `vlist` print.
+            let (zone, room_id) = parse_zone_id(arg)?;
+            let entity = world
+                .resource::<WorldKeyIndex>()
+                .rooms
+                .get(&(zone, room_id))
+                .copied();
+            if entity.is_none() {
+                send_to(world, player, format!("No room ({zone}, {room_id}).\r\n"));
+                return None;
+            }
+            entity
         }
         [arg] if arg.eq_ignore_ascii_case("home") => {
             // Legacy do_goto: "home" is the staff member's own home room
             // (here the bound recall point, else the race start room).
             let Some(home) = crate::commands::recall::recall_room(world, player) else {
                 send_to(world, player, "Your home room is invalid.\r\n");
-                return;
+                return None;
             };
             Some(home)
         }
@@ -3097,7 +3119,7 @@ pub(crate) fn cmd_goto(world: &mut World, player: Entity, args: &str) {
                 .copied();
             if entity.is_none() {
                 send_to(world, player, format!("No room ({zone}, {room_id}).\r\n"));
-                return;
+                return None;
             }
             entity
         }
@@ -3112,7 +3134,7 @@ pub(crate) fn cmd_goto(world: &mut World, player: Entity, args: &str) {
                 .and_then(|l| world.get::<WorldKey>(l.0).map(|k| k.zone));
             let Some(zone) = here_zone else {
                 send_to(world, player, "Can't resolve current zone.\r\n");
-                return;
+                return None;
             };
             let entity = world
                 .resource::<WorldKeyIndex>()
@@ -3125,7 +3147,7 @@ pub(crate) fn cmd_goto(world: &mut World, player: Entity, args: &str) {
                     player,
                     format!("No room {room_id} in zone {zone}.\r\n"),
                 );
-                return;
+                return None;
             }
             entity
         }
@@ -3167,7 +3189,7 @@ pub(crate) fn cmd_goto(world: &mut World, player: Entity, args: &str) {
                     player,
                     format!("No one named '{needle}' here or anywhere.\r\n"),
                 );
-                return;
+                return None;
             };
             world.get::<Located>(actor).map(|l| l.0)
         }
@@ -3175,7 +3197,7 @@ pub(crate) fn cmd_goto(world: &mut World, player: Entity, args: &str) {
 
     let Some(target) = target else {
         send_to(world, player, "Couldn't resolve a destination.\r\n");
-        return;
+        return None;
     };
     // Legacy do_goto has no no-teleport gate: it is a staff command and
     // `ROOM_NOTELEPORT` only constrains the teleport spells.
@@ -3187,8 +3209,31 @@ pub(crate) fn cmd_goto(world: &mut World, player: Entity, args: &str) {
             player,
             "You are not godly enough to use that room!\r\n",
         );
+        return None;
+    }
+    Some(target)
+}
+
+/// `zone:id` token as printed by `vnum` / `vlist`.
+fn parse_zone_id(token: &str) -> Option<(i32, i32)> {
+    let (z, i) = token.split_once(':')?;
+    Some((z.parse().ok()?, i.parse().ok()?))
+}
+
+#[allow(clippy::too_many_lines)]
+pub(crate) fn cmd_goto(world: &mut World, player: Entity, args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    if parts.is_empty() {
+        send_to(
+            world,
+            player,
+            "Usage: goto <id> | goto <zone> <id> | goto <name> | goto home\r\n",
+        );
         return;
     }
+    let Some(target) = resolve_staff_destination(world, player, &parts) else {
+        return;
+    };
     let origin = world.get::<Located>(player).map(|l| l.0);
     let (poof_in, poof_out) = world
         .get::<mud_world::Poofs>(player)
