@@ -994,6 +994,16 @@ mod tests {
     }
 
     #[test]
+    fn empty_tank_and_target_keep_their_angle_brackets() {
+        // #13: `<%t> : <%o>` out of combat reads `<> : <>`, not ` : `.
+        let mut c = ctx();
+        c.victim = None;
+        c.tank = None;
+        assert_eq!(plain(&render_prompt("<%t> : <%o>", &c)), "<> : <> ");
+        assert_eq!(plain(&render_prompt("<%t>:<%o>", &c)), "<>:<> ");
+    }
+
+    #[test]
     fn status_alias_bands_match_legacy() {
         let word = |cur, max| plain(&status_alias(cur, max));
         assert_eq!(word(100, 100), "excellent");
