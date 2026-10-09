@@ -8901,6 +8901,136 @@ mod tests {
         temp_cleanup(&pool, &[], &[&ch.id], &[]).await;
     }
 
+    /// Enchant Weapon's per-instance applies, `MAGIC` flag and barred
+    /// alignment ride in the `curse` key of `custom_values`, reload with the
+    /// item, and are re-granted on wield rather than baked into any saved
+    /// character stat.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn item_enchantment_survives_save_and_reload() {
+        use mud_db::enums::{Alignment, ObjectFlag};
+        use mud_world::components::{ItemApplies, ItemBarredAlignments};
+        let Some((pool, _db_lock)) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let object: Option<(i32, i32)> =
+            mud_db::sqlx::query_as("SELECT zone_id, id FROM \"Objects\" LIMIT 1")
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+        let Some((oz, oid)) = object else {
+            eprintln!("skipping: no Objects rows");
+            return;
+        };
+        let (_user, ch) = temp_unlinked_char(&pool, "enchant").await;
+        let mut protos = mud_world::ObjectPrototypes::default();
+        let mut proto =
+            crate::commands::test_support::object_proto(oz, oid, mud_db::enums::ObjectType::Weapon);
+        proto.weapon_dice_num = 2;
+        proto.weapon_dice_size = 6;
+        protos.by_key.insert((oz, oid), proto);
+        let by_key = protos.by_key.clone();
+        let mut world = World::new();
+        world.insert_resource(SaveCoordinator::default());
+        world.insert_resource(protos);
+        world.insert_resource(mud_world::TriggerCatalog::default());
+        world.insert_resource(mud_world::ObjectAbilityCatalog::default());
+        let room = world.spawn_empty().id();
+        let player = spawn_player_for(&mut world, &ch.id, room);
+        let sword = world
+            .spawn((
+                Item,
+                Named {
+                    name: "a test object".into(),
+                },
+                WorldKey { zone: oz, id: oid },
+                Located(player),
+            ))
+            .id();
+        world.entity_mut(sword).insert((
+            ItemApplies(vec![("accuracy".into(), 4), ("attack_power".into(), 10)]),
+            mud_world::ObjectFlags(vec![ObjectFlag::Magic]),
+            ItemBarredAlignments(vec![Alignment::Evil]),
+        ));
+        crate::item_alter::mark_dirty(&mut world, sword);
+        save(&mut world, player, &pool).await;
+        let pid = world.get::<mud_world::PersistedItemId>(sword).unwrap().0;
+        let stored: serde_json::Value = mud_db::sqlx::query_scalar(
+            "SELECT custom_values -> 'curse' FROM \"CharacterItems\" WHERE id = $1",
+        )
+        .bind(pid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(stored["applies"][0]["target"], "accuracy");
+        assert_eq!(stored["applies"][0]["amount"], 4);
+        assert_eq!(stored["applies"][1]["target"], "attack_power");
+        assert_eq!(stored["flags_added"], serde_json::json!(["Magic"]));
+        assert_eq!(stored["alignments_barred"], serde_json::json!(["Evil"]));
+
+        // Relog: the enchantment is back, and wielding grants it exactly once.
+        let rows = mud_db::character_items::list_for(&pool, &ch.id)
+            .await
+            .unwrap();
+        let mut fresh = World::new();
+        fresh.insert_resource(mud_world::ObjectPrototypes { by_key });
+        fresh.insert_resource(mud_world::TriggerCatalog::default());
+        fresh.insert_resource(mud_world::ObjectAbilityCatalog::default());
+        let fresh_room = fresh.spawn_empty().id();
+        let who = spawn_player_for(&mut fresh, &ch.id, fresh_room);
+        assert_eq!(spawn_inventory(&mut fresh, who, &rows), 1);
+        let loaded = fresh
+            .query_filtered::<Entity, With<Item>>()
+            .iter(&fresh)
+            .next()
+            .unwrap();
+        assert_eq!(
+            fresh.get::<ItemApplies>(loaded).unwrap().0,
+            vec![
+                ("accuracy".to_string(), 4),
+                ("attack_power".to_string(), 10)
+            ]
+        );
+        assert!(
+            fresh
+                .get::<mud_world::ObjectFlags>(loaded)
+                .unwrap()
+                .has(ObjectFlag::Magic)
+        );
+        assert_eq!(
+            fresh.get::<ItemBarredAlignments>(loaded).unwrap().0,
+            vec![Alignment::Evil]
+        );
+        assert!(
+            fresh
+                .get::<mud_world::components::ItemAlterDirty>(loaded)
+                .is_none()
+        );
+        fresh
+            .entity_mut(who)
+            .insert(mud_world::CombatStats::default());
+        let before = fresh.get::<mud_world::CombatStats>(who).map(|c| c.accuracy);
+        fresh
+            .entity_mut(loaded)
+            .insert(mud_world::EquippedSlot(mud_world::Slot::Wield));
+        crate::equip_apply::apply_object_to_wearer(&mut fresh, loaded, who);
+        let after = fresh.get::<mud_world::CombatStats>(who).map(|c| c.accuracy);
+        assert_eq!(after.unwrap_or(0) - before.unwrap_or(0), 4);
+        assert_eq!(
+            crate::equip_apply::gear_offsets(&fresh, who),
+            crate::equip_apply::GearOffsets::default(),
+            "the enchantment is not part of any persisted stat"
+        );
+
+        mud_db::sqlx::query("DELETE FROM \"CharacterItems\" WHERE character_id = $1")
+            .bind(&ch.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        temp_cleanup(&pool, &[], &[&ch.id], &[]).await;
+    }
+
     /// Issues #67/#68: a custom name, examine text and keyword override
     /// written through the normal save reload on the next login, set the
     /// mirroring instance flags, and clearing them clears the columns.

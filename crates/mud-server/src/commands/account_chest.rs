@@ -977,6 +977,7 @@ mod tests {
                 restrictions_added: vec!["NO_DROP".to_string()],
                 restrictions_removed: Vec::new(),
                 weapon_dice_size: -1,
+                ..Default::default()
             }),
         };
         let json = serde_json::to_value(&state).unwrap();

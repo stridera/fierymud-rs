@@ -12,7 +12,9 @@
 //! (`ItemCustomSnap::overwrite`), or on INSERT.
 //! Spell-altered state (a Curse's restriction change and weapon-die shrink,
 //! [`ItemAlter`]) lives in the `curse` key of `custom_values` and follows the
-//! same rule (`ItemAlterSnap::overwrite`). The `ItemInstanceFlag` enum has no
+//! same rule (`ItemAlterSnap::overwrite`). Enchant Weapon's instance changes
+//! (stat applies, the `MAGIC` flag, barred alignments) ride in the same key.
+//! The `ItemInstanceFlag` enum has no
 //! curse value and is a DB-schema type owned by the editor, so the delta is
 //! kept in the JSONB column instead.
 //! Other columns (`condition`, the rest of `custom_values`, the rest of
@@ -99,6 +101,24 @@ pub struct ItemAlter {
     /// Change to the weapon's dice size (negative: cursed).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub weapon_dice_size: i32,
+    /// Stat applies a spell put on this instance (Enchant Weapon): modern
+    /// modify keys and amounts, e.g. `("accuracy", 4)`. Granted when the
+    /// item is worn, so they are never baked into the saved character.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub applies: Vec<ItemApply>,
+    /// Object flags the instance has that its prototype does not (`MAGIC`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flags_added: Vec<crate::enums::ObjectFlag>,
+    /// Alignments a spell barred from wielding the instance.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alignments_barred: Vec<crate::enums::Alignment>,
+}
+
+/// One per-instance stat apply (see [`ItemAlter::applies`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemApply {
+    pub target: String,
+    pub amount: i32,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -113,6 +133,9 @@ impl ItemAlter {
         self.restrictions_added.is_empty()
             && self.restrictions_removed.is_empty()
             && self.weapon_dice_size == 0
+            && self.applies.is_empty()
+            && self.flags_added.is_empty()
+            && self.alignments_barred.is_empty()
     }
 }
 

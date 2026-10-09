@@ -289,6 +289,20 @@ pub fn apply_object_to_wearer(world: &mut World, item: Entity, wearer: Entity) {
             }
         }
     }
+    // ---- Per-instance applies (Enchant Weapon) ----
+    // Stat applies a spell put on this one item, on top of the prototype's
+    // grants. Recorded in `applied_deltas` like any other apply, so unequip
+    // releases them and the save path (`gear_offsets`) subtracts any that
+    // land in a persisted stat.
+    let instance_applies = world
+        .get::<mud_world::components::ItemApplies>(item)
+        .map(|a| a.0.clone())
+        .unwrap_or_default();
+    for (target, amount) in instance_applies {
+        if amount != 0 && apply_modify_delta(world, wearer, &target, amount) {
+            applied_deltas.push((target, amount));
+        }
+    }
     // ---- Bookkeeping for unapply ----
     let bookkeeping = GrantedDeltas {
         deltas: applied_deltas,
@@ -300,6 +314,41 @@ pub fn apply_object_to_wearer(world: &mut World, item: Entity, wearer: Entity) {
         || !bookkeeping.resistances.is_empty()
     {
         try_insert(world, item, bookkeeping);
+    }
+}
+
+/// Grant `applies` (just added to `item` by a spell) to whoever is wearing
+/// it right now, recording them with the rest of the item's grants so
+/// unequip releases them. Nothing to do for an item that is not worn: it
+/// picks them up from its `ItemApplies` when next worn.
+pub(crate) fn grant_applies_to_worn(world: &mut World, item: Entity, applies: &[(String, i32)]) {
+    if world.get::<EquippedSlot>(item).is_none() {
+        return;
+    }
+    let Some(wearer) = world.get::<mud_world::Located>(item).map(|l| l.0) else {
+        return;
+    };
+    let granted: Vec<(String, i32)> = applies
+        .iter()
+        .filter(|(target, amount)| {
+            *amount != 0 && apply_modify_delta(world, wearer, target, *amount)
+        })
+        .cloned()
+        .collect();
+    if granted.is_empty() {
+        return;
+    }
+    if let Some(mut b) = world.get_mut::<GrantedDeltas>(item) {
+        b.deltas.extend(granted);
+    } else {
+        try_insert(
+            world,
+            item,
+            GrantedDeltas {
+                deltas: granted,
+                ..GrantedDeltas::default()
+            },
+        );
     }
 }
 

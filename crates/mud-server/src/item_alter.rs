@@ -1,8 +1,10 @@
 //! Persistence of spell-altered item state (Curse / Remove Curse, legacy
-//! `mag_alter_obj`): the restriction change and the weapon-die shrink.
+//! `mag_alter_obj`; Enchant Weapon, legacy `spell_enchant_weapon`): the
+//! restriction change, the weapon-die shrink, and the enchantment (stat
+//! applies, the `MAGIC` flag, barred alignments).
 //!
-//! Live state is the item's [`ObjectRestrictions`] and
-//! [`WeaponDiceSizeAdjust`]. What is stored is the delta against the
+//! Live state is the item's [`ObjectRestrictions`], [`WeaponDiceSizeAdjust`],
+//! [`ItemApplies`], [`ObjectFlags`] and [`ItemBarredAlignments`]. What is stored is the delta against the
 //! prototype ([`ItemAlter`], the `curse` key of `CharacterItems.custom_values`
 //! or the account-chest row), so later edits to the prototype's own
 //! restrictions still reach the instance. Only a changed ([`ItemAlterDirty`])
@@ -10,10 +12,12 @@
 //! [`mud_world::ItemCustomization`]; an INSERT always writes it.
 
 use bevy_ecs::prelude::*;
-use mud_db::character_items::ItemAlter;
-use mud_db::enums::ObjectRestriction;
-use mud_world::components::{ItemAlterDirty, WeaponDiceSizeAdjust};
-use mud_world::{ObjectPrototypes, ObjectRestrictions, WorldKey};
+use mud_db::character_items::{ItemAlter, ItemApply};
+use mud_db::enums::{ObjectFlag, ObjectRestriction};
+use mud_world::components::{
+    ItemAlterDirty, ItemApplies, ItemBarredAlignments, WeaponDiceSizeAdjust,
+};
+use mud_world::{ObjectFlags, ObjectPrototypes, ObjectRestrictions, WorldKey};
 
 /// DB / JSON spelling of a restriction.
 fn db_name(r: ObjectRestriction) -> &'static str {
@@ -45,6 +49,17 @@ fn proto_restrictions(world: &World, item: Entity) -> Vec<ObjectRestriction> {
         .unwrap_or_default()
 }
 
+fn proto_flags(world: &World, item: Entity) -> Vec<ObjectFlag> {
+    let Some(key) = world.get::<WorldKey>(item) else {
+        return Vec::new();
+    };
+    world
+        .get_resource::<ObjectPrototypes>()
+        .and_then(|p| p.by_key.get(&(key.zone, key.id)))
+        .map(|p| p.flags.clone())
+        .unwrap_or_default()
+}
+
 /// Mark `item` as changed by a spell so the next save writes it.
 pub(crate) fn mark_dirty(world: &mut World, item: Entity) {
     if let Ok(mut em) = world.get_entity_mut(item) {
@@ -73,10 +88,37 @@ pub(crate) fn snapshot(world: &World, item: Entity) -> ItemAlter {
             restrictions_removed.push(name);
         }
     }
+    let proto_flags = proto_flags(world, item);
+    let mut flags_added: Vec<ObjectFlag> = Vec::new();
+    for f in world
+        .get::<ObjectFlags>(item)
+        .map(|f| f.0.as_slice())
+        .unwrap_or_default()
+    {
+        if !proto_flags.contains(f) && !flags_added.contains(f) {
+            flags_added.push(*f);
+        }
+    }
     ItemAlter {
         restrictions_added,
         restrictions_removed,
         weapon_dice_size: world.get::<WeaponDiceSizeAdjust>(item).map_or(0, |a| a.0),
+        applies: world
+            .get::<ItemApplies>(item)
+            .map(|a| {
+                a.0.iter()
+                    .map(|(target, amount)| ItemApply {
+                        target: target.clone(),
+                        amount: *amount,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        flags_added,
+        alignments_barred: world
+            .get::<ItemBarredAlignments>(item)
+            .map(|a| a.0.clone())
+            .unwrap_or_default(),
     }
 }
 
@@ -106,6 +148,30 @@ pub(crate) fn restore(world: &mut World, item: Entity, alter: &ItemAlter, dirty:
     }
     if alter.weapon_dice_size != 0 {
         em.insert(WeaponDiceSizeAdjust(alter.weapon_dice_size));
+    }
+    if !alter.applies.is_empty() {
+        em.insert(ItemApplies(
+            alter
+                .applies
+                .iter()
+                .map(|a| (a.target.clone(), a.amount))
+                .collect(),
+        ));
+    }
+    if !alter.alignments_barred.is_empty() {
+        em.insert(ItemBarredAlignments(alter.alignments_barred.clone()));
+    }
+    if !alter.flags_added.is_empty() {
+        let mut flags = em
+            .get::<ObjectFlags>()
+            .map(|f| f.0.clone())
+            .unwrap_or_default();
+        for f in &alter.flags_added {
+            if !flags.contains(f) {
+                flags.push(*f);
+            }
+        }
+        em.insert(ObjectFlags(flags));
     }
     if dirty {
         em.insert(ItemAlterDirty);

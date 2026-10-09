@@ -1143,6 +1143,7 @@ async fn curse_delta_persists_through_corpse_loot_and_overwrite() {
         restrictions_added: vec!["NO_DROP".to_string()],
         restrictions_removed: Vec::new(),
         weapon_dice_size: -1,
+        ..Default::default()
     };
     let with_alter = |persisted_id: Option<i32>, in_corpse: bool, alter: Option<ItemAlterSnap>| {
         let mut s = corpse_snap(persisted_id, key, None, in_corpse);

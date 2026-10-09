@@ -13161,7 +13161,7 @@ pub(crate) fn wear_refusal(
     // blocked by alignment / class / race the world authors set
     // for normal players.
     let staff_bypass = is_staff(world, player);
-    let (alignment_restriction, class_restriction, race_restriction) = if staff_bypass {
+    let (mut alignment_restriction, class_restriction, race_restriction) = if staff_bypass {
         Default::default()
     } else {
         world
@@ -13181,6 +13181,12 @@ pub(crate) fn wear_refusal(
             })
             .unwrap_or_default()
     };
+    // Alignments a spell barred from this one item (Enchant Weapon).
+    if !staff_bypass
+        && let Some(barred) = world.get::<mud_world::components::ItemBarredAlignments>(item)
+    {
+        alignment_restriction.extend(barred.0.iter().copied());
+    }
     // B6: inclusive allow-list + size band. Loaded separately so
     // the existing tuple doesn't grow further.
     let (allowed_races, min_size, max_size): (Vec<String>, Option<String>, Option<String>) = world
@@ -15203,15 +15209,7 @@ pub(crate) fn invoke_ability_with(
     // a 0..=100 scale — the same scale `practice` displays. Without
     // this division a L21 sorc's `burning hands` resolved to
     // `4d19 + pow(1000, 1.25)` ≈ 5660 damage. G2.2.
-    let caster_skill = world
-        .get::<KnownAbilities>(player)
-        .and_then(|k| {
-            k.entries
-                .iter()
-                .find(|(id, _, _)| *id == def.id)
-                .map(|(_, p, _)| *p)
-        })
-        .map_or(0, |raw| (raw / 10).clamp(0, 100));
+    let caster_skill = known_skill_pct(world, player, def.id);
     tracing::debug!(
         ability_id = def.id,
         ability_name = def.plain_name.as_str(),
@@ -16660,7 +16658,7 @@ pub(crate) fn invoke_ability_with(
                 //                   AC = better; ward+N → ac-=N)
                 //   - Maxes:        max_hp, max_move/max_stamina
                 // Unsupported targets (unarmed_damage, weapon_hitroll,
-                // item_bonus, max_mana, ...) spawn a labeled effect
+                // max_mana, ...) spawn a labeled effect
                 // without applying anything.
                 let target_stat = spec
                     .override_params
@@ -20682,6 +20680,33 @@ impl FormulaCtx {
             }
             _ => None,
         }
+    }
+}
+
+/// `entity`'s proficiency in ability `ability_id` on the 0..=100 scale
+/// spell formulas are written against (the schema stores 0..=1000).
+fn known_skill_pct(world: &World, entity: Entity, ability_id: i32) -> i32 {
+    world
+        .get::<KnownAbilities>(entity)
+        .and_then(|k| {
+            k.entries
+                .iter()
+                .find(|(id, _, _)| *id == ability_id)
+                .map(|(_, p, _)| *p)
+        })
+        .map_or(0, |raw| (raw / 10).clamp(0, 100))
+}
+
+/// Caster-only formula symbols for casts that never reach the full
+/// context above (spells on objects): `level`, `skill`, `caster_align`.
+pub(crate) fn caster_formula_ctx(world: &World, caster: Entity, ability_id: i32) -> FormulaCtx {
+    FormulaCtx {
+        level: mud_world::effective_level(world, caster).max(1),
+        skill: known_skill_pct(world, caster, ability_id),
+        caster_align: world
+            .get::<CombatStats>(caster)
+            .map_or(0, |cs| cs.alignment),
+        ..FormulaCtx::default()
     }
 }
 

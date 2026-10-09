@@ -367,6 +367,20 @@ impl ObjectRestrictions {
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WeaponDiceSizeAdjust(pub i32);
 
+/// Stat applies a spell put on this one item instance (legacy Enchant
+/// Weapon writes `obj->applies[]`): `(modify stat key, amount)` pairs in the
+/// same modern units `ObjectEffects` modify rows use. Granted on top of the
+/// prototype's own grants when the item is worn (`equip_apply`), released
+/// when it comes off. Never part of the saved character stats.
+#[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
+pub struct ItemApplies(pub Vec<(String, i32)>);
+
+/// Alignments barred from wielding this item by a spell (legacy Enchant
+/// Weapon's `ITEM_ANTI_EVIL` / `ITEM_ANTI_GOOD`), on top of the prototype's
+/// own `restricted_alignments`.
+#[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
+pub struct ItemBarredAlignments(pub Vec<mud_db::enums::Alignment>);
+
 /// Marker: a spell changed this item's restrictions or weapon die this
 /// session (Curse / Remove Curse), so the next save writes the delta over
 /// its `CharacterItems` row. Cleared once a save has written it, like
