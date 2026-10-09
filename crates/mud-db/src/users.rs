@@ -198,6 +198,15 @@ pub async fn clear_failed_logins(pool: &PgPool, user_id: &str) -> sqlx::Result<(
 /// for a stand-alone INSERT or `&mut *tx` for a transactional
 /// pair with the matching `Characters` INSERT.
 ///
+/// The email was only typed at the game prompt, never proven, so the
+/// row is created with `preferences.emailVerified = false`. Muditor's
+/// Google login refuses to auto-link by email to such a row (otherwise
+/// anyone could pre-register a victim's address in game and inherit
+/// their website account when they later sign in with Google). There is
+/// no `emailVerified` column; the flag lives in the existing
+/// `preferences` JSON so no schema change is needed. Rows without the
+/// key (website registrations, imports) count as verified.
+///
 /// Email + `display_name` uniqueness is enforced by the table's
 /// indexes; collisions surface as `sqlx::Error::Database` and
 /// the caller should re-prompt the user.
@@ -208,8 +217,9 @@ pub async fn create<'e, E: PgExecutor<'e>>(
 ) -> sqlx::Result<String> {
     let row = sqlx::query!(
         r#"
-        INSERT INTO "Users" (id, email, display_name, role, updated_at)
-        VALUES (gen_random_uuid()::text, $1, $2, 'PLAYER'::"UserRole", NOW())
+        INSERT INTO "Users" (id, email, display_name, role, preferences, updated_at)
+        VALUES (gen_random_uuid()::text, $1, $2, 'PLAYER'::"UserRole",
+                '{"emailVerified": false}'::jsonb, NOW())
         RETURNING id
         "#,
         email,

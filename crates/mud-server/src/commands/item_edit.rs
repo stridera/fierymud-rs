@@ -76,6 +76,7 @@ fn find_own_item(world: &mut World, needle: &str, player: Entity) -> Option<Enti
 }
 
 fn cmd_nameitem(world: &mut World, player: Entity, args: &str) {
+    let args = mud_net::sanitize_text(args, false);
     let args = args.trim();
     let Some((needle, rest)) = args.split_once(char::is_whitespace) else {
         send_to(

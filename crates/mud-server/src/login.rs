@@ -191,6 +191,9 @@ pub struct WebLogin {
     /// Character picked at the identifier prompt (character-name
     /// path); `None` for the email path, which lands in `CharSelect`.
     preselected: Option<Box<CharacterRow>>,
+    /// Shown for an email with no account: no database row backs it and
+    /// it can never be approved. See [`ConnRouter::begin_decoy_approval`].
+    decoy: bool,
     _poller: PollGuard,
 }
 
@@ -499,6 +502,12 @@ enum AuthDoneKind {
     Create {
         draft: NewCharDraft,
         hashed: Result<String, String>,
+    },
+    /// Result of the character-name lookups started at the identifier
+    /// prompt; see [`ConnRouter::finish_char_lookup`].
+    CharLookup {
+        identifier: String,
+        result: CharLookup,
     },
     /// The poller saw the device-code row leave PENDING (or reach its
     /// deadline); the main loop re-reads it and resolves the login.
@@ -1133,9 +1142,111 @@ pub struct ConnCapabilities {
     pub eor: bool,
     pub mxp: bool,
     pub utf8: bool,
+    /// `Core.Hello` / `Core.Supports.Set` payloads are logged once per
+    /// connection (a client can repeat them without limit).
+    hello_logged: bool,
+    supports_logged: bool,
     /// Shared output capabilities (colour depth, charset) for this
     /// connection. The same handle the writer encodes with.
     pub output: mud_net::OutputHandle,
+}
+
+/// What the identifier prompt's character-name lookups found.
+pub(crate) enum CharLookup {
+    Found {
+        character: Box<CharacterRow>,
+        user: Option<User>,
+        game_hash: String,
+    },
+    Unknown,
+    Failed,
+}
+
+/// Look up a character by name together with its owning account and
+/// GAME password hash. Runs off the world loop (see the identifier
+/// prompt).
+async fn lookup_character(pool: &PgPool, name: &str) -> CharLookup {
+    let character = match characters::find_by_name(pool, name).await {
+        Ok(Some(c)) => c,
+        Ok(None) => return CharLookup::Unknown,
+        Err(e) => {
+            warn!(error = %e, "character lookup failed");
+            return CharLookup::Failed;
+        }
+    };
+    let user = match character.user_id.as_deref() {
+        Some(uid) => match users::find_by_id(pool, uid).await {
+            Ok(u) => u,
+            Err(e) => {
+                warn!(error = %e, "user lookup failed");
+                None
+            }
+        },
+        None => None,
+    };
+    // The GAME password is always the character's own
+    // `Characters.password_hash` (bcrypt or legacy crypt(3));
+    // `Users.password_hash` (the website password) is never loaded.
+    let game_hash = match characters::load_password_hash(pool, &character.id).await {
+        Ok(h) => h,
+        Err(e) => {
+            warn!(error = %e, "character password lookup failed");
+            return CharLookup::Failed;
+        }
+    };
+    CharLookup::Found {
+        character: Box::new(character),
+        user,
+        game_hash,
+    }
+}
+
+/// Shown before an email's login code, for registered and unregistered
+/// addresses alike.
+const WEBSITE_PASSWORD_NOTICE: &str = "The game does not accept your website password. \
+Approve a login code on the website instead.\r\n";
+
+/// Device-code timeout (seconds) and website base URL from live config.
+fn web_approval_settings(world: &World) -> (u64, String) {
+    let cfg = world.resource::<mud_world::RuntimeConfig>();
+    let secs = cfg
+        .get_i64(
+            "security",
+            "web_approval_timeout_secs",
+            DEFAULT_WEB_APPROVAL_TIMEOUT_SECS,
+        )
+        .clamp(10, 3600);
+    let url = cfg
+        .get_string("security", "website_url", DEFAULT_WEBSITE_URL)
+        .trim_end_matches('/')
+        .to_string();
+    (u64::try_from(secs).unwrap_or(120), url)
+}
+
+/// "2 minutes" / "1 minute" / "90 seconds".
+fn describe_timeout(timeout_secs: u64) -> String {
+    if timeout_secs.is_multiple_of(60) {
+        let m = timeout_secs / 60;
+        format!("{m} minute{}", if m == 1 { "" } else { "s" })
+    } else {
+        format!("{timeout_secs} seconds")
+    }
+}
+
+/// Longest GMCP payload (bytes) written to the log.
+const GMCP_LOG_MAX: usize = 256;
+
+/// `s` cut to at most `max` bytes on a char boundary. Client-controlled
+/// text must never reach the log unbounded.
+fn truncate_for_log(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// Lock notice for an account whose `locked_until` is in the future.
@@ -1743,7 +1854,14 @@ impl ConnRouter {
             // we just log; future work could record client name
             // for capability-gated rendering.
             "Core.Hello" => {
-                tracing::info!(conn_id, payload, "GMCP Core.Hello");
+                let entry = self.caps.entry(conn_id).or_default();
+                if !std::mem::replace(&mut entry.hello_logged, true) {
+                    tracing::info!(
+                        conn_id,
+                        payload = truncate_for_log(payload, GMCP_LOG_MAX),
+                        "GMCP Core.Hello"
+                    );
+                }
                 // A (re)negotiating client has lost whatever we sent
                 // before; forget it so the next prompt re-sends every
                 // change-gated package.
@@ -1756,7 +1874,14 @@ impl ConnRouter {
             // pushes by this, but the log helps debugging which
             // bindings a connecting client expects.
             "Core.Supports.Set" => {
-                tracing::info!(conn_id, payload, "GMCP Core.Supports.Set");
+                let entry = self.caps.entry(conn_id).or_default();
+                if !std::mem::replace(&mut entry.supports_logged, true) {
+                    tracing::info!(
+                        conn_id,
+                        payload = truncate_for_log(payload, GMCP_LOG_MAX),
+                        "GMCP Core.Supports.Set"
+                    );
+                }
                 // A (re)negotiating client has lost whatever we sent
                 // before; forget it so the next prompt re-sends every
                 // change-gated package.
@@ -1864,9 +1989,6 @@ impl ConnRouter {
         match std::mem::replace(&mut ctx.stage, Stage::AwaitingIdentifier) {
             Stage::AwaitingIdentifier => {
                 // Branch on '@' — emails contain it, character names don't.
-                // Either path lands in AwaitingPassword; the character path
-                // also stashes a preselected character so we can skip the
-                // CharSelect menu.
                 if !is_valid_login_identifier(trimmed) {
                     // Never echo the rejected input: control bytes in it
                     // (ESC sequences) would act on the player's terminal.
@@ -1876,193 +1998,34 @@ impl ConnRouter {
                     send_login_prompt(&ctx.outbound, world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK);
                     return;
                 }
-                let is_email = trimmed.contains('@');
-                let sentinel_user = || User {
-                    id: String::new(),
-                    email: trimmed.to_string(),
-                    display_name: String::new(),
-                    role: mud_db::enums::UserRole::Player,
-                    failed_login_attempts: 0,
-                    locked_until: None,
-                    account_wealth: 0,
-                };
-                // Registration gate: when `security.enable_new_player_creation`
-                // is false, the unknown-identifier path returns a
-                // closed-registration message instead of routing to the
-                // create-account flow. Default true (legacy permissive).
-                let registration_open = world.resource::<mud_world::RuntimeConfig>().get_bool(
-                    "security",
-                    "enable_new_player_creation",
-                    true,
-                );
-                let mut routed_to_password = false;
-                if is_email {
-                    let lookup = users::find_by_email(pool, trimmed).await;
-                    match lookup {
-                        Ok(Some(user)) => {
-                            // The website password is never accepted by
-                            // the game, and an email doesn't name a
-                            // character (so no game password to check).
-                            // Email login is therefore device-code only;
-                            // approval leads to the usual `CharSelect`.
-                            let _ = ctx.outbound.try_send(
-                                "The game does not accept your website password. \
-                                 Approve a login code on the website instead.\r\n"
-                                    .as_bytes()
-                                    .to_vec(),
-                            );
-                            self.begin_web_approval(conn_id, user, None, pool, world)
-                                .await;
-                            return;
-                        }
-                        Ok(None) => {
-                            if !registration_open {
-                                let _ = ctx.outbound.try_send(
-                                    "New character creation is currently closed.\r\n"
-                                        .as_bytes()
-                                        .to_vec(),
-                                );
-                                ctx.stage = Stage::AwaitingIdentifier;
-                                send_login_prompt(
-                                    &ctx.outbound,
-                                    world,
-                                    "EMAIL_PROMPT",
-                                    IDENT_PROMPT_FALLBACK,
-                                );
-                                return;
-                            }
-                            ctx.stage = Stage::ConfirmCreate {
-                                identifier: trimmed.to_string(),
-                                is_email: true,
-                            };
-                            send_confirm_create_prompt(&ctx.outbound, trimmed, true);
-                        }
-                        Err(e) => {
-                            warn!(conn_id, error = %e, "user lookup failed");
-                            let _ = ctx
-                                .outbound
-                                .try_send("Server error.\r\n".as_bytes().to_vec());
-                            ctx.stage = Stage::AwaitingIdentifier;
-                            send_login_prompt(
-                                &ctx.outbound,
-                                world,
-                                "EMAIL_PROMPT",
-                                IDENT_PROMPT_FALLBACK,
-                            );
-                            return;
-                        }
-                    }
-                } else {
-                    // Character-name path. Look up the row by name; if found,
-                    // resolve its user_id → User. Unknown names route to
-                    // ConfirmCreate so the player gets a clear "no such
-                    // character — make a new one?" prompt instead of a
-                    // silent bcrypt-fail bounce.
-                    let char_lookup = characters::find_by_name(pool, trimmed).await;
-                    match char_lookup {
-                        Ok(Some(c)) => {
-                            let user_lookup: Option<User> = match c.user_id.as_deref() {
-                                Some(uid) => match users::find_by_id(pool, uid).await {
-                                    Ok(u) => u,
-                                    Err(e) => {
-                                        warn!(conn_id, error = %e, "user lookup failed");
-                                        None
-                                    }
-                                },
-                                None => None,
-                            };
-                            // The GAME password is always the character's own
-                            // `Characters.password_hash` (bcrypt or legacy
-                            // crypt(3)); `Users.password_hash` (the website
-                            // password) is never loaded or checked.
-                            let game_hash = match characters::load_password_hash(pool, &c.id).await
-                            {
-                                Ok(h) => h,
-                                Err(e) => {
-                                    warn!(conn_id, error = %e, "character password lookup failed");
-                                    let _ = ctx
-                                        .outbound
-                                        .try_send("Server error.\r\n".as_bytes().to_vec());
-                                    ctx.stage = Stage::AwaitingIdentifier;
-                                    send_login_prompt(
-                                        &ctx.outbound,
-                                        world,
-                                        "EMAIL_PROMPT",
-                                        IDENT_PROMPT_FALLBACK,
-                                    );
-                                    return;
-                                }
-                            };
-                            // Legacy-orphan path: imported CircleMUD
-                            // characters land with no `user_id`. A sentinel
-                            // user (empty id) marks them; after the game
-                            // password verifies, `finish_password` only
-                            // upgrades the hash to bcrypt. No `Users` row is
-                            // created: the player claims the character on
-                            // the website.
-                            let user = user_lookup.unwrap_or_else(sentinel_user);
-                            ctx.stage = Stage::AwaitingPassword {
-                                user,
-                                preselected: Some(Box::new(c)),
-                                game_hash,
-                            };
-                            routed_to_password = true;
-                        }
-                        Ok(None) => {
-                            if !registration_open {
-                                let _ = ctx.outbound.try_send(
-                                    "New character creation is currently closed.\r\n"
-                                        .as_bytes()
-                                        .to_vec(),
-                                );
-                                ctx.stage = Stage::AwaitingIdentifier;
-                                send_login_prompt(
-                                    &ctx.outbound,
-                                    world,
-                                    "EMAIL_PROMPT",
-                                    IDENT_PROMPT_FALLBACK,
-                                );
-                                return;
-                            }
-                            ctx.stage = Stage::ConfirmCreate {
-                                identifier: trimmed.to_string(),
-                                is_email: false,
-                            };
-                            send_confirm_create_prompt(&ctx.outbound, trimmed, false);
-                        }
-                        Err(e) => {
-                            warn!(conn_id, error = %e, "character lookup failed");
-                            let _ = ctx
-                                .outbound
-                                .try_send("Server error.\r\n".as_bytes().to_vec());
-                            ctx.stage = Stage::AwaitingIdentifier;
-                            send_login_prompt(
-                                &ctx.outbound,
-                                world,
-                                "EMAIL_PROMPT",
-                                IDENT_PROMPT_FALLBACK,
-                            );
-                            return;
-                        }
-                    }
+                if trimmed.contains('@') {
+                    // Email path: no lookup here, and the reply is the same
+                    // whether or not the address has an account, so the
+                    // prompt cannot be used to probe which emails are
+                    // registered. The choice made at the next prompt
+                    // (`code` vs creating an account) does the lookup.
+                    ctx.stage = Stage::ConfirmCreate {
+                        identifier: trimmed.to_string(),
+                        is_email: true,
+                    };
+                    send_confirm_create_prompt(&ctx.outbound, trimmed, true);
+                    return;
                 }
-                if routed_to_password {
-                    if !ctx.tls && !ctx.notice_shown {
-                        ctx.notice_shown = true;
-                        let _ = ctx.outbound.try_send(plain_telnet_notice_bytes(world));
-                    }
-                    if let Stage::AwaitingPassword { user, .. } = &ctx.stage
-                        && let Some(msg) = locked_hint(user, chrono::Utc::now().naive_utc())
-                    {
-                        let _ = ctx.outbound.try_send(msg.into_bytes());
-                    }
-                    send_login_prompt(
-                        &ctx.outbound,
-                        world,
-                        "PASSWORD_PROMPT",
-                        PASSWORD_PROMPT_FALLBACK,
-                    );
-                }
+                // Character-name path. The lookups hit the database, so
+                // they run in a task and come back through `AuthDone`
+                // (`finish_char_lookup`); an unauthenticated peer must not
+                // be able to stall the world loop on Postgres round-trips.
+                ctx.stage = Stage::Authenticating;
+                let tx = self.auth_tx.clone();
+                let pool = pool.clone();
+                let identifier = trimmed.to_string();
+                tokio::spawn(async move {
+                    let result = lookup_character(&pool, &identifier).await;
+                    let _ = tx.send(AuthDone {
+                        conn_id,
+                        kind: AuthDoneKind::CharLookup { identifier, result },
+                    });
+                });
             }
 
             Stage::ConfirmCreate {
@@ -2070,9 +2033,28 @@ impl ConnRouter {
                 is_email,
             } => {
                 let answer = trimmed.to_ascii_lowercase();
-                let yes = matches!(answer.as_str(), "y" | "yes");
+                if is_email && matches!(answer.as_str(), "code" | "c") {
+                    self.email_login_code(conn_id, identifier, pool, world)
+                        .await;
+                    return;
+                }
+                let yes = matches!(answer.as_str(), "y" | "yes" | "new");
                 let no = matches!(answer.as_str(), "n" | "no" | "");
                 if yes {
+                    let registration_open = world.resource::<mud_world::RuntimeConfig>().get_bool(
+                        "security",
+                        "enable_new_player_creation",
+                        true,
+                    );
+                    if !registration_open {
+                        let _ = ctx.outbound.try_send(
+                            "New character creation is currently closed.\r\n"
+                                .as_bytes()
+                                .to_vec(),
+                        );
+                        reprompt_identifier(ctx, world);
+                        return;
+                    }
                     let _ = ctx.outbound.try_send(
                         format!(
                             "Great — let's set up '{identifier}'. Pick a password \
@@ -2099,9 +2081,15 @@ impl ConnRouter {
                     ctx.stage = Stage::AwaitingIdentifier;
                     send_login_prompt(&ctx.outbound, world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK);
                 } else {
-                    let _ = ctx
-                        .outbound
-                        .try_send("Please answer 'yes' or 'no'.\r\n".as_bytes().to_vec());
+                    let _ = ctx.outbound.try_send(
+                        if is_email {
+                            "Please answer 'new', 'code' or 'no'.\r\n"
+                        } else {
+                            "Please answer 'yes' or 'no'."
+                        }
+                        .as_bytes()
+                        .to_vec(),
+                    );
                     ctx.stage = Stage::ConfirmCreate {
                         identifier,
                         is_email,
@@ -2636,11 +2624,13 @@ impl ConnRouter {
             Err(e) => {
                 warn!(conn_id, error = %e, "user create failed");
                 let _ = ctx.outbound.try_send(
-                    format!(
-                        "Couldn't create the account ({e}). Please try again \
-                         with a different identifier.\r\n"
-                    )
-                    .into_bytes(),
+                    // Deliberately generic: the database error would say
+                    // whether the email / name is already registered.
+                    "Couldn't create the account. If you already have one, \
+                     type 'code' at the email prompt to log in; otherwise \
+                     try a different identifier.\r\n"
+                        .as_bytes()
+                        .to_vec(),
                 );
                 // Drop the tx — uncommitted, so the user
                 // INSERT (if any) gets rolled back.
@@ -3110,6 +3100,9 @@ impl ConnRouter {
                 self.finish_creation(conn_id, draft, hashed, pool, world)
                     .await;
             }
+            AuthDoneKind::CharLookup { identifier, result } => {
+                self.finish_char_lookup(conn_id, &identifier, result, world);
+            }
             AuthDoneKind::SaveSettled {
                 user,
                 char_row,
@@ -3137,6 +3130,201 @@ impl ConnRouter {
                 }
             }
         }
+    }
+
+    /// Continuation of the character-name identifier prompt once the
+    /// off-loop lookups finished: password prompt for a known
+    /// character, create-offer (or closed notice) for an unknown name.
+    fn finish_char_lookup(
+        &mut self,
+        conn_id: ConnId,
+        identifier: &str,
+        result: CharLookup,
+        world: &World,
+    ) {
+        let Some(ctx) = self.login.get_mut(&conn_id) else {
+            return;
+        };
+        if !matches!(ctx.stage, Stage::Authenticating) {
+            return;
+        }
+        match result {
+            CharLookup::Found {
+                character,
+                user,
+                game_hash,
+            } => {
+                // Legacy-orphan path: imported CircleMUD characters land
+                // with no `user_id`. A sentinel user (empty id) marks
+                // them; after the game password verifies,
+                // `finish_password` only upgrades the hash to bcrypt. No
+                // `Users` row is created: the player claims the character
+                // on the website.
+                let user = user.unwrap_or_else(|| User {
+                    id: String::new(),
+                    email: identifier.to_string(),
+                    display_name: String::new(),
+                    role: mud_db::enums::UserRole::Player,
+                    failed_login_attempts: 0,
+                    locked_until: None,
+                    account_wealth: 0,
+                });
+                ctx.stage = Stage::AwaitingPassword {
+                    user,
+                    preselected: Some(character),
+                    game_hash,
+                };
+                if !ctx.tls && !ctx.notice_shown {
+                    ctx.notice_shown = true;
+                    let _ = ctx.outbound.try_send(plain_telnet_notice_bytes(world));
+                }
+                if let Stage::AwaitingPassword { user, .. } = &ctx.stage
+                    && let Some(msg) = locked_hint(user, chrono::Utc::now().naive_utc())
+                {
+                    let _ = ctx.outbound.try_send(msg.into_bytes());
+                }
+                send_login_prompt(
+                    &ctx.outbound,
+                    world,
+                    "PASSWORD_PROMPT",
+                    PASSWORD_PROMPT_FALLBACK,
+                );
+            }
+            CharLookup::Unknown => {
+                // Registration gate: when
+                // `security.enable_new_player_creation` is false, the
+                // unknown-name path returns a closed-registration message
+                // instead of the create-account flow. Default true.
+                let registration_open = world.resource::<mud_world::RuntimeConfig>().get_bool(
+                    "security",
+                    "enable_new_player_creation",
+                    true,
+                );
+                if !registration_open {
+                    let _ = ctx.outbound.try_send(
+                        "New character creation is currently closed.\r\n"
+                            .as_bytes()
+                            .to_vec(),
+                    );
+                    reprompt_identifier(ctx, world);
+                    return;
+                }
+                ctx.stage = Stage::ConfirmCreate {
+                    identifier: identifier.to_string(),
+                    is_email: false,
+                };
+                send_confirm_create_prompt(&ctx.outbound, identifier, false);
+            }
+            CharLookup::Failed => {
+                let _ = ctx
+                    .outbound
+                    .try_send("Server error.\r\n".as_bytes().to_vec());
+                reprompt_identifier(ctx, world);
+            }
+        }
+    }
+
+    /// `code` chosen at the email prompt: start a website device-code
+    /// login. A registered address gets a real code; an unregistered one
+    /// gets a decoy that looks identical and simply never approves, so
+    /// the two outcomes cannot be told apart from the game prompt.
+    async fn email_login_code(
+        &mut self,
+        conn_id: ConnId,
+        email: String,
+        pool: &PgPool,
+        world: &mut World,
+    ) {
+        let found = users::find_by_email(pool, &email).await;
+        let Some(ctx) = self.login.get_mut(&conn_id) else {
+            return;
+        };
+        match found {
+            Ok(Some(user)) => {
+                let _ = ctx
+                    .outbound
+                    .try_send(WEBSITE_PASSWORD_NOTICE.as_bytes().to_vec());
+                self.begin_web_approval(conn_id, user, None, pool, world)
+                    .await;
+            }
+            Ok(None) => {
+                let _ = ctx
+                    .outbound
+                    .try_send(WEBSITE_PASSWORD_NOTICE.as_bytes().to_vec());
+                self.begin_decoy_approval(conn_id, email, world);
+            }
+            Err(e) => {
+                warn!(conn_id, error = %e, "user lookup failed");
+                let _ = ctx
+                    .outbound
+                    .try_send("Server error.\r\n".as_bytes().to_vec());
+                reprompt_identifier(ctx, world);
+            }
+        }
+    }
+
+    /// Show a plausible login code for an email with no account. Same
+    /// rate limit, text, prompts and timing as [`Self::begin_web_approval`],
+    /// but no `GameLoginCode` row exists, so nothing can approve it.
+    fn begin_decoy_approval(&mut self, conn_id: ConnId, email: String, world: &World) {
+        let Some(ctx) = self.login.get_mut(&conn_id) else {
+            return;
+        };
+        let ip = ctx.peer.map_or(IpAddr::from([0u8, 0, 0, 0]), |a| a.ip());
+        if !self.code_limiter.try_acquire(ip, Instant::now()) {
+            let _ = ctx.outbound.try_send(
+                "Too many login codes requested; try again later.\r\n"
+                    .as_bytes()
+                    .to_vec(),
+            );
+            reprompt_identifier(ctx, world);
+            return;
+        }
+        let (timeout_secs, website_url) = web_approval_settings(world);
+        let code = generate_login_code();
+        let shown = format_login_code(&code);
+        let _ = ctx.outbound.try_send(
+            format!(
+                "Your login code is {shown}. Approve it at {website_url}/verify?code={shown} \
+                 within {}. Press Enter to check, or type cancel.\r\n",
+                describe_timeout(timeout_secs)
+            )
+            .into_bytes(),
+        );
+        let _ = ctx.outbound.try_send(mud_net::iac_eor());
+        let expires_at = Instant::now() + Duration::from_secs(timeout_secs);
+        let poller = {
+            let tx = self.auth_tx.clone();
+            let deadline = expires_at + Duration::from_secs(1);
+            let handle = tokio::spawn(async move {
+                tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+                let _ = tx.send(AuthDone {
+                    conn_id,
+                    kind: AuthDoneKind::WebApprovalWake {
+                        code_id: String::new(),
+                    },
+                });
+            });
+            PollGuard(handle.abort_handle())
+        };
+        ctx.stage = Stage::AwaitingWebApproval(Box::new(WebLogin {
+            code,
+            code_id: String::new(),
+            expires_at,
+            user_id: String::new(),
+            user: User {
+                id: String::new(),
+                email,
+                display_name: String::new(),
+                role: mud_db::enums::UserRole::Player,
+                failed_login_attempts: 0,
+                locked_until: None,
+                account_wealth: 0,
+            },
+            preselected: None,
+            decoy: true,
+            _poller: poller,
+        }));
     }
 
     /// Start a device-code login for `user` (and, on the character-name
@@ -3179,21 +3367,7 @@ impl ConnRouter {
             reprompt_identifier(ctx, world);
             return;
         }
-        let (timeout_secs, website_url) = {
-            let cfg = world.resource::<mud_world::RuntimeConfig>();
-            let secs = cfg
-                .get_i64(
-                    "security",
-                    "web_approval_timeout_secs",
-                    DEFAULT_WEB_APPROVAL_TIMEOUT_SECS,
-                )
-                .clamp(10, 3600);
-            let url = cfg
-                .get_string("security", "website_url", DEFAULT_WEBSITE_URL)
-                .trim_end_matches('/')
-                .to_string();
-            (u64::try_from(secs).unwrap_or(120), url)
-        };
+        let (timeout_secs, website_url) = web_approval_settings(world);
         let character_name = preselected.as_deref().map_or("", |c| c.name.as_str());
         let created_at = chrono::Utc::now().naive_utc();
         let expires_naive =
@@ -3267,12 +3441,7 @@ impl ConnRouter {
             PollGuard(handle.abort_handle())
         };
         let shown = format_login_code(&code);
-        let within = if timeout_secs % 60 == 0 {
-            let m = timeout_secs / 60;
-            format!("{m} minute{}", if m == 1 { "" } else { "s" })
-        } else {
-            format!("{timeout_secs} seconds")
-        };
+        let within = describe_timeout(timeout_secs);
         let Some(ctx) = self.login.get_mut(&conn_id) else {
             return;
         };
@@ -3299,6 +3468,7 @@ impl ConnRouter {
             user_id: user.id.clone(),
             user,
             preselected,
+            decoy: false,
             _poller: poller,
         }));
     }
@@ -3315,6 +3485,33 @@ impl ConnRouter {
         pool: &PgPool,
         world: &mut World,
     ) {
+        if web.decoy {
+            let Some(ctx) = self.login.get_mut(&conn_id) else {
+                return;
+            };
+            let now = Instant::now();
+            if now >= web.expires_at {
+                let _ = ctx.outbound.try_send(
+                    "Your login code expired. Please try again.\r\n"
+                        .as_bytes()
+                        .to_vec(),
+                );
+                reprompt_identifier(ctx, world);
+            } else {
+                let left = (web.expires_at - now).as_secs().max(1);
+                send_prompt(
+                    &ctx.outbound,
+                    format!(
+                        "Code {} is still waiting for approval ({left}s left). \
+                         Press Enter to check, or type cancel.\r\n",
+                        format_login_code(&web.code)
+                    )
+                    .into_bytes(),
+                );
+                ctx.stage = Stage::AwaitingWebApproval(Box::new(web));
+            }
+            return;
+        }
         let state = mud_db::game_login_code::state(pool, &web.code_id).await;
         let Some(ctx) = self.login.get_mut(&conn_id) else {
             return;
@@ -6315,7 +6512,19 @@ fn send_stat_review(outbound: &Outbound, stats: &CoreStats) {
 /// switches the noun so the player sees "account" / "character"
 /// matching the identifier they typed.
 fn send_confirm_create_prompt(outbound: &Outbound, identifier: &str, is_email: bool) {
-    let kind_label = if is_email { "account" } else { "character" };
+    if is_email {
+        // Identical for registered and unregistered addresses.
+        send_prompt(
+            outbound,
+            format!(
+                "'{identifier}': type 'new' to create an account, or 'code' to log in \
+                 with a website login code (new/code/no): "
+            )
+            .into_bytes(),
+        );
+        return;
+    }
+    let kind_label = "character";
     send_prompt(
         outbound,
         format!("I don't see a {kind_label} for '{identifier}'. Create a new one? (yes/no): ")
@@ -8445,6 +8654,142 @@ mod tests {
         Some((pool, db_lock))
     }
 
+    #[test]
+    fn gmcp_log_payload_is_truncated_on_a_char_boundary() {
+        assert_eq!(truncate_for_log("short", 256), "short");
+        let long = "a".repeat(1000);
+        assert_eq!(truncate_for_log(&long, GMCP_LOG_MAX).len(), GMCP_LOG_MAX);
+        // 'é' is two bytes: cutting at 3 must not split it.
+        assert_eq!(truncate_for_log("aéé", 4), "aé");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn gmcp_hello_is_logged_once_per_connection() {
+        let mut world = auth_world(0);
+        let mut router = ConnRouter::new();
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        router.on_connect(1, tx, None, &world);
+        for _ in 0..3 {
+            router.on_gmcp(1, "Core.Hello", "{}", &mut world).await;
+            router
+                .on_gmcp(1, "Core.Supports.Set", "[]", &mut world)
+                .await;
+        }
+        let caps = router.caps.get(&1).unwrap();
+        assert!(caps.hello_logged && caps.supports_logged);
+    }
+
+    /// The email prompt answers identically whatever the address, and
+    /// does not touch the database (the pool here cannot connect).
+    #[tokio::test(flavor = "current_thread")]
+    async fn email_identifier_gets_one_neutral_prompt_without_a_lookup() {
+        let mut world = auth_world(0);
+        let pool = lazy_pool();
+        let mut router = ConnRouter::new();
+        let mut outputs = Vec::new();
+        for (conn, email) in [(1, "known@example.com"), (2, "nobody-here@example.org")] {
+            let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+            router.on_connect(conn, tx, None, &world);
+            drain(&mut rx);
+            router.on_line(conn, email.into(), &pool, &mut world).await;
+            assert!(matches!(
+                router.login.get(&conn).unwrap().stage,
+                Stage::ConfirmCreate { is_email: true, .. }
+            ));
+            // Same text once the address itself is blanked out.
+            outputs.push(drain(&mut rx).replace(email, "<email>"));
+        }
+        assert_eq!(outputs[0], outputs[1]);
+        assert!(outputs[0].contains("'code'"), "{}", outputs[0]);
+    }
+
+    /// Character-name lookups run off the loop: the stage parks in
+    /// `Authenticating` and the answer arrives as an `AuthDone`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn character_lookup_runs_off_the_loop_and_resumes_via_auth_done() {
+        let mut world = auth_world(0);
+        let pool = lazy_pool();
+        let mut router = ConnRouter::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        router.on_connect(1, tx, None, &world);
+        drain(&mut rx);
+        router
+            .on_line(1, "Somebody".into(), &pool, &mut world)
+            .await;
+        assert!(matches!(
+            router.login.get(&1).unwrap().stage,
+            Stage::Authenticating
+        ));
+        // Input while the lookup is in flight is swallowed.
+        router.on_line(1, "again".into(), &pool, &mut world).await;
+        assert!(matches!(
+            router.login.get(&1).unwrap().stage,
+            Stage::Authenticating
+        ));
+        // Resolve it by hand (the lazy pool's own lookup would fail).
+        router
+            .on_auth_done(
+                AuthDone {
+                    conn_id: 1,
+                    kind: AuthDoneKind::CharLookup {
+                        identifier: "Somebody".into(),
+                        result: CharLookup::Unknown,
+                    },
+                },
+                &pool,
+                &mut world,
+            )
+            .await;
+        assert!(matches!(
+            router.login.get(&1).unwrap().stage,
+            Stage::ConfirmCreate {
+                is_email: false,
+                ..
+            }
+        ));
+        assert!(drain(&mut rx).contains("Create a new one?"));
+    }
+
+    /// `code` for an email with no account still shows a code and waits,
+    /// exactly like a real one; nothing exists to approve it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn unregistered_email_code_request_is_a_decoy() {
+        let Some((pool, _db_lock)) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let mut world = auth_world(0);
+        let mut router = ConnRouter::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        router.on_connect(1, tx, None, &world);
+        drain(&mut rx);
+        let email = format!("nobody-{}@example.invalid", std::process::id());
+        router.on_line(1, email, &pool, &mut world).await;
+        drain(&mut rx);
+        router.on_line(1, "code".into(), &pool, &mut world).await;
+        let out = drain(&mut rx);
+        assert!(out.contains("Your login code is"), "{out}");
+        assert!(
+            out.contains("does not accept your website password"),
+            "{out}"
+        );
+        assert!(
+            matches!(
+                &router.login.get(&1).unwrap().stage,
+                Stage::AwaitingWebApproval(w) if w.decoy
+            ),
+            "stage"
+        );
+        // Enter: still waiting, like a pending real code.
+        router.on_line(1, String::new(), &pool, &mut world).await;
+        assert!(drain(&mut rx).contains("still waiting for approval"));
+        router.on_line(1, "cancel".into(), &pool, &mut world).await;
+        assert!(matches!(
+            router.login.get(&1).unwrap().stage,
+            Stage::AwaitingIdentifier
+        ));
+    }
+
     fn pending_web(router: &ConnRouter, conn: ConnId) -> (String, String) {
         match &router.login.get(&conn).unwrap().stage {
             Stage::AwaitingWebApproval(w) => (w.code_id.clone(), w.code.clone()),
@@ -8577,6 +8922,28 @@ mod tests {
         )
         .await
         .ok()
+    }
+
+    /// An account created at the game prompt carries an unproven email;
+    /// Muditor's Google login must not auto-link to it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn game_created_user_is_marked_email_unverified() {
+        let Some((pool, _db_lock)) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let Some(uid) = temp_user(&pool, "unverif").await else {
+            return;
+        };
+        let flag: Option<String> = mud_db::sqlx::query_scalar(
+            "SELECT preferences->>'emailVerified' FROM \"Users\" WHERE id = $1",
+        )
+        .bind(&uid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(flag.as_deref(), Some("false"));
+        temp_cleanup(&pool, &[], &[], &[&uid]).await;
     }
 
     /// Temp unlinked (NULL `user_id`) legacy-style character; returns

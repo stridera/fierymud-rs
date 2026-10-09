@@ -514,6 +514,9 @@ mod blindness_tests;
 #[path = "commands/effects_list_tests.rs"]
 mod effects_list_tests;
 #[cfg(test)]
+#[path = "commands/escape_tests.rs"]
+mod escape_tests;
+#[cfg(test)]
 #[path = "commands/expand_tests.rs"]
 mod expand_tests;
 #[cfg(test)]
@@ -2320,6 +2323,12 @@ pub(crate) struct StyleLayer {
 /// Malformed input is tolerated quietly — unterminated `<` swallows
 /// the rest of the string. Empty `<>` is literal text (issue #13).
 pub(crate) fn render_color_tags(s: &str, mode: ColorMode) -> String {
+    // Tags are rendered below, but the input may also hold untrusted
+    // text (and already-rendered colour: names are rendered once and
+    // the surrounding line again). Keep SGR colour, drop every other
+    // escape sequence and control byte so a player-set string can't
+    // clear screens or write the clipboard.
+    let s = &*mud_net::strip_non_sgr_escapes(s);
     let mut out = String::with_capacity(s.len() + 16);
     let mut stack: Vec<StyleLayer> = Vec::new();
     // Index-based walk so we can rewind on a nested `<`. The previous

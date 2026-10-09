@@ -9,6 +9,7 @@ mod corpses;
 mod drowning;
 mod effects;
 mod entity_vars;
+mod envflags;
 mod equip_apply;
 mod events;
 mod fear;
@@ -237,6 +238,16 @@ async fn main() {
 
     info!("fierymud-rs starting");
 
+    // Production must have an admin token: refuse to boot rather than run
+    // with an unauthenticated control plane.
+    if envflags::is_production() {
+        let token_set = envflags::non_blank(std::env::var("ADMIN_TOKEN").ok()).is_some();
+        if !token_set {
+            error!("MUD_ENV=production but ADMIN_TOKEN is unset or blank; aborting");
+            std::process::exit(1);
+        }
+    }
+
     let Ok(database_url) = std::env::var("DATABASE_URL") else {
         error!("DATABASE_URL not set; aborting");
         return;
@@ -358,7 +369,12 @@ async fn main() {
     let dev_mode_db = world
         .resource::<mud_world::RuntimeConfig>()
         .get_bool("server", "dev_mode", false);
-    if dev_mode_db {
+    if dev_mode_db && !envflags::dev_mode_allowed() {
+        tracing::warn!(
+            "GameConfig server.dev_mode is set but ignored: dev mode needs \
+             MUD_DEV_MODE=true in the environment and is refused when MUD_ENV=production"
+        );
+    } else if dev_mode_db {
         tracing::warn!("┌─────────────────────────────────────────────────────────┐");
         tracing::warn!("│ GameConfig server.dev_mode=ON — players are Implementor│");
         tracing::warn!("│ Admin commands open to anyone. Dice rolls visible.     │");
@@ -432,7 +448,36 @@ async fn main() {
             usize::MAX
         }
     };
-    let net_limits = mud_net::Limits::new(max_connections, max_per_ip);
+    let mut net_limits = mud_net::Limits::new(max_connections, max_per_ip);
+    // Separate, smaller cap on connections that have not finished login
+    // (`server.max_pre_login_connections`; default half of
+    // `max_connections`), plus per-connection input-line token buckets
+    // (`server.pre_login_lines_per_sec` / `_burst` and `server.lines_per_sec`
+    // / `_burst`; 0 for a rate disables that limit). Non-positive caps keep
+    // the default.
+    {
+        let cfg = world.resource::<mud_world::RuntimeConfig>();
+        let positive = |key: &str| {
+            usize::try_from(cfg.get_i32("server", key, 0))
+                .ok()
+                .filter(|v| *v > 0)
+        };
+        let rate = |key: &str, default: u32| {
+            u32::try_from(cfg.get_i32("server", key, i32::try_from(default).unwrap_or(i32::MAX)))
+                .unwrap_or(default)
+        };
+        if let Some(n) = positive("max_pre_login_connections") {
+            net_limits.max_pre_login = n;
+        }
+        net_limits.pre_login_lines_per_sec = rate(
+            "pre_login_lines_per_sec",
+            net_limits.pre_login_lines_per_sec,
+        );
+        net_limits.pre_login_line_burst =
+            rate("pre_login_line_burst", net_limits.pre_login_line_burst);
+        net_limits.lines_per_sec = rate("lines_per_sec", net_limits.lines_per_sec);
+        net_limits.line_burst = rate("line_burst", net_limits.line_burst);
+    }
     let listen_addr_for_task = listen_addr.clone();
     let inbound_tx_plain = inbound_tx.clone();
     tokio::spawn(async move {

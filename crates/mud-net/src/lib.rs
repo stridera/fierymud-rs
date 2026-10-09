@@ -13,7 +13,9 @@ use tracing::{debug, info, warn};
 
 pub mod output;
 pub mod telnet;
-pub use output::{Charset, ColorDepth, OutputHandle};
+pub use output::{
+    CLEAR_SCREEN, Charset, ColorDepth, OutputHandle, sanitize_text, strip_non_sgr_escapes,
+};
 pub use telnet::{
     Event as TelnetEvent, Parser as TelnetParser, charset_request_utf8, do_, dont,
     environ_send_query, iac_eor, iac_ga, mccp2_start, negotiate, opt, parse_environ, parse_mtts,
@@ -115,6 +117,20 @@ pub struct Limits {
     /// Concurrent open connections from a single source IP, so one
     /// host can't fill every slot in `max_connections`.
     pub max_per_ip: usize,
+    /// Concurrent connections that have not finished login. Smaller than
+    /// `max_connections` so a flood of idle, unauthenticated sockets
+    /// cannot take every slot from players who are already in.
+    pub max_pre_login: usize,
+    /// Sustained input-line rate (lines per second) allowed from a
+    /// connection that has not finished login. Burst capacity is
+    /// `pre_login_line_burst`. Telnet negotiation bytes do not count.
+    pub pre_login_lines_per_sec: u32,
+    /// Token-bucket burst for pre-login input lines.
+    pub pre_login_line_burst: u32,
+    /// Sustained input-line rate for authenticated connections.
+    pub lines_per_sec: u32,
+    /// Token-bucket burst for authenticated input lines.
+    pub line_burst: u32,
     /// Budget for the TLS handshake. A peer that opens a socket and
     /// never speaks TLS is dropped when this elapses.
     pub handshake_timeout: Duration,
@@ -137,6 +153,14 @@ const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_PRE_LOGIN_IDLE: Duration = Duration::from_secs(120);
 const DEFAULT_PRE_LOGIN_TOTAL: Duration = Duration::from_secs(15 * 60);
 const DEFAULT_NEGOTIATION_WINDOW: Duration = Duration::from_millis(500);
+/// Pre-login connections get half of `max_connections` by default.
+const PRE_LOGIN_FRACTION_DIVISOR: usize = 2;
+/// Humans type a line every few seconds and pasted scripts a handful at
+/// once; these are well above that and far below a flood.
+const DEFAULT_PRE_LOGIN_LINES_PER_SEC: u32 = 2;
+const DEFAULT_PRE_LOGIN_LINE_BURST: u32 = 10;
+const DEFAULT_LINES_PER_SEC: u32 = 20;
+const DEFAULT_LINE_BURST: u32 = 100;
 
 impl Limits {
     /// Build limits with the given caps and the default timeouts.
@@ -145,11 +169,27 @@ impl Limits {
         Self {
             max_connections,
             max_per_ip,
+            max_pre_login: default_max_pre_login(max_connections),
+            pre_login_lines_per_sec: DEFAULT_PRE_LOGIN_LINES_PER_SEC,
+            pre_login_line_burst: DEFAULT_PRE_LOGIN_LINE_BURST,
+            lines_per_sec: DEFAULT_LINES_PER_SEC,
+            line_burst: DEFAULT_LINE_BURST,
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             pre_login_idle: DEFAULT_PRE_LOGIN_IDLE,
             pre_login_total: DEFAULT_PRE_LOGIN_TOTAL,
             negotiation_window: DEFAULT_NEGOTIATION_WINDOW,
         }
+    }
+}
+
+/// Default pre-login cap for a given total cap: half of it (at least 1),
+/// or unlimited when the total is.
+#[must_use]
+pub fn default_max_pre_login(max_connections: usize) -> usize {
+    if max_connections == usize::MAX {
+        usize::MAX
+    } else {
+        (max_connections / PRE_LOGIN_FRACTION_DIVISOR).max(1)
     }
 }
 
@@ -197,11 +237,15 @@ enum Throttle {
 enum Reject {
     Throttled { first: bool },
     MaxConnections,
+    PreLoginFull,
     PerIp,
 }
 
 struct GateState {
     active: usize,
+    /// Of `active`, connections that have not yet been marked
+    /// authenticated. Adjusted only under the gate lock.
+    pre_login: usize,
     /// Open-connection count per source IP; entries removed at zero.
     per_ip: HashMap<IpAddr, usize>,
     throttle: HashMap<IpAddr, ThrottleEntry>,
@@ -233,6 +277,7 @@ impl Gate {
         Arc::new(Self {
             state: Mutex::new(GateState {
                 active: 0,
+                pre_login: 0,
                 per_ip: HashMap::new(),
                 throttle: HashMap::new(),
                 last_sweep: Instant::now(),
@@ -264,10 +309,14 @@ impl Gate {
         if st.active >= limits.max_connections {
             return Err(Reject::MaxConnections);
         }
+        if st.pre_login >= limits.max_pre_login {
+            return Err(Reject::PreLoginFull);
+        }
         if st.per_ip.get(&ip).copied().unwrap_or(0) >= limits.max_per_ip {
             return Err(Reject::PerIp);
         }
         st.active += 1;
+        st.pre_login += 1;
         *st.per_ip.entry(ip).or_default() += 1;
         let shared = Arc::new(ConnShared {
             authenticated: AtomicBool::new(false),
@@ -284,8 +333,13 @@ impl Gate {
     }
 
     fn mark_authenticated(&self, conn_id: ConnId) {
-        if let Some(c) = self.lock().conns.get(&conn_id) {
-            c.authenticated.store(true, Ordering::Release);
+        let mut st = self.lock();
+        let first = st
+            .conns
+            .get(&conn_id)
+            .is_some_and(|c| !c.authenticated.swap(true, Ordering::AcqRel));
+        if first {
+            st.pre_login = st.pre_login.saturating_sub(1);
         }
     }
 
@@ -344,6 +398,9 @@ impl Drop for ConnGuard {
     fn drop(&mut self) {
         let mut st = self.gate.lock();
         st.active = st.active.saturating_sub(1);
+        if !self.shared.authenticated.load(Ordering::Acquire) {
+            st.pre_login = st.pre_login.saturating_sub(1);
+        }
         if let Some(n) = st.per_ip.get_mut(&self.ip) {
             *n = n.saturating_sub(1);
             if *n == 0 {
@@ -467,6 +524,10 @@ fn admit_or_log(
             warn!(%peer, max = limits.max_connections, "max_connections reached; refusing{kind}");
             Err(Refusal::Notice(NOTICE_FULL))
         }
+        Err(Reject::PreLoginFull) => {
+            warn!(%peer, max = limits.max_pre_login, "pre-login connection cap reached; refusing{kind}");
+            Err(Refusal::Notice(NOTICE_FULL))
+        }
         Err(Reject::PerIp) => {
             warn!(%peer, max = limits.max_per_ip, "per-IP connection cap reached; refusing{kind}");
             Err(Refusal::Notice(NOTICE_PER_IP))
@@ -489,6 +550,7 @@ pub async fn serve(bind_addr: &str, inbound: InboundTx, limits: Limits) -> std::
         addr = %listener.local_addr()?,
         max_connections = limits.max_connections,
         max_per_ip = limits.max_per_ip,
+        max_pre_login = limits.max_pre_login,
         "telnet listener accepting connections"
     );
     accept_plain(listener, inbound, global_gate(), limits).await
@@ -1053,15 +1115,66 @@ impl LineSplitter {
                     // A blank line still gets forwarded — players use
                     // `<enter>` to dismiss prompts; the dispatcher
                     // treats it as a no-op and refreshes the prompt.
-                    lines.push(String::from_utf8_lossy(&self.buf).into_owned());
+                    let mut line = String::from_utf8_lossy(&self.buf).into_owned();
+                    // C1 controls (U+0080..U+009F) survive UTF-8 decoding;
+                    // some terminals still act on them (CSI/OSC introducers).
+                    line.retain(|c| !c.is_control() || c == '\t');
+                    lines.push(line);
                     self.buf.clear();
                     self.after_cr = b == b'\r';
                 }
+                // Remaining C0 controls (ESC above all) are never part of
+                // a command; keeping them lets a player smuggle terminal
+                // escape sequences into text other players see. TAB stays.
+                0x01..=0x1f if b != b'\t' => {}
                 _ if self.buf.len() < MAX_LINE_LEN => self.buf.push(b),
                 _ => return Err(LineTooLong),
             }
         }
         Ok(())
+    }
+}
+
+/// Consecutive rate-limited lines after which an authenticated
+/// connection is dropped instead of just having input discarded.
+const MAX_DROPPED_LINE_STREAK: u32 = 1000;
+
+/// Token bucket for input lines. `per_sec == 0` disables the limit.
+/// The rate and burst are passed per call so the same bucket follows a
+/// connection from the strict pre-login limits to the relaxed ones once
+/// it authenticates.
+struct LineBucket {
+    tokens: f64,
+    last: Instant,
+    /// Lines refused since the last accepted one.
+    dropped_streak: u32,
+}
+
+impl LineBucket {
+    fn new(now: Instant, burst: u32) -> Self {
+        Self {
+            tokens: f64::from(burst),
+            last: now,
+            dropped_streak: 0,
+        }
+    }
+
+    /// Spend a token for one line; false when the bucket is empty.
+    fn take(&mut self, now: Instant, per_sec: u32, burst: u32) -> bool {
+        if per_sec == 0 {
+            return true;
+        }
+        let dt = now.saturating_duration_since(self.last).as_secs_f64();
+        self.last = now;
+        self.tokens = (self.tokens + dt * f64::from(per_sec)).min(f64::from(burst.max(1)));
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            self.dropped_streak = 0;
+            true
+        } else {
+            self.dropped_streak = self.dropped_streak.saturating_add(1);
+            false
+        }
     }
 }
 
@@ -1186,6 +1299,7 @@ async fn handle_connection<S>(
     let mut chunk = [0u8; READ_CHUNK];
     let started = Instant::now();
     let mut last_line = started;
+    let mut line_bucket = LineBucket::new(started, limits.pre_login_line_burst);
     // The greeting waits for the client's capabilities, but not forever
     // (raw TCP clients never answer).
     let connect_deadline = started + limits.negotiation_window;
@@ -1275,7 +1389,24 @@ async fn handle_connection<S>(
                 break 'conn;
             }
         }
+        let authed = guard.is_authenticated();
+        let (per_sec, burst) = if authed {
+            (limits.lines_per_sec, limits.line_burst)
+        } else {
+            (limits.pre_login_lines_per_sec, limits.pre_login_line_burst)
+        };
         for line in lines {
+            if !line_bucket.take(Instant::now(), per_sec, burst) {
+                // Pre-login there is no legitimate reason to exceed the
+                // burst, and every line costs the world loop a lookup:
+                // drop the peer. In game, shed the excess and only
+                // disconnect a sustained flood.
+                if !authed || line_bucket.dropped_streak >= MAX_DROPPED_LINE_STREAK {
+                    warn!(conn_id, %peer, authed, "input rate limit exceeded; dropping connection");
+                    break 'conn;
+                }
+                continue;
+            }
             if !sink.send(InboundKind::Line(line)).await {
                 break 'conn;
             }
@@ -1704,7 +1835,75 @@ mod limit_tests {
             pre_login_idle: Duration::from_millis(200),
             pre_login_total: Duration::from_secs(30),
             negotiation_window: Duration::from_millis(50),
+            ..Limits::default()
         }
+    }
+
+    #[tokio::test]
+    async fn pre_login_line_flood_is_disconnected() {
+        let (addr, _gate, mut rx) = start(Limits {
+            pre_login_lines_per_sec: 1,
+            pre_login_line_burst: 3,
+            ..fast_limits()
+        })
+        .await;
+        let mut c = TcpStream::connect(addr).await.unwrap();
+        let flood = "look\r\n".repeat(50);
+        c.write_all(flood.as_bytes()).await.unwrap();
+        // The server drops the connection; the reader sees EOF eventually.
+        let mut lines = 0usize;
+        let mut disconnected = false;
+        while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+            match ev.kind {
+                InboundKind::Line(_) => lines += 1,
+                InboundKind::Disconnected => {
+                    disconnected = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(disconnected, "flooding peer must be disconnected");
+        assert!(lines <= 3, "only the burst gets through, got {lines}");
+    }
+
+    #[tokio::test]
+    async fn pre_login_cap_is_separate_and_freed_on_authentication() {
+        let (addr, gate, mut rx) = start(Limits {
+            max_pre_login: 2,
+            max_per_ip: 10,
+            ..fast_limits()
+        })
+        .await;
+        // Pre-login connections must not announce, so use raw probes and
+        // check the gate counters directly.
+        let _a = TcpStream::connect(addr).await.unwrap();
+        let _b = TcpStream::connect(addr).await.unwrap();
+        tokio::time::timeout(WAIT, async {
+            while gate.lock().pre_login < 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // A third is refused while both slots are held by unauthenticated peers.
+        let mut c = TcpStream::connect(addr).await.unwrap();
+        assert!(closed_by_peer(&mut c).await);
+        assert_eq!(gate.lock().pre_login, 2);
+        // Authenticating one frees a pre-login slot (and counts once only).
+        let id = *gate.lock().conns.keys().next().unwrap();
+        gate.mark_authenticated(id);
+        gate.mark_authenticated(id);
+        assert_eq!(gate.lock().pre_login, 1);
+        let _d = TcpStream::connect(addr).await.unwrap();
+        tokio::time::timeout(WAIT, async {
+            while gate.lock().pre_login < 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(rx.try_recv());
     }
 
     /// Start a plain listener on loopback with a private gate.
@@ -1986,6 +2185,41 @@ mod limit_tests {
         // Multibyte char split across reads, then erased.
         let e = "\u{e9}".as_bytes();
         assert_eq!(split(&[&e[..1], &[e[1], 0x08, b'x', b'\r']]), ["x"]);
+    }
+
+    #[test]
+    fn line_bucket_allows_burst_then_refills() {
+        let t0 = Instant::now();
+        let mut b = LineBucket::new(t0, 3);
+        assert!(b.take(t0, 1, 3));
+        assert!(b.take(t0, 1, 3));
+        assert!(b.take(t0, 1, 3));
+        assert!(!b.take(t0, 1, 3));
+        assert_eq!(b.dropped_streak, 1);
+        // One second later one token has come back.
+        let t1 = t0 + Duration::from_secs(1);
+        assert!(b.take(t1, 1, 3));
+        assert_eq!(b.dropped_streak, 0);
+        assert!(!b.take(t1, 1, 3));
+        // Refill never exceeds the burst.
+        let t2 = t1 + Duration::from_secs(3600);
+        assert!(b.take(t2, 1, 3));
+        assert!(b.take(t2, 1, 3));
+        assert!(b.take(t2, 1, 3));
+        assert!(!b.take(t2, 1, 3));
+        // Rate 0 disables the limit.
+        assert!(b.take(t2, 0, 3));
+    }
+
+    #[test]
+    fn splitter_drops_escape_and_other_control_bytes() {
+        // ESC is dropped, so the CSI / OSC introducers are inert text.
+        assert_eq!(split(&[b"say \x1b[2Jhi\r"]), ["say [2Jhi"]);
+        assert_eq!(split(&[b"say \x1b]52;c;QUJD\x07x\r"]), ["say ]52;c;QUJDx"]);
+        // Other C0 controls go; TAB stays.
+        assert_eq!(split(&[b"a\x01b\x07c\td\x1fe\r"]), ["abc\tde"]);
+        // C1 controls (CSI U+009B, OSC U+009D) are stripped after decoding.
+        assert_eq!(split(&["a\u{9b}2Jb\u{9d}c\r".as_bytes()]), ["a2Jbc"]);
     }
 
     #[test]

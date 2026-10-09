@@ -255,11 +255,13 @@ pub(crate) async fn compose_board_step(
             if trimmed.is_empty() {
                 ComposeStep::Nudge
             } else {
-                draft.subject = Some(trimmed.to_string());
+                draft.subject = Some(mud_net::sanitize_text(trimmed, false).into_owned());
                 ComposeStep::SubjectSet
             }
         } else {
-            draft.body.push(line.to_string());
+            draft
+                .body
+                .push(mud_net::sanitize_text(line, false).into_owned());
             ComposeStep::BodyAdded
         }
     } else {

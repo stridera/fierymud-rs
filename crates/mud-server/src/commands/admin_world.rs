@@ -1871,7 +1871,8 @@ pub(crate) fn cmd_send(world: &mut World, player: Entity, args: &str) {
 pub(crate) fn cmd_poofin(world: &mut World, player: Entity, args: &str) {
     use mud_world::Poofs;
     record_admin_action(world, player, "poofin", args);
-    let arg = args.trim();
+    let arg = mud_net::sanitize_text(args, false);
+    let arg = arg.trim();
     if arg.is_empty() {
         let current = world.get::<Poofs>(player).and_then(|p| p.poof_in.clone());
         match current {
@@ -1901,7 +1902,8 @@ pub(crate) fn cmd_poofin(world: &mut World, player: Entity, args: &str) {
 pub(crate) fn cmd_poofout(world: &mut World, player: Entity, args: &str) {
     use mud_world::Poofs;
     record_admin_action(world, player, "poofout", args);
-    let arg = args.trim();
+    let arg = mud_net::sanitize_text(args, false);
+    let arg = arg.trim();
     if arg.is_empty() {
         let current = world.get::<Poofs>(player).and_then(|p| p.poof_out.clone());
         match current {
@@ -1932,7 +1934,8 @@ pub(crate) fn cmd_cls(world: &mut World, player: Entity, _args: &str) {
     use crate::commands::send_raw;
     // ANSI: ESC[2J clears the screen, ESC[H homes the cursor. Most
     // terminals support both even when the player has color stripped.
-    send_raw(world, player, "\x1b[2J\x1b[H");
+    // The output encoder lets exactly this frame through.
+    send_raw(world, player, mud_net::CLEAR_SCREEN);
 }
 
 /// True when `item`'s outermost holder (through nested containers) is a

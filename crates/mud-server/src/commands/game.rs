@@ -124,6 +124,10 @@ const TOGGLES: &[Toggle] = &[
     },
 ];
 
+/// Shown when `devmode on` is attempted without the `MUD_DEV_MODE` env opt-in
+/// (or under `MUD_ENV=production`).
+pub(crate) const DEV_MODE_REFUSED: &str = "DevMode cannot be enabled here: it needs MUD_DEV_MODE=true in the server environment and is refused in production.\r\n";
+
 fn caller_role(world: &World, player: Entity) -> UserRole {
     world
         .get::<mud_world::Account>(player)
@@ -258,6 +262,10 @@ pub(crate) fn cmd_game(world: &mut World, player: Entity, args: &str) {
                 if current { "on" } else { "off" }
             ),
         );
+        return;
+    }
+    if new_state && toggle.name == "devmode" && !crate::envflags::dev_mode_allowed() {
+        send_to(world, player, DEV_MODE_REFUSED);
         return;
     }
     let actor = name_of(world, player);

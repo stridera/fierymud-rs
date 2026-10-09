@@ -8,7 +8,10 @@
 //!   client can show (or drops colour entirely),
 //! * transliterates non-ASCII text to ASCII for clients that are not
 //!   known to speak UTF-8 (see [`TRANSLIT`]),
-//! * turns bare `\n` into `\r\n` (telnet's NVT newline).
+//! * turns bare `\n` into `\r\n` (telnet's NVT newline),
+//! * strips terminal-control injection from game text: every non-SGR
+//!   CSI, all OSC / DCS / APC string sequences, other ESC sequences and
+//!   stray control characters (see [`CLEAR_SCREEN`] for the one exception).
 //!
 //! Frames that carry telnet framing (any `0xFF` byte) or are not valid
 //! UTF-8 are binary and pass through untouched.
@@ -287,6 +290,87 @@ impl OutputHandle {
     }
 }
 
+/// The one server-issued screen clear (`cls`). It is the only non-SGR
+/// escape sequence the encoder lets through, and only when it is the
+/// entire frame (optionally behind a line break), so it can never ride
+/// along inside player-authored text.
+pub const CLEAR_SCREEN: &str = "\x1b[2J\x1b[H";
+
+fn is_clear_screen_frame(text: &str) -> bool {
+    text.trim_start_matches(['\r', '\n']) == CLEAR_SCREEN
+}
+
+/// Control characters that never belong in game text. Newlines and tabs
+/// survive (the encoder normalises line endings itself); everything else
+/// in C0, DEL and C1 is dropped.
+fn is_forbidden_control(c: char) -> bool {
+    c.is_control() && !matches!(c, '\n' | '\r' | '\t')
+}
+
+/// Result of scanning one escape sequence that starts at an `ESC`.
+enum Escape {
+    /// A complete `ESC [ params m` sequence; `params_end` indexes the `m`.
+    Sgr { params_end: usize },
+    /// Any other escape sequence (or fragment): drop everything up to
+    /// but not including this index.
+    Skip(usize),
+}
+
+/// Classify the escape sequence at `chars[i]` (which must be `ESC`).
+///
+/// Only SGR (colour) is kept. Every other CSI, all string-type sequences
+/// (OSC, DCS, SOS, PM, APC; clipboard writes, hyperlinks, title changes)
+/// and bare two-byte escapes (`ESC c` reset, `ESC 7` ...) are dropped.
+/// String sequences end at BEL, ST, or the end of the line, so an
+/// unterminated one cannot swallow the rest of the frame.
+fn scan_escape(chars: &[char], i: usize) -> Escape {
+    match chars.get(i + 1) {
+        None => Escape::Skip(i + 1),
+        Some('[') => {
+            let mut j = i + 2;
+            while j < chars.len() && matches!(chars[j], '\u{20}'..='\u{3f}') {
+                j += 1;
+            }
+            if j < chars.len() && matches!(chars[j], '\u{40}'..='\u{7e}') {
+                let plain = chars[i + 2..j]
+                    .iter()
+                    .all(|c| c.is_ascii_digit() || matches!(c, ';' | ':'));
+                if chars[j] == 'm' && plain {
+                    Escape::Sgr { params_end: j }
+                } else {
+                    Escape::Skip(j + 1)
+                }
+            } else {
+                // Aborted CSI: a control char or end of input interrupted it.
+                Escape::Skip(j)
+            }
+        }
+        Some(']' | 'P' | 'X' | '^' | '_') => {
+            let mut j = i + 2;
+            while j < chars.len() {
+                match chars[j] {
+                    '\x07' | '\u{9c}' => return Escape::Skip(j + 1),
+                    '\x1b' if chars.get(j + 1) == Some(&'\\') => return Escape::Skip(j + 2),
+                    '\n' | '\r' => return Escape::Skip(j),
+                    _ => j += 1,
+                }
+            }
+            Escape::Skip(chars.len())
+        }
+        Some(c) => {
+            // Two-byte escapes (`ESC c` reset, `ESC 7` save cursor, ...)
+            // go whole. Anything else (including an `ESC` followed by a
+            // space or other intermediate) loses only the `ESC`, so the
+            // text after it is not eaten.
+            if matches!(c, '\u{30}'..='\u{7e}') {
+                Escape::Skip(i + 2)
+            } else {
+                Escape::Skip(i + 1)
+            }
+        }
+    }
+}
+
 /// Encode one frame for a client with the given capabilities.
 #[must_use]
 pub fn encode_frame(frame: Vec<u8>, depth: ColorDepth, charset: Charset) -> Vec<u8> {
@@ -298,8 +382,11 @@ pub fn encode_frame(frame: Vec<u8>, depth: ColorDepth, charset: Charset) -> Vec<
     let Ok(text) = std::str::from_utf8(&frame) else {
         return frame;
     };
+    if is_clear_screen_frame(text) {
+        return frame;
+    }
     let needs_work = text.contains('\n')
-        || (depth != ColorDepth::TrueColor && text.contains('\x1b'))
+        || text.chars().any(is_forbidden_control)
         || (charset == Charset::Ascii && !text.is_ascii());
     if !needs_work {
         return frame;
@@ -319,23 +406,21 @@ pub fn encode_text(text: &str, depth: ColorDepth, charset: Charset) -> Cow<'_, s
     let mut prev = '\0';
     while i < chars.len() {
         let c = chars[i];
-        if c == '\x1b' && chars.get(i + 1) == Some(&'[') {
-            // CSI: params 0x30-0x3F, intermediates 0x20-0x2F, final 0x40-0x7E.
-            let mut j = i + 2;
-            while j < chars.len() && matches!(chars[j], '\u{20}'..='\u{3f}') {
-                j += 1;
-            }
-            if j < chars.len() && matches!(chars[j], '\u{40}'..='\u{7e}') {
-                if chars[j] == 'm' {
-                    let params: String = chars[i + 2..j].iter().collect();
+        if c == '\x1b' {
+            match scan_escape(&chars, i) {
+                Escape::Sgr { params_end } => {
+                    let params: String = chars[i + 2..params_end].iter().collect();
                     out.push_str(&rewrite_sgr(&params, depth));
-                } else {
-                    out.extend(&chars[i..=j]);
+                    prev = 'm';
+                    i = params_end + 1;
                 }
-                prev = chars[j];
-                i = j + 1;
-                continue;
+                Escape::Skip(next) => i = next.max(i + 1),
             }
+            continue;
+        }
+        if is_forbidden_control(c) {
+            i += 1;
+            continue;
         }
         match c {
             '\n' if prev != '\r' => out.push_str("\r\n"),
@@ -351,6 +436,54 @@ pub fn encode_text(text: &str, depth: ColorDepth, charset: Charset) -> Cow<'_, s
     } else {
         Cow::Owned(out)
     }
+}
+
+/// Strip terminal control content from untrusted text: all escape
+/// sequences (colour included), C0 controls, DEL and C1 controls. With
+/// `keep_newlines`, `\n`, `\r` and `\t` survive (multi-line stored text);
+/// otherwise they are removed too. Use on player-authored text before it
+/// is stored or echoed.
+#[must_use]
+pub fn sanitize_text(text: &str, keep_newlines: bool) -> Cow<'_, str> {
+    sanitize(text, keep_newlines, false)
+}
+
+/// Like [`sanitize_text`] keeping newlines and tabs, but complete SGR
+/// (colour) sequences survive. For text that may already have been
+/// rendered once (colour escapes are the server's own) yet must not carry
+/// cursor, screen, OSC or other terminal-control sequences.
+#[must_use]
+pub fn strip_non_sgr_escapes(text: &str) -> Cow<'_, str> {
+    sanitize(text, true, true)
+}
+
+fn sanitize(text: &str, keep_newlines: bool, keep_sgr: bool) -> Cow<'_, str> {
+    let forbidden = |c: char| c.is_control() && !(keep_newlines && matches!(c, '\n' | '\r' | '\t'));
+    if !text.chars().any(|c| c == '\x1b' || forbidden(c)) {
+        return Cow::Borrowed(text);
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\x1b' {
+            match scan_escape(&chars, i) {
+                Escape::Sgr { params_end } if keep_sgr => {
+                    out.extend(&chars[i..=params_end]);
+                    i = params_end + 1;
+                }
+                Escape::Sgr { params_end } => i = params_end + 1,
+                Escape::Skip(next) => i = next.max(i + 1),
+            }
+            continue;
+        }
+        if !forbidden(c) {
+            out.push(c);
+        }
+        i += 1;
+    }
+    Cow::Owned(out)
 }
 
 // ---------------------------------------------------------------------
@@ -781,7 +914,7 @@ mod tests {
     }
 
     #[test]
-    fn color_off_strips_every_sgr_but_keeps_other_csi() {
+    fn color_off_strips_every_sgr_and_other_csi() {
         assert_eq!(
             enc(
                 "\x1b[1;31mred\x1b[0m plain",
@@ -792,8 +925,97 @@ mod tests {
         );
         assert_eq!(
             enc("\x1b[38;5;196mx\x1b[2J", ColorDepth::None, Charset::Utf8),
-            "x\x1b[2J"
+            "x"
         );
+    }
+
+    #[test]
+    fn injected_escapes_are_stripped_at_every_depth() {
+        for depth in [
+            ColorDepth::None,
+            ColorDepth::Ansi16,
+            ColorDepth::Ansi256,
+            ColorDepth::TrueColor,
+        ] {
+            // Screen clear / cursor moves.
+            assert_eq!(enc("a\x1b[2Jb\x1b[1;1Hc", depth, Charset::Utf8), "abc");
+            // OSC 52 clipboard write, BEL- and ST-terminated.
+            assert_eq!(enc("a\x1b]52;c;QUJD\x07b", depth, Charset::Utf8), "ab");
+            assert_eq!(enc("a\x1b]52;c;QUJD\x1b\\b", depth, Charset::Utf8), "ab");
+            // OSC 8 hyperlink open / close.
+            assert_eq!(
+                enc(
+                    "\x1b]8;;http://evil\x07click\x1b]8;;\x07",
+                    depth,
+                    Charset::Utf8
+                ),
+                "click"
+            );
+            // DCS, bare ESC resets, C1 introducers, stray controls.
+            assert_eq!(enc("a\x1bPq data\x1b\\b", depth, Charset::Utf8), "ab");
+            assert_eq!(enc("a\x1bcb\x1b7c", depth, Charset::Utf8), "abc");
+            assert_eq!(enc("a\u{9b}2Jb\u{9d}x\x07", depth, Charset::Utf8), "a2Jbx");
+            assert_eq!(enc("a\x08\x0c\x7fb", depth, Charset::Utf8), "ab");
+        }
+    }
+
+    #[test]
+    fn unterminated_osc_does_not_eat_following_lines() {
+        assert_eq!(
+            enc(
+                "say \x1b]52;c;AAAA\r\nnext",
+                ColorDepth::Ansi16,
+                Charset::Utf8
+            ),
+            "say \r\nnext"
+        );
+    }
+
+    #[test]
+    fn sgr_colour_survives_and_clear_screen_frame_is_allowed() {
+        assert_eq!(
+            enc("\x1b[31mred\x1b[0m", ColorDepth::TrueColor, Charset::Utf8),
+            "\x1b[31mred\x1b[0m"
+        );
+        assert_eq!(
+            enc(CLEAR_SCREEN, ColorDepth::None, Charset::Ascii),
+            CLEAR_SCREEN
+        );
+        assert_eq!(
+            enc(
+                &format!("\r\n{CLEAR_SCREEN}"),
+                ColorDepth::None,
+                Charset::Ascii
+            ),
+            format!("\r\n{CLEAR_SCREEN}")
+        );
+        // Embedded in other text it is stripped.
+        assert_eq!(
+            enc(
+                &format!("Bob says, '{CLEAR_SCREEN}'\r\n"),
+                ColorDepth::Ansi16,
+                Charset::Utf8
+            ),
+            "Bob says, ''\r\n"
+        );
+    }
+
+    #[test]
+    fn sanitize_text_strips_everything_but_optionally_newlines() {
+        assert_eq!(sanitize_text("plain", false), "plain");
+        assert_eq!(sanitize_text("a\x1b[2Jb\x1b[31mc", false), "abc");
+        assert_eq!(sanitize_text("t\x1b]52;c;QQ==\x07x", false), "tx");
+        assert_eq!(sanitize_text("l1\r\nl2\x1b[2J", true), "l1\r\nl2");
+        assert_eq!(sanitize_text("l1\r\nl2", false), "l1l2");
+    }
+
+    #[test]
+    fn strip_non_sgr_escapes_keeps_colour_only() {
+        assert_eq!(
+            strip_non_sgr_escapes("\x1b[1;33mgold\x1b[0m\x1b[2J\x1b]52;c;QQ==\x07 ok\r\n"),
+            "\x1b[1;33mgold\x1b[0m ok\r\n"
+        );
+        assert_eq!(strip_non_sgr_escapes("gem\x1b bag"), "gem bag");
     }
 
     #[test]

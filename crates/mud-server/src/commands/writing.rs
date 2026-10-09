@@ -46,7 +46,8 @@ fn find_writable_target(world: &mut World, player: Entity, needle: &str) -> Opti
 }
 
 fn cmd_write(world: &mut World, player: Entity, args: &str) {
-    let trimmed = args.trim();
+    let trimmed = mud_net::sanitize_text(args, false);
+    let trimmed = trimmed.trim();
     let mut parts = trimmed.splitn(2, char::is_whitespace);
     let Some(target_kw) = parts.next().filter(|w| !w.is_empty()) else {
         send_to(

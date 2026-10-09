@@ -3917,7 +3917,8 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
 }
 
 pub(crate) fn cmd_title(world: &mut World, player: Entity, args: &str) {
-    let arg = args.trim();
+    let arg = mud_net::sanitize_text(args, false);
+    let arg = arg.trim();
     if arg.is_empty() {
         let cur = world.get::<Title>(player).map(|t| t.0.clone());
         let line = match cur {
@@ -3949,7 +3950,8 @@ pub(crate) fn cmd_title(world: &mut World, player: Entity, args: &str) {
 }
 
 pub(crate) fn cmd_description(world: &mut World, player: Entity, args: &str) {
-    let arg = args.trim();
+    let arg = mud_net::sanitize_text(args, false);
+    let arg = arg.trim();
     if arg.is_empty() {
         let cur = world.get::<Description>(player).map(|d| d.0.clone());
         let line = match cur {
@@ -7876,7 +7878,8 @@ const PROMPT_TEMPLATES: &[(&str, &str)] = &[
 ];
 
 pub(crate) fn cmd_prompt(world: &mut World, player: Entity, args: &str) {
-    let template = args.trim();
+    let template = mud_net::sanitize_text(args, false);
+    let template = template.trim();
 
     // `prompt list` — show the named-template menu so a player
     // doesn't have to read the format spec to find a starting
@@ -8126,7 +8129,8 @@ pub(crate) fn cmd_afk(world: &mut World, player: Entity, _args: &str) {
 }
 
 pub(crate) fn cmd_alias(world: &mut World, player: Entity, args: &str) {
-    let trimmed = args.trim();
+    let trimmed = mud_net::sanitize_text(args, false);
+    let trimmed = trimmed.trim();
     if trimmed.is_empty() {
         // List
         let Some(aliases) = world.get::<mud_world::Aliases>(player) else {
@@ -14710,7 +14714,9 @@ pub(crate) fn cmd_house_rename(
 ) {
     let mut parts = args.splitn(2, char::is_whitespace);
     let idx_str = parts.next().unwrap_or("");
-    let new_text = parts.next().unwrap_or("").trim();
+    let new_text = parts.next().unwrap_or("");
+    let new_text = mud_net::sanitize_text(new_text, false);
+    let new_text = new_text.trim();
     let Ok(local_idx) = idx_str.parse::<i32>() else {
         send_to(
             world,

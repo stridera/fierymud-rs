@@ -229,6 +229,10 @@ pub(crate) fn cmd_devmode(world: &mut World, player: Entity, args: &str) {
                 send_to(world, player, "DevMode is already on.\r\n");
                 return;
             }
+            if !crate::envflags::dev_mode_allowed() {
+                send_to(world, player, super::game::DEV_MODE_REFUSED);
+                return;
+            }
             true
         }
         "off" | "false" | "0" | "disable" => {

@@ -216,10 +216,13 @@ pub fn spawn_admin_server(pool: PgPool) -> mpsc::Receiver<AdminCommand> {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| "127.0.0.1:8080".parse().expect("default admin addr parses"));
-    let token = std::env::var("ADMIN_TOKEN").ok().map(Arc::new);
-    let allow_unauth_local = std::env::var("ADMIN_ALLOW_UNAUTH_LOCAL")
-        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
-        .unwrap_or(false);
+    // An empty / whitespace-only ADMIN_TOKEN is "unset", never a valid
+    // secret (an empty expected token would match a request with no header).
+    let token = crate::envflags::non_blank(std::env::var("ADMIN_TOKEN").ok()).map(Arc::new);
+    // The unauthenticated-bind override is a dev convenience; production
+    // never honours it (startup already requires a token there).
+    let allow_unauth_local = !crate::envflags::is_production()
+        && std::env::var("ADMIN_ALLOW_UNAUTH_LOCAL").is_ok_and(|v| crate::envflags::is_truthy(&v));
     if token.is_none() && !addr.ip().is_loopback() && !allow_unauth_local {
         warn!(
             %addr,
@@ -298,9 +301,22 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 fn check_auth(state: &AppState, headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
-    let Some(expected) = state.token.as_ref() else {
+    check_bearer(state.token.as_deref().map(String::as_str), headers)
+}
+
+/// `expected == None` means no token is configured (loopback-only dev
+/// run): everything passes. A configured-but-blank token can never
+/// authenticate anyone; it is rejected outright.
+fn check_bearer(expected: Option<&str>, headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
+    let Some(expected) = expected else {
         return Ok(());
     };
+    if expected.trim().is_empty() {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "missing or invalid bearer token".into(),
+        ));
+    }
     let got = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
@@ -2474,5 +2490,46 @@ mod teleport_fight_tests {
         assert_eq!(w.get::<Located>(target).map(|l| l.0), Some(to));
         assert!(w.get::<Fighting>(target).is_none());
         assert!(w.get::<Fighting>(foe).is_none());
+    }
+}
+
+#[cfg(test)]
+mod auth_token_tests {
+    use super::*;
+
+    fn bearer(value: Option<&str>) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        if let Some(v) = value {
+            h.insert("authorization", v.parse().unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn empty_token_is_unset_not_a_bypass_secret() {
+        // ADMIN_TOKEN="" and ADMIN_TOKEN="   " both resolve to "no token".
+        assert_eq!(crate::envflags::non_blank(Some(String::new())), None);
+        assert_eq!(crate::envflags::non_blank(Some(" \t ".into())), None);
+    }
+
+    #[test]
+    fn blank_expected_token_never_authenticates() {
+        // Defence in depth: even if a blank token reached the checker, a
+        // header-less request (got == "") must not match it.
+        assert!(check_bearer(Some(""), &bearer(None)).is_err());
+        assert!(check_bearer(Some("  "), &bearer(Some("Bearer   "))).is_err());
+        assert!(check_bearer(Some(""), &bearer(Some("Bearer "))).is_err());
+    }
+
+    #[test]
+    fn real_token_requires_exact_bearer() {
+        assert!(check_bearer(Some("s3cret"), &bearer(None)).is_err());
+        assert!(check_bearer(Some("s3cret"), &bearer(Some("Bearer nope"))).is_err());
+        assert!(check_bearer(Some("s3cret"), &bearer(Some("Bearer s3cret"))).is_ok());
+    }
+
+    #[test]
+    fn no_token_configured_passes() {
+        assert!(check_bearer(None, &bearer(None)).is_ok());
     }
 }
