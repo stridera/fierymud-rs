@@ -114,6 +114,8 @@ pub(crate) struct PromptCtx {
     pub tank: Option<Combatant>,
     pub group_master: Option<Combatant>,
     pub exp: ExpState,
+    /// The `exp_progress` `SystemMessage` lines for `%E`.
+    pub exp_messages: Vec<String>,
     pub effects: Vec<EffectEntry>,
     /// `(legacy letter, remaining ms, total ms)` for cooldowns in
     /// progress; letters absent here render an idle bar.
@@ -196,22 +198,11 @@ pub(crate) fn status_alias(cur: i32, max: i32) -> String {
     format!("{tag}{cond}</>")
 }
 
-/// Legacy `exp_message`.
+/// Legacy `exp_message`. `messages` is the `exp_progress` `SystemMessage` row:
+/// eleven lines indexed by tenth of the way through the level. A missing row
+/// leaves that one case blank rather than failing.
 #[must_use]
-pub(crate) fn exp_message(e: ExpState) -> String {
-    const MESSAGES: [&str; 11] = [
-        "<blue>You still have a very long way to go to your next level.</>",
-        "<blue>You have gained some progress towards your next level.</>",
-        "<cyan>You are about one-quarter of the way to your next level.</>",
-        "<blue>You are about a third of the way to your next level.</>",
-        "<blue>You are almost half-way to your next level.</>",
-        "<cyan>You are just past the half-way point to your next level.</>",
-        "<blue>You are well on your way to your next level.</>",
-        "<blue>You are about three-quarters of the way to your next level.</>",
-        "<cyan>You are almost ready to attain your next level.</>",
-        "<blue>You should level anytime now!</>",
-        "<blue>You are SO close to the next level.</>",
-    ];
+pub(crate) fn exp_message(e: ExpState, messages: &[String]) -> String {
     if e.level >= mud_db::enums::MIN_STAFF_LEVEL {
         return "Experience has no meaning for you.".to_string();
     }
@@ -228,7 +219,10 @@ pub(crate) fn exp_message(e: ExpState) -> String {
     } else if percent < 4 {
         "<blue>You have just begun the journey to your next level.</>".to_string()
     } else if (0..=100).contains(&percent) {
-        MESSAGES[usize::try_from(percent / 10).unwrap_or(0)].to_string()
+        messages
+            .get(usize::try_from(percent / 10).unwrap_or(0))
+            .cloned()
+            .unwrap_or_default()
     } else {
         "<red>You are somewhere along the way to your next level.</>".to_string()
     }
@@ -471,7 +465,7 @@ pub(crate) fn render_prompt(template: &str, ctx: &PromptCtx) -> String {
                     'N' => out.push_str(ctx.real_name.as_deref().unwrap_or("?")),
                     'd' => expecting = Expect::Cooldown,
                     'e' => out.push_str(&exp_bar(ctx.exp, 20, 20, 20)),
-                    'E' => out.push_str(&exp_message(ctx.exp)),
+                    'E' => out.push_str(&exp_message(ctx.exp, &ctx.exp_messages)),
                     'l' | 'L' => {
                         let n = ctx.effects.len();
                         for (i, eff) in ctx.effects.iter().enumerate() {
@@ -593,38 +587,6 @@ pub(crate) fn render_prompt(template: &str, ctx: &PromptCtx) -> String {
 /// Every selector letter legacy accepts after `%d`.
 const COOLDOWN_SELECTORS: &str = "abcdDefghijklmnopqrstuvwxy1234567";
 
-/// Legacy cooldown letters (`%d<letter>`) mapped to the abilities whose
-/// cooldown each one tracks. Letters whose legacy innate / skill has no
-/// counterpart here are absent and render an idle bar.
-const COOLDOWN_LETTERS: &[(char, &[&str])] = &[
-    ('a', &["innate ascension"]),
-    (
-        'b',
-        &[
-            "breathe acid",
-            "breathe fire",
-            "breathe frost",
-            "breathe gas",
-            "breathe lightning",
-        ],
-    ),
-    ('c', &["innate brilliance"]),
-    ('g', &["darkness"]),
-    ('h', &["disarm"]),
-    ('i', &["first aid"]),
-    ('j', &["instant kill"]),
-    ('k', &["invisibility"]),
-    ('l', &["lay hands"]),
-    ('m', &["feather fall"]),
-    ('n', &["shapechange"]),
-    ('o', &["summon mount"]),
-    ('r', &["throatcut"]),
-    ('t', &["blinding beauty"]),
-    ('u', &["illumination"]),
-    ('w', &["statue"]),
-    ('x', &["barkskin"]),
-];
-
 /// Active, non-permanent effects on `target`: one entry per distinct
 /// name, colour-graded by time left when the target has detect magic
 /// (legacy `%l` behaviour).
@@ -669,17 +631,20 @@ fn active_effects(world: &mut World, target: Entity) -> Vec<EffectEntry> {
 /// currently running on `target`.
 fn active_cooldowns(world: &World, target: Entity) -> Vec<(char, i64, i64)> {
     let mut out: Vec<(char, i64, i64)> = Vec::new();
-    let (Some(cd), Some(catalog)) = (
+    let (Some(cd), Some(catalog), Some(letters)) = (
         world.get::<Cooldowns>(target),
         world.get_resource::<AbilityCatalog>(),
+        // Legacy cooldown letters (`%d<letter>`): the `Ability.prompt_letter`
+        // column says which abilities each one tracks.
+        world.get_resource::<mud_world::PromptLetters>(),
     ) else {
         return out;
     };
     let now = std::time::Instant::now();
-    for (letter, names) in COOLDOWN_LETTERS {
+    for (letter, ids) in &letters.by_letter {
         let mut best: Option<(i64, i64)> = None;
         for def in catalog.by_name.values() {
-            if !names.contains(&def.plain_name.as_str()) {
+            if !ids.contains(&def.id) {
                 continue;
             }
             let Some(ready_at) = cd.ready_at.get(&def.id) else {
@@ -763,6 +728,9 @@ pub(crate) fn build_prompt_ctx(world: &mut World, target: Entity) -> PromptCtx {
     });
     let level = profile.map_or(0, |p| p.level);
     let exp = profile.map_or_else(ExpState::default, |p| exp_state(world, p));
+    let exp_messages = world
+        .get_resource::<mud_world::SystemMessages>()
+        .map_or_else(Vec::new, |m| m.get("exp_progress").to_vec());
 
     let victim_entity = world
         .get::<Fighting>(target)
@@ -799,6 +767,7 @@ pub(crate) fn build_prompt_ctx(world: &mut World, target: Entity) -> PromptCtx {
         tank: tank_entity.and_then(combatant),
         group_master,
         exp,
+        exp_messages,
         effects,
         cooldowns,
         wizinvis: world.get::<WizInvis>(target).map_or(0, |w| w.0),
@@ -833,6 +802,25 @@ mod tests {
             hp: 75,
             max_hp: 100,
         }
+    }
+
+    /// The seeded `exp_progress` `SystemMessage` row.
+    fn exp_lines() -> Vec<String> {
+        [
+            "<blue>You still have a very long way to go to your next level.</>",
+            "<blue>You have gained some progress towards your next level.</>",
+            "<cyan>You are about one-quarter of the way to your next level.</>",
+            "<blue>You are about a third of the way to your next level.</>",
+            "<blue>You are almost half-way to your next level.</>",
+            "<cyan>You are just past the half-way point to your next level.</>",
+            "<blue>You are well on your way to your next level.</>",
+            "<blue>You are about three-quarters of the way to your next level.</>",
+            "<cyan>You are almost ready to attain your next level.</>",
+            "<blue>You should level anytime now!</>",
+            "<blue>You are SO close to the next level.</>",
+        ]
+        .map(String::from)
+        .to_vec()
     }
 
     fn ctx() -> PromptCtx {
@@ -880,6 +868,7 @@ mod tests {
                 current: 500,
                 starstar: false,
             },
+            exp_messages: exp_lines(),
             effects: vec![
                 EffectEntry {
                     name: "armor".into(),
@@ -1094,6 +1083,66 @@ mod tests {
         c.exp = ExpState::default();
         assert_eq!(plain(&render_prompt("%E", &c)), "You're fairly weak. ");
         assert_eq!(plain(&render_prompt("%e", &c)), "-?- ");
+    }
+
+    #[test]
+    fn exp_progress_lines_come_from_the_system_message_row() {
+        let state = |current| ExpState {
+            level: 42,
+            total: 1000,
+            current,
+            starstar: false,
+        };
+        let lines = exp_lines();
+        // Under 4% is its own legacy line; 999/1000 is "ready"; everything
+        // else is the row's line for its tenth.
+        assert_eq!(
+            exp_message(state(30), &lines),
+            "<blue>You have just begun the journey to your next level.</>"
+        );
+        assert_eq!(
+            exp_message(state(999), &lines),
+            "<blue>You are ready for the next level!</>"
+        );
+        for (current, idx) in [(40, 0), (100, 1), (250, 2), (500, 5), (990, 9), (1000, 10)] {
+            assert_eq!(exp_message(state(current), &lines), lines[idx], "{current}");
+        }
+        let mut edited = lines;
+        edited[5] = "Halfway there!".into();
+        assert_eq!(exp_message(state(500), &edited), "Halfway there!");
+        // Row missing (table absent at boot): the tenth-bucket lines are blank.
+        assert_eq!(exp_message(state(500), &[]), "");
+    }
+
+    #[test]
+    fn cooldown_bars_follow_the_prompt_letters_resource() {
+        use crate::commands::test_support::ability_def;
+        use mud_db::abilities::AbilityKind;
+        let mut world = World::new();
+        let mut catalog = AbilityCatalog::default();
+        let mut fire = ability_def(5, "Breathe Fire", AbilityKind::Skill);
+        fire.cooldown_ms = 10_000;
+        catalog.by_name.insert("breathe_fire".into(), fire);
+        world.insert_resource(catalog);
+        let mut cd = mud_world::Cooldowns::default();
+        cd.ready_at.insert(
+            5,
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+        );
+        let player = world.spawn(cd).id();
+
+        // No PromptLetters resource (column absent at boot): idle bars.
+        assert!(active_cooldowns(&world, player).is_empty());
+
+        world.insert_resource(mud_world::PromptLetters {
+            by_letter: vec![('b', vec![4, 5]), ('h', vec![99])],
+        });
+        let bars = active_cooldowns(&world, player);
+        assert_eq!(bars.len(), 1, "{bars:?}");
+        let (letter, remaining, total) = bars[0];
+        assert_eq!(letter, 'b');
+        assert!((4000..=5000).contains(&remaining), "{remaining}");
+        assert_eq!(total, 10_000);
     }
 
     #[test]

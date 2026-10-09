@@ -43,9 +43,9 @@ pub use components::{
     is_lit, room_in_god_zone, wear_keyword_slot, zone_is_god,
 };
 pub use loader::{
-    LoadStats, ReloadStats, default_weather_for_climate, load_ability_catalog, load_effect_catalog,
-    load_from_db, load_trigger_catalog, merge_prototypes, reload_zones, wear_flags_primary_slot,
-    wear_flags_slots,
+    LoadStats, ReloadStats, default_weather_for_climate, load_ability_catalog, load_content_tables,
+    load_effect_catalog, load_from_db, load_trigger_catalog, merge_prototypes, reload_zones,
+    wear_flags_primary_slot, wear_flags_slots,
 };
 pub use mob_spawn::spawn_mob_from_proto;
 pub use reset_gear::{
@@ -64,13 +64,14 @@ pub use resources::{
     LoginMessages, LuaOutbox, MobDefaultEffect, MobDefaultEffectCatalog, MobProto, MobPrototypes,
     MobResetCatalog, MobResetEntry, MudClock, ObjectAbilityBinding, ObjectAbilityCatalog,
     ObjectGrantedEffect, ObjectProto, ObjectPrototypes, ObjectResetCatalog, ObjectResetEntry,
-    PendingDiscordLink, PendingDiscordLinks, PrecipKind, QuestVariableCache, RaceAbilitiesData,
-    RaceCatalog, RaceDef, RaceDefaults, RaceEffect, RaceEffectCatalog, RaceStatCaps, RecallRooms,
-    RoomEnvironmentalEffects, RuntimeConfig, SavingThrow, ScriptError, ScriptErrorLog, Season,
-    ShopAcceptRule, ShopCatalog, ShopDef, ShopOffering, ShopPetOffering, SocialDef, SocialRegistry,
-    SpellSlotData, SystemTextEntry, SystemTexts, TargetingRule, TempBand, TriggerAttach,
-    TriggerCatalog, TriggerDef, TriggerEvent, TriggerHistoryEntry, TriggerHistoryLog,
-    WeatherCatalog, WeatherDriftLocks, WeatherState, WizLock, WorldKeyIndex, effective_level,
-    effective_race, parse_resistance_json,
+    PendingDiscordLink, PendingDiscordLinks, PrecipKind, PromptLetters, QuestVariableCache,
+    RaceAbilitiesData, RaceCatalog, RaceDef, RaceDefaults, RaceEffect, RaceEffectCatalog,
+    RaceStatCaps, RecallRooms, RoomEnvironmentalEffects, RuntimeConfig, SavingThrow, ScriptError,
+    ScriptErrorLog, Season, ShopAcceptRule, ShopCatalog, ShopDef, ShopOffering, ShopPetOffering,
+    SocialDef, SocialRegistry, SpellSlotData, SpellSyllables, StatusFlagValues, SystemMessages,
+    SystemTextEntry, SystemTexts, TargetingRule, TempBand, TriggerAttach, TriggerCatalog,
+    TriggerDef, TriggerEvent, TriggerHistoryEntry, TriggerHistoryLog, WeatherCatalog,
+    WeatherDriftLocks, WeatherState, WizLock, WorldKeyIndex, effective_level, effective_race,
+    month_name, parse_resistance_json,
 };
 pub use resources::{class_exp_factor, exp_to_reach, is_starstar, scale_exp, stars_for_name};

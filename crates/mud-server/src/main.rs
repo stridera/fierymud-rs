@@ -5,6 +5,8 @@ mod camp;
 mod casting;
 mod combat;
 mod commands;
+#[cfg(test)]
+mod content_tables_tests;
 mod corpses;
 mod drowning;
 mod effects;

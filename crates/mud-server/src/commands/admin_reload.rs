@@ -1286,7 +1286,7 @@ fn cmd_date(world: &mut World, player: Entity, _args: &str) {
             "In-game date: the {}{} day of {}, Year {} ({:02}:{:02}).\r\n",
             clock.day,
             ordinal(clock.day),
-            clock.month_name(),
+            mud_world::month_name(world, clock.month),
             clock.year,
             clock.hour,
             clock.minute

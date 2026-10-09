@@ -356,17 +356,6 @@ fn cmd_whisper(world: &mut World, player: Entity, args: &str) {
     send_comm_channel_text(world, target, "whisper", &speaker, &gmcp_text);
 }
 
-const INSULT_LINES: &[&str] = &[
-    "You smell like a troll's armpit!",
-    "Your mother was a bugbear!",
-    "You fight like a dairy farmer!",
-    "I've seen better-looking rust monsters!",
-    "Even a gelatinous cube has more personality!",
-    "Your sword is dull and your wits are duller!",
-    "I've met kobolds with sharper tongues!",
-    "Your aim is as bad as your cooking!",
-];
-
 fn cmd_insult(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
     if arg.is_empty() {
@@ -388,7 +377,15 @@ fn cmd_insult(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "You feel insulted.\r\n");
         return;
     }
-    let line = INSULT_LINES[rand::random_range(0..INSULT_LINES.len())];
+    // The `insult_lines` SystemMessage row is the pool to pick from.
+    let Some(line) = world
+        .get_resource::<mud_world::SystemMessages>()
+        .and_then(|m| m.pick("insult_lines"))
+        .map(str::to_string)
+    else {
+        send_to(world, player, "You can't think of an insult.\r\n");
+        return;
+    };
     let actor_name = name_of(world, player);
     let target_name = name_of(world, target);
     send_to(
@@ -482,5 +479,58 @@ fn cmd_gsay(world: &mut World, player: Entity, args: &str) {
         };
         send_rendered(world, m, &line);
         send_comm_channel_text(world, m, "group", &speaker, &gmcp_text);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bevy_ecs::prelude::*;
+    use mud_world::{Exits, Named, Room, SystemMessages};
+
+    use super::cmd_insult;
+    use crate::commands::test_support::{Rx, drain, player_in};
+
+    fn setup() -> (World, Entity, Rx, Rx) {
+        let mut world = World::new();
+        let room = world
+            .spawn((
+                Room,
+                Named {
+                    name: "A hall".into(),
+                },
+                Exits::default(),
+            ))
+            .id();
+        let (speaker, rx) = player_in(&mut world, room);
+        let (target, target_rx) = player_in(&mut world, room);
+        world
+            .entity_mut(target)
+            .insert(Named { name: "Bob".into() });
+        (world, speaker, rx, target_rx)
+    }
+
+    #[test]
+    fn insult_picks_from_the_system_message_row() {
+        let (mut world, speaker, mut rx, _target_rx) = setup();
+        let mut m = SystemMessages::default();
+        m.by_key
+            .insert("insult_lines".into(), vec!["Your hat is silly!".into()]);
+        world.insert_resource(m);
+        cmd_insult(&mut world, speaker, "bob");
+        let out = drain(&mut rx);
+        assert!(
+            out.contains("You insult Bob: Your hat is silly!"),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn insult_without_lines_says_so_instead_of_panicking() {
+        let (mut world, speaker, mut rx, _target_rx) = setup();
+        cmd_insult(&mut world, speaker, "bob");
+        assert!(drain(&mut rx).contains("You can't think of an insult."));
+        world.insert_resource(SystemMessages::default());
+        cmd_insult(&mut world, speaker, "bob");
+        assert!(drain(&mut rx).contains("You can't think of an insult."));
     }
 }

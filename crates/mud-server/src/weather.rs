@@ -118,29 +118,34 @@ fn weather_recipients(world: &mut World, zone_id: i32) -> Vec<Entity> {
 }
 
 /// Send the transition line for `new_precip` to everyone who can
-/// perceive it. Called only when a zone's precipitation changed.
+/// perceive it. Called only when a zone's precipitation changed. The text is
+/// the `weather_change_<precip>` `SystemMessage` row (several messages = a
+/// random pick); a zone's players hear nothing when the row is missing.
 fn broadcast_precip_change(world: &mut World, zone_id: i32, new_precip: PrecipKind) {
-    let line = transition_line(new_precip);
+    let Some(line) = world
+        .get_resource::<mud_world::SystemMessages>()
+        .and_then(|m| m.pick(transition_key(new_precip)))
+        .map(str::to_string)
+    else {
+        return;
+    };
     for r in weather_recipients(world, zone_id) {
         crate::commands::send_to(world, r, format!("\r\n{line}\r\n"));
     }
 }
 
-/// One-line atmospheric flavor for a precip transition. Generic
-/// (no per-from/per-to combinatorics) — players see the new
-/// state, not the delta. Good enough for v1.
-fn transition_line(new_precip: PrecipKind) -> &'static str {
-    // Same palette as `ambient_line`; transitions are the louder
-    // moments the player should look up at, so accent words
-    // ("rain", "thunder", "lightning") get the saturation.
+/// `SystemMessage` key for the line announcing a change to `new_precip`.
+/// One generic line per new state (no per-from/per-to combinatorics):
+/// players see the new state, not the delta.
+fn transition_key(new_precip: PrecipKind) -> &'static str {
     match new_precip {
-        PrecipKind::Clear => "<b:yellow>The clouds part</>; the sky brightens.",
-        PrecipKind::Cloudy => "<dim>Clouds gather overhead.</>",
-        PrecipKind::Drizzle => "<cyan>A light drizzle</> begins to fall.",
-        PrecipKind::Rain => "The <cyan>rain</> picks up — a steady <cyan>downpour</>.",
-        PrecipKind::Storm => "<dim>The wind howls</>; <dim>thunder</> rumbles in the distance.",
-        PrecipKind::Snow => "<b:white>Snowflakes</> begin to fall.",
-        PrecipKind::Blizzard => "The snow thickens into a blinding <b:white>blizzard</>.",
+        PrecipKind::Clear => "weather_change_clear",
+        PrecipKind::Cloudy => "weather_change_cloudy",
+        PrecipKind::Drizzle => "weather_change_drizzle",
+        PrecipKind::Rain => "weather_change_rain",
+        PrecipKind::Storm => "weather_change_storm",
+        PrecipKind::Snow => "weather_change_snow",
+        PrecipKind::Blizzard => "weather_change_blizzard",
     }
 }
 
@@ -460,6 +465,16 @@ mod tests {
         world.insert_resource(WeatherCatalog::default());
         world.insert_resource(WeatherDriftLocks::default());
         world.insert_resource(mud_world::ObjectPrototypes::default());
+        let mut messages = mud_world::SystemMessages::default();
+        for kind in [
+            "clear", "cloudy", "drizzle", "rain", "storm", "snow", "blizzard",
+        ] {
+            messages.by_key.insert(
+                format!("weather_change_{kind}"),
+                vec![format!("Now {kind}.")],
+            );
+        }
+        world.insert_resource(messages);
         world.spawn((
             Zone,
             WorldKey { zone: ZONE, id: 0 },
@@ -519,8 +534,14 @@ mod tests {
 
         broadcast_precip_change(&mut w, ZONE, PrecipKind::Rain);
 
-        assert!(drain(&mut awake).contains("rain"), "awake outdoor hears it");
-        assert!(drain(&mut resting).contains("rain"), "resting is awake");
+        assert!(
+            drain(&mut awake).contains("Now rain."),
+            "awake outdoor hears it"
+        );
+        assert!(
+            drain(&mut resting).contains("Now rain."),
+            "resting is awake"
+        );
         assert!(drain(&mut asleep).is_empty(), "sleeper hears nothing");
         assert!(drain(&mut indoors).is_empty(), "indoor room hears nothing");
         assert!(drain(&mut sheltered).is_empty(), "IndoorRoom hears nothing");
@@ -528,6 +549,28 @@ mod tests {
             drain(&mut other_zone).is_empty(),
             "other zone hears nothing"
         );
+    }
+
+    #[test]
+    fn transition_text_comes_from_the_system_message_row() {
+        let mut w = world();
+        let field = room(&mut w, ZONE, 1, Sector::Field);
+        let (_, mut rx) = player(&mut w, field, PostureKind::Standing);
+        w.resource_mut::<mud_world::SystemMessages>().by_key.insert(
+            "weather_change_snow".into(),
+            vec!["Edited snow line.".into()],
+        );
+        broadcast_precip_change(&mut w, ZONE, PrecipKind::Snow);
+        assert!(drain(&mut rx).contains("Edited snow line."));
+        // No row for the new state (or no table at all): nothing is sent.
+        w.resource_mut::<mud_world::SystemMessages>()
+            .by_key
+            .remove("weather_change_storm");
+        broadcast_precip_change(&mut w, ZONE, PrecipKind::Storm);
+        assert_eq!(drain(&mut rx), "");
+        w.remove_resource::<mud_world::SystemMessages>();
+        broadcast_precip_change(&mut w, ZONE, PrecipKind::Rain);
+        assert_eq!(drain(&mut rx), "");
     }
 
     #[test]

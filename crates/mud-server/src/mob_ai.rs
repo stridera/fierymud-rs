@@ -174,41 +174,13 @@ fn value_spell(world: &World, ability_id: i32, aggro_good: bool) -> i32 {
     }
 }
 
-/// Legacy `value_spell_effect`, keyed by the status flag name.
-fn value_status_flag(flag: &str) -> i32 {
-    match flag {
-        "major_paralysis" => -50,
-        "blind" | "blindness" => -40,
-        "silence" | "insanity" | "hurt_throat" => -30,
-        "poison" | "poisoned" | "sleep" | "minor_paralysis" | "on_fire" | "disease"
-        | "animated" | "exposed" => -20,
-        "charm" | "tamed" | "fear" => -10,
-        "vitality" => -5,
-        "curse" => 3,
-        "enlarge" | "reduce" | "bless" => 10,
-        "tongues" | "feather_fall" | "camouflaged" | "ray_of_enfeeblement" => 15,
-        "farsee" | "detect_align" | "detect_poison" | "detect_magic" | "waterbreath"
-        | "minor_globe" | "shadowing" => 20,
-        "waterwalk" | "invisible" | "notrack" | "light" => 25,
-        "sneak" | "sense_life" | "detect_life" | "infravision" => 35,
-        "detect_invis" => 40,
-        "protect_evil" | "protect_good" | "fly" | "soulshield" | "prot_fire" | "prot_cold"
-        | "prot_air" | "prot_earth" | "fireshield" | "coldshield" | "ultravision" | "aware"
-        | "vamp_touch" => 50,
-        "haste" | "displacement" | "nimble" | "acid_weapon" | "fire_weapon" | "ice_weapon"
-        | "radiant_weapon" | "poison_weapon" | "shock_weapon" => 60,
-        "major_globe"
-        | "harness"
-        | "negate_heat"
-        | "negate_cold"
-        | "negate_air"
-        | "negate_earth"
-        | "greater_displacement" => 70,
-        "blur" => 80,
-        "sanctuary" => 90,
-        "stone_skin" | "stoneskin" => 100,
-        _ => 0,
-    }
+/// Legacy `value_spell_effect`, keyed by the status flag name. The scores live
+/// in the `StatusFlagValue` table (loaded into [`mud_world::StatusFlagValues`]);
+/// a flag with no row is worth 0.
+fn value_status_flag(world: &World, flag: &str) -> i32 {
+    world
+        .get_resource::<mud_world::StatusFlagValues>()
+        .map_or(0, |v| v.value(flag))
 }
 
 /// Legacy `value_effect`: what an `APPLY_*` bonus is worth. Keys are the
@@ -329,7 +301,7 @@ pub(crate) fn appraise_item(world: &World, mob: Entity, item: Entity) -> i32 {
                         for flag in
                             mud_world::mob_effects::row_flags(&g.modifier_data, &def.default_params)
                         {
-                            value += value_status_flag(&flag);
+                            value += value_status_flag(world, &flag);
                         }
                     }
                     "globe" => {
@@ -682,6 +654,54 @@ mod tests {
 
     fn holder(world: &World, e: Entity) -> Entity {
         world.get::<Located>(e).unwrap().0
+    }
+
+    #[test]
+    fn status_flag_scores_come_from_the_resource() {
+        let (mut world, room, mob) = setup();
+        let mut catalog = mud_world::EffectCatalog::default();
+        catalog.by_id.insert(
+            7,
+            mud_world::EffectDef {
+                id: 7,
+                name: "status".into(),
+                description: None,
+                effect_type: "status".into(),
+                tags: Vec::new(),
+                presence_override: None,
+                default_params: serde_json::json!({}),
+                prevents_speaking: false,
+                prevents_casting: false,
+                prevents_movement: false,
+                on_apply: None,
+                on_tick: None,
+                on_remove: None,
+            },
+        );
+        world.insert_resource(catalog);
+        let ring = item(&mut world, room, 1, ObjectType::Other, |p| {
+            p.granted_effects.push(mud_world::ObjectGrantedEffect {
+                effect_id: 7,
+                strength: 1,
+                modifier_data: serde_json::json!({"flags": ["sanctuary", "brand_new_flag"]}),
+                wear_location: None,
+            });
+        });
+        let base = super::appraise_item(&world, mob, ring);
+
+        // No resource (table missing at boot): every flag scores 0.
+        assert_eq!(super::value_status_flag(&world, "sanctuary"), 0);
+
+        let mut values = mud_world::StatusFlagValues::default();
+        values.by_flag.insert("sanctuary".into(), 90);
+        world.insert_resource(values);
+        assert_eq!(super::value_status_flag(&world, "sanctuary"), 90);
+        assert_eq!(super::value_status_flag(&world, "brand_new_flag"), 0);
+        assert_eq!(
+            super::appraise_item(&world, mob, ring),
+            base + 90,
+            "a flag with a row adds its score; a flag without adds nothing"
+        );
     }
 
     #[test]

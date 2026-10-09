@@ -303,73 +303,20 @@ fn is_staff(world: &World, e: Entity) -> bool {
         .is_some_and(|a| a.role.at_least(mud_db::enums::UserRole::Builder))
 }
 
-/// Legacy syllable table: a spell's name as heard by someone who
-/// doesn't recognise it. Whole-syllable rewrites first, then a
-/// letter-for-letter cipher. Flavour text, not tuning.
-const SYLLABLES: &[(&str, &str)] = &[
-    (" ", " "),
-    ("ar", "abra"),
-    ("ate", "i"),
-    ("cau", "kada"),
-    ("blind", "nose"),
-    ("bur", "mosa"),
-    ("cu", "judi"),
-    ("de", "oculo"),
-    ("dis", "mar"),
-    ("ect", "kamina"),
-    ("en", "uns"),
-    ("gro", "cra"),
-    ("light", "dies"),
-    ("lo", "hi"),
-    ("magi", "kari"),
-    ("mon", "bar"),
-    ("mor", "zak"),
-    ("move", "sido"),
-    ("ness", "lacri"),
-    ("ning", "illa"),
-    ("per", "duda"),
-    ("ra", "gru"),
-    ("re", "candus"),
-    ("son", "sabru"),
-    ("tect", "infra"),
-    ("tri", "cula"),
-    ("ven", "nofo"),
-    ("word of", "inset"),
-    ("a", "i"),
-    ("b", "v"),
-    ("c", "q"),
-    ("d", "m"),
-    ("e", "o"),
-    ("f", "y"),
-    ("g", "t"),
-    ("h", "p"),
-    ("i", "u"),
-    ("j", "y"),
-    ("k", "t"),
-    ("l", "r"),
-    ("m", "w"),
-    ("n", "b"),
-    ("o", "a"),
-    ("p", "s"),
-    ("q", "d"),
-    ("r", "f"),
-    ("s", "g"),
-    ("t", "h"),
-    ("u", "e"),
-    ("v", "z"),
-    ("w", "x"),
-    ("x", "n"),
-    ("y", "l"),
-    ("z", "k"),
-];
-
-/// Spell name as a bystander who can't place it hears it.
-fn syllabize(name: &str) -> String {
+/// A spell's name as a bystander who can't place it hears it. `table` is the
+/// legacy syllable table from the `SpellSyllable` rows (whole-syllable rewrites
+/// first, then a letter-for-letter cipher; first prefix match wins). Flavour
+/// text, not tuning. With no rows (table missing at boot) the name comes out
+/// unchanged.
+fn syllabize(table: &[(String, String)], name: &str) -> String {
     let lower = name.to_ascii_lowercase();
     let mut out = String::new();
     let mut rest = lower.as_str();
     while !rest.is_empty() {
-        if let Some((org, new)) = SYLLABLES.iter().find(|(org, _)| rest.starts_with(org)) {
+        if let Some((org, new)) = table
+            .iter()
+            .find(|(org, _)| !org.is_empty() && rest.starts_with(org.as_str()))
+        {
             out.push_str(new);
             rest = &rest[org.len()..];
         } else {
@@ -379,6 +326,13 @@ fn syllabize(name: &str) -> String {
         }
     }
     out
+}
+
+/// The loaded chant syllables (empty when the resource is absent).
+fn spell_syllables(world: &World) -> &[(String, String)] {
+    world
+        .get_resource::<mud_world::SpellSyllables>()
+        .map_or(&[], |s| s.rows.as_slice())
 }
 
 /// Legacy `garble_text(-1)`: half the letters are swapped for random
@@ -444,7 +398,7 @@ pub(crate) fn announce_cast_start(
         .get(KNOW_SPELL_KEY)
         .map(|d| d.id);
     let plain = spoken_name(def);
-    let garbled = syllabize(&garble(&plain));
+    let garbled = syllabize(spell_syllables(world), &garble(&plain));
     let target_actor = match target {
         CastTarget::InRoom(t) | CastTarget::Fighting(t) => Some(t),
         _ => None,
@@ -509,7 +463,7 @@ fn announce_cast_complete(world: &mut World, caster: Entity, snap: &Casting) {
         .values()
         .find(|d| d.id == snap.ability_id)
         .map_or_else(|| snap.ability_name.clone(), spoken_name);
-    let garbled = syllabize(&plain);
+    let garbled = syllabize(spell_syllables(world), &plain);
     let dark = room_dark_for_all(world, caster);
     for observer in observers(world, caster) {
         let who = caster_label(world, observer, caster, dark);
@@ -708,6 +662,49 @@ mod tests {
     use crate::commands::{dispatch, invoke_ability};
     use mud_db::abilities::AbilityKind;
     use mud_world::{AppliedTo, EffectCatalog, EffectDef, EffectInstance, Mob, Named, SpellSlots};
+
+    fn table(rows: &[(&str, &str)]) -> Vec<(String, String)> {
+        rows.iter()
+            .map(|(a, b)| ((*a).to_string(), (*b).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn syllabize_applies_the_table_in_order() {
+        // Whole-syllable rewrites come before the letter cipher: "ar" is one
+        // syllable, so it never reaches the single-letter "a" -> "i" rule.
+        let t = table(&[
+            (" ", " "),
+            ("ar", "abra"),
+            ("a", "i"),
+            ("m", "w"),
+            ("e", "o"),
+        ]);
+        assert_eq!(syllabize(&t, "arm"), "abraw");
+        assert_eq!(syllabize(&t, "AME"), "iwo", "input is lowercased");
+        // Characters with no rule pass through.
+        assert_eq!(syllabize(&t, "ze z"), "zo z");
+        // Reordering the rows changes the result: first prefix match wins.
+        let t = table(&[("a", "i"), ("ar", "abra")]);
+        assert_eq!(syllabize(&t, "ar"), "ir");
+    }
+
+    #[test]
+    fn syllabize_without_rows_leaves_the_name_alone() {
+        assert_eq!(syllabize(&[], "magic missile"), "magic missile");
+        // A blank syllable would match forever; it is skipped, not looped on.
+        assert_eq!(syllabize(&table(&[("", "x")]), "ab"), "ab");
+    }
+
+    #[test]
+    fn spell_syllables_read_the_resource() {
+        let mut world = World::new();
+        assert!(spell_syllables(&world).is_empty());
+        world.insert_resource(mud_world::SpellSyllables {
+            rows: table(&[("ar", "abra")]),
+        });
+        assert_eq!(spell_syllables(&world).len(), 1);
+    }
 
     const MEND: i32 = 1;
     const QUICK_CHANT: i32 = 2;

@@ -8080,43 +8080,36 @@ pub(crate) fn begin_quit(world: &mut World, player: Entity, farewell: &str) -> b
     true
 }
 
-/// Built-in prompt templates a player can pick by short name.
-/// Order is the order shown by `prompt list`; first entry is the
-/// default suggested for new players. Templates intentionally
-/// avoid leading `<` so the renderer's "literal angle bracket"
-/// fallback isn't relied on by the defaults — the plumbing
-/// works either way, but plain forms read better in clients
-/// without color support.
-const PROMPT_TEMPLATES: &[(&str, &str)] = &[
-    ("classic", "<%h/%H hp %v/%V mv> "),
-    ("compact", "[%h/%H %v/%V] "),
-    ("bars", "%B %M "),
-    ("vitals", "<red>%h</>/%H hp <green>%v</>/%V mv "),
-    ("verbose", "<%n %h/%H hp %v/%V mv %w @ %R> "),
-    ("location", "[%R] <%h/%H hp> "),
-    ("worldclock", "<%h/%H %v/%V — %s %y %Y> "),
-    // Combat preset: same vitals as `classic` plus the opponent's
-    // name + HP bar. Out of combat `%O` is empty and `%K` renders
-    // "[----------]" so the line stays readable.
-    ("combat", "<%h/%H hp %v/%V mv | %O %K> "),
-    ("minimal", "> "),
-];
+/// Built-in prompt templates a player can pick by short name, from the
+/// `display.prompt_templates` `GameConfig` row: a JSON array of
+/// `[name, template]` pairs. Order is the order shown by `prompt list`.
+/// A missing or malformed row yields no templates (the `prompt <format>`
+/// path still works).
+fn prompt_templates(world: &World) -> Vec<(String, String)> {
+    let raw = world
+        .get_resource::<mud_world::RuntimeConfig>()
+        .map_or("", |c| c.get_string("display", "prompt_templates", ""));
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    serde_json::from_str(raw).unwrap_or_else(|e| {
+        tracing::error!(error = %e, "GameConfig display.prompt_templates is not a JSON [[name, template], ...] array");
+        Vec::new()
+    })
+}
 
 pub(crate) fn cmd_prompt(world: &mut World, player: Entity, args: &str) {
     let template = mud_net::sanitize_text(args, false);
     let template = template.trim();
+    let templates = prompt_templates(world);
 
     // `prompt list` — show the named-template menu so a player
     // doesn't have to read the format spec to find a starting
     // point. `prompt <name>` adopts a template by name.
     if template.eq_ignore_ascii_case("list") || template.eq_ignore_ascii_case("templates") {
         let mut out = String::from("\r\n<b:cyan>Built-in prompt templates:</>\r\n");
-        let widest = PROMPT_TEMPLATES
-            .iter()
-            .map(|(n, _)| n.len())
-            .max()
-            .unwrap_or(0);
-        for (name, body) in PROMPT_TEMPLATES {
+        let widest = templates.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
+        for (name, body) in &templates {
             out.push_str(&format!("  <cyan>{name:<widest$}</>  {body}\r\n"));
         }
         out.push_str(
@@ -8125,11 +8118,11 @@ pub(crate) fn cmd_prompt(world: &mut World, player: Entity, args: &str) {
         send_rendered(world, player, &out);
         return;
     }
-    if let Some((_, body)) = PROMPT_TEMPLATES
+    if let Some((_, body)) = templates
         .iter()
         .find(|(n, _)| n.eq_ignore_ascii_case(template))
     {
-        try_insert(world, player, Prompt((*body).to_string()));
+        try_insert(world, player, Prompt(body.clone()));
         send_rendered(
             world,
             player,
@@ -10009,7 +10002,7 @@ pub(crate) fn cmd_time(world: &mut World, player: Entity, _args: &str) {
     let mud_minute = i64::from(clock.minute);
     let mud_day = i64::from(clock.day);
     let mud_year = i64::from(clock.year);
-    let month_name = clock.month_name();
+    let month_name = mud_world::month_name(world, clock.month);
     let season = clock.season().label();
     let period = match mud_hour {
         0..=4 => "deep night",
@@ -16405,5 +16398,67 @@ mod god_eat_tests {
         let out = drain(&mut rx);
         assert!(out.contains("You can't eat a rusty sword."), "{out}");
         assert!(drain(&mut watcher).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod prompt_template_tests {
+    use super::{cmd_prompt, prompt_templates};
+    use crate::commands::test_support::{self, drain};
+    use bevy_ecs::prelude::*;
+    use mud_world::{ConfigValue, Prompt, RuntimeConfig};
+
+    fn config(json: &str) -> RuntimeConfig {
+        let mut c = RuntimeConfig::default();
+        c.by_key.insert(
+            ("display".into(), "prompt_templates".into()),
+            ConfigValue::Json(json.into()),
+        );
+        c
+    }
+
+    fn setup() -> (World, Entity, test_support::Rx) {
+        let mut world = World::new();
+        let room = world.spawn_empty().id();
+        let (player, rx) = test_support::player_in(&mut world, room);
+        (world, player, rx)
+    }
+
+    #[test]
+    fn templates_come_from_the_game_config_row_in_order() {
+        let mut world = World::new();
+        world.insert_resource(config(r#"[["classic","<%h/%H> "],["minimal","> "]]"#));
+        assert_eq!(
+            prompt_templates(&world),
+            vec![
+                ("classic".to_string(), "<%h/%H> ".to_string()),
+                ("minimal".to_string(), "> ".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn prompt_list_and_pick_use_the_row() {
+        let (mut world, player, mut rx) = setup();
+        world.insert_resource(config(r#"[["classic","<%h/%H hp> "],["minimal","> "]]"#));
+        cmd_prompt(&mut world, player, "list");
+        let out = drain(&mut rx);
+        assert!(
+            out.contains("classic") && out.contains("minimal"),
+            "{out:?}"
+        );
+        cmd_prompt(&mut world, player, "MINIMAL");
+        assert_eq!(world.get::<Prompt>(player).unwrap().0, "> ");
+        assert!(drain(&mut rx).contains("Prompt set to"));
+    }
+
+    #[test]
+    fn missing_or_malformed_row_means_no_templates() {
+        let mut world = World::new();
+        assert!(prompt_templates(&world).is_empty(), "no RuntimeConfig");
+        world.insert_resource(RuntimeConfig::default());
+        assert!(prompt_templates(&world).is_empty(), "no row");
+        world.insert_resource(config("not json"));
+        assert!(prompt_templates(&world).is_empty(), "malformed row");
     }
 }

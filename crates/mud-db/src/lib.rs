@@ -20,6 +20,7 @@ pub mod characters;
 pub mod clans;
 pub mod classes;
 pub mod consumable_effects;
+pub mod content_tables;
 pub mod creation_recipes;
 pub mod dialogue;
 pub mod discord_config;

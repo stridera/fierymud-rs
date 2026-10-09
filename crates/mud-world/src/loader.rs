@@ -4,7 +4,7 @@ use bevy_ecs::prelude::*;
 use mud_db::{
     abilities, ability_components, ability_damage_components, ability_effects, ability_messages,
     ability_restrictions, ability_saving_throw, ability_targeting, achievements, boards, classes,
-    discord_config, effects, game_config, help, levels, liquids, login_message,
+    content_tables, discord_config, effects, game_config, help, levels, liquids, login_message,
     mob_reset_equipment, mob_resets, mobs, object_abilities, object_reset_contents, object_resets,
     objects, races, room_exits, rooms, shops, socials, spell_slots, sqlx::PgPool, system_text,
     triggers, zones,
@@ -84,6 +84,104 @@ fn schema_gap(err: sqlx::Error, missing: &str, fix: &str) -> sqlx::Error {
     sqlx::Error::Configuration(
         format!("database schema is behind this build: missing {missing} ({err}); {fix}").into(),
     )
+}
+
+/// A content table the runtime tolerates losing: when `res` failed because the
+/// table / column is missing (prod applies the SQL patch by hand, possibly after
+/// the deploy), log an ERROR naming the patch and the effect, and carry on with
+/// no rows. Any other error still fails the boot.
+fn rows_or_empty<T>(
+    res: sqlx::Result<Vec<T>>,
+    missing: &str,
+    consequence: &str,
+) -> sqlx::Result<Vec<T>> {
+    match res {
+        Err(e) if is_missing_schema(&e) => {
+            let e = schema_gap(
+                e,
+                missing,
+                "apply fierylib/data/sql/2026-10-09-content-tables.sql (and deploy the muditor schema)",
+            );
+            error!("{e}; booting with no rows ({consequence})");
+            Ok(Vec::new())
+        }
+        other => other,
+    }
+}
+
+/// Load the small content tables that used to be hard-coded arrays: status flag
+/// AI values, spell chant syllables, `SystemMessage` text pools and the `%d`
+/// prompt cooldown letters. All are created by the 2026-10-09-content-tables
+/// patch, which prod applies by hand, so a missing table / column logs an ERROR
+/// and boots with no rows (call sites fall back to empty text / zero scores)
+/// instead of failing the boot. Every resource is inserted either way.
+///
+/// # Errors
+/// Any database error other than a missing table / column.
+pub async fn load_content_tables(world: &mut World, pool: &PgPool) -> sqlx::Result<()> {
+    let flag_rows = rows_or_empty(
+        content_tables::list_status_flag_values(pool).await,
+        "table \"StatusFlagValue\"",
+        "every status flag scores 0 in mob gear AI",
+    )?;
+    let mut flag_values = crate::resources::StatusFlagValues::default();
+    for r in flag_rows {
+        flag_values.by_flag.insert(r.flag, r.ai_value);
+    }
+    info!(rows = flag_values.by_flag.len(), "StatusFlagValue loaded");
+    world.insert_resource(flag_values);
+
+    let syllable_rows = rows_or_empty(
+        content_tables::list_spell_syllables(pool).await,
+        "table \"SpellSyllable\"",
+        "bystanders hear spell names unscrambled",
+    )?;
+    let syllables = crate::resources::SpellSyllables {
+        rows: syllable_rows
+            .into_iter()
+            .map(|r| (r.syllable, r.replacement))
+            .collect(),
+    };
+    info!(rows = syllables.rows.len(), "SpellSyllable loaded");
+    world.insert_resource(syllables);
+
+    let message_rows = rows_or_empty(
+        content_tables::list_system_messages(pool).await,
+        "table \"SystemMessage\"",
+        "prompt experience lines, insults, month names and weather change lines are blank",
+    )?;
+    let mut system_messages = crate::resources::SystemMessages::default();
+    for r in message_rows {
+        system_messages.by_key.insert(r.key, r.messages);
+    }
+    info!(rows = system_messages.by_key.len(), "SystemMessage loaded");
+    world.insert_resource(system_messages);
+
+    let letter_rows = rows_or_empty(
+        content_tables::list_prompt_letters(pool).await,
+        "column \"Ability\".\"prompt_letter\"",
+        "the %d prompt cooldown bars stay idle",
+    )?;
+    let mut prompt_letters = crate::resources::PromptLetters::default();
+    for r in letter_rows {
+        let Some(letter) = r.letter.chars().next() else {
+            continue;
+        };
+        match prompt_letters
+            .by_letter
+            .iter_mut()
+            .find(|(l, _)| *l == letter)
+        {
+            Some((_, ids)) => ids.push(r.ability_id),
+            None => prompt_letters.by_letter.push((letter, vec![r.ability_id])),
+        }
+    }
+    info!(
+        letters = prompt_letters.by_letter.len(),
+        "PromptLetters loaded"
+    );
+    world.insert_resource(prompt_letters);
+    Ok(())
 }
 
 /// Load the persistent world from the database into the ECS World:
@@ -597,6 +695,9 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     let lm_count = login_messages.by_key.len();
     world.insert_resource(login_messages);
     info!(rows = lm_count, "LoginMessage loaded");
+
+    // Pass 4c.9b: the small content tables (see `load_content_tables`).
+    load_content_tables(world, pool).await?;
 
     // Pass 4c.10: Discord guild configuration (singleton row at PK
     // 1). Channel IDs are consumed by future outbound-to-Discord

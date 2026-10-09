@@ -211,6 +211,88 @@ impl SystemTexts {
     }
 }
 
+/// Builder-authored text pools from the `SystemMessage` table, keyed by the
+/// row's stable `key` (`exp_progress`, `insult_lines`, `month_names`,
+/// `weather_change_<precip>`). A row's `messages` array is either an ordered
+/// list (index = meaning, e.g. the month names) or a pool of equivalent
+/// variants ([`Self::pick`]). A missing row yields an empty slice, so every
+/// call site decides its own degraded text.
+#[derive(Resource, Debug, Default)]
+pub struct SystemMessages {
+    pub by_key: HashMap<String, Vec<String>>,
+}
+
+impl SystemMessages {
+    /// All messages under `key`, in table order (empty when the row is missing).
+    #[must_use]
+    pub fn get(&self, key: &str) -> &[String] {
+        self.by_key.get(key).map_or(&[], Vec::as_slice)
+    }
+
+    /// One random message under `key`, `None` when the row is missing or empty.
+    #[must_use]
+    pub fn pick(&self, key: &str) -> Option<&str> {
+        let pool = self.get(key);
+        if pool.is_empty() {
+            None
+        } else {
+            pool.get(rand::random_range(0..pool.len()))
+                .map(String::as_str)
+        }
+    }
+
+    /// Name of the 1-indexed calendar `month` from the `month_names` row.
+    /// Out-of-range months, or a missing row, get a placeholder rather than
+    /// panicking: `time` is a read-only command and a crash there isn't worth it.
+    #[must_use]
+    pub fn month_name(&self, month: i32) -> &str {
+        usize::try_from(month - 1)
+            .ok()
+            .and_then(|idx| self.get("month_names").get(idx))
+            .map_or("an unknown month", String::as_str)
+    }
+}
+
+/// Name of the calendar month, read from the [`SystemMessages`] resource
+/// (placeholder text when the resource or row is missing).
+#[must_use]
+pub fn month_name(world: &World, month: i32) -> String {
+    world
+        .get_resource::<SystemMessages>()
+        .map_or("an unknown month", |m| m.month_name(month))
+        .to_string()
+}
+
+/// AI worth of each status flag (`StatusFlagValue` table), the legacy
+/// `value_spell_effect` scores mob AI uses to judge gear. Flags without a row
+/// are worth 0.
+#[derive(Resource, Debug, Default)]
+pub struct StatusFlagValues {
+    pub by_flag: HashMap<String, i32>,
+}
+
+impl StatusFlagValues {
+    #[must_use]
+    pub fn value(&self, flag: &str) -> i32 {
+        self.by_flag.get(flag).copied().unwrap_or(0)
+    }
+}
+
+/// Spell chant syllables (`SpellSyllable` table) in match order: at each
+/// position of a lowercased spell name the first `syllable` that prefixes the
+/// rest is rewritten to its `replacement`.
+#[derive(Resource, Debug, Default)]
+pub struct SpellSyllables {
+    pub rows: Vec<(String, String)>,
+}
+
+/// `Ability.prompt_letter`: which abilities each `%d<letter>` prompt code
+/// tracks the cooldown of. Entries are in letter order.
+#[derive(Resource, Debug, Default)]
+pub struct PromptLetters {
+    pub by_letter: Vec<(char, Vec<i32>)>,
+}
+
 /// Per-stage login flow text — banner, identifier prompt, password
 /// prompts, error messages, character-creation steps. Loaded from
 /// the schema's `LoginMessage` table at boot. Keyed by
@@ -1821,29 +1903,9 @@ impl Default for MudClock {
     }
 }
 
-/// Sixteen-month calendar inherited from `FieryMUD`'s lore — four
-/// thematic months per season, 30 days each. Months are 1-indexed
-/// in `MudClock.month`; helpers accept that and clamp out-of-range
-/// values to the placeholder so persisted snapshots from a future
-/// schema bump still render something readable.
-const MONTH_NAMES: [&str; 16] = [
-    "the Month of Deepwinter",
-    "the Month of the Claw",
-    "the Month of the Grand Struggle",
-    "the Month of the Running",
-    "the Month of the Planting",
-    "the Month of the Long Day",
-    "the Month of the Time of Famine",
-    "the Month of the High Sun",
-    "the Month of the Ripening",
-    "the Month of the Lowering",
-    "the Month of the Fade",
-    "the Month of the Dying",
-    "the Month of the Shadows",
-    "the Month of the Great Frost",
-    "the Month of the Drawing",
-    "the Month of the Long Night",
-];
+// The sixteen-month calendar (four thematic months per season, 30 days each) lives
+// in the `SystemMessage` row `month_names`; months are 1-indexed in
+// `MudClock.month` and read through [`month_name`].
 
 /// Calendar quarter — months 1..=4 are Winter, 5..=8 Spring, etc.
 /// Matches the legacy four-seasons-of-four-months layout exactly.
@@ -1868,18 +1930,6 @@ impl Season {
 }
 
 impl MudClock {
-    /// Month name for the current `month` field. Out-of-range months
-    /// (a hand-edited snapshot, a future bump) get a placeholder
-    /// rather than panicking — `time` is a read-only command and a
-    /// crash there isn't worth a defensible invariant elsewhere.
-    #[must_use]
-    pub fn month_name(&self) -> &'static str {
-        usize::try_from(self.month - 1)
-            .ok()
-            .and_then(|idx| MONTH_NAMES.get(idx).copied())
-            .unwrap_or("an unknown month")
-    }
-
     /// Calendar quarter for the current `month`. Out-of-range months
     /// fold into the nearest in-range quarter (months ≤ 0 → Winter,
     /// months ≥ 17 → Autumn) so a hand-edited snapshot still renders.
@@ -3318,21 +3368,68 @@ mod tests {
         }
     }
 
+    fn messages(key: &str, lines: &[&str]) -> SystemMessages {
+        let mut m = SystemMessages::default();
+        m.by_key.insert(
+            key.to_string(),
+            lines.iter().map(ToString::to_string).collect(),
+        );
+        m
+    }
+
+    fn calendar() -> SystemMessages {
+        let names: Vec<String> = (1..=16).map(|i| format!("month {i}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        messages("month_names", &refs)
+    }
+
     #[test]
-    fn month_name_covers_full_calendar() {
-        assert_eq!(clock_for_month(1).month_name(), "the Month of Deepwinter");
-        assert_eq!(clock_for_month(8).month_name(), "the Month of the High Sun");
+    fn month_name_reads_the_system_message_row() {
+        let cal = calendar();
+        assert_eq!(cal.month_name(1), "month 1");
+        assert_eq!(cal.month_name(8), "month 8");
+        assert_eq!(cal.month_name(16), "month 16");
+    }
+
+    #[test]
+    fn month_name_clamps_out_of_range_or_missing() {
+        let cal = calendar();
+        assert_eq!(cal.month_name(0), "an unknown month");
+        assert_eq!(cal.month_name(17), "an unknown month");
+        assert_eq!(cal.month_name(-3), "an unknown month");
         assert_eq!(
-            clock_for_month(16).month_name(),
-            "the Month of the Long Night"
+            SystemMessages::default().month_name(1),
+            "an unknown month",
+            "a missing row degrades to the placeholder"
         );
     }
 
     #[test]
-    fn month_name_clamps_out_of_range() {
-        assert_eq!(clock_for_month(0).month_name(), "an unknown month");
-        assert_eq!(clock_for_month(17).month_name(), "an unknown month");
-        assert_eq!(clock_for_month(-3).month_name(), "an unknown month");
+    fn month_name_helper_reads_the_resource() {
+        let mut world = World::new();
+        assert_eq!(month_name(&world, 2), "an unknown month");
+        world.insert_resource(calendar());
+        assert_eq!(month_name(&world, 2), "month 2");
+    }
+
+    #[test]
+    fn system_messages_get_and_pick() {
+        let m = messages("pool", &["a", "b", "c"]);
+        assert_eq!(m.get("pool"), ["a", "b", "c"]);
+        assert!(m.get("nope").is_empty());
+        for _ in 0..20 {
+            assert!(["a", "b", "c"].contains(&m.pick("pool").unwrap()));
+        }
+        assert_eq!(m.pick("nope"), None);
+        assert_eq!(messages("one", &["only"]).pick("one"), Some("only"));
+    }
+
+    #[test]
+    fn status_flag_values_default_to_zero() {
+        let mut v = StatusFlagValues::default();
+        v.by_flag.insert("sanctuary".to_string(), 90);
+        assert_eq!(v.value("sanctuary"), 90);
+        assert_eq!(v.value("brand_new_flag"), 0);
     }
 
     #[test]

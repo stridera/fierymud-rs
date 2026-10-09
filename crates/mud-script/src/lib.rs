@@ -1303,7 +1303,7 @@ impl LuaHost {
             // String views of the calendar — let triggers branch on
             // "if time.season == 'Winter' then …" without rebuilding
             // the 16-month name table in every script.
-            time_tbl.set("month_name", clock.month_name())?;
+            time_tbl.set("month_name", mud_world::month_name(world, clock.month))?;
             time_tbl.set("season", clock.season().label())?;
             // Day/night convenience flag matches `commands::room_is_dark`'s
             // window (22..=05) so triggers don't have to redo the math.
