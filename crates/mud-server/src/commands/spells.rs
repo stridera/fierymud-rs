@@ -366,7 +366,7 @@ pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
     // are scoped narrowly enough that "anyone in the room can
     // drop one" matches the immediate, blocking-the-only-path UX.
     let player_room = world.get::<mud_world::Located>(player).map(|l| l.0);
-    let cancellable: Vec<(Entity, String, Option<String>, i32)> = {
+    let cancellable: Vec<(Entity, String, Option<String>, i32, String)> = {
         let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
         q.iter(world)
             .filter(|(_, inst, a)| {
@@ -382,7 +382,13 @@ pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
                 let src = inst
                     .ability_id
                     .and_then(|id| ability_names.get(&id).cloned());
-                (e, inst.name.clone(), src, inst.remaining_secs)
+                (
+                    e,
+                    inst.name.clone(),
+                    src,
+                    inst.remaining_secs,
+                    super::info::effect_label(world, inst),
+                )
             })
             .collect()
     };
@@ -392,14 +398,11 @@ pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
     }
     if needle.is_empty() {
         let mut out = format!("\r\n{} cancellable effect(s):\r\n", cancellable.len());
-        for (_, name, src, remaining) in &cancellable {
-            let shown = super::info::effect_display_name(name);
+        for (_, _, _, remaining, shown) in &cancellable {
             let hours = super::info::format_effect_hours(*remaining);
-            if let Some(src) = src {
-                out.push_str(&format!("  {shown} ({hours}) — from {src}\r\n"));
-            } else {
-                out.push_str(&format!("  {shown} ({hours})\r\n"));
-            }
+            // A spell's row is named for its ability, so it needs no
+            // "from ..." attribution.
+            out.push_str(&format!("  {shown} ({hours})\r\n"));
         }
         out.push_str("\r\nUse 'cancel <name>' to drop one.\r\n");
         send_to(world, player, out);
@@ -407,14 +410,18 @@ pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
     }
     let target = cancellable
         .iter()
-        .find(|(_, name, src, _)| {
+        .find(|(_, name, src, _, label)| {
             let words = |s: &str| s.replace(['_', '-'], " ");
             mud_world::targeting::names_match(&needle, std::iter::once(words(name).as_str()))
+                || mud_world::targeting::names_match(
+                    &needle,
+                    std::iter::once(words(label).as_str()),
+                )
                 || src.as_deref().is_some_and(|s| {
                     mud_world::targeting::names_match(&needle, std::iter::once(words(s).as_str()))
                 })
         })
-        .map(|(e, _, _, _)| *e);
+        .map(|(e, ..)| *e);
     let Some(target_effect) = target else {
         send_to(
             world,

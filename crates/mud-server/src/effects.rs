@@ -279,7 +279,9 @@ pub(crate) fn teardown_markers_after_removal(world: &mut World, target: Entity, 
     // Invisible: the backing is any `InvisibleSource`-tagged instance
     // (INVISIBLE / MASS_INVIS, a permanent `invisible` flag), whatever
     // it is named; the fade message and aggro recheck live in
-    // `invisibility_faded`.
+    // `invisibility_faded`. (The spell instances are named for the stat
+    // they move, not "invisible": `teardown_effect_instance` covers
+    // them by their tag.)
     if name.eq_ignore_ascii_case("invisible") {
         let still_invisible = {
             let mut q = world.query::<(&mud_world::InvisibleSource, &AppliedTo)>();
@@ -395,6 +397,12 @@ pub(crate) fn replace_effect_instance(world: &mut World, target: Entity, eff_ent
 /// drops only when no other tagged instance and no worn `protect_*` item
 /// still backs it.
 fn teardown_effect_instance(world: &mut World, target: Entity, eff_entity: Entity) {
+    // INVISIBLE / MASS_INVIS instances are named for the stat they move
+    // ("evasion"), so the name-keyed marker teardown below cannot see
+    // them: remember the tag before the despawn.
+    let was_invisibility_source = world
+        .get::<mud_world::InvisibleSource>(eff_entity)
+        .is_some();
     let (name, align_tag) = reverse_effect_companions(world, target, eff_entity);
     let Some(name) = name else {
         return;
@@ -405,6 +413,15 @@ fn teardown_effect_instance(world: &mut World, target: Entity, eff_entity: Entit
         sync_stunned(world, target);
     }
     teardown_markers_after_removal(world, target, &name);
+    if was_invisibility_source && !name.eq_ignore_ascii_case("invisible") {
+        let still_invisible = {
+            let mut q = world.query::<(&mud_world::InvisibleSource, &AppliedTo)>();
+            q.iter(world).any(|(_, applied)| applied.0 == target)
+        };
+        if !still_invisible {
+            crate::commands::invisibility_faded(world, target);
+        }
+    }
     // J2 alignment-protect teardown: PROT_FROM_EVIL / PROT_FROM_GOOD
     // spawn instances named "resistance" (shared with element-resistance
     // flavors), tagged with the alignment they guard against.

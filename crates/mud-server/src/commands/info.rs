@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use bevy_ecs::prelude::{Entity, With, World};
+use bevy_ecs::prelude::{Entity, Has, With, World};
 use mud_db::enums::{Direction, UserRole};
 use mud_world::*;
 
@@ -4187,6 +4187,29 @@ pub(crate) fn cmd_bribe(world: &mut World, player: Entity, args: &str) {
     }
 }
 
+/// Legacy shop `is_ok_char`: a keeper refuses a customer it cannot see
+/// ([`can_see_player`]: invisible, hidden or blind keeper). Sends the
+/// refusal itself; returns whether the trade may go ahead.
+fn shopkeeper_sees_customer(
+    world: &mut World,
+    player: Entity,
+    keeper: Entity,
+    keeper_name: &str,
+) -> bool {
+    if can_see_player(world, keeper, player) {
+        return true;
+    }
+    send_rendered(
+        world,
+        player,
+        &format!(
+            "{} says, 'I don't trade with someone I can't see!'\r\n",
+            cap_sentence_start(keeper_name)
+        ),
+    );
+    false
+}
+
 /// `list`: find a shopkeeper in the player's room and dump the catalog
 /// as `# | item | price | stock`. Stock `unlimited` for `-1`. Price
 /// falls back to the proto's base `cost * buy_profit` when the row's
@@ -4208,6 +4231,9 @@ pub(crate) fn cmd_list(world: &mut World, player: Entity, _args: &str) {
         return;
     };
     let keeper_name = name_of(world, keeper_entity);
+    if !shopkeeper_sees_customer(world, player, keeper_entity, &keeper_name) {
+        return;
+    }
     let shop_def = world
         .resource::<ShopCatalog>()
         .by_key
@@ -4384,6 +4410,9 @@ pub(crate) fn cmd_inspect(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let keeper_name = name_of(world, keeper_entity);
+    if !shopkeeper_sees_customer(world, player, keeper_entity, &keeper_name) {
+        return;
+    }
     let Some(shop) = world
         .resource::<ShopCatalog>()
         .by_key
@@ -4641,6 +4670,9 @@ pub(crate) fn cmd_buy(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let keeper_name = name_of(world, keeper_entity);
+    if !shopkeeper_sees_customer(world, player, keeper_entity, &keeper_name) {
+        return;
+    }
     let Some(shop) = world
         .resource::<ShopCatalog>()
         .by_key
@@ -4805,6 +4837,9 @@ pub(crate) fn cmd_hire(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let keeper_name = name_of(world, keeper_entity);
+    if !shopkeeper_sees_customer(world, player, keeper_entity, &keeper_name) {
+        return;
+    }
     let Some(shop) = world
         .resource::<ShopCatalog>()
         .by_key
@@ -4947,6 +4982,9 @@ pub(crate) fn cmd_sell(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let keeper_name = name_of(world, keeper_entity);
+    if !shopkeeper_sees_customer(world, player, keeper_entity, &keeper_name) {
+        return;
+    }
     let Some(item) = find_carried_by(world, target_word, player, EquipFilter::Inventory) else {
         send_rendered(
             world,
@@ -7489,9 +7527,9 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
             // Permanent effects (innate, worn gear, mob defaults) are
             // listed too, tagged so they read apart from timed buffs.
             let label = if inst.remaining_secs < 0 {
-                format!("{} (permanent)", effect_display_name(&inst.name))
+                format!("{} (permanent)", effect_label(world, inst))
             } else {
-                effect_display_name(&inst.name)
+                effect_label(world, inst)
             };
             if !seen.contains(&label) {
                 seen.push(label);
@@ -12095,14 +12133,69 @@ fn hiding_group_size(world: &mut World, player: Entity) -> usize {
         .max(1)
 }
 
-/// `visible` / `vis`: stop hiding. Always succeeds.
+/// `visible` / `vis` (legacy `do_visible` -> `appear`): stop hiding and
+/// drop every source of invisibility. Spell instances (`INVISIBLE`,
+/// `MASS_INVIS`) are removed through [`remove_effect_instance`] so the
+/// marker, the evasion bonus and the room's view all unwind; a worn item
+/// that grants invisibility cannot be shrugged off, so the player is
+/// told to take it off.
 pub(crate) fn cmd_visible(world: &mut World, player: Entity, _args: &str) {
-    if !crate::hiding::is_hidden(world, player) {
-        send_to(world, player, "You're already visible.\r\n");
+    let hidden = crate::hiding::is_hidden(world, player);
+    let invisible = world.get::<mud_world::Invisible>(player).is_some();
+    if !hidden && !invisible {
+        send_to(world, player, "You are already visible.\r\n");
         return;
     }
+    let mut item_backed = false;
+    if invisible {
+        let sources: Vec<(Entity, bool)> = {
+            let mut q = world.query_filtered::<(
+                Entity,
+                &AppliedTo,
+                &EffectInstance,
+            ), With<mud_world::InvisibleSource>>();
+            q.iter(world)
+                .filter(|(_, a, _)| a.0 == player)
+                .map(|(e, _, inst)| (e, mud_world::mob_effects::is_innate_effect(&inst.source)))
+                .collect()
+        };
+        for (src, innate) in sources {
+            if innate {
+                // Worn gear, race and mob-default grants outlive the
+                // command: only the owner (item / race) can end them.
+                item_backed = true;
+            } else if world.get::<EffectInstance>(src).is_some() {
+                crate::effects::remove_effect_instance(world, player, src);
+            }
+        }
+    }
+    let was_hidden = hidden;
     crate::hiding::reveal(world, player);
-    send_to(world, player, "You stop hiding.\r\n");
+    if was_hidden {
+        send_to(world, player, "You step out of the shadows.\r\n");
+        if let Some(room) = world.get::<Located>(player).map(|l| l.0) {
+            let name = cap_sentence_start(&name_of(world, player));
+            broadcast_room_except_rendered(
+                world,
+                room,
+                &[player],
+                &format!("{name} steps out of the shadows.\r\n"),
+            );
+            refresh_room_players(world, room);
+        }
+    }
+    if world.get::<mud_world::Invisible>(player).is_some() {
+        if item_backed {
+            send_to(
+                world,
+                player,
+                "You can't drop your invisibility while something you are wearing grants it.\r\n",
+            );
+        } else {
+            // A marker nothing backs any more (stale): clear it.
+            invisibility_faded(world, player);
+        }
+    }
 }
 
 /// Despawn `item` and everything nested inside it. `Located` has no
@@ -13115,6 +13208,41 @@ pub(super) fn effect_display_name(raw: &str) -> String {
     full.to_string()
 }
 
+/// Player-facing label for an ability: its display name with colour
+/// tags stripped ("Invisibility"), or the title-cased `plain_name`
+/// ("Detect Magic") when the display name is empty.
+pub(crate) fn ability_label(def: &mud_world::AbilityDef) -> String {
+    let shown = render_color_tags(&def.name, ColorMode::Strip);
+    if shown.trim().is_empty() {
+        pretty_ability(&def.plain_name)
+    } else {
+        shown.trim().to_string()
+    }
+}
+
+/// Player-facing label for an ability id, `None` when the catalog has no
+/// such ability (or no catalog is loaded).
+pub(crate) fn ability_label_by_id(world: &World, id: i32) -> Option<String> {
+    world
+        .get_resource::<AbilityCatalog>()?
+        .by_name
+        .values()
+        .find(|d| d.id == id)
+        .map(ability_label)
+}
+
+/// Player-facing label for an effect instance, shared by `effects`,
+/// `score`, `cancel`, the prompt `%l` code and GMCP `Char.Effects`: the
+/// spawning ability's display name ("Invisibility", as legacy
+/// `show_active_spells` printed the spell name), else the effect's own
+/// name spelled out ([`effect_display_name`], which title-cases
+/// `SNAKE_CASE` identifiers).
+pub(crate) fn effect_label(world: &World, inst: &EffectInstance) -> String {
+    inst.ability_id
+        .and_then(|id| ability_label_by_id(world, id))
+        .unwrap_or_else(|| effect_display_name(&inst.name))
+}
+
 /// Remaining effect time in MUD hours (75 real seconds each), rounded up
 /// and never below one, matching legacy `show_active_spells` where
 /// `duration + 1` hours are shown ("1 hour", "3 hours").
@@ -13128,8 +13256,20 @@ pub(super) fn format_effect_hours(remaining_secs: i32) -> String {
     }
 }
 
-/// `(name, remaining_secs, ability_id, modify delta, permanent-effect origin)`.
-type ActiveEffectRow = (String, i32, Option<i32>, Option<i32>, Option<String>);
+/// One row of the `effects` listing.
+struct ActiveEffectRow {
+    /// Player-facing label ([`effect_label`]).
+    label: String,
+    remaining_secs: i32,
+    /// The label came from the spawning ability, so a stat change is
+    /// worth naming next to it ("Enhance Ability (+4 Charisma)").
+    from_ability: bool,
+    /// `(stat, amount)` of the instance's `ModifyDelta`, hidden for
+    /// invisibility (its evasion bonus is a modelling detail).
+    delta: Option<(String, i32)>,
+    /// Permanent-effect origin ("racial (Elf)", "from <item>").
+    origin: Option<String>,
+}
 
 /// Where a permanent effect comes from, for the `effects` listing:
 /// race innates read "racial (Elf)", worn-item grants name the item,
@@ -13169,32 +13309,42 @@ fn permanent_origin(
 pub(crate) fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
     // Snapshot effects on the player; pull the optional ModifyDelta
     // companion in the same query so the renderer can show
-    // "ward (+60) (2245s)" for stat-bonus effects.
+    // "Bless (+2 Strength)" for stat-bonus effects.
     let active: Vec<ActiveEffectRow> = {
         let mut q = world.query::<(
             &EffectInstance,
             &AppliedTo,
             Option<&mud_world::ModifyDelta>,
             Option<&mud_world::GrantedByItem>,
+            Has<mud_world::InvisibleSource>,
         )>();
         let rows: Vec<_> = q
             .iter(world)
-            .filter(|(_, a, _, _)| a.0 == player)
-            .map(|(inst, _, delta, granted)| {
+            .filter(|(_, a, ..)| a.0 == player)
+            .map(|(inst, _, delta, granted, invisible)| {
                 (
-                    inst.name.clone(),
+                    effect_label(world, inst),
+                    inst.ability_id
+                        .is_some_and(|id| ability_label_by_id(world, id).is_some()),
                     inst.remaining_secs,
-                    inst.ability_id,
-                    delta.map(|d| d.amount),
+                    delta
+                        .filter(|_| !invisible)
+                        .map(|d| (d.target.clone(), d.amount)),
                     (inst.remaining_secs < 0).then(|| (inst.source.clone(), granted.map(|g| g.0))),
                 )
             })
             .collect();
         rows.into_iter()
-            .map(|(name, remaining, ability, delta, perm)| {
+            .map(|(label, from_ability, remaining_secs, delta, perm)| {
                 let origin =
                     perm.and_then(|(src, item)| permanent_origin(world, player, &src, item));
-                (name, remaining, ability, delta, origin)
+                ActiveEffectRow {
+                    label,
+                    remaining_secs,
+                    from_ability,
+                    delta,
+                    origin,
+                }
             })
             .collect()
     };
@@ -13203,39 +13353,35 @@ pub(crate) fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
     } else {
         format!("\r\n<b:cyan>{} active effect(s):</>\r\n", active.len())
     };
-    let catalog = world.resource::<AbilityCatalog>();
-    for (name, remaining, ability_id, delta_amount, origin) in active {
-        let pretty_name = effect_display_name(&name);
-        // Look up the spawning ability's plain_name when known so
-        // players can see "Bleed (45s) — from Rend" instead of
-        // just the bare effect tag.
-        let from = ability_id.and_then(|id| {
-            catalog
-                .by_name
-                .values()
-                .find(|d| d.id == id)
-                .map(|d| pretty_ability(&d.plain_name))
-        });
-        // Source attribution dimmed — supplemental, not the focus.
-        // Suppress when it'd just echo the effect name (`detect_magic`
-        // from DETECT_MAGIC capitalizes to the same string).
-        let suffix = from
-            .as_deref()
-            .filter(|n| *n != pretty_name)
-            .map(|n| format!("from {n}"))
-            .or(origin)
-            .map_or(String::new(), |n| format!(" <dim>— {n}</>"));
+    for row in active {
+        let ActiveEffectRow {
+            label: pretty_name,
+            remaining_secs: remaining,
+            from_ability,
+            delta,
+            origin,
+        } = row;
+        // Source attribution dimmed: only permanent effects carry one
+        // now, since a spell is named after its ability.
+        let suffix = origin.map_or(String::new(), |n| format!(" <dim>— {n}</>"));
         // Modifier delta colored by sign — green for buffs, red for
         // debuffs. A bless (+2 STR) reads green; a curse (-3 DEX)
         // reads red. Player can scan the list and immediately see
-        // which way each effect is pulling them.
-        let delta_label = delta_amount.map_or(String::new(), |a| {
+        // which way each effect is pulling them. When the row is
+        // named after its ability the stat is spelled out after the
+        // number ("Enhance Ability (+4 Charisma)"); a row already
+        // named for its stat just shows the number.
+        let delta_label = delta.map_or(String::new(), |(stat, a)| {
             let (sign, color) = if a >= 0 {
                 ("+", "<green>")
             } else {
                 ("", "<red>")
             };
-            format!(" {color}({sign}{a})</>")
+            if from_ability {
+                format!(" {color}({sign}{a} {})</>", effect_display_name(&stat))
+            } else {
+                format!(" {color}({sign}{a})</>")
+            }
         });
         if remaining < 0 {
             // Permanent effects (innate racials, divine boons, etc.)

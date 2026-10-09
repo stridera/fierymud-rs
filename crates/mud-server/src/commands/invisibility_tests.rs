@@ -631,3 +631,135 @@ fn aggro_never_engages_a_ghost_or_a_dead_actor() {
     fx.world.get_mut::<Health>(fx.ghost).unwrap().hp = 10;
     assert!(super::mob_will_start_fight(&fx.world, wolf, fx.ghost));
 }
+
+// -- `visible` and dispel (issue #101) ---------------------------------------
+
+/// An INVISIBLE spell instance the way `invoke_ability` builds it: named
+/// for the stat it moves ("evasion"), carrying a +40 delta.
+fn spell_invisibility(fx: &mut Fx) -> Entity {
+    if let Some(mut stats) = fx.world.get_mut::<CombatStats>(fx.ghost) {
+        stats.evasion += 40;
+    }
+    fx.world
+        .spawn((
+            mud_world::EffectInstance {
+                kind: 1,
+                name: "evasion".into(),
+                strength: 40,
+                remaining_secs: 600,
+                source: mud_world::EffectSource::Spell,
+                ability_id: None,
+            },
+            mud_world::AppliedTo(fx.ghost),
+            mud_world::ModifyDelta {
+                target: "evasion".into(),
+                amount: 40,
+            },
+            mud_world::InvisibleSource,
+        ))
+        .id()
+}
+
+#[test]
+fn visible_drops_spell_invisibility_and_the_evasion_bonus() {
+    let mut fx = Fx::new();
+    let base = fx.world.get::<CombatStats>(fx.ghost).unwrap().evasion;
+    let spell = spell_invisibility(&mut fx);
+    assert!(!can_see_player(&fx.world, fx.watcher, fx.ghost));
+    let _ = (drain(&mut fx.wrx), drain(&mut fx.grx));
+    dispatch(&mut fx.world, fx.ghost, "vis");
+    let mine = drain(&mut fx.grx);
+    assert!(!mine.contains("already visible"), "{mine}");
+    assert!(mine.contains("into view"), "{mine}");
+    assert!(fx.world.get::<Invisible>(fx.ghost).is_none());
+    assert!(fx.world.get_entity(spell).is_err(), "spell instance gone");
+    assert_eq!(fx.world.get::<CombatStats>(fx.ghost).unwrap().evasion, base);
+    assert!(can_see_player(&fx.world, fx.watcher, fx.ghost));
+    assert!(drain(&mut fx.wrx).contains("Ghost fades back into view."));
+    dispatch(&mut fx.world, fx.ghost, "vis");
+    assert!(drain(&mut fx.grx).contains("You are already visible."));
+}
+
+#[test]
+fn dispelling_spell_invisibility_makes_the_caster_visible_again() {
+    let mut fx = Fx::new();
+    let spell = spell_invisibility(&mut fx);
+    crate::effects::remove_effect_instance(&mut fx.world, fx.ghost, spell);
+    assert!(fx.world.get::<Invisible>(fx.ghost).is_none());
+    assert!(can_see_player(&fx.world, fx.watcher, fx.ghost));
+    assert!(drain(&mut fx.wrx).contains("Ghost fades back into view."));
+}
+
+#[test]
+fn dispelling_one_of_two_invisibility_sources_keeps_the_other() {
+    let mut fx = Fx::new();
+    let first = spell_invisibility(&mut fx);
+    let _second = spell_invisibility(&mut fx);
+    crate::effects::remove_effect_instance(&mut fx.world, fx.ghost, first);
+    assert!(fx.world.get::<Invisible>(fx.ghost).is_some());
+}
+
+#[test]
+fn visible_cannot_shed_invisibility_a_worn_item_grants() {
+    let mut fx = Fx::new();
+    let spell = spell_invisibility(&mut fx);
+    fx.world.spawn((
+        mud_world::EffectInstance {
+            kind: 1,
+            name: "invisible".into(),
+            strength: 1,
+            remaining_secs: -1,
+            source: mud_world::EffectSource::Other(
+                mud_world::mob_effects::WORN_ITEM_EFFECT_SOURCE.to_string(),
+            ),
+            ability_id: None,
+        },
+        mud_world::AppliedTo(fx.ghost),
+        mud_world::InvisibleSource,
+    ));
+    let _ = drain(&mut fx.grx);
+    dispatch(&mut fx.world, fx.ghost, "visible");
+    let mine = drain(&mut fx.grx);
+    assert!(
+        mine.contains("while something you are wearing grants it"),
+        "{mine}"
+    );
+    assert!(
+        fx.world.get_entity(spell).is_err(),
+        "the spell part still goes"
+    );
+    assert!(fx.world.get::<Invisible>(fx.ghost).is_some());
+}
+
+#[test]
+fn visible_clears_a_marker_nothing_backs() {
+    let mut fx = Fx::new();
+    dispatch(&mut fx.world, fx.ghost, "vis");
+    assert!(fx.world.get::<Invisible>(fx.ghost).is_none());
+    assert!(can_see_player(&fx.world, fx.watcher, fx.ghost));
+}
+
+#[test]
+fn shopkeepers_refuse_a_customer_they_cannot_see() {
+    let mut fx = Fx::new();
+    fx.mob("a shopkeeper", 0);
+    let keeper = fx.mob("the grocer", 0);
+    fx.world.entity_mut(keeper).insert(mud_world::Shopkeeper {
+        shop_zone_id: 1,
+        shop_id: 1,
+    });
+    fx.world.insert_resource(mud_world::ShopCatalog::default());
+    let _ = drain(&mut fx.grx);
+    for cmd in ["list", "buy bread", "sell bread", "inspect bread"] {
+        dispatch(&mut fx.world, fx.ghost, cmd);
+        let out = drain(&mut fx.grx);
+        assert!(
+            out.contains("The grocer says, 'I don't trade with someone I can't see!'"),
+            "{cmd}: {out}"
+        );
+    }
+    dispatch(&mut fx.world, fx.ghost, "vis");
+    let _ = drain(&mut fx.grx);
+    dispatch(&mut fx.world, fx.ghost, "list");
+    assert!(!drain(&mut fx.grx).contains("can't see"));
+}

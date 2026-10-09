@@ -206,3 +206,102 @@ fn score_lists_permanent_effects_tagged_and_timed_ones_plain() {
     assert!(out.contains("Detect Magic"), "{out}");
     assert!(!out.contains("Detect Magic (permanent)"), "{out}");
 }
+
+// -- friendly labels (#13, #39) ---------------------------------------------
+
+/// An invisibility spell instance the way `invoke_ability` builds it:
+/// named for the stat it moves, carrying a +40 evasion delta.
+fn add_invisibility_spell(world: &mut World, player: Entity, ability_id: i32) {
+    world.spawn((
+        EffectInstance {
+            kind: 1,
+            name: "evasion".to_string(),
+            strength: 40,
+            remaining_secs: 750,
+            source: EffectSource::Spell,
+            ability_id: Some(ability_id),
+        },
+        AppliedTo(player),
+        ModifyDelta {
+            target: "evasion".to_string(),
+            amount: 40,
+        },
+        mud_world::InvisibleSource,
+    ));
+}
+
+fn catalog_with(world: &mut World, defs: &[(i32, &str)]) {
+    let mut catalog = mud_world::AbilityCatalog::default();
+    for (id, name) in defs {
+        let def =
+            super::test_support::ability_def(*id, name, mud_db::abilities::AbilityKind::Spell);
+        catalog.by_name.insert(name.to_ascii_lowercase(), def);
+    }
+    world.insert_resource(catalog);
+}
+
+#[test]
+fn invisibility_is_listed_by_spell_name_not_as_evasion() {
+    let (mut world, player, mut rx) = setup();
+    catalog_with(&mut world, &[(7, "Invisibility")]);
+    add_invisibility_spell(&mut world, player, 7);
+    let out = effects_output(&mut world, player, &mut rx);
+    assert!(out.contains("Invisibility (10 hours remaining)"), "{out}");
+    assert!(!out.contains("Evasion"), "{out}");
+    assert!(!out.contains("+40"), "{out}");
+}
+
+#[test]
+fn spell_stat_buffs_are_named_for_the_spell_with_the_stat_spelled_out() {
+    let (mut world, player, mut rx) = setup();
+    catalog_with(&mut world, &[(8, "Enhance Ability")]);
+    world.spawn((
+        EffectInstance {
+            kind: 1,
+            name: "cha".to_string(),
+            strength: 4,
+            remaining_secs: 750,
+            source: EffectSource::Spell,
+            ability_id: Some(8),
+        },
+        AppliedTo(player),
+        ModifyDelta {
+            target: "cha".to_string(),
+            amount: 4,
+        },
+    ));
+    let out = effects_output(&mut world, player, &mut rx);
+    assert!(
+        out.contains("Enhance Ability (+4 Charisma) (10 hours remaining)"),
+        "{out}"
+    );
+    assert!(!out.contains("from"), "{out}");
+}
+
+#[test]
+fn ability_display_name_falls_back_to_title_cased_plain_name() {
+    let mut def = super::test_support::ability_def(9, "", mud_db::abilities::AbilityKind::Spell);
+    def.plain_name = "DETECT_MAGIC".to_string();
+    assert_eq!(super::info::ability_label(&def), "Detect Magic");
+    def.name = "<b:cyan>Fire</>ball".to_string();
+    assert_eq!(super::info::ability_label(&def), "Fireball");
+}
+
+#[test]
+fn score_and_prompt_use_the_spell_name_for_invisibility() {
+    let (mut world, player, mut rx) = setup();
+    world.init_resource::<mud_world::AchievementCatalog>();
+    catalog_with(&mut world, &[(7, "Invisibility")]);
+    add_invisibility_spell(&mut world, player, 7);
+    super::info::cmd_score(&mut world, player, "");
+    let out = plain(&drain(&mut rx));
+    assert!(out.contains("Invisibility"), "{out}");
+    assert!(!out.contains("Evasion"), "{out}");
+    let inst = world
+        .query::<&EffectInstance>()
+        .iter(&world)
+        .next()
+        .unwrap()
+        .clone();
+    assert_eq!(super::info::effect_label(&world, &inst), "Invisibility");
+}

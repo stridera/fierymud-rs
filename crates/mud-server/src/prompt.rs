@@ -594,15 +594,11 @@ fn active_effects(world: &mut World, target: Entity) -> Vec<EffectEntry> {
     let mut found: Vec<(String, i32, bool)> = Vec::new();
     {
         let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-        let catalog = world.get_resource::<AbilityCatalog>();
         for (inst, applied) in q.iter(world) {
             if applied.0 != target || inst.remaining_secs < 0 {
                 continue;
             }
-            let label = inst
-                .ability_id
-                .and_then(|id| catalog.and_then(|c| c.by_name.values().find(|d| d.id == id)))
-                .map_or_else(|| inst.name.replace('_', " "), |d| d.plain_name.clone());
+            let label = crate::commands::info::effect_label(world, inst);
             let is_detect = inst.name.eq_ignore_ascii_case("detect_magic")
                 || label.eq_ignore_ascii_case("detect magic");
             found.push((label, inst.remaining_secs, is_detect));
@@ -1046,7 +1042,42 @@ mod tests {
             .into_iter()
             .map(|e| e.name)
             .collect();
-        assert_eq!(names, vec!["bless".to_string()]);
+        assert_eq!(names, vec!["Bless".to_string()]);
+    }
+
+    #[test]
+    fn prompt_effects_use_ability_display_names() {
+        use mud_world::EffectSource;
+        let mut world = World::new();
+        let mut catalog = mud_world::AbilityCatalog::default();
+        let mut def = crate::commands::test_support::ability_def(
+            7,
+            "Invisibility",
+            mud_db::abilities::AbilityKind::Spell,
+        );
+        def.plain_name = "INVISIBLE".to_string();
+        catalog.by_name.insert("invisible".to_string(), def);
+        world.insert_resource(catalog);
+        let player = world.spawn_empty().id();
+        for (name, ability_id) in [("evasion", Some(7)), ("detect_magic", None)] {
+            world.spawn((
+                EffectInstance {
+                    kind: 1,
+                    name: name.to_string(),
+                    strength: 1,
+                    remaining_secs: 300,
+                    source: EffectSource::Spell,
+                    ability_id,
+                },
+                AppliedTo(player),
+            ));
+        }
+        let mut names: Vec<String> = active_effects(&mut world, player)
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["Detect Magic", "Invisibility"]);
     }
 
     #[test]

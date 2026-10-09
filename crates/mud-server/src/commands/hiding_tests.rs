@@ -709,7 +709,7 @@ fn a_halfling_hiding_in_a_group_multiplies_its_dex_bonus() {
 fn visible_drops_the_hiding() {
     let (mut fx, _seeker, _srx, lurker, mut lrx) = hiding_pair(300);
     dispatch(&mut fx.world, lurker, "visible");
-    assert!(drain(&mut lrx).contains("You stop hiding."));
+    assert!(drain(&mut lrx).contains("You step out of the shadows."));
     assert!(!hiding::is_hidden(&fx.world, lurker));
     dispatch(&mut fx.world, lurker, "visible");
     assert!(drain(&mut lrx).contains("already visible"));

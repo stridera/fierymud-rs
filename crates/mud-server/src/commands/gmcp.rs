@@ -12,8 +12,8 @@ use std::hash::{Hash, Hasher};
 
 use bevy_ecs::prelude::*;
 use mud_world::{
-    AbilityCatalog, AppliedTo, EffectInstance, EffectSource, Exits, Located, Named, RoomSector,
-    WorldKey, WorldKeyIndex,
+    AppliedTo, EffectInstance, EffectSource, Exits, Located, Named, RoomSector, WorldKey,
+    WorldKeyIndex,
 };
 use serde_json::{Value, json};
 
@@ -279,40 +279,10 @@ pub(crate) fn send_room_info(world: &mut World, viewer: Entity, force: bool) {
     send_if_changed(world, viewer, "Room.Info", &payload, force);
 }
 
-/// Cached `Ability.id` -> plain name map for `Char.Effects`, rebuilt
-/// only when the catalog's size changes (catalog reload) rather than
-/// on every prompt.
-#[derive(Resource, Default)]
-struct GmcpAbilityNames {
-    source_len: usize,
-    names: HashMap<i32, String>,
-}
-
-fn ability_name(world: &mut World, id: i32) -> Option<String> {
-    let len = world
-        .get_resource::<AbilityCatalog>()
-        .map(|c| c.by_name.len())?;
-    let stale = world
-        .get_resource::<GmcpAbilityNames>()
-        .is_none_or(|c| c.source_len != len);
-    if stale {
-        let names = world
-            .resource::<AbilityCatalog>()
-            .by_name
-            .values()
-            .map(|d| (d.id, d.plain_name.clone()))
-            .collect();
-        world.insert_resource(GmcpAbilityNames {
-            source_len: len,
-            names,
-        });
-    }
-    world.resource::<GmcpAbilityNames>().names.get(&id).cloned()
-}
-
 /// The `Char.Effects` array for `target`: one entry per active effect
-/// attached to the player. `name` is the effect's own label, `ability`
-/// the originating spell ("" when none), `duration` seconds remaining
+/// attached to the player. `name` is the effect's player-facing label
+/// ([`super::info::effect_label`]), `ability` the originating spell's
+/// display name ("" when none), `duration` seconds remaining
 /// (-1 = permanent), `source` the high-level origin tag.
 pub(crate) fn build_char_effects(world: &mut World, target: Entity) -> String {
     let mut rows: Vec<EffectInstance> = Vec::new();
@@ -327,8 +297,7 @@ pub(crate) fn build_char_effects(world: &mut World, target: Entity) -> String {
         .map(|inst| {
             let ability = inst
                 .ability_id
-                .and_then(|id| ability_name(world, id))
-                .map(|s| strip(&s))
+                .and_then(|id| super::info::ability_label_by_id(world, id))
                 .unwrap_or_default();
             let source = match &inst.source {
                 EffectSource::Spell => "spell",
@@ -338,7 +307,7 @@ pub(crate) fn build_char_effects(world: &mut World, target: Entity) -> String {
                 EffectSource::Other(_) => "other",
             };
             json!({
-                "name": inst.name,
+                "name": super::info::effect_label(world, &inst),
                 "ability": ability,
                 "duration": inst.remaining_secs,
                 "source": source,

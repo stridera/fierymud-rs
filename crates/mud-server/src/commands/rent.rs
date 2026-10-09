@@ -626,6 +626,62 @@ mod tests {
         assert!(world.get::<crate::commands::Quitting>(player).is_some());
     }
 
+    /// An INVISIBLE spell instance, named for its evasion stat as the
+    /// cast path builds it (issue #101).
+    fn cast_invisibility(world: &mut World, player: Entity) -> Entity {
+        world.entity_mut(player).insert(mud_world::Invisible);
+        world
+            .spawn((
+                mud_world::EffectInstance {
+                    kind: 1,
+                    name: "evasion".into(),
+                    strength: 40,
+                    remaining_secs: 600,
+                    source: mud_world::EffectSource::Spell,
+                    ability_id: None,
+                },
+                mud_world::AppliedTo(player),
+                mud_world::InvisibleSource,
+            ))
+            .id()
+    }
+
+    #[test]
+    fn visible_lets_an_invisible_player_rent_again() {
+        let (mut world, player, mut rx) = world_with_clerk(false);
+        world.insert_resource(mud_world::SocialRegistry::default());
+        world.entity_mut(player).insert(Account {
+            user_id: "u".into(),
+            character_id: "c".into(),
+            role: UserRole::Player,
+            account_role: UserRole::Player,
+            perms: vec![],
+        });
+        cast_invisibility(&mut world, player);
+        cmd_rent(&mut world, player, "");
+        assert!(drain(&mut rx).contains("I don't deal with people I can't see"));
+        crate::commands::dispatch(&mut world, player, "vis");
+        let out = drain(&mut rx);
+        assert!(!out.contains("already visible"), "{out}");
+        assert!(world.get::<mud_world::Invisible>(player).is_none(), "{out}");
+        cmd_rent(&mut world, player, "");
+        let out = drain(&mut rx);
+        assert!(!out.contains("can't see"), "{out}");
+        assert!(world.get::<crate::commands::Quitting>(player).is_some());
+    }
+
+    #[test]
+    fn dispelling_invisibility_lets_the_player_rent_again() {
+        let (mut world, player, mut rx) = world_with_clerk(false);
+        let spell = cast_invisibility(&mut world, player);
+        crate::effects::remove_effect_instance(&mut world, player, spell);
+        let _ = drain(&mut rx);
+        cmd_rent(&mut world, player, "");
+        let out = drain(&mut rx);
+        assert!(!out.contains("can't see"), "{out}");
+        assert!(world.get::<crate::commands::Quitting>(player).is_some());
+    }
+
     #[test]
     fn rent_away_from_a_receptionist_refuses_and_does_not_quit() {
         let mut world = World::new();

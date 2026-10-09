@@ -380,7 +380,9 @@ fn char_effects_lists_a_cast_buff() {
     let v: Value = serde_json::from_str(&eff[0]).unwrap();
     let arr = v.as_array().unwrap();
     assert!(!arr.is_empty(), "cast output: {said}\nframes: {eff:?}");
-    assert_eq!(arr[0]["ability"], "ARMOR");
+    // Human-friendly labels, never the SNAKE_CASE identifier (#13).
+    assert_eq!(arr[0]["ability"], "Armor");
+    assert_eq!(arr[0]["name"], "Armor");
     assert_eq!(arr[0]["source"], "spell");
 }
 
