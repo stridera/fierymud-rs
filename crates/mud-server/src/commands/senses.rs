@@ -4,10 +4,11 @@
 //! actors). Legacy `EFF_INFRAVISION`, `EFF_SENSE_LIFE`, `EFF_DETECT_ALIGN`.
 
 use bevy_ecs::prelude::{Entity, With, World};
-use mud_db::enums::{Alignment, LifeForce, Size};
+use mud_db::enums::{Alignment, LifeForce, ObjectFlag, Sector, Size};
 use mud_world::{
-    Blinded, CombatStats, DetectAlign, Infravision, LifeForceTag, Located, Mob, ObjectPrototypes,
-    Player, SenseLife, Sized, WorldKey,
+    AbilityCatalog, AppliedTo, Blinded, CombatStats, DetectAlign, EffectInstance, Infravision,
+    LifeForceTag, LiquidContainer, Located, Mob, ObjectFlags, ObjectPrototypes, Player, RoomSector,
+    SenseLife, Sized, WorldKey, is_lit,
 };
 
 use super::{can_see_player, hidden_by_magic_from, wiz_hidden_from};
@@ -106,14 +107,108 @@ pub(crate) fn item_alignment_aura(
     }
 }
 
+/// Whether `viewer` has an effect active that goes by one of `labels`
+/// (lowercase, spaces for underscores): the effect's own flag name or its
+/// originating ability's plain name. Read-only twin of the aura lookup in
+/// `look_auras`.
+fn viewer_has_effect(world: &World, viewer: Entity, labels: &[&str]) -> bool {
+    let norm = |s: &str| s.replace('_', " ").to_ascii_lowercase();
+    let Some(mut q) = world.try_query::<(&EffectInstance, &AppliedTo)>() else {
+        return false;
+    };
+    let catalog = world.get_resource::<AbilityCatalog>();
+    q.iter(world)
+        .filter(|(_, applied)| applied.0 == viewer)
+        .any(|(inst, _)| {
+            labels.contains(&norm(&inst.name).as_str())
+                || inst
+                    .ability_id
+                    .and_then(|id| catalog?.by_name.values().find(|d| d.id == id))
+                    .is_some_and(|d| labels.contains(&norm(&d.plain_name).as_str()))
+        })
+}
+
+/// Legacy `EFF_DETECT_MAGIC`: the Detect Magic effect, or the Sphere of
+/// Divination that grants it.
+fn has_detect_magic(world: &World, viewer: Entity) -> bool {
+    viewer_has_effect(world, viewer, &["detect magic", "sphere of divination"])
+}
+
+/// Legacy `EFF_DETECT_POISON`.
+fn has_detect_poison(world: &World, viewer: Entity) -> bool {
+    viewer_has_effect(world, viewer, &["detect poison"])
+}
+
+/// Legacy `IS_WATER(obj->in_room)`: the item lies directly on the floor
+/// of a shallows, water or underwater room. Items carried, worn or inside
+/// a container have no room (`in_room == NOWHERE`) and never float.
+fn lies_in_water(world: &World, item: Entity) -> bool {
+    world
+        .get::<Located>(item)
+        .and_then(|l| world.get::<RoomSector>(l.0))
+        .is_some_and(|s| matches!(s.0, Sector::Shallows | Sector::Water | Sector::Underwater))
+}
+
+/// Legacy `CAN_SEE_OBJ`'s invisibility half (`OBJ_INVIS_TO_CHAR`): an
+/// `Invisible` item is hidden from a viewer who cannot pierce invisibility
+/// (detect invisible, `HOLY_LIGHT`, or an Immortal+ account). Light and
+/// per-viewer hiddenness are not modelled here.
+#[must_use]
+pub(crate) fn item_visible_to(world: &World, viewer: Entity, item: Entity) -> bool {
+    !world
+        .get::<ObjectFlags>(item)
+        .is_some_and(|f| f.has(ObjectFlag::Invisible))
+        || super::pierces_invisibility(world, viewer)
+}
+
+/// Every tag `viewer` perceives on `item`, in legacy
+/// `print_obj_flags_to_char` order: floating, illuminated, invisible,
+/// magic (detect magic), glowing, humming, poisoned (detect poison), then
+/// the detect-align aura. Legacy's `(hidden)` / `(hN)` (object
+/// hiddenness) and `(hovering)` (`ITEM_NOFALL`) have no Rust counterpart.
+#[must_use]
+pub(crate) fn item_tags(world: &World, viewer: Entity, item: Entity) -> Vec<String> {
+    let flags = world.get::<ObjectFlags>(item);
+    let flagged = |f: ObjectFlag| flags.is_some_and(|x| x.has(f));
+    let mut tags: Vec<String> = Vec::new();
+    if lies_in_water(world, item) {
+        tags.push("(<b:blue>floating</>)".into());
+    }
+    if is_lit(world, item) {
+        tags.push("<yellow>(</><b:yellow>illuminated</><yellow>)</>".into());
+    }
+    if flagged(ObjectFlag::Invisible) {
+        tags.push("(invisible)".into());
+    }
+    if flagged(ObjectFlag::Magic) && has_detect_magic(world, viewer) {
+        tags.push("(<b:blue>magic</>)".into());
+    }
+    if flagged(ObjectFlag::Glow) {
+        tags.push("<b:black>(</><magenta>glowing</><b:black>)</>".into());
+    }
+    if flagged(ObjectFlag::Hum) {
+        tags.push("<red>(</><cyan>humming</><red>)</>".into());
+    }
+    if world
+        .get::<LiquidContainer>(item)
+        .is_some_and(|l| l.poisoned)
+        && has_detect_poison(world, viewer)
+    {
+        tags.push("(<b:magenta>poisoned</>)".into());
+    }
+    if let Some(aura) = item_alignment_aura(world, viewer, item) {
+        tags.push(aura.into());
+    }
+    tags
+}
+
 /// `line` with the item tags `viewer` perceives appended, the way legacy
 /// `print_obj_flags_to_char` trails them after an item's description.
 #[must_use]
 pub(crate) fn with_item_tags(world: &World, viewer: Entity, item: Entity, line: String) -> String {
-    match item_alignment_aura(world, viewer, item) {
-        Some(tag) => format!("{line} {tag}"),
-        None => line,
-    }
+    item_tags(world, viewer, item)
+        .into_iter()
+        .fold(line, |acc, tag| format!("{acc} {tag}"))
 }
 
 /// Legacy `senses_living`: life force the sense can pick up. Undead,

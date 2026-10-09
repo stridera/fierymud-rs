@@ -3260,21 +3260,14 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
     // player can step past a real grimoire to land on its
     // "ancient" extra-description body.
     //
-    // INVISIBLE items are filtered out unless the observer has
-    // HOLY_LIGHT (staff vision). Mob/player invisibility is a
-    // separate system; this filter only fires on Item entities
-    // (other entities don't carry `ObjectFlags`).
-    let can_see_invis = crate::commands::player_can_see_in_dark(world, player);
+    // INVISIBLE items are filtered out unless the observer pierces
+    // invisibility (detect invisible, HOLY_LIGHT, Immortal+). Mob/player
+    // invisibility is a separate system; this filter only fires on Item
+    // entities (other entities don't carry `ObjectFlags`).
     let entity_matches: Vec<Entity> = {
-        let mut q = world.query::<(
-            Entity,
-            &Located,
-            &Named,
-            Option<&Keywords>,
-            Option<&mud_world::ObjectFlags>,
-        )>();
+        let mut q = world.query::<(Entity, &Located, &Named, Option<&Keywords>)>();
         q.iter(world)
-            .filter(|(e, l, n, kw, flags)| {
+            .filter(|(e, l, n, kw)| {
                 if !(l.0 == room || l.0 == player) {
                     return false;
                 }
@@ -3283,14 +3276,12 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
                 if !crate::commands::can_see_player(world, player, *e) {
                     return false;
                 }
-                if !can_see_invis
-                    && flags.is_some_and(|f| f.has(mud_db::enums::ObjectFlag::Invisible))
-                {
+                if !crate::commands::senses::item_visible_to(world, player, *e) {
                     return false;
                 }
                 matches(&needle, n, *kw)
             })
-            .map(|(e, _, _, _, _)| e)
+            .map(|(e, _, _, _)| e)
             .collect()
     };
     // Newest arrival first inside each holder, room before inventory
@@ -3898,6 +3889,7 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
                 .filter(|(_, l, _)| l.0 == target)
                 .map(|(e, _, n)| (e, n.name.clone()))
                 .collect();
+            rows.retain(|(e, _)| crate::commands::senses::item_visible_to(world, player, *e));
             crate::commands::sort_newest_first(world, target, &mut rows, |r| r.0);
             for (e, name) in &mut rows {
                 *name = crate::commands::senses::with_item_tags(
@@ -6238,24 +6230,15 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
     // Pattern matches `cmd_inventory`.
     //
     // INVISIBLE items vanish from the listing unless the observer
-    // has HOLY_LIGHT (staff vision — also used as the dark-room
-    // bypass). Detect-Invisible as a normal player effect doesn't
-    // exist yet; when it lands, route it through this gate.
-    // TODO: route a real "see invisible" perception once that
-    // pipeline exists.
-    let can_see_invis = crate::commands::player_can_see_in_dark(world, player);
+    // pierces invisibility (detect invisible, HOLY_LIGHT, Immortal+).
     let items: Vec<String> = {
         let mut names: Vec<String> = Vec::new();
-        let mut q = world.query_filtered::<
-            (Entity, &Located, &Named, Option<&mud_world::ObjectFlags>),
-            With<Item>,
-        >();
+        let mut q = world.query_filtered::<(Entity, &Located, &Named), With<Item>>();
         // Newest arrival first (legacy `obj_to_room` pushes the list head).
-        let mut item_rows: Vec<_> = q.iter(world).filter(|(_, l, _, _)| l.0 == room).collect();
+        let mut item_rows: Vec<_> = q.iter(world).filter(|(_, l, _)| l.0 == room).collect();
         crate::commands::sort_newest_first(world, room, &mut item_rows, |r| r.0);
-        for (e, _l, n, flags) in item_rows {
-            if !can_see_invis && flags.is_some_and(|f| f.has(mud_db::enums::ObjectFlag::Invisible))
-            {
+        for (e, _l, n) in item_rows {
+            if !crate::commands::senses::item_visible_to(world, player, e) {
                 continue;
             }
             let line = item_room_line(world, e, &n.name);
@@ -10023,6 +10006,7 @@ pub(crate) fn cmd_inventory(world: &mut World, player: Entity, args: &str) {
                     )
             })
             .map(|(e, _, _, _)| e)
+            .filter(|e| crate::commands::senses::item_visible_to(world, player, *e))
             .collect()
     };
     let item_entities: Vec<Entity> = {
@@ -12464,6 +12448,11 @@ pub(crate) fn cmd_equipment(world: &mut World, player: Entity, _args: &str) {
         q.iter(world)
             .filter(|(_, l, _, _)| l.0 == player)
             .map(|(e, _, n, eq)| {
+                // Legacy `do_equipment`: a worn item the viewer cannot see
+                // is just "Something.", with nothing else given away.
+                if !crate::commands::senses::item_visible_to(world, player, e) {
+                    return (e, eq.0, "Something.".to_string(), 0.0);
+                }
                 let name =
                     crate::commands::senses::with_item_tags(world, player, e, n.name.clone());
                 (e, eq.0, name, item_weight(world, e))

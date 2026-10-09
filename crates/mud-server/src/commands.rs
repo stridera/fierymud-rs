@@ -479,6 +479,9 @@ mod item_edit_tests;
 #[path = "commands/item_effects_tests.rs"]
 mod item_effects_tests;
 #[cfg(test)]
+#[path = "commands/item_tag_tests.rs"]
+mod item_tag_tests;
+#[cfg(test)]
 #[path = "commands/look_aura_tests.rs"]
 mod look_aura_tests;
 #[cfg(test)]
@@ -7227,6 +7230,10 @@ pub(crate) fn send_char_items_list(
     };
     let mut entries: Vec<String> = Vec::with_capacity(items.len());
     for &item in items {
+        // The panel never names an item the viewer cannot see.
+        if !senses::item_visible_to(world, viewer, item) {
+            continue;
+        }
         let raw_name = world.get::<Named>(item).map_or("", |n| n.name.as_str());
         let plain = render_color_tags(raw_name, ColorMode::Strip)
             .replace('\\', "\\\\")
@@ -11590,6 +11597,7 @@ pub(crate) fn look_in_container(world: &mut World, player: Entity, target_word: 
             .filter(|(_, l, _)| l.0 == container)
             .map(|(e, _, n)| (e, n.name.clone()))
             .collect();
+        rows.retain(|(e, _)| senses::item_visible_to(world, player, *e));
         sort_newest_first(world, container, &mut rows, |r| r.0);
         rows.into_iter()
             .map(|(e, n)| senses::with_item_tags(world, player, e, n))
