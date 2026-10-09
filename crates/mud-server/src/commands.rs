@@ -401,6 +401,8 @@ mod feedback;
 mod game;
 #[path = "commands/housing.rs"]
 mod housing;
+#[path = "commands/identify_actor.rs"]
+mod identify_actor;
 #[path = "commands/identity.rs"]
 mod identity;
 #[path = "commands/info.rs"]
@@ -510,8 +512,8 @@ mod multi_hit_tests;
 mod norepeat_tests;
 
 #[cfg(test)]
-#[path = "commands/symbol_cmd_tests.rs"]
-mod symbol_cmd_tests;
+#[path = "commands/identify_actor_tests.rs"]
+mod identify_actor_tests;
 #[cfg(test)]
 #[path = "commands/order_tests.rs"]
 mod order_tests;
@@ -576,6 +578,10 @@ mod staff_move_tests;
 mod status_lists;
 #[path = "commands/subclass.rs"]
 mod subclass;
+
+#[cfg(test)]
+#[path = "commands/symbol_cmd_tests.rs"]
+mod symbol_cmd_tests;
 #[path = "commands/tells.rs"]
 mod tells;
 #[cfg(test)]
@@ -1349,6 +1355,10 @@ pub(crate) enum CommandOrigin {
 }
 
 thread_local! {
+    /// Set whenever a cast settles as landed ([`settle_slot`] with
+    /// `charge`). A scroll / wand reads it after its casts to decide
+    /// whether the item is used up.
+    static CAST_LANDED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static COMMAND_ORIGIN: std::cell::Cell<CommandOrigin> =
         const { std::cell::Cell::new(CommandOrigin::Direct) };
     /// Whether the line most recently dispatched ended in whitespace, i.e.
@@ -12736,6 +12746,41 @@ pub(crate) fn invoke_object_abilities(
         );
         return;
     }
+    // Legacy `mag_objectmagic`: the target is resolved before anything
+    // happens, so a scroll or wand aimed at nothing (or at something that
+    // isn't there) says so and is NOT used up. A scroll with several
+    // spells still reads if any one of them has a legal target.
+    let bindings = if matches!(verb, "recite" | "wave") {
+        let mut first_refusal: Option<String> = None;
+        let castable: Vec<i32> = bindings
+            .into_iter()
+            .filter(|ability_id| {
+                match item_cast_target_refusal(
+                    world,
+                    player,
+                    *ability_id,
+                    target_word,
+                    verb,
+                    &item_name,
+                ) {
+                    None => true,
+                    Some(msg) => {
+                        first_refusal.get_or_insert(msg);
+                        false
+                    }
+                }
+            })
+            .collect();
+        if castable.is_empty()
+            && let Some(msg) = first_refusal
+        {
+            send_rendered(world, player, &msg);
+            return;
+        }
+        castable
+    } else {
+        bindings
+    };
     send_rendered(world, player, &format!("{intro_phrase} {item_name}.\r\n"));
     // Room broadcast — bystanders should see the gesture
     // (waving a wand, tapping a staff, reciting from a scroll)
@@ -12775,6 +12820,7 @@ pub(crate) fn invoke_object_abilities(
             id: key.id,
         },
     );
+    CAST_LANDED.with(|c| c.set(false));
     for ability_id in bindings {
         let ability_name = world
             .resource::<AbilityCatalog>()
@@ -12799,6 +12845,10 @@ pub(crate) fn invoke_object_abilities(
         );
     }
     try_remove::<RecallScrollSource>(world, player);
+    // Only a cast that actually landed uses the item up.
+    if !CAST_LANDED.with(std::cell::Cell::get) {
+        return;
+    }
     if single_use {
         crate::equip_apply::despawn_item(world, item);
     } else if let Some(mut c) = world.get_mut::<mud_world::Charges>(item) {
@@ -12811,6 +12861,63 @@ pub(crate) fn invoke_object_abilities(
             crate::equip_apply::despawn_item(world, item);
         }
     }
+}
+
+/// Legacy `find_spell_target` for a scroll / wand: `Some(refusal)` when the
+/// spell bound to the item has no legal target for what the player typed.
+/// Quiet (sends nothing), so the caller decides what to print and whether
+/// the item is spent.
+fn item_cast_target_refusal(
+    world: &mut World,
+    player: Entity,
+    ability_id: i32,
+    target_word: Option<&str>,
+    verb: &str,
+    item_name: &str,
+) -> Option<String> {
+    let def = world
+        .resource::<AbilityCatalog>()
+        .by_name
+        .values()
+        .find(|d| d.id == ability_id)
+        .cloned()?;
+    let needs_explicit_target = {
+        let catalog = world.resource::<AbilityCatalog>();
+        let effects = world.resource::<EffectCatalog>();
+        catalog.effects_for.get(&def.id).is_some_and(|maps| {
+            maps.iter().any(|(id, _)| {
+                effects
+                    .by_id
+                    .get(id)
+                    .is_some_and(|e| matches!(e.effect_type.as_str(), "inspect" | "reveal"))
+            })
+        })
+    };
+    let Some(needle) = target_word else {
+        let needs_target = needs_explicit_target
+            || (ability_is_hostile(world, &def) && world.get::<Fighting>(player).is_none());
+        return needs_target.then(|| {
+            if verb == "recite" {
+                format!("What do you want to recite {item_name} at?\r\n")
+            } else {
+                format!("At what should {item_name} be pointed?\r\n")
+            }
+        });
+    };
+    if needle.eq_ignore_ascii_case("me")
+        || needle.eq_ignore_ascii_case("self")
+        || needle.eq_ignore_ascii_case(&name_of(world, player))
+    {
+        return None;
+    }
+    let found = find_carried_by(world, needle, player, EquipFilter::Anywhere).is_some()
+        || world.get::<Located>(player).copied().is_some_and(|l| {
+            find_actor_in_room(world, needle, l.0, player).is_some()
+                || find_in_room(world, needle, l.0).is_some()
+        })
+        || (def.plain_name.eq_ignore_ascii_case("SUMMON")
+            && find_online_player_anywhere(world, needle, player).is_some());
+    (!found).then(|| format!("You can't see any {needle} here.\r\n"))
 }
 
 /// Where `wear_item` should put the item.
@@ -13924,6 +14031,9 @@ fn reserve_spell_slot(
 /// recovery cooldown (the spell landed), otherwise it is released
 /// untouched. Only ever acts on `hold`'s own slot.
 pub(crate) fn settle_slot(world: &mut World, player: Entity, hold: Option<u64>, charge: bool) {
+    if charge {
+        CAST_LANDED.with(|c| c.set(true));
+    }
     let Some(id) = hold else {
         return;
     };
@@ -17642,7 +17752,18 @@ pub(crate) fn invoke_ability_with(
                     applied_msgs.push(format!("{pretty} (no target)"));
                     continue;
                 }
-                crate::commands::info::cmd_identify(world, player, item_word);
+                // Legacy `spell_identify` also reads a character: a mob or
+                // player resolved in the room (or yourself, by name).
+                let names_self = item_word.eq_ignore_ascii_case("me")
+                    || item_word.eq_ignore_ascii_case("self")
+                    || item_word.eq_ignore_ascii_case(&actor_name_pre);
+                let is_actor = world.get::<Mob>(target_entity).is_some()
+                    || world.get::<Player>(target_entity).is_some();
+                if is_actor && (target_entity != player || names_self) {
+                    identify_actor::identify_actor(world, player, target_entity);
+                } else {
+                    crate::commands::info::cmd_identify(world, player, item_word);
+                }
                 applied_msgs.push(format!("{pretty} (identified)"));
             }
             "reveal" => {

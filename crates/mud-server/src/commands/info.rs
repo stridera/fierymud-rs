@@ -4279,7 +4279,10 @@ pub(crate) fn cmd_list(world: &mut World, player: Entity, _args: &str) {
 /// when the mob is left at the `FLESH` schema default. A mob explicitly
 /// authored as flesh on a non-flesh race therefore reads as the race;
 /// there is no separate "unset" state in the column.
-fn mob_composition(world: &World, proto: &mud_world::MobProto) -> mud_db::enums::Composition {
+pub(super) fn mob_composition(
+    world: &World,
+    proto: &mud_world::MobProto,
+) -> mud_db::enums::Composition {
     use mud_db::enums::Composition;
     if proto.composition != Composition::Flesh {
         return proto.composition;

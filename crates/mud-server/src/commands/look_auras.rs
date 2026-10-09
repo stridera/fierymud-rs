@@ -17,7 +17,7 @@ fn normalize(label: &str) -> String {
 }
 
 /// `(he, his, him)` for a profile / proto gender column.
-fn pronouns(gender: &str) -> (&'static str, &'static str, &'static str) {
+pub(super) fn pronouns(gender: &str) -> (&'static str, &'static str, &'static str) {
     match gender.to_ascii_lowercase().as_str() {
         "male" => ("he", "his", "him"),
         "female" => ("she", "her", "her"),
@@ -32,7 +32,7 @@ fn capitalize_first(s: &str) -> String {
     })
 }
 
-fn target_gender(world: &World, target: Entity) -> String {
+pub(super) fn target_gender(world: &World, target: Entity) -> String {
     if let Some(p) = world.get::<Profile>(target) {
         return p.gender.clone();
     }
