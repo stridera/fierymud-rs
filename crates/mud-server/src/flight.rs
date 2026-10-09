@@ -573,9 +573,6 @@ fn land(world: &mut World, e: Entity, room: Entity, distance: u32, feather: bool
             send_to(world, e, m);
         }
     }
-    if world.get::<Player>(e).is_some() {
-        crate::commands::recheck_aggro_in_room(world, e);
-    }
 }
 
 /// Legacy fall damage: `distance * (size + 1) / 50` of max HP, a quarter of

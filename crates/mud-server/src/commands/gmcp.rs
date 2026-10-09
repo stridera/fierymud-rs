@@ -280,7 +280,9 @@ pub(crate) fn send_room_info(world: &mut World, viewer: Entity, force: bool) {
 }
 
 /// The `Char.Effects` array for `target`: one entry per active effect
-/// attached to the player. `name` is the effect's player-facing label
+/// attached to the player. `id` is the stable machine key
+/// ([`super::info::effect_id`], lowercased `plain_name`, e.g. `stone_skin`),
+/// `name` the effect's player-facing label
 /// ([`super::info::effect_label`]), `ability` the originating spell's
 /// display name ("" when none), `duration` seconds remaining
 /// (-1 = permanent), `source` the high-level origin tag.
@@ -307,6 +309,7 @@ pub(crate) fn build_char_effects(world: &mut World, target: Entity) -> String {
                 EffectSource::Other(_) => "other",
             };
             json!({
+                "id": super::info::effect_id(world, &inst),
                 "name": super::info::effect_label(world, &inst),
                 "ability": ability,
                 "duration": inst.remaining_secs,

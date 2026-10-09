@@ -92,11 +92,6 @@ pub fn respawn_tick(world: &mut World) {
     // Same reason as load_fire_queue — the broadcast helper queries
     // the world, but the spawn block here holds an EntityWorldMut.
     let mut announce_queue: Vec<(Entity, String)> = Vec::new();
-    // (mob, room) pairs for any aggro mob that just spawned —
-    // post-loop, we look for a player in that room and start
-    // hostilities. Reuses the same threshold the on-entry check
-    // does so look / consider / spawn-engage all flip together.
-    let mut aggro_rooms: Vec<Entity> = Vec::new();
     // Read the configurable per-row respawn delay once. Negative or
     // zero means "no delay" — useful for tests and for staff-tuned
     // dungeons that need snappy refills.
@@ -157,7 +152,6 @@ pub fn respawn_tick(world: &mut World) {
         spawned_mobs.push(new_mob);
         *world_counts.entry(proto_key).or_insert(0) += 1;
         announce_queue.push((entry.room_entity, proto.name.clone()));
-        aggro_rooms.push(entry.room_entity);
         refilled += 1;
         // Re-run the reset's E / G commands (legacy `reset_zone`
         // re-equips on every reset): same function the boot loader
@@ -193,17 +187,6 @@ pub fn respawn_tick(world: &mut World) {
                 crate::commands::cap_sentence_start(&name)
             ),
         );
-    }
-
-    // Aggro pass: a respawned mob attacks a player already in its room
-    // through the same check a player walking in gets
-    // (`recheck_aggro_in_room`: grudge, alignment / formula rule,
-    // visibility, wimpy gating, staff exempt), so respawn and room
-    // entry can't drift apart.
-    aggro_rooms.sort_unstable();
-    aggro_rooms.dedup();
-    for room in aggro_rooms {
-        crate::commands::aggro_room_players(world, room);
     }
 
     // Fire LOAD triggers for the just-spawned mobs. The respawn loop
@@ -933,10 +916,27 @@ mod tests {
         assert!(world.get::<mud_world::Haste>(mob).is_some());
     }
 
+    /// A respawn, then the mob AI pulse: mobs only pick fights on the pulse
+    /// (legacy `mobile_activity`), never at spawn time.
+    fn respawn_and_pulse(world: &mut World, tick: u64) {
+        run_respawn(world, tick);
+        crate::commands::aggro_pulse(world);
+    }
+
+    #[test]
+    fn respawned_aggressive_mob_waits_for_the_pulse() {
+        let (mut world, _room, player, _rx) = aggro_world(vec![]);
+        run_respawn(&mut world, 6000);
+        let mob = mob_of(&mut world, 1).expect("respawned");
+        assert_eq!(fighting_target(&world, mob), None, "not at spawn time");
+        crate::commands::aggro_pulse(&mut world);
+        assert_eq!(fighting_target(&world, mob), Some(player));
+    }
+
     #[test]
     fn respawned_aggressive_mob_attacks_an_awake_visible_player() {
         let (mut world, _room, player, _rx) = aggro_world(vec![]);
-        run_respawn(&mut world, 6000);
+        respawn_and_pulse(&mut world, 6000);
         let mob = mob_of(&mut world, 1).expect("respawned");
         assert_eq!(fighting_target(&world, mob), Some(player));
     }
@@ -945,7 +945,7 @@ mod tests {
     fn respawned_mob_does_not_attack_a_player_it_cannot_see() {
         let (mut world, _room, player, _rx) = aggro_world(vec![]);
         world.entity_mut(player).insert(mud_world::Invisible);
-        run_respawn(&mut world, 6000);
+        respawn_and_pulse(&mut world, 6000);
         let mob = mob_of(&mut world, 1).expect("respawned");
         assert_eq!(fighting_target(&world, mob), None);
     }
@@ -960,7 +960,7 @@ mod tests {
             MOB_KEY,
             &["detect_invisible"],
         );
-        run_respawn(&mut world, 6000);
+        respawn_and_pulse(&mut world, 6000);
         let mob = mob_of(&mut world, 1).expect("respawned");
         assert_eq!(fighting_target(&world, mob), Some(player));
     }
@@ -969,7 +969,7 @@ mod tests {
     fn respawned_wimpy_mob_leaves_an_awake_player_alone_but_hits_a_sleeper() {
         use mud_db::enums::MobBehavior;
         let (mut world, _room, _player, _rx) = aggro_world(vec![MobBehavior::Wimpy]);
-        run_respawn(&mut world, 6000);
+        respawn_and_pulse(&mut world, 6000);
         let mob = mob_of(&mut world, 1).expect("respawned");
         assert_eq!(fighting_target(&world, mob), None, "awake player");
 
@@ -977,7 +977,7 @@ mod tests {
         world
             .entity_mut(player)
             .insert(mud_world::Posture(mud_world::PostureKind::Sleeping));
-        run_respawn(&mut world, 6000);
+        respawn_and_pulse(&mut world, 6000);
         let mob = mob_of(&mut world, 1).expect("respawned");
         assert_eq!(fighting_target(&world, mob), Some(player), "sleeping");
     }
@@ -987,7 +987,7 @@ mod tests {
         let (mut world, _room, player, _rx) = aggro_world(vec![]);
         world.get_mut::<mud_world::Account>(player).unwrap().role =
             mud_db::enums::UserRole::Immortal;
-        run_respawn(&mut world, 6000);
+        respawn_and_pulse(&mut world, 6000);
         let mob = mob_of(&mut world, 1).expect("respawned");
         assert_eq!(fighting_target(&world, mob), None);
     }
@@ -1022,7 +1022,7 @@ mod tests {
         };
         let pet = spawn_evil(&mut world);
         world.entity_mut(pet).insert(mud_world::Follower(player));
-        run_respawn(&mut world, 6000);
+        respawn_and_pulse(&mut world, 6000);
         assert_eq!(fighting_target(&world, pet), None, "pet spares its owner");
 
         // Control: the same evil mob without a master does attack.
@@ -1033,7 +1033,7 @@ mod tests {
             .clear();
         let mob = mob_of(&mut world, 1).expect("reset mob alive");
         world.entity_mut(mob).despawn();
-        run_respawn(&mut world, 12000);
+        respawn_and_pulse(&mut world, 12000);
         assert_eq!(fighting_target(&world, pet), Some(player));
     }
 }

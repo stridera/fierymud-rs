@@ -2094,16 +2094,6 @@ pub struct DeferredRoomTriggerFires {
     pub queue: Vec<DeferredRoomTriggerFire>,
 }
 
-/// Rooms a Lua `spawn_mob_proto` put a mob into during the current
-/// tick. The aggro check (`commands::aggro_room_players`) lives in
-/// mud-server and engages combat, which a Lua frame must not do
-/// inline, so the binding queues the room here and `lua_coroutine_tick`
-/// drains it once the frame has unwound.
-#[derive(Resource, Debug, Default)]
-pub struct DeferredSpawnAggro {
-    pub rooms: Vec<Entity>,
-}
-
 /// Queued output produced by Lua trigger bodies. `messages` carries
 /// room broadcasts (`room.send` / `room.send_except`); `direct`
 /// carries one-to-one lines (`actor.send`). mud-server drains both

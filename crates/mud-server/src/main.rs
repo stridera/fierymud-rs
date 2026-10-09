@@ -602,7 +602,8 @@ async fn main() {
                 timed!(wander::wander_tick),
                 timed!(wander::scavenger_tick),
                 timed!(wander::mob_hide_tick),
-                timed!(wander::assist_tick),
+                // Mob AI pulse: pick fights first, then helpers join them.
+                (timed!(wander::aggro_tick), timed!(wander::assist_tick)).chain(),
                 timed!(idle::idle_kick_tick),
                 timed!(camp::camp_tick),
                 timed!(memorize::memorize_tick),

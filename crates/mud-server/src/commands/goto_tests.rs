@@ -235,3 +235,89 @@ fn goto_ends_fights_only_when_the_room_changes() {
     assert!(w.get::<mud_world::Fighting>(god).is_none());
     assert!(w.get::<mud_world::Fighting>(foe).is_none());
 }
+
+// -- legacy find_target_room privacy checks (act.wizard.cpp:233-238) --------
+
+/// A Builder-role staffer whose character is below `LVL_GOD` (101): the
+/// legacy `find_target_room` restrictions apply to them.
+fn lowly_builder(w: &mut World, name: &str, room: Entity) -> (Entity, Rx) {
+    let (e, rx) = person(w, name, 102, room);
+    w.get_mut::<Profile>(e).unwrap().level = 60;
+    (e, rx)
+}
+
+fn private_room_with_two(w: &mut World, id: i32) -> Entity {
+    let r = room(w, id);
+    w.entity_mut(r).insert(mud_world::RoomCapacity(2));
+    person(w, "Alice", 30, r);
+    person(w, "Bob", 30, r);
+    r
+}
+
+#[test]
+fn goto_refuses_a_crowded_private_room_below_lvl_god_only() {
+    let mut w = world();
+    let (start, private) = (room(&mut w, 2), private_room_with_two(&mut w, 3));
+    let (immortal, mut rx) = lowly_builder(&mut w, "Imm", start);
+    dispatch(&mut w, immortal, "goto 30:3");
+    let out = drain(&mut rx);
+    assert!(out.contains("private conversation"), "{out}");
+    assert_eq!(where_is(&w, immortal), start);
+    // `at` shares the resolver.
+    dispatch(&mut w, immortal, "at 30:3 look");
+    assert!(drain(&mut rx).contains("private conversation"));
+    assert_eq!(where_is(&w, immortal), start);
+    // LVL_GOD (101) walks right in.
+    let (god, _grx) = person(&mut w, "God", 101, start);
+    dispatch(&mut w, god, "goto 30:3");
+    assert_eq!(where_is(&w, god), private);
+}
+
+#[test]
+fn goto_allows_a_private_room_with_one_occupant() {
+    let mut w = world();
+    let (start, private) = (room(&mut w, 2), room(&mut w, 3));
+    w.entity_mut(private).insert(mud_world::RoomCapacity(2));
+    person(&mut w, "Alice", 30, private);
+    let (immortal, _rx) = lowly_builder(&mut w, "Imm", start);
+    dispatch(&mut w, immortal, "goto 30:3");
+    assert_eq!(where_is(&w, immortal), private);
+}
+
+#[test]
+fn goto_refuses_a_house_the_staffer_cannot_enter() {
+    let mut w = world();
+    let (start, house) = (room(&mut w, 2), room(&mut w, 3));
+    w.entity_mut(house).insert(mud_world::HouseRoom {
+        house_id: 7,
+        local_index: 0,
+    });
+    let (owner, _orx) = person(&mut w, "Owner", 30, house);
+    let (imm, mut rx) = lowly_builder(&mut w, "Imm", start);
+    let summary = |guests: Vec<mud_world::HouseGuestEntry>| mud_world::HouseSummary {
+        house_id: 7,
+        entrance_room: WorldKey { zone: 30, id: 3 },
+        return_room: None,
+        rooms: vec![],
+        exits: vec![],
+        items: vec![],
+        guests,
+    };
+    w.entity_mut(owner).insert(summary(vec![]));
+    dispatch(&mut w, imm, "goto Owner");
+    assert!(drain(&mut rx).contains("no trespassing"));
+    assert_eq!(where_is(&w, imm), start);
+    // On the guest list: allowed.
+    w.entity_mut(owner)
+        .insert(summary(vec![mud_world::HouseGuestEntry {
+            character_id: "c-Imm".into(),
+            can_place: false,
+        }]));
+    dispatch(&mut w, imm, "goto Owner");
+    assert_eq!(where_is(&w, imm), house);
+    // LVL_GOD ignores the list.
+    w.entity_mut(owner).insert(summary(vec![]));
+    let (god, _grx) = person(&mut w, "God", 102, start);
+    dispatch(&mut w, god, "goto Owner");
+    assert_eq!(where_is(&w, god), house);
+}

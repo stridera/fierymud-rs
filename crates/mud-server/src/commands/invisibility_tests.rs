@@ -297,9 +297,11 @@ fn zero_damage_and_self_damage_do_not_break_invisibility() {
 // -- expiry ---------------------------------------------------------------
 
 #[test]
-fn expiry_announces_refreshes_the_panel_and_lets_mobs_aggro() {
+fn expiry_announces_refreshes_the_panel_and_lets_mobs_aggro_on_the_pulse() {
     use crate::TickCount;
     let mut fx = Fx::new();
+    // Staff are never aggro targets, so the pulse can only pick the ghost.
+    fx.world.get_mut::<Account>(fx.watcher).unwrap().role = UserRole::Immortal;
     let wolf = fx.mob("a wolf", -1000);
     fx.world.spawn((
         mud_world::EffectInstance {
@@ -322,6 +324,9 @@ fn expiry_announces_refreshes_the_panel_and_lets_mobs_aggro() {
     assert!(seen.contains("Ghost fades back into view."), "{seen}");
     assert!(seen.contains("Room.Players"), "panel refreshed: {seen}");
     assert!(drain(&mut fx.grx).contains("You fade back into view."));
+    // Mobs notice on the next mob AI pulse, not the instant it fades.
+    assert!(fx.world.get::<Fighting>(wolf).is_none());
+    super::aggro_pulse(&mut fx.world);
     assert_eq!(fx.world.get::<Fighting>(wolf).map(|f| f.0), Some(fx.ghost));
 }
 

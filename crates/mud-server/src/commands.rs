@@ -595,6 +595,9 @@ mod wand_charge_tests;
 mod identify_actor_tests;
 
 #[cfg(test)]
+#[path = "commands/aggro_pulse_tests.rs"]
+mod aggro_pulse_tests;
+#[cfg(test)]
 #[path = "commands/cmd_parity_tests.rs"]
 mod cmd_parity_tests;
 #[cfg(test)]
@@ -7898,7 +7901,7 @@ fn build_char_combat(world: &World, viewer: Entity) -> String {
 ///   - has the viewer on its `HateList` (actively chasing)
 ///   - remembers the viewer (`MobMemory` — lingering grudge)
 ///   - alignment is at or below the aggro threshold (auto-attacks
-///     on arrival), per the same check `try_engage_aggressive_mob`
+///     on the next mob pulse), per the same check `try_engage_aggressive_mob`
 ///     uses
 fn mob_is_hostile_to(world: &World, mob: Entity, viewer: Entity) -> bool {
     if world.get::<Fighting>(mob).is_some() {
@@ -11644,9 +11647,8 @@ pub(crate) fn break_invisibility(world: &mut World, entity: Entity) {
         );
         refresh_room_players(world, room);
     }
-    // The actor is now visible: mobs that would have aggroed it get
-    // their chance.
-    recheck_aggro_in_room(world, entity);
+    // Mobs that would have aggroed it get their chance on the next
+    // `aggro_tick` pulse, like legacy `mobile_activity`.
 }
 
 /// Magical invisibility ran out: the `Invisible` marker is already
@@ -11669,21 +11671,20 @@ pub(crate) fn invisibility_faded(world: &mut World, entity: Entity) {
         );
         refresh_room_players(world, room);
     }
-    recheck_aggro_in_room(world, entity);
 }
 
 /// Give the room's aggressive mobs a chance to attack `player`: a mob
-/// with a grudge first, then the alignment / formula rule. Used on
-/// room entry and whenever `player` becomes visible. Only idle,
-/// non-staff players are eligible, and each call engages at most one
-/// mob.
+/// with a grudge first, then the alignment / formula rule. Runs only
+/// from the mob AI pulse ([`aggro_pulse`]), never on room entry: legacy
+/// `mobile_activity` (mobact.cpp:283, every `PULSE_MOBILE`) is the sole
+/// place mobs pick fights, and `mob_attack` -> `hit()` strikes at once.
+/// Only idle, non-staff players are eligible, and each call engages at
+/// most one mob.
 pub(crate) fn recheck_aggro_in_room(world: &mut World, player: Entity) {
     if world.get::<Player>(player).is_none() || world.get::<Fighting>(player).is_some() {
         return;
     }
-    // Nobody picks a fight with a ghost or a corpse-to-be: death-time
-    // effect teardown (invisibility fading) and fall deaths reach here
-    // while the victim is already dead.
+    // Nobody picks a fight with a ghost or a corpse-to-be.
     if target_is_dead_or_ghost(world, player) {
         return;
     }
@@ -11701,22 +11702,14 @@ pub(crate) fn recheck_aggro_in_room(world: &mut World, player: Entity) {
     }
 }
 
-/// Run the room-entry aggro check for every online player standing in
-/// `room`. Called after a hostile-capable mob is placed there by
-/// something other than a player walking in (zone respawn, Lua / admin
-/// spawn): same [`recheck_aggro_in_room`] gating (grudge first, then the
-/// alignment / formula rule, `can_see_player`, wimpy rules, staff and
-/// already-fighting players excluded), so a spawned mob behaves exactly
-/// like one the player walked in on. Not for follower spawns (pets,
-/// mounts, summoned or animated allies), which must not turn on the room.
-pub(crate) fn aggro_room_players(world: &mut World, room: Entity) {
+/// The aggro half of legacy `mobile_activity`: run [`recheck_aggro_in_room`]
+/// for every player in the world (link-dead ones included, as in legacy). Called once per `PULSE_MOBILE` by
+/// `wander::aggro_tick`; the engaging mob strikes in the same tick
+/// ([`engage_and_strike`]).
+pub(crate) fn aggro_pulse(world: &mut World) {
     let players: Vec<Entity> = {
-        let mut q =
-            world.query_filtered::<(Entity, &Located), (With<Player>, With<mud_world::Online>)>();
-        q.iter(world)
-            .filter(|(_, l)| l.0 == room)
-            .map(|(e, _)| e)
-            .collect()
+        let mut q = world.query_filtered::<Entity, With<Player>>();
+        q.iter(world).collect()
     };
     for player in players {
         recheck_aggro_in_room(world, player);
@@ -23470,16 +23463,9 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         crate::triggers::fire_room_entry(world, target, mover, mud_world::TriggerEvent::Postentry);
     }
 
-    // Aggressive-mob check: after the player has seen the room and
-    // any greet/post-entry chatter, give the worst-aligned non-
-    // engaged mob in the room a free swing to start combat. Only
-    // player movers trigger it (mobs migrating between rooms don't
-    // fight other mobs on sight); admins are spared. One attacker
-    // per arrival to avoid a gang pile when several aggro mobs
-    // share a room.
-    for &mover in &movers {
-        recheck_aggro_in_room(world, mover);
-    }
+    // No aggro check here: legacy mobs only decide to attack on the
+    // `mobile_activity` pulse (mobact.cpp:283, `wander::aggro_tick`), so a
+    // player passing through takes no blow if they leave before it fires.
 }
 
 /// If any mob in `room` has the player in its `MobMemory`, engage
@@ -23732,7 +23718,7 @@ pub(crate) fn try_engage_aggressive_mob(world: &mut World, player: Entity, room:
             threshold,
             player_align,
             chosen = ?chosen.map(|m| name_of(world, m)),
-            "aggro check on room entry"
+            "aggro check on mob pulse"
         );
     }
     let Some(mob) = chosen else { return };

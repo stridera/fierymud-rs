@@ -383,6 +383,8 @@ fn char_effects_lists_a_cast_buff() {
     // Human-friendly labels, never the SNAKE_CASE identifier (#13).
     assert_eq!(arr[0]["ability"], "Armor");
     assert_eq!(arr[0]["name"], "Armor");
+    // Stable id: lowercased plain_name, independent of the display labels.
+    assert_eq!(arr[0]["id"], "armor");
     assert_eq!(arr[0]["source"], "spell");
 }
 

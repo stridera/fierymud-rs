@@ -1,7 +1,6 @@
 //! Every route that puts a mob into the world builds it through
 //! `mud_world::spawn_mob_from_proto`, so the proto's `MobDefaultEffects`
-//! apply and a hostile arrival gets the same aggro check a player
-//! walking in does. Boot, respawn and shop-pet coverage live beside
+//! apply and a hostile arrival picks its fight on the next aggro pulse. Boot, respawn and shop-pet coverage live beside
 //! those paths (`respawn.rs`, `shop_tests.rs`).
 
 use bevy_ecs::prelude::*;
@@ -90,7 +89,7 @@ fn lua_spawn_mobile_applies_default_effects() {
 }
 
 #[test]
-fn lua_spawned_aggressive_mob_attacks_the_player_once_the_frame_unwinds() {
+fn lua_spawned_aggressive_mob_attacks_the_player_on_the_aggro_pulse() {
     let mut fx = fixture(-1000);
     let mut host = mud_script::LuaHost::new();
     host.exec_for_actor(
@@ -100,10 +99,10 @@ fn lua_spawned_aggressive_mob_attacks_the_player_once_the_frame_unwinds() {
     )
     .expect("script runs");
     let mob = spawned_mob(&mut fx.world);
-    // Not inline inside the Lua frame ...
+    // Not inline inside the Lua frame, and not at spawn time either ...
     assert!(fx.world.get::<Fighting>(mob).is_none());
-    // ... but on the tick drain, through the room-entry check.
-    crate::triggers::drain_deferred_spawn_aggro(&mut fx.world);
+    // ... but on the mob AI pulse, like legacy `mobile_activity`.
+    super::aggro_pulse(&mut fx.world);
     assert_eq!(fx.world.get::<Fighting>(mob).map(|f| f.0), Some(fx.player));
 }
 
@@ -119,11 +118,13 @@ fn admin_spawn_applies_default_effects() {
 }
 
 #[test]
-fn admin_spawned_aggressive_mob_attacks_a_player_in_the_room() {
+fn admin_spawned_aggressive_mob_attacks_a_player_in_the_room_on_the_pulse() {
     let mut fx = fixture(-1000);
     crate::admin::spawn_into(&mut fx.world, "mob", KEY.0, KEY.1, ROOM_KEY.0, ROOM_KEY.1)
         .expect("spawn ok");
     let mob = spawned_mob(&mut fx.world);
+    assert!(fx.world.get::<Fighting>(mob).is_none(), "not at spawn time");
+    super::aggro_pulse(&mut fx.world);
     assert_eq!(fx.world.get::<Fighting>(mob).map(|f| f.0), Some(fx.player));
 }
 

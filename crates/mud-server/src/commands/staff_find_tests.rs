@@ -163,16 +163,39 @@ fn at_leaves_you_where_the_command_moved_you() {
 fn at_leaves_a_ghost_where_it_died() {
     let (mut w, p, a, b, mut rx) = two_rooms();
     // A command that kills the caller in place: model it as the ghost state.
-    super::return_from_at(&mut w, p, b, a);
+    super::return_from_at(&mut w, p, b, a, false);
     // Not in `location` (b): nothing to undo.
     assert_eq!(where_is(&w, p), a);
     w.entity_mut(p).insert((Located(b), Ghost));
-    super::return_from_at(&mut w, p, b, a);
-    assert_eq!(where_is(&w, p), b, "ghost stays");
+    super::return_from_at(&mut w, p, b, a, false);
+    assert_eq!(
+        where_is(&w, p),
+        b,
+        "became a ghost during the command: stays"
+    );
     w.entity_mut(p).remove::<Ghost>();
-    super::return_from_at(&mut w, p, b, a);
+    super::return_from_at(&mut w, p, b, a, false);
     assert_eq!(where_is(&w, p), a, "living caller goes back");
     drain(&mut rx);
+}
+
+#[test]
+fn at_returns_a_staffer_who_was_already_a_ghost() {
+    let (mut w, p, a, b, _rx) = two_rooms();
+    // Already a ghost before the command: dying is not what moved them, so
+    // the return still happens.
+    w.entity_mut(p).insert((Located(b), Ghost));
+    super::return_from_at(&mut w, p, b, a, true);
+    assert_eq!(where_is(&w, p), a, "an existing ghost still goes back");
+}
+
+#[test]
+fn at_with_two_numbers_and_no_command_asks_what_to_do() {
+    let (mut w, p, a, _b, mut rx) = two_rooms();
+    dispatch(&mut w, p, "at 30 2");
+    let out = drain(&mut rx);
+    assert!(out.contains("What do you want to do there?"), "{out}");
+    assert_eq!(where_is(&w, p), a);
 }
 
 #[test]

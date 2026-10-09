@@ -128,8 +128,11 @@ Active buffs/debuffs — top center icon bar.
 
 ```ts
 Array<{
-  name: string,        // human display name ("Sanctuary")
-  ability: string,     // spell key for icon lookup ("sanctuary" → sanctuary.png)
+  id: string,          // stable machine key: lowercased ability plain_name
+                       // ("stone_skin"), or the lowercased effect name when no
+                       // ability spawned it. Key icons / tiles on this.
+  name: string,        // display label ("Stone Skin"); may be reworded, don't key on it
+  ability: string,     // originating spell's display name ("Stone Skin"), "" when none
   duration: number,    // seconds remaining; -1 = permanent
   source: string,      // who cast it ("Self", "Mejna", etc.)
   strength: number,    // 1..n stacking strength
@@ -137,7 +140,7 @@ Array<{
 ```
 
 **Cadence:** On effect add/remove. Snapshot every effect each
-emission — the client diffs by ability/name key. Permanent effects
+emission — the client diffs by `id`. Permanent effects
 (`duration: -1`) tick at -1 forever; the client just doesn't decrement
 them.
 

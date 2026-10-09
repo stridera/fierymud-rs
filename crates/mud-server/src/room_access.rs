@@ -18,10 +18,10 @@
 use bevy_ecs::prelude::*;
 use mud_db::enums::{MobTrait, MovementMode, ObjectType, Sector, UserRole};
 use mud_world::{
-    Account, Contents, DeathTrap, EntryRestriction, EquippedSlot, Flying, Item, Located, Mob,
-    MobTraits, Mounted, MovementModeTag, NoTeleportRoom, ObjectPrototypes, PeacefulRoom, Player,
-    Profile, RoomCapacity, RoomSector, WaterWalk, WorldKey, WorldKeyIndex, room_in_god_zone,
-    zone_is_god,
+    Account, Contents, DeathTrap, EntryRestriction, EquippedSlot, Flying, HouseRoom, HouseSummary,
+    Item, Located, Mob, MobTraits, Mounted, MovementModeTag, NoTeleportRoom, ObjectPrototypes,
+    PeacefulRoom, Player, Profile, RoomCapacity, RoomSector, WaterWalk, WorldKey, WorldKeyIndex,
+    room_in_god_zone, zone_is_god,
 };
 
 /// Legacy refusal (act.movement.cpp `do_simple_move`, GODROOM branch).
@@ -391,6 +391,50 @@ fn occupants(world: &World, room: Entity) -> i32 {
         .filter(|e| world.get::<Player>(*e).is_some() || world.get::<Mob>(*e).is_some())
         .count();
     i32::try_from(n).unwrap_or(i32::MAX)
+}
+
+/// Legacy `find_target_room` privacy checks (act.wizard.cpp:233-238), applied
+/// below `LVL_GOD` ([`is_god_level_character`]) to `goto` / `at`: a PRIVATE
+/// room (capacity 2 here, see [`PRIVATE_ROOM_MAX_CAPACITY`]) with two or more
+/// occupants refuses, and so does a player house the character is neither
+/// the owner nor a guest of (`House_can_enter`). Returns the refusal line.
+pub(crate) fn staff_destination_privacy_refusal(
+    world: &World,
+    who: Entity,
+    room: Entity,
+) -> Option<&'static str> {
+    if is_god_level_character(world, who) {
+        return None;
+    }
+    if world
+        .get::<RoomCapacity>(room)
+        .is_some_and(|c| c.0 <= PRIVATE_ROOM_MAX_CAPACITY)
+        && occupants(world, room) >= 2
+    {
+        return Some("There's a private conversation going on in that room.\r\n");
+    }
+    if let Some(house) = world.get::<HouseRoom>(room)
+        && !can_enter_house(world, who, house.house_id)
+    {
+        return Some("That's private property -- no trespassing!\r\n");
+    }
+    None
+}
+
+/// Legacy `House_can_enter`: the owner or a listed guest. The owner's guest
+/// list lives on their online `HouseSummary`; a house with no online owner
+/// admits nobody.
+fn can_enter_house(world: &World, who: Entity, house_id: i32) -> bool {
+    let Some(cid) = world.get::<Account>(who).map(|a| a.character_id.as_str()) else {
+        return false;
+    };
+    let Some(mut owners) = world.try_query::<(Entity, &HouseSummary)>() else {
+        return false;
+    };
+    owners.iter(world).any(|(e, summary)| {
+        summary.house_id == house_id
+            && (e == who || summary.guests.iter().any(|g| g.character_id == cid))
+    })
 }
 
 /// Static (script-free) exclusions for a random teleport landing room.

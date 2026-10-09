@@ -788,21 +788,6 @@ pub fn lua_coroutine_tick(world: &mut World) {
         tracing::info!(resumed, parked, "lua_coroutine_tick resumed parked threads");
     }
     drain_deferred_room_triggers(world);
-    drain_deferred_spawn_aggro(world);
-}
-
-/// Run the on-arrival aggro check for rooms a Lua `spawn_mob_proto`
-/// populated this tick (queued on `DeferredSpawnAggro`).
-pub fn drain_deferred_spawn_aggro(world: &mut World) {
-    let rooms: Vec<Entity> = {
-        let Some(mut q) = world.get_resource_mut::<mud_world::DeferredSpawnAggro>() else {
-            return;
-        };
-        std::mem::take(&mut q.rooms)
-    };
-    for room in rooms {
-        crate::commands::aggro_room_players(world, room);
-    }
 }
 
 /// One trigger whose body failed to compile.

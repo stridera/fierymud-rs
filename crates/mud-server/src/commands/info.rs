@@ -13231,6 +13231,23 @@ pub(crate) fn ability_label_by_id(world: &World, id: i32) -> Option<String> {
         .map(ability_label)
 }
 
+/// Stable machine id of an effect instance for GMCP `Char.Effects.id`: the
+/// lowercased `plain_name` of the spawning ability ("stone_skin"), else the
+/// lowercased effect name. Unlike [`effect_label`] it never changes with
+/// display wording, so clients can key icons on it.
+pub(crate) fn effect_id(world: &World, inst: &EffectInstance) -> String {
+    inst.ability_id
+        .and_then(|id| {
+            world
+                .get_resource::<AbilityCatalog>()?
+                .by_name
+                .values()
+                .find(|d| d.id == id)
+                .map(|d| d.plain_name.to_ascii_lowercase())
+        })
+        .unwrap_or_else(|| inst.name.to_ascii_lowercase())
+}
+
 /// Player-facing label for an effect instance, shared by `effects`,
 /// `score`, `cancel`, the prompt `%l` code and GMCP `Char.Effects`: the
 /// spawning ability's display name ("Invisibility", as legacy

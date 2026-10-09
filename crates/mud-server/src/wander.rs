@@ -390,6 +390,20 @@ pub fn assist_tick(world: &mut World) {
     crate::commands::mob_assist_pulse(world);
 }
 
+/// Mob aggro pulse (legacy `mobile_activity` -> `find_aggr_target` /
+/// `mob_memory_check` -> `mob_attack`, every `PULSE_MOBILE` =
+/// [`SCAVENGER_PERIOD_TICKS`], mobact.cpp:283): the only place a mob decides to
+/// start a fight with a player standing in its room. The mob that engages
+/// strikes in the same tick, so entering a room never costs a free blow and a
+/// player who leaves before the pulse is never hit.
+pub fn aggro_tick(world: &mut World) {
+    let tick = world.resource::<TickCount>().0;
+    if !tick.is_multiple_of(SCAVENGER_PERIOD_TICKS) {
+        return;
+    }
+    crate::commands::aggro_pulse(world);
+}
+
 #[cfg(test)]
 mod tests {
     //! Room-flag wander gating tests. Verifies the

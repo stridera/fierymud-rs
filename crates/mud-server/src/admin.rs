@@ -2096,7 +2096,6 @@ pub(crate) fn spawn_into(
                 ));
             };
             let entity = mud_world::spawn_mob_from_proto(world, &proto, room_entity, None);
-            crate::commands::aggro_room_players(world, room_entity);
             Ok(json!({
                 "success": true,
                 "kind": "mob",

@@ -1579,8 +1579,6 @@ pub(crate) fn cmd_summon(world: &mut World, player: Entity, args: &str) {
         &[player],
         &format!("{player_name} summons {proto_name} from thin air.\r\n"),
     );
-    // The new mob may be hostile to anyone else standing here.
-    crate::commands::aggro_room_players(world, room);
 }
 pub(crate) fn cmd_switch(world: &mut World, player: Entity, args: &str) {
     use mud_world::{SwitchedFrom, SwitchedInto};
@@ -3068,7 +3066,8 @@ pub(crate) fn cmd_teleport(world: &mut World, player: Entity, args: &str) {
 /// Resolve a staff location argument (`goto` / `at`): a room id in the
 /// current zone, `<zone> <id>` or `<zone>:<id>`, `home`, or the name of a
 /// player or mob (their room). Applies the destination's entry restriction
-/// (legacy `find_target_room`'s god-room check). Sends the refusal itself
+/// and privacy checks (legacy `find_target_room`'s god-room, PRIVATE and
+/// house checks). Sends the refusal itself
 /// and returns `None` on any failure.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn resolve_staff_destination(
@@ -3209,6 +3208,14 @@ pub(crate) fn resolve_staff_destination(
             player,
             "You are not godly enough to use that room!\r\n",
         );
+        return None;
+    }
+    // Legacy find_target_room: below LVL_GOD a crowded PRIVATE room and a
+    // house the character can't enter are refused too.
+    if let Some(refusal) =
+        crate::room_access::staff_destination_privacy_refusal(world, player, target)
+    {
+        send_to(world, player, refusal);
         return None;
     }
     Some(target)

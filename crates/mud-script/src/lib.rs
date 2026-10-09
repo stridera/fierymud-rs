@@ -4911,9 +4911,8 @@ impl UserData for LuaProto {
 /// in the catalog. Goes through [`mud_world::spawn_mob_from_proto`]
 /// like every other spawn path (so the proto's default effects
 /// apply) but skips reset bookkeeping: script-spawned mobs don't
-/// participate in the reset cycle. The room is queued on
-/// `DeferredSpawnAggro` so aggressive mobs get their on-arrival
-/// attack once the Lua frame has unwound.
+/// participate in the reset cycle. Aggressive mobs pick their fight on
+/// the next mob AI pulse, like any other mob.
 fn spawn_mob_proto(lua: &Lua, room: Entity, zone: i32, id: i32) -> mlua::Result<Value> {
     let entity = world_mut_from_lua(lua, |world| -> Option<Entity> {
         let proto = world
@@ -4922,10 +4921,6 @@ fn spawn_mob_proto(lua: &Lua, room: Entity, zone: i32, id: i32) -> mlua::Result<
             .get(&(zone, id))
             .cloned()?;
         let mob = mud_world::spawn_mob_from_proto(world, &proto, room, None);
-        world
-            .get_resource_or_insert_with(mud_world::DeferredSpawnAggro::default)
-            .rooms
-            .push(room);
         Some(mob)
     })?;
     match entity {

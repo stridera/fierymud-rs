@@ -17,8 +17,6 @@
 //! per-type values, applies). The commands that remain cover the
 //! prototype, trigger and exit tables a builder reaches for most.
 
-use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
-
 use bevy_ecs::prelude::*;
 use mud_db::enums::UserRole;
 use mud_world::{
@@ -215,7 +213,8 @@ const VSEARCH_HELP: &str = "Builder+. Search one table by a field. Run it \
 // ---------------------------------------------------------------------------
 
 /// `at <location> <command>`. The location is the first word, or the first
-/// two when both are numbers (`at 30 45 look`), like `goto`.
+/// two when both are numbers (`at 30 45 look`, or `at 30 45` alone), like
+/// `goto`.
 pub(crate) fn cmd_at(world: &mut World, player: Entity, args: &str) {
     let args = args.trim();
     let tokens: Vec<&str> = args.split_whitespace().collect();
@@ -227,13 +226,14 @@ pub(crate) fn cmd_at(world: &mut World, player: Entity, args: &str) {
         );
         return;
     }
-    let loc_len =
-        if tokens.len() > 2 && tokens[0].parse::<i32>().is_ok() && tokens[1].parse::<i32>().is_ok()
-        {
-            2
-        } else {
-            1
-        };
+    let loc_len = if tokens.len() >= 2
+        && tokens[0].parse::<i32>().is_ok()
+        && tokens[1].parse::<i32>().is_ok()
+    {
+        2
+    } else {
+        1
+    };
     let command = skip_n_tokens(args, loc_len).trim();
     if command.is_empty() {
         send_to(world, player, "What do you want to do there?\r\n");
@@ -247,34 +247,36 @@ pub(crate) fn cmd_at(world: &mut World, player: Entity, args: &str) {
         return;
     };
 
+    let was_ghost = world.get::<Ghost>(player).is_some();
     if original != location {
         mud_world::movement::stop_fighting_both_ways(world, player);
         world.entity_mut(player).insert(Located(location));
     }
-    // A panic in the command must not leave the caller in the wrong room:
-    // put them back, then let the panic carry on.
-    let outcome = catch_unwind(AssertUnwindSafe(|| {
-        crate::commands::dispatch(world, player, command);
-    }));
+    crate::commands::dispatch(world, player, command);
     if original != location {
-        return_from_at(world, player, location, original);
-    }
-    if let Err(panic) = outcome {
-        resume_unwind(panic);
+        return_from_at(world, player, location, original, was_ghost);
     }
 }
 
 /// Legacy `do_at` tail: only if the caller is still in the borrowed room
 /// do they go back. A command that moved them (goto, teleport, flee) wins,
-/// and so does death: a ghost stays where it fell.
-fn return_from_at(world: &mut World, player: Entity, location: Entity, original: Entity) {
+/// and so does dying during the command: a staffer who became a ghost stays
+/// where it fell. One who was already a ghost goes back like anyone else.
+fn return_from_at(
+    world: &mut World,
+    player: Entity,
+    location: Entity,
+    original: Entity,
+    was_ghost: bool,
+) {
     if world.get_entity(player).is_err() || world.get_entity(original).is_err() {
         return;
     }
     let still_there = world
         .get::<Located>(player)
         .is_some_and(|l| l.0 == location);
-    if still_there && world.get::<Ghost>(player).is_none() {
+    let died_here = !was_ghost && world.get::<Ghost>(player).is_some();
+    if still_there && !died_here {
         mud_world::movement::stop_fighting_both_ways(world, player);
         world.entity_mut(player).insert(Located(original));
     }
