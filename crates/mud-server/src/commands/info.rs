@@ -12576,14 +12576,16 @@ pub(crate) fn cmd_remove(world: &mut World, player: Entity, args: &str) {
         let actor_name = name_of(world, player);
         let located = world.get::<Located>(player).copied();
         for (item, item_name) in &items {
-            // Reverse the wear-granted stat bonuses BEFORE removing
-            // the EquippedSlot — `unapply_object_from_wearer` reads
-            // the slot to log effect-grant filtering decisions
-            // (no-op semantically, but the order is the legacy
-            // contract: unapply, then remove).
+            // "You remove X." goes out first, then the wear-granted bonuses
+            // are reversed and whatever that announces ("You fall to the
+            // ground.") follows (issue #87). The reversal still runs BEFORE
+            // removing the EquippedSlot — `unapply_object_from_wearer` reads
+            // the slot to log effect-grant filtering decisions (no-op
+            // semantically, but the order is the legacy contract: unapply,
+            // then remove).
+            send_rendered(world, player, &format!("You remove {item_name}.\r\n"));
             crate::equip_apply::unapply_object_from_wearer(world, *item, player);
             try_remove::<EquippedSlot>(world, *item);
-            send_rendered(world, player, &format!("You remove {item_name}.\r\n"));
             crate::triggers::fire_item_event(world, *item, player, mud_world::TriggerEvent::Remove);
         }
         // Single consolidated room broadcast for the bulk strip —
@@ -12615,8 +12617,7 @@ pub(crate) fn cmd_remove(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let item_name = name_of(world, item);
-    crate::equip_apply::unapply_object_from_wearer(world, item, player);
-    try_remove::<EquippedSlot>(world, item);
+    // The removal is announced before its effects are reversed (issue #87).
     send_rendered(world, player, &format!("You remove {item_name}.\r\n"));
     if let Some(located) = world.get::<Located>(player).copied() {
         let actor_name = name_of(world, player);
@@ -12628,6 +12629,8 @@ pub(crate) fn cmd_remove(world: &mut World, player: Entity, args: &str) {
             &cap_sentence_start(&format!("{actor_name} removes {item_name}.\r\n")),
         );
     }
+    crate::equip_apply::unapply_object_from_wearer(world, item, player);
+    try_remove::<EquippedSlot>(world, item);
     crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Remove);
     refresh_player_items_gmcp(world, player);
 }

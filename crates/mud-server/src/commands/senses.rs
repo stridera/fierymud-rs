@@ -202,11 +202,15 @@ pub(crate) fn item_tags(world: &World, viewer: Entity, item: Entity) -> Vec<Stri
 
 /// `line` with the item tags `viewer` perceives appended, the way legacy
 /// `print_obj_flags_to_char` trails them after an item's description.
+/// The tags follow a reset, so a name that leaves a colour open (a builder
+/// forgot the `</>`) does not tint them.
 #[must_use]
 pub(crate) fn with_item_tags(world: &World, viewer: Entity, item: Entity, line: String) -> String {
-    item_tags(world, viewer, item)
-        .into_iter()
-        .fold(line, |acc, tag| format!("{acc} {tag}"))
+    let tags = item_tags(world, viewer, item);
+    if tags.is_empty() {
+        return line;
+    }
+    format!("{line}</> {}", tags.join(" "))
 }
 
 /// Legacy `senses_living`: life force the sense can pick up. Undead,

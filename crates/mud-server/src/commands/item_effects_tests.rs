@@ -1745,3 +1745,41 @@ fn a_size_spell_that_expired_offline_leaves_no_size_behind() {
     assert_eq!(size_of(&world, p), None, "nothing baked, nothing applied");
     assert!(effects_on(&mut world, p).is_empty());
 }
+
+/// Issue #87: "You remove X." comes before the messages its effects' wear-off
+/// prints ("You fall to the ground."), and "You wear X." before whatever
+/// putting the effects on announces.
+#[test]
+fn removing_a_flying_ring_says_remove_before_the_fall() {
+    let (mut world, p, mut rx) = setup();
+    ring(&mut world, p, 21, "wing", vec![status(&["fly"])]);
+    wear(&mut world, p, &mut rx, "wing");
+    let _ = drain(&mut rx);
+    dispatch(&mut world, p, "remove wing");
+    let out = drain(&mut rx);
+    let removed = out.find("You remove a wing ring.").expect(&out);
+    let fell = out.find("You fall to the ground.").expect(&out);
+    assert!(removed < fell, "{out:?}");
+}
+
+#[test]
+fn remove_all_says_remove_before_the_fall_too() {
+    let (mut world, p, mut rx) = setup();
+    ring(&mut world, p, 22, "wing", vec![status(&["fly"])]);
+    wear(&mut world, p, &mut rx, "wing");
+    let _ = drain(&mut rx);
+    dispatch(&mut world, p, "remove all");
+    let out = drain(&mut rx);
+    let removed = out.find("You remove a wing ring.").expect(&out);
+    let fell = out.find("You fall to the ground.").expect(&out);
+    assert!(removed < fell, "{out:?}");
+}
+
+#[test]
+fn wearing_says_wear_before_any_effect_text() {
+    let (mut world, p, mut rx) = setup();
+    ring(&mut world, p, 23, "wing", vec![status(&["fly"])]);
+    dispatch(&mut world, p, "wear wing");
+    let out = drain(&mut rx);
+    assert!(out.starts_with("You slide a wing ring"), "{out:?}");
+}

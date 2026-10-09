@@ -141,8 +141,6 @@ fn cmd_stow(world: &mut World, player: Entity, _args: &str) {
         return;
     };
     let weapon_name = name_of(world, weapon);
-    crate::equip_apply::unapply_object_from_wearer(world, weapon, player);
-    try_remove::<EquippedSlot>(world, weapon);
     send_to(
         world,
         player,
@@ -157,6 +155,8 @@ fn cmd_stow(world: &mut World, player: Entity, _args: &str) {
             &format!("{who} quickly stows a weapon.\r\n"),
         );
     }
+    crate::equip_apply::unapply_object_from_wearer(world, weapon, player);
+    try_remove::<EquippedSlot>(world, weapon);
     crate::triggers::fire_item_event(world, weapon, player, mud_world::TriggerEvent::Remove);
     refresh_player_items_gmcp(world, player);
 }
