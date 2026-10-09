@@ -1,4 +1,4 @@
-//! Per-instance item text: `nameitem` (players name their bags, issue #68)
+//! Per-instance item text: `nameitem` (players label their items, issue #68)
 //! and `iedit` (staff edit one item instance online, issue #67).
 //!
 //! Legacy `FieryMUD`'s `iedit` (`oedit.cpp` `do_iedit`) pulled the object out
@@ -9,7 +9,7 @@
 //! and charges. Legacy had no player-facing item naming command.
 
 use bevy_ecs::prelude::*;
-use mud_db::enums::{ObjectType, UserRole};
+use mud_db::enums::UserRole;
 use mud_world::{
     Charges, Item, ItemCustomization, Keywords, Located, Named, ObjectPrototypes, PendingSave,
     PlayerCorpse, WorldKey,
@@ -21,7 +21,7 @@ use crate::commands::{
 };
 use crate::item_custom::{
     MAX_EXAMINE_LEN, MAX_STAFF_NAME_LEN, edit, holder_of, sanitize_keywords, sanitize_player_name,
-    sanitize_staff_text,
+    sanitize_staff_text, split_label, with_label,
 };
 
 inventory::submit! {
@@ -31,14 +31,16 @@ inventory::submit! {
         required_perm: None,
         category: Category::Inventory,
         help: Help {
-            usage: "nameitem <container> <new name> | nameitem <container> clear",
-            summary: "Give a bag or other container a name of your own.",
-            long: "Renames a container you carry, e.g. 'nameitem sack \
-                   Daedela's cloth sack'. The new name is what inventory \
-                   and look show, and its words also work for targeting \
-                   ('get gems daedela'). Names are 3-40 characters; colour \
-                   codes and unusual symbols are removed. 'nameitem sack \
-                   clear' restores the original name. Containers only.",
+            usage: "nameitem <item> <label> | nameitem <item> clear",
+            summary: "Add a label of your own to an item you carry.",
+            long: "Labels an item you carry or wear, e.g. 'nameitem sack \
+                   gems' turns \"a cloth sack\" into \"a cloth sack \
+                   (labeled 'gems')\". The item keeps its own name; the \
+                   label's words also work for targeting ('get ruby \
+                   gems'). Labels are 3-40 characters; colour codes and \
+                   unusual symbols are removed. 'nameitem sack clear' \
+                   removes the label. Works on any item. Carried items \
+                   are matched before worn ones.",
         },
         run: cmd_nameitem,
     }
@@ -66,13 +68,11 @@ inventory::submit! {
     }
 }
 
-fn item_proto_type(world: &World, item: Entity) -> Option<ObjectType> {
-    let key = world.get::<WorldKey>(item)?;
-    world
-        .resource::<ObjectPrototypes>()
-        .by_key
-        .get(&(key.zone, key.id))
-        .map(|p| p.r#type)
+/// Inventory first, then worn items: the order `drop`, `give` and `put`
+/// use, so `nameitem bag` hits the bag in the pack before the one held.
+fn find_own_item(world: &mut World, needle: &str, player: Entity) -> Option<Entity> {
+    find_carried_by(world, needle, player, EquipFilter::Inventory)
+        .or_else(|| find_carried_by(world, needle, player, EquipFilter::Equipped))
 }
 
 fn cmd_nameitem(world: &mut World, player: Entity, args: &str) {
@@ -81,12 +81,12 @@ fn cmd_nameitem(world: &mut World, player: Entity, args: &str) {
         send_to(
             world,
             player,
-            "Usage: nameitem <container> <new name>   (or 'clear' to restore)\r\n",
+            "Usage: nameitem <item> <label>   (or 'clear' to remove it)\r\n",
         );
         return;
     };
     let rest = rest.trim();
-    let Some(item) = find_carried_by(world, needle, player, EquipFilter::Anywhere) else {
+    let Some(item) = find_own_item(world, needle, player) else {
         send_to(
             world,
             player,
@@ -95,52 +95,53 @@ fn cmd_nameitem(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let old_name = name_of(world, item);
-    if world.get::<PlayerCorpse>(item).is_some()
-        || item_proto_type(world, item) != Some(ObjectType::Container)
-    {
-        send_to(
-            world,
-            player,
-            format!("You can only name containers, and {old_name} isn't one.\r\n"),
-        );
+    if world.get::<PlayerCorpse>(item).is_some() {
+        send_to(world, player, format!("You can't label {old_name}.\r\n"));
         return;
     }
+    // The name without any earlier label: what the item is called on its own.
+    let base = split_label(&old_name)
+        .map_or(old_name.as_str(), |(b, _)| b)
+        .to_string();
     if rest.eq_ignore_ascii_case("clear") {
-        if world
-            .get::<ItemCustomization>(item)
-            .is_none_or(|c| c.name.is_none())
-        {
+        if split_label(&old_name).is_none() {
             send_to(
                 world,
                 player,
-                format!("{old_name} has no custom name to clear.\r\n"),
+                format!("{old_name} has no label to clear.\r\n"),
             );
             return;
         }
-        edit(world, item, |c| c.name = None);
+        let proto_name = world.get::<WorldKey>(item).and_then(|k| {
+            world
+                .resource::<ObjectPrototypes>()
+                .by_key
+                .get(&(k.zone, k.id))
+                .map(|p| p.name.clone())
+        });
+        // Keep a staff-set name; only the player's label goes away.
+        let keep = (proto_name.as_deref() != Some(base.as_str())).then(|| base.clone());
+        edit(world, item, |c| c.name = keep);
         let new_name = name_of(world, item);
         try_insert(world, player, PendingSave);
         send_to(
             world,
             player,
-            format!("You restore {old_name}'s original name: {new_name}.\r\n"),
+            format!("You remove the label from {old_name}: {new_name}.\r\n"),
         );
         return;
     }
-    let new_name = match sanitize_player_name(rest) {
+    let label = match sanitize_player_name(rest) {
         Ok(n) => n,
         Err(msg) => {
             send_to(world, player, msg);
             return;
         }
     };
+    let new_name = with_label(&base, &label);
     edit(world, item, |c| c.name = Some(new_name.clone()));
     try_insert(world, player, PendingSave);
-    send_to(
-        world,
-        player,
-        format!("You name {old_name} \"{new_name}\".\r\n"),
-    );
+    send_to(world, player, format!("You label {base}: {new_name}.\r\n"));
 }
 
 fn cmd_iedit(world: &mut World, player: Entity, args: &str) {

@@ -3,8 +3,8 @@
 use bevy_ecs::prelude::*;
 use mud_db::enums::{ObjectType, UserRole};
 use mud_world::{
-    Account, Charges, Description, Exits, Item, ItemCustomization, Keywords, Located, Named,
-    ObjectPrototypes, PendingSave, Room, WorldKey,
+    Account, Charges, Description, EquippedSlot, Exits, Item, ItemCustomization, Keywords, Located,
+    Named, ObjectPrototypes, PendingSave, Room, WorldKey,
 };
 
 use super::test_support::{Rx, drain, object_proto, player_in};
@@ -68,7 +68,7 @@ fn name(world: &World, e: Entity) -> String {
 }
 
 #[test]
-fn nameitem_renames_a_container_and_its_words_target_it() {
+fn nameitem_adds_a_label_suffix_and_its_words_target_it() {
     let (mut world, _room, p, mut rx) = setup(UserRole::Player);
     let sack = item(
         &mut world,
@@ -86,32 +86,33 @@ fn nameitem_renames_a_container_and_its_words_target_it() {
         "a cloth sack",
         "sack",
     );
-    dispatch(&mut world, p, "nameitem 2.sack Daedela's cloth sack");
+    dispatch(&mut world, p, "nameitem 2.sack gems");
     let out = drain(&mut rx);
     assert!(
-        out.contains("You name a cloth sack \"Daedela's cloth sack\"."),
+        out.contains("You label a cloth sack: a cloth sack (labeled 'gems')."),
         "{out}"
     );
     // `2.sack` is the older one in newest-first order, i.e. `sack`.
-    assert_eq!(name(&world, sack), "Daedela's cloth sack");
+    assert_eq!(name(&world, sack), "a cloth sack (labeled 'gems')");
     assert_eq!(name(&world, other), "a cloth sack");
     assert!(
         world.get::<PendingSave>(p).is_some(),
         "holder marked for save"
     );
-    // The custom name's words join the keywords, the proto's stay.
+    // The label's words join the keywords, the proto's stay; "labeled" does not.
     let kw = &world.get::<Keywords>(sack).unwrap().0;
-    assert!(kw.contains(&"sack".to_string()) && kw.contains(&"daedela's".to_string()));
-    // Inventory shows it and the name targets it alone.
+    assert!(kw.contains(&"sack".to_string()) && kw.contains(&"gems".to_string()));
+    assert!(!kw.contains(&"labeled".to_string()), "{kw:?}");
     dispatch(&mut world, p, "inventory");
-    assert!(drain(&mut rx).contains("Daedela's cloth sack"));
-    dispatch(&mut world, p, "nameitem daed Gem bag");
-    assert_eq!(name(&world, sack), "Gem bag");
+    assert!(drain(&mut rx).contains("a cloth sack (labeled 'gems')"));
+    // Relabelling replaces the label, never stacking a second one.
+    dispatch(&mut world, p, "nameitem gems Ruby bag");
+    assert_eq!(name(&world, sack), "a cloth sack (labeled 'Ruby bag')");
     assert_eq!(name(&world, other), "a cloth sack");
 }
 
 #[test]
-fn nameitem_only_names_containers() {
+fn nameitem_works_on_any_item_type() {
     let (mut world, _room, p, mut rx) = setup(UserRole::Player);
     let sword = item(
         &mut world,
@@ -123,9 +124,43 @@ fn nameitem_only_names_containers() {
     );
     dispatch(&mut world, p, "nameitem sword Excalibur");
     let out = drain(&mut rx);
-    assert!(out.contains("You can only name containers"), "{out}");
-    assert_eq!(name(&world, sword), "a rusty sword");
-    assert!(world.get::<ItemCustomization>(sword).is_none());
+    assert!(out.contains("(labeled 'Excalibur')"), "{out}");
+    assert_eq!(name(&world, sword), "a rusty sword (labeled 'Excalibur')");
+}
+
+#[test]
+fn nameitem_prefers_inventory_over_worn_items() {
+    let (mut world, _room, p, mut rx) = setup(UserRole::Player);
+    let held = item(
+        &mut world,
+        p,
+        1,
+        ObjectType::Container,
+        "a cloth bag",
+        "bag",
+    );
+    world
+        .entity_mut(held)
+        .insert(EquippedSlot(mud_world::Slot::Hold));
+    let packed = item(
+        &mut world,
+        p,
+        2,
+        ObjectType::Container,
+        "a cloth bag",
+        "bag",
+    );
+    dispatch(&mut world, p, "nameitem bag pack");
+    assert_eq!(name(&world, packed), "a cloth bag (labeled 'pack')");
+    assert_eq!(name(&world, held), "a cloth bag");
+    // A worn item is found when nothing in the pack matches.
+    let cap = item(&mut world, p, 3, ObjectType::Armor, "a tin helm", "helm");
+    world
+        .entity_mut(cap)
+        .insert(EquippedSlot(mud_world::Slot::Head));
+    dispatch(&mut world, p, "nameitem helm shiny");
+    let out = drain(&mut rx);
+    assert_eq!(name(&world, cap), "a tin helm (labeled 'shiny')", "{out}");
 }
 
 #[test]
@@ -145,7 +180,7 @@ fn nameitem_strips_colour_and_control_codes_and_enforces_length() {
         "nameitem sack <red>Red</> \x1b[31mbag\x07 <b>",
     );
     let _ = drain(&mut rx);
-    assert_eq!(name(&world, sack), "Red bag");
+    assert_eq!(name(&world, sack), "a cloth sack (labeled 'Red bag')");
     dispatch(&mut world, p, "nameitem red ab");
     dispatch(&mut world, p, &format!("nameitem red {}", "x".repeat(41)));
     let out = drain(&mut rx);
@@ -153,7 +188,7 @@ fn nameitem_strips_colour_and_control_codes_and_enforces_length() {
         out.contains("too short") && out.contains("too long"),
         "{out}"
     );
-    assert_eq!(name(&world, sack), "Red bag");
+    assert_eq!(name(&world, sack), "a cloth sack (labeled 'Red bag')");
 }
 
 #[test]
@@ -172,7 +207,7 @@ fn sanitize_player_name_rules() {
 }
 
 #[test]
-fn nameitem_clear_restores_the_prototype_name() {
+fn nameitem_clear_removes_the_label() {
     let (mut world, _room, p, mut rx) = setup(UserRole::Player);
     let sack = item(
         &mut world,
@@ -183,6 +218,7 @@ fn nameitem_clear_restores_the_prototype_name() {
         "sack",
     );
     dispatch(&mut world, p, "nameitem sack Mira's bag");
+    assert_eq!(name(&world, sack), "a cloth sack (labeled 'Mira's bag')");
     dispatch(&mut world, p, "nameitem mira clear");
     let _ = drain(&mut rx);
     assert_eq!(name(&world, sack), "a cloth sack");

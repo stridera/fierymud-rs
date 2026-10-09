@@ -1,4 +1,4 @@
-//! Per-instance item text customization: a player-given name for a bag
+//! Per-instance item text customization: a player-given label on an item
 //! (`nameitem`, issue #68) and the staff `iedit` overrides (issue #67).
 //!
 //! The overrides live in [`ItemCustomization`]; the live `Named`,
@@ -167,13 +167,32 @@ pub(crate) fn sanitize_keywords(raw: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+const LABEL_OPEN: &str = " (labeled '";
+const LABEL_CLOSE: &str = "')";
+
+/// A player label is shown after the item's own short description, e.g.
+/// `a cloth sack (labeled 'gems')`, so the item stays recognisable.
+pub(crate) fn with_label(base: &str, label: &str) -> String {
+    format!("{base}{LABEL_OPEN}{label}{LABEL_CLOSE}")
+}
+
+/// Split a name made by [`with_label`] into `(base, label)`. Player labels
+/// cannot contain parentheses, so the last opener is the real one.
+pub(crate) fn split_label(name: &str) -> Option<(&str, &str)> {
+    let rest = name.strip_suffix(LABEL_CLOSE)?;
+    let at = rest.rfind(LABEL_OPEN)?;
+    Some((&rest[..at], &rest[at + LABEL_OPEN.len()..]))
+}
+
 /// Keywords a customized item answers to: the base list (the prototype's,
 /// or the staff override) plus every word of its custom name, so `get
-/// daedela` finds "Daedela's cloth sack". Single-character words and
-/// reserved targeting words (`all`, `self`, numbers, `2nd`) are skipped.
+/// daedela` finds "Daedela's cloth sack". For a labeled name only the
+/// label's words are added. Single-character words and reserved targeting
+/// words (`all`, `self`, numbers, `2nd`) are skipped.
 pub(crate) fn effective_keywords(base: &[String], custom_name: Option<&str>) -> Vec<String> {
     let mut out: Vec<String> = base.to_vec();
     if let Some(name) = custom_name {
+        let name = split_label(name).map_or(name, |(_, label)| label);
         for word in name.split_whitespace() {
             let w: String = word
                 .chars()
