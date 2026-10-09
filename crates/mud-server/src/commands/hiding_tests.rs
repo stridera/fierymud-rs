@@ -831,6 +831,7 @@ fn mob_hide_world() -> (World, Entity) {
                 exp_gain_factor: 1.0,
                 alignment_bias: 0,
                 resistances: HashMap::new(),
+                campcraft_bonus: false,
             },
         );
     }
@@ -986,6 +987,7 @@ fn a_hide_wait_state_binds_a_thief_player_for_half_a_round() {
             exp_gain_factor: 1.0,
             alignment_bias: 0,
             resistances: HashMap::new(),
+            campcraft_bonus: false,
         },
     );
     world.insert_resource(classes);
