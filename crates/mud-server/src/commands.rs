@@ -21917,9 +21917,6 @@ pub(crate) fn broadcast_room_visual(
     except: &[Entity],
     raw_msg: &str,
 ) {
-    // Light precondition for the source room is the same for every
-    // observer in it — compute it once.
-    let visible_here = !room_is_dark(world, room) || room_has_light(world, room);
     let targets: Vec<Entity> = {
         let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
         q.iter(world)
@@ -21929,6 +21926,13 @@ pub(crate) fn broadcast_room_visual(
             .map(|(e, _)| e)
             .collect()
     };
+    if targets.is_empty() {
+        return;
+    }
+    // Light precondition for the source room is the same for every
+    // observer in it — compute it once, and only when someone is there
+    // to see (`room_has_light` scans every light-bearing item).
+    let visible_here = !room_is_dark(world, room) || room_has_light(world, room);
     for t in targets {
         if visible_here || sees_characters_in_dark(world, t) {
             send_to(world, t, raw_msg);

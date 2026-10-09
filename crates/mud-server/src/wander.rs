@@ -159,6 +159,14 @@ pub fn wander_tick(world: &mut World) {
         let (dir, target) = candidates_dir[pick];
         moves.push((mob, room, target, dir));
     }
+    // Rooms a player stands in. Departure / arrival lines, hiding-perception
+    // checks and life-sense rolls only ever reach players, so a move between
+    // rooms nobody is in does none of that work. Players do not move during
+    // this pass, so one snapshot serves every move.
+    let player_rooms: HashSet<Entity> = {
+        let mut q = world.query_filtered::<&Located, With<Player>>();
+        q.iter(world).map(|l| l.0).collect()
+    };
     // Apply moves. Done in a separate pass so the candidate
     // snapshot's borrows are gone before we mutate `Located`.
     for (mob, from_room, target_room, dir) in moves {
@@ -177,30 +185,34 @@ pub fn wander_tick(world: &mut World) {
         // A hiding mob wears its hiding down as it walks, and observers
         // who cannot see it through that hear nothing of it.
         crate::hiding::decay_on_move(world, mob, &mut |lo, hi| rand::random_range(lo..=hi));
-        crate::commands::broadcast_room_visual(
-            world,
-            from_room,
-            mob,
-            &[mob],
-            &format!(
-                "{} leaves {}.\r\n",
-                crate::commands::cap_sentence_start(&mob_name),
-                direction_name(dir),
-            ),
-        );
-        crate::commands::senses::sense_departure(world, from_room, mob, &[mob]);
+        if player_rooms.contains(&from_room) {
+            crate::commands::broadcast_room_visual(
+                world,
+                from_room,
+                mob,
+                &[mob],
+                &format!(
+                    "{} leaves {}.\r\n",
+                    crate::commands::cap_sentence_start(&mob_name),
+                    direction_name(dir),
+                ),
+            );
+            crate::commands::senses::sense_departure(world, from_room, mob, &[mob]);
+        }
         crate::combat::relocate(world, mob, target_room);
-        let arrival_dir = arrival_from(dir);
-        crate::commands::broadcast_room_visible(
-            world,
-            target_room,
-            mob,
-            &[mob],
-            &format!(
-                "{} arrives from {arrival_dir}.\r\n",
-                crate::commands::cap_sentence_start(&mob_name),
-            ),
-        );
+        if player_rooms.contains(&target_room) {
+            let arrival_dir = arrival_from(dir);
+            crate::commands::broadcast_room_visible(
+                world,
+                target_room,
+                mob,
+                &[mob],
+                &format!(
+                    "{} arrives from {arrival_dir}.\r\n",
+                    crate::commands::cap_sentence_start(&mob_name),
+                ),
+            );
+        }
     }
 }
 
@@ -783,6 +795,115 @@ mod tests {
         if !cfg!(debug_assertions) {
             assert!(first.as_millis() < 5, "first pass took {first:?}");
             assert!(second.as_millis() < 5, "second pass took {second:?}");
+        }
+    }
+
+    /// Prod-scale wander scenario: a 100x100 torus of rooms (10k) with
+    /// caves (dark), deep water and underwater rooms mixed in, 5500 mobs
+    /// (a third sentinel), 4000 items (carried and on the floor), and no
+    /// players, at night.
+    fn wander_world() -> World {
+        const SIDE: usize = 100;
+        const MOBS: usize = 5500;
+        const ITEMS: usize = 4000;
+        let mut world = World::new();
+        world.insert_resource(TickCount(WANDER_PERIOD_TICKS));
+        // Worst case: night, when every outdoor wilderness room is dark.
+        world.insert_resource(mud_world::MudClock {
+            hour: 23,
+            ..Default::default()
+        });
+        let rooms: Vec<Entity> = (0..SIDE * SIDE).map(|_| make_room(&mut world)).collect();
+        for (i, &room) in rooms.iter().enumerate() {
+            let (x, y) = (i % SIDE, i / SIDE);
+            let at = |x: usize, y: usize| rooms[(y % SIDE) * SIDE + x % SIDE];
+            let sector = match i % 20 {
+                0..=2 => Sector::Cave,
+                3 => Sector::Water,
+                4 => Sector::Underwater,
+                5 => Sector::Shallows,
+                _ => Sector::Field,
+            };
+            world.entity_mut(room).insert(RoomSector(sector));
+            for (dir, to) in [
+                (Direction::North, at(x, y + SIDE - 1)),
+                (Direction::South, at(x, y + 1)),
+                (Direction::East, at(x + 1, y)),
+                (Direction::West, at(x + SIDE - 1, y)),
+            ] {
+                if let Some(mut e) = world.get_mut::<mud_world::Exits>(room) {
+                    e.0.insert(dir, open_exit(to));
+                } else {
+                    let mut exits = mud_world::Exits::default();
+                    exits.0.insert(dir, open_exit(to));
+                    world.entity_mut(room).insert(exits);
+                }
+            }
+        }
+        let mut mobs = Vec::with_capacity(MOBS);
+        for i in 0..MOBS {
+            let mob = make_mob(&mut world, rooms[(i * 7) % rooms.len()]);
+            if i % 3 == 0 {
+                world
+                    .entity_mut(mob)
+                    .insert(MobBehaviors(vec![MobBehavior::Sentinel]));
+            }
+            scatter_archetype(&mut world, mob, i);
+            mobs.push(mob);
+        }
+        for i in 0..ITEMS {
+            let holder = if i % 2 == 0 {
+                mobs[i % MOBS]
+            } else {
+                rooms[(i * 13) % rooms.len()]
+            };
+            let item = world
+                .spawn((
+                    Item,
+                    Named {
+                        name: format!("item {i}"),
+                    },
+                    Located(holder),
+                ))
+                .id();
+            scatter_archetype(&mut world, item, i);
+        }
+        world
+    }
+
+    fn open_exit(to: Entity) -> ExitData {
+        ExitData {
+            to: Some(to),
+            state: mud_db::enums::ExitState::Open,
+            key: None,
+            description: None,
+            keywords: Vec::new(),
+            is_hidden: false,
+            is_pickproof: false,
+            is_bashable: false,
+            hit_points: None,
+        }
+    }
+
+    /// Timing guard at prod scale (5500 mobs, 4000 items, 10k rooms, no
+    /// players). Prod saw 600-700 ms per pass when every move scanned the
+    /// whole item table for light sources and re-built player queries for
+    /// observers that cannot exist. Hard limit only enforced in release.
+    #[test]
+    fn wander_tick_prod_scale_is_fast() {
+        let mut world = wander_world();
+        let start = std::time::Instant::now();
+        wander_tick(&mut world);
+        let first = start.elapsed();
+        let start = std::time::Instant::now();
+        wander_tick(&mut world);
+        let second = start.elapsed();
+        eprintln!(
+            "wander_tick 5500 mobs / 4000 items / 10k rooms: first={first:?} second={second:?}"
+        );
+        if !cfg!(debug_assertions) {
+            assert!(first.as_millis() < 20, "first pass took {first:?}");
+            assert!(second.as_millis() < 20, "second pass took {second:?}");
         }
     }
 

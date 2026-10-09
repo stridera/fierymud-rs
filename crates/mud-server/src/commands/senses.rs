@@ -310,7 +310,6 @@ fn senses_living(world: &World, ch: Entity, vict: Entity, basepct: i32, roll: i3
 /// the room is too dark): a `SENSE_LIFE` observer has a 50% chance of
 /// feeling a living creature depart. `except` are the movers themselves.
 pub(crate) fn sense_departure(world: &mut World, room: Entity, mover: Entity, except: &[Entity]) {
-    let visible_here = !super::room_is_dark(world, room) || super::room_has_light(world, room);
     let observers: Vec<Entity> = {
         let mut q = world.query_filtered::<(Entity, &Located), (With<Player>, With<SenseLife>)>();
         q.iter(world)
@@ -318,6 +317,10 @@ pub(crate) fn sense_departure(world: &mut World, room: Entity, mover: Entity, ex
             .map(|(e, _)| e)
             .collect()
     };
+    if observers.is_empty() {
+        return;
+    }
+    let visible_here = !super::room_is_dark(world, room) || super::room_has_light(world, room);
     for observer in observers {
         let noticed = can_see_player(world, observer, mover)
             && (visible_here || super::sees_characters_in_dark(world, observer));
