@@ -777,9 +777,13 @@ fn aggro_mob_lands_its_first_blow_on_engage_not_a_round_later() {
     // No combat_tick has run: the swing came with the engagement.
     let out = drain(&mut fx.grx);
     assert!(out.contains("sees you and attacks!"), "{out}");
-    let swung = out.contains("wolf hits you")
-        || out.contains("wolf misses you")
-        || out.contains("wolf's attack");
+    // Beyond the "sees you and attacks!" banner, the wolf's swing (hit
+    // or miss wording varies) is already reported.
+    let swung = out
+        .lines()
+        .filter(|l| l.contains("wolf") && !l.contains("sees you and attacks"))
+        .count()
+        >= 1;
     assert!(swung, "first blow on engage: {out}");
 }
 

@@ -65,6 +65,24 @@ pub(crate) const COMBAT_ROUND_TICKS: i32 = 40;
 /// Legacy cast times are counted in "stars" of one second each.
 const TICKS_PER_STAR: i32 = 10;
 
+/// Legacy `casting_handler` runs every `PULSE_VIOLENCE / 2` (2s; the
+/// +/- 0.2s jitter it adds is not modelled) and each run takes 2 stars
+/// off the remaining cast time ([`handler_ticks`]).
+const HANDLER_PERIOD_TICKS: i32 = 2 * TICKS_PER_STAR;
+
+/// Wall-clock ticks a legacy `SCMD_CAST` wind-up of `stars` takes.
+/// `do_cast` schedules the first `casting_handler` run one period out;
+/// each run completes the spell when the remaining time is `<= 0` and
+/// otherwise subtracts 2 and waits another period (`events.cpp`,
+/// `casting_handler`). So a cast of N stars lands on run
+/// `1 + ceil(N / 2)`: 0 stars -> 2s, 1-2 -> 4s, 3-4 -> 6s, 8 -> 10s. The
+/// first run is always spent before anything can complete, so even a
+/// zero-star quick chant is not instant.
+#[must_use]
+pub(crate) fn handler_ticks(stars: i32) -> i32 {
+    (1 + (stars.max(0) + 1) / 2) * HANDLER_PERIOD_TICKS
+}
+
 /// Catalog key (lowercased `plain_name`) of the Quick Chant skill.
 const QUICK_CHANT_KEY: &str = "quick_chant";
 
@@ -194,7 +212,8 @@ pub(crate) fn quick_chant_stars(
     stars.max(0)
 }
 
-/// Wind-up length in ticks for `caster` starting `def`, and whether
+/// Wind-up length in ticks for `caster` starting `def` (a spell lands on
+/// the legacy handler cadence, [`handler_ticks`]), and whether
 /// quick chant fired. `roll` is the `1..=110` die, passed in so tests
 /// can force either outcome. Only spells quick-chant, and only for a
 /// caster who has the Quick Chant skill.
@@ -206,12 +225,15 @@ pub(crate) fn wind_up_ticks(
     roll: i32,
 ) -> (i32, bool) {
     let base = def.cast_time_rounds * COMBAT_ROUND_TICKS;
+    // Only a legacy `SCMD_CAST` rides the event-handler cadence; chants
+    // and songs keep their flat wind-up.
     if !matches!(def.kind, mud_db::abilities::AbilityKind::Spell) {
         return (base, false);
     }
+    let unhurried = handler_ticks(base / TICKS_PER_STAR);
     let catalog = world.resource::<AbilityCatalog>();
     let Some(quick) = catalog.by_name.get(QUICK_CHANT_KEY) else {
-        return (base, false);
+        return (unhurried, false);
     };
     let Some(skill) = world.get::<KnownAbilities>(caster).and_then(|k| {
         k.entries
@@ -219,7 +241,7 @@ pub(crate) fn wind_up_ticks(
             .find(|(id, _, known)| *id == quick.id && *known)
             .map(|(_, prof, _)| (prof / 10).clamp(0, 100))
     }) else {
-        return (base, false);
+        return (unhurried, false);
     };
     let core = world.get::<CoreStats>(caster).copied().unwrap_or_default();
     if !quick_chant_hit(
@@ -228,7 +250,7 @@ pub(crate) fn wind_up_ticks(
         stat_bonus_magic(core.wisdom),
         roll,
     ) {
-        return (base, false);
+        return (unhurried, false);
     }
     let slots = world.resource::<SpellSlotData>();
     let (max_circle, spell_circle) = world.get::<Profile>(caster).map_or((0, 0), |p| {
@@ -246,7 +268,7 @@ pub(crate) fn wind_up_ticks(
         || def.sphere.as_deref() == Some("healing")
         || def.plain_name.eq_ignore_ascii_case("STONE_SKIN");
     let stars = quick_chant_stars(base / TICKS_PER_STAR, max_circle, spell_circle, offensive);
-    (stars * TICKS_PER_STAR, true)
+    (handler_ticks(stars), true)
 }
 
 fn actor_alive(world: &World, e: Entity) -> bool {
@@ -1008,7 +1030,7 @@ mod tests {
         start_mend(&mut world, caster);
         let c = world.get::<Casting>(caster).expect("cast queued");
         assert_eq!(c.target, CastTarget::InRoom(bob));
-        assert_eq!(c.ticks_total, 80);
+        assert_eq!(c.ticks_total, handler_ticks(8));
     }
 
     #[test]
@@ -1039,7 +1061,7 @@ mod tests {
         let (caster, _rx) = caster_in(&mut world, room);
         let (bob, _b) = bob_in(&mut world, room);
         start_mend(&mut world, caster);
-        run_ticks(&mut world, 40);
+        run_ticks(&mut world, handler_ticks(4));
         assert!(world.get::<Casting>(caster).is_none());
         assert!(hp(&world, bob) > 5, "the spell landed on Bob");
     }
@@ -1067,7 +1089,7 @@ mod tests {
         start_mend(&mut world, caster);
         // A second "Bob" walks in while the first is still there.
         let (other, _o) = bob_in(&mut world, room);
-        run_ticks(&mut world, 40);
+        run_ticks(&mut world, handler_ticks(4));
         assert!(hp(&world, bob) > 5, "the original was healed");
         assert_eq!(hp(&world, other), 5, "the newcomer was not");
 
@@ -1081,7 +1103,7 @@ mod tests {
             "first match is the newest arrival"
         );
         world.entity_mut(other).insert(Located(elsewhere));
-        run_ticks(&mut world, 40);
+        run_ticks(&mut world, handler_ticks(4));
         assert_eq!(hp(&world, bob), 5, "never re-resolved onto the other Bob");
         assert_eq!(hp(&world, other), 5);
     }
@@ -1153,7 +1175,7 @@ mod tests {
         let (caster, _rx) = slot_caster(&mut world, room, 1);
         let (bob, _b) = bob_in(&mut world, room);
         start_mend(&mut world, caster);
-        run_ticks(&mut world, 40);
+        run_ticks(&mut world, handler_ticks(4));
         assert!(hp(&world, bob) > 5, "the spell landed");
         let s = slots(&world, caster);
         assert!(s.reserved.is_empty());
@@ -1278,7 +1300,7 @@ mod tests {
         );
         world.entity_mut(caster).insert(cd);
         drain(&mut rx);
-        run_ticks(&mut world, 40);
+        run_ticks(&mut world, handler_ticks(4));
         assert!(drain(&mut rx).contains("yet"));
         assert_eq!(hp(&world, bob), 5, "nothing landed");
         let s = slots(&world, caster);
@@ -1392,7 +1414,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_star_quick_chant_resolves_on_the_first_tick() {
+    fn zero_star_quick_chant_resolves_on_the_first_handler_pass() {
         let (mut world, room, _) = slot_world(1);
         let (caster, _rx) = slot_caster(&mut world, room, 1);
         let (bob, _b) = bob_in(&mut world, room);
@@ -1409,9 +1431,13 @@ mod tests {
             world.entity_mut(bob).insert(Health { hp: 5, max: 50 });
             world.entity_mut(caster).remove::<SpellSlots>();
             start_mend(&mut world, caster);
-            if world.get::<Casting>(caster).unwrap().ticks_total == 0 {
+            if world.get::<Casting>(caster).unwrap().ticks_total == handler_ticks(0) {
+                // Legacy still spends the handler's first 2s pass.
+                assert_eq!(handler_ticks(0), 20);
+                run_ticks(&mut world, 19);
+                assert!(hp(&world, bob) == 5, "not before the first pass");
                 run_ticks(&mut world, 1);
-                assert!(hp(&world, bob) > 5, "landed at once");
+                assert!(hp(&world, bob) > 5, "landed on the first pass");
                 landed += 1;
             } else {
                 world.entity_mut(caster).remove::<Casting>();
@@ -1468,7 +1494,7 @@ mod tests {
         assert!(out.contains("Someone starts casting"), "{out:?}");
         assert!(out.contains("someone"), "{out:?}");
         assert!(!out.contains("Tester") && !out.contains("Bob"), "{out:?}");
-        run_ticks(&mut world, 40);
+        run_ticks(&mut world, handler_ticks(4));
         let out = drain(&mut wrx);
         assert!(out.contains("Someone completes their spell"), "{out:?}");
         assert!(out.contains("stares off at nothing"), "{out:?}");
@@ -1572,7 +1598,7 @@ mod tests {
         start_mend(&mut world, caster);
         let out = drain(&mut wrx);
         assert!(out.contains("Tester starts casting"), "{out:?}");
-        run_ticks(&mut world, 40);
+        run_ticks(&mut world, handler_ticks(4));
         let out = drain(&mut wrx);
         assert!(out.contains("Tester completes their spell..."), "{out:?}");
         assert!(out.contains("utters the words"), "{out:?}");
@@ -1625,7 +1651,7 @@ mod tests {
         // Roll 1 always beats skill 80 + stat bonuses.
         let (ticks, quick) = wind_up_ticks(&world, caster, &def, 1);
         assert!(quick);
-        assert_eq!(ticks, 80, "4 rounds (160 ticks) halved");
+        assert_eq!(ticks, handler_ticks(8), "4 rounds (16 stars) halved");
     }
 
     #[test]
@@ -1634,7 +1660,7 @@ mod tests {
         let def = world.resource::<AbilityCatalog>().by_name["mend"].clone();
         let (ticks, quick) = wind_up_ticks(&world, caster, &def, 110);
         assert!(!quick);
-        assert_eq!(ticks, 160);
+        assert_eq!(ticks, handler_ticks(16));
     }
 
     #[test]
@@ -1644,7 +1670,7 @@ mod tests {
         let def = world.resource::<AbilityCatalog>().by_name["mend"].clone();
         let (ticks, quick) = wind_up_ticks(&world, caster, &def, 1);
         assert!(!quick);
-        assert_eq!(ticks, 160);
+        assert_eq!(ticks, handler_ticks(16));
     }
 
     #[test]
@@ -1658,6 +1684,20 @@ mod tests {
         assert_eq!(quick_chant_stars(8, 9, 9, false), 4);
         // Long casts keep at least (half - 2) stars.
         assert_eq!(quick_chant_stars(12, 12, 1, true), 4);
+    }
+
+    #[test]
+    fn handler_ticks_follow_the_legacy_event_cadence() {
+        // `casting_handler` runs every 2s and completes on the first run
+        // that finds <= 0 stars left, taking 2 off each earlier run.
+        assert_eq!(handler_ticks(-3), 20);
+        assert_eq!(handler_ticks(0), 20);
+        assert_eq!(handler_ticks(1), 40);
+        assert_eq!(handler_ticks(2), 40);
+        assert_eq!(handler_ticks(3), 60);
+        assert_eq!(handler_ticks(4), 60);
+        // CAST_SPEED8 (2 rounds): 8s plus the handler's lead-in.
+        assert_eq!(handler_ticks(8), 100);
     }
 
     #[test]
@@ -1680,10 +1720,10 @@ mod tests {
         for _ in 0..40 {
             start_mend(&mut world, caster);
             let c = world.get::<Casting>(caster).unwrap();
-            if c.ticks_total == 80 {
+            if c.ticks_total == handler_ticks(8) {
                 halved += 1;
             } else {
-                assert_eq!(c.ticks_total, 160);
+                assert_eq!(c.ticks_total, handler_ticks(16));
             }
             world.entity_mut(caster).remove::<Casting>();
         }
