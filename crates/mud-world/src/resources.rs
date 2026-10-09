@@ -1096,6 +1096,15 @@ pub struct ObjectProto {
     /// consumed on camp completion, its tier folding into
     /// `computeCampTier`.
     pub camp_kit_tier: Option<i32>,
+    /// Legacy object hiddenness (`Objects.concealment`, the `H` section):
+    /// how hard a fresh instance is to spot lying in a room or container.
+    /// Zero = in plain sight. Reset-spawned instances carry it as a
+    /// `Hiddenness` component; see [`ObjectProto::initial_hiddenness`].
+    pub concealment: i32,
+    /// `Food`-typed objects: the schema's `Poisoned` value (legacy
+    /// `VAL_FOOD_POISONED`). Drink containers and fountains carry theirs
+    /// in `liquid`.
+    pub food_poisoned: bool,
 }
 
 /// Per-town destinations of a scroll of recall: the guild hall that
@@ -1152,6 +1161,16 @@ pub struct LightFuelProto {
 }
 
 impl ObjectProto {
+    /// The `Hiddenness` a freshly reset instance starts with (legacy
+    /// `read_object` copies the prototype's `hiddenness`): the authored
+    /// value clamped to the legal range, `None` when in plain sight.
+    #[must_use]
+    pub fn initial_hiddenness(&self) -> Option<crate::components::Hiddenness> {
+        (self.concealment > 0).then(|| {
+            crate::components::Hiddenness(self.concealment.min(crate::components::MAX_HIDDENNESS))
+        })
+    }
+
     /// Average damage roll: `N * (M + 1) / 2 + B`. Returns 0 for
     /// non-weapons (zero dice) so callers can use it directly.
     #[must_use]

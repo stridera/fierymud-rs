@@ -86,6 +86,10 @@ pub struct Object {
     /// `ObjectWakeEffects` rows (a kit's wake attachments apply at
     /// first-XP-gain).
     pub camp_kit_tier: Option<i32>,
+    /// Legacy object hiddenness (`GET_OBJ_HIDDENNESS`, the `H` section): how
+    /// hard the object is to spot lying in a room or container. Zero = in
+    /// plain sight. Stamped on reset-spawned instances as `Hiddenness`.
+    pub concealment: i32,
 }
 
 pub async fn list_objects(pool: &PgPool) -> sqlx::Result<Vec<Object>> {
@@ -120,7 +124,8 @@ pub async fn list_objects(pool: &PgPool) -> sqlx::Result<Vec<Object>> {
             allowed_races::text[] AS "allowed_races!: Vec<String>",
             min_size::text AS "min_size?: String",
             max_size::text AS "max_size?: String",
-            camp_kit_tier
+            camp_kit_tier,
+            concealment
         FROM "Objects"
         ORDER BY zone_id, id
         "#

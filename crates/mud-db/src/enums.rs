@@ -989,6 +989,8 @@ pub enum ObjectFlag {
     Buoyant,
     Vehicle,
     Soulbound,
+    /// Legacy `ITEM_NOFALL`: unaffected by gravity. Looks like "(hovering)".
+    NoFall,
 }
 
 impl sqlx::postgres::PgHasArrayType for ObjectFlag {
@@ -1015,6 +1017,7 @@ impl ObjectFlag {
             Self::Buoyant => "Buoyant",
             Self::Vehicle => "Vehicle",
             Self::Soulbound => "Soulbound",
+            Self::NoFall => "NoFall",
         }
     }
 }

@@ -300,6 +300,15 @@ pub fn respawn_tick(world: &mut World) {
         if let Some(keys) = trigger_keys {
             bundle.insert(AttachedTriggers(keys));
         }
+        if !proto.flags.is_empty() {
+            bundle.insert(mud_world::ObjectFlags(proto.flags.clone()));
+        }
+        if !proto.restrictions.is_empty() {
+            bundle.insert(mud_world::ObjectRestrictions(proto.restrictions.clone()));
+        }
+        if let Some(h) = proto.initial_hiddenness() {
+            bundle.insert(h);
+        }
         let spawned = bundle.id();
         crate::item_decay::attach_timer_if_decaying(world, spawned, &proto);
         // A container that comes back gets its authored contents again,
@@ -631,6 +640,44 @@ mod tests {
         assert!(
             crate::commands::room_has_light(&mut world, room),
             "respawned mob's worn torch is lit"
+        );
+    }
+
+    #[test]
+    fn respawned_room_object_keeps_its_flags_and_authored_hiddenness() {
+        let (mut world, room) = base_world();
+        {
+            let mut protos = world.resource_mut::<ObjectPrototypes>();
+            let gem = protos.by_key.get_mut(&(1, GEM)).expect("gem proto");
+            gem.concealment = 300;
+            gem.flags = vec![mud_db::enums::ObjectFlag::NoFall];
+        }
+        world
+            .resource_mut::<ObjectResetCatalog>()
+            .entries
+            .push(ObjectResetEntry {
+                reset_id: 8,
+                object_zone_id: 1,
+                object_id: GEM,
+                room_entity: room,
+                max_instances: 1,
+            });
+        run_respawn(&mut world, 6000);
+        let gem = {
+            let mut q = world.query_filtered::<(Entity, &WorldKey), With<Item>>();
+            q.iter(&world)
+                .find(|(_, k)| k.id == GEM)
+                .map(|(e, _)| e)
+                .expect("gem respawned")
+        };
+        assert_eq!(
+            world.get::<mud_world::Hiddenness>(gem).map(|h| h.0),
+            Some(300)
+        );
+        assert!(
+            world
+                .get::<mud_world::ObjectFlags>(gem)
+                .is_some_and(|f| f.has(mud_db::enums::ObjectFlag::NoFall))
         );
     }
 

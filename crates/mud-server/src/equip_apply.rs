@@ -900,6 +900,8 @@ mod tests {
                 min_size: None,
                 max_size: None,
                 camp_kit_tier: None,
+                concealment: 0,
+                food_poisoned: false,
             },
         );
         world.insert_resource(protos);
@@ -1023,6 +1025,8 @@ mod tests {
                 min_size: None,
                 max_size: None,
                 camp_kit_tier: None,
+                concealment: 0,
+                food_poisoned: false,
             },
         );
         world.insert_resource(protos);

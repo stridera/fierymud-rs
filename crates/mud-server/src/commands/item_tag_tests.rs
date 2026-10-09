@@ -1,14 +1,15 @@
 //! Legacy `print_obj_flags_to_char` item tags: floating, illuminated,
-//! invisible, magic, glowing, humming, poisoned (plus the detect-align
-//! aura covered in `item_aura_tests`), and the `CAN_SEE_OBJ` invisibility
-//! filter, wherever item lines are listed.
+//! invisible, hidden, magic, glowing, humming, poisoned (plus the
+//! detect-align aura covered in `item_aura_tests`), hovering, and the
+//! `CAN_SEE_OBJ` invisibility / hiddenness filter, wherever item lines
+//! are listed.
 
 use bevy_ecs::prelude::*;
-use mud_db::enums::{Alignment, ObjectFlag, ObjectType, Sector};
+use mud_db::enums::{Alignment, ObjectFlag, ObjectType, PlayerFlag, Sector, UserRole};
 use mud_world::{
-    AppliedTo, DetectAlign, DetectInvis, EffectInstance, EffectSource, EquippedSlot, Item,
-    Keywords, LiquidContainer, Lit, Located, Named, ObjectFlags, ObjectPrototypes, RoomSector,
-    Slot, WorldKey,
+    Account, AppliedTo, DetectAlign, DetectInvis, EffectInstance, EffectSource, EquippedSlot,
+    Hiddenness, Item, Keywords, LiquidContainer, Lit, Located, Named, ObjectFlags,
+    ObjectPrototypes, Perception, PlayerFlags, RoomSector, Slot, WorldKey,
 };
 
 use super::dispatch;
@@ -18,6 +19,7 @@ use super::test_support::{Rx, drain, object_proto};
 const PLAIN: i32 = 1;
 const BAG: i32 = 2;
 const BANE: i32 = 3;
+const PIE: i32 = 4;
 
 fn setup() -> (Fx, Entity, Rx) {
     let mut fx = fixture();
@@ -31,6 +33,9 @@ fn setup() -> (Fx, Entity, Rx) {
     let mut bane = object_proto(551, BANE, ObjectType::Other);
     bane.restricted_alignments = vec![Alignment::Good, Alignment::Neutral];
     protos.by_key.insert((551, BANE), bane);
+    let mut pie = object_proto(551, PIE, ObjectType::Food);
+    pie.food_poisoned = true;
+    protos.by_key.insert((551, PIE), pie);
     fx.world.insert_resource(protos);
     let a = fx.a;
     let (p, rx) = player(&mut fx.world, a, "Viewer");
@@ -313,10 +318,12 @@ fn tags_trail_in_legacy_order() {
             ObjectFlag::Glow,
             ObjectFlag::Magic,
             ObjectFlag::Invisible,
+            ObjectFlag::NoFall,
         ],
     );
     fx.world.entity_mut(e).insert((
         Lit,
+        Hiddenness(40),
         LiquidContainer {
             liquid: "WATER".into(),
             capacity: 1,
@@ -324,7 +331,9 @@ fn tags_trail_in_legacy_order() {
             poisoned: true,
         },
     ));
-    fx.world.entity_mut(p).insert((DetectInvis, DetectAlign));
+    fx.world
+        .entity_mut(p)
+        .insert((DetectInvis, DetectAlign, Perception(500)));
     add_effect(&mut fx, p, "detect_magic");
     add_effect(&mut fx, p, "detect_poison");
     let out = run(&mut fx, p, &mut rx, "look");
@@ -333,11 +342,13 @@ fn tags_trail_in_legacy_order() {
         "(floating)",
         "(illuminated)",
         "(invisible)",
+        "(hidden)",
         "(magic)",
         "(glowing)",
         "(humming)",
         "(poisoned)",
         "(Red Aura)",
+        "(hovering)",
     ];
     let mut last = 0;
     for t in tags {
@@ -345,4 +356,117 @@ fn tags_trail_in_legacy_order() {
         assert!(at >= last, "{t} out of order: {l}");
         last = at;
     }
+}
+
+#[test]
+fn hovering_tag_marks_no_fall_items() {
+    let (mut fx, p, mut rx) = setup();
+    trio(&mut fx, p, "a drifting spark", &[ObjectFlag::NoFall]);
+    for l in listings(&mut fx, p, &mut rx, "drifting spark") {
+        assert!(l.contains("(hovering)"), "{l}");
+    }
+    let room = fx.a;
+    item(&mut fx, PLAIN, "a fallen leaf", room, &[ObjectFlag::Float]);
+    let out = run(&mut fx, p, &mut rx, "look");
+    assert!(!line(&out, "fallen leaf").contains("hovering"), "{out}");
+}
+
+#[test]
+fn poisoned_food_is_tagged_to_detect_poison() {
+    let (mut fx, p, mut rx) = setup();
+    let room = fx.a;
+    item(&mut fx, PIE, "a grey pie", room, &[]);
+    item(&mut fx, PLAIN, "a fresh pear", room, &[]);
+    let out = run(&mut fx, p, &mut rx, "look");
+    assert!(!line(&out, "grey pie").contains("(poisoned)"), "{out}");
+    add_effect(&mut fx, p, "detect_poison");
+    let out = run(&mut fx, p, &mut rx, "look");
+    assert!(line(&out, "grey pie").contains("(poisoned)"), "{out}");
+    assert!(!line(&out, "fresh pear").contains("(poisoned)"), "{out}");
+}
+
+fn hidden_cache(fx: &mut Fx, hid: i32) -> Entity {
+    let room = fx.a;
+    let e = item(fx, PLAIN, "a mossy cache", room, &[]);
+    fx.world.entity_mut(e).insert(Hiddenness(hid));
+    e
+}
+
+#[test]
+fn hidden_items_are_unseen_until_perception_reaches_them() {
+    let (mut fx, p, mut rx) = setup();
+    let cache = hidden_cache(&mut fx, 300);
+    let room = fx.a;
+    item(&mut fx, PLAIN, "a wooden cup", room, &[]);
+    for perception in [0, 299] {
+        fx.world.entity_mut(p).insert(Perception(perception));
+        let out = run(&mut fx, p, &mut rx, "look");
+        assert!(has_line(&out, "wooden cup"), "{out}");
+        assert!(!out.contains("mossy cache"), "{out}");
+    }
+    // Perception at (not below) the hiddenness sees it, tagged.
+    fx.world.entity_mut(p).insert(Perception(300));
+    let out = run(&mut fx, p, &mut rx, "look");
+    let l = line(&out, "mossy cache");
+    assert!(l.contains("(hidden)") && !l.contains("(h300)"), "{l}");
+    // Holylight sees it whatever the perception.
+    fx.world.entity_mut(p).insert(Perception(0));
+    fx.world
+        .entity_mut(p)
+        .insert(PlayerFlags(vec![PlayerFlag::HolyLight]));
+    assert!(super::senses::item_visible_to(&fx.world, p, cache));
+}
+
+#[test]
+fn staff_see_the_hiddenness_number() {
+    let (mut fx, p, mut rx) = setup();
+    hidden_cache(&mut fx, 300);
+    fx.world.entity_mut(p).insert((
+        Perception(1000),
+        Account {
+            user_id: String::new(),
+            character_id: "g".into(),
+            role: UserRole::Immortal,
+            account_role: UserRole::Immortal,
+            perms: vec![],
+        },
+    ));
+    let out = run(&mut fx, p, &mut rx, "look");
+    let l = line(&out, "mossy cache");
+    assert!(l.contains("(h300)") && !l.contains("(hidden)"), "{l}");
+}
+
+#[test]
+fn a_hidden_item_cannot_be_taken_until_found_and_pickup_clears_it() {
+    let (mut fx, p, mut rx) = setup();
+    let cache = hidden_cache(&mut fx, 300);
+    let out = run(&mut fx, p, &mut rx, "get cache");
+    assert!(out.contains("You don't see 'cache' here."), "{out}");
+    let out = run(&mut fx, p, &mut rx, "get all");
+    assert!(!out.contains("mossy cache"), "{out}");
+    assert_eq!(fx.world.get::<Located>(cache).map(|l| l.0), Some(fx.a));
+    // Seen but still hidden (perception 300): taking it ends the hiding.
+    fx.world.entity_mut(p).insert(Perception(300));
+    let out = run(&mut fx, p, &mut rx, "get cache");
+    assert!(out.contains("mossy cache"), "{out}");
+    assert_eq!(fx.world.get::<Located>(cache).map(|l| l.0), Some(p));
+    assert!(fx.world.get::<Hiddenness>(cache).is_none());
+    // Dropped again, it lies in plain sight.
+    fx.world.entity_mut(p).insert(Perception(0));
+    run(&mut fx, p, &mut rx, "drop cache");
+    let out = run(&mut fx, p, &mut rx, "look");
+    assert!(has_line(&out, "mossy cache"), "{out}");
+}
+
+#[test]
+fn a_hidden_prototype_starts_hidden_and_clamps() {
+    let mut proto = object_proto(551, PLAIN, ObjectType::Other);
+    assert!(proto.initial_hiddenness().is_none());
+    proto.concealment = 250;
+    assert_eq!(proto.initial_hiddenness().map(|h| h.0), Some(250));
+    proto.concealment = 99_999;
+    assert_eq!(
+        proto.initial_hiddenness().map(|h| h.0),
+        Some(mud_world::MAX_HIDDENNESS)
+    );
 }

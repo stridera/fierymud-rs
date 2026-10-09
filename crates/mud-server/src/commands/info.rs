@@ -5640,9 +5640,15 @@ inventory::submit! {
         category: Category::Info,
         help: Help {
             usage: "search [<keyword>]",
-            summary: "Search the area for hidden exits and hiding characters.",
-            long: "Refuses while fighting. Each hidden exit you \
-                   haven't found is checked in turn: naming its \
+            summary: "Search the area for hidden objects, exits and hiding characters.",
+            long: "Refuses while fighting. Hidden objects come \
+                   first: 'search' checks the ones lying in the room, \
+                   'search <container>' the ones inside it. Your \
+                   perception cuts each one's hiding by a random \
+                   amount, and whatever is left within your \
+                   perception is found (staff find them all); finding \
+                   something ends the search. Otherwise each hidden \
+                   exit you haven't found is checked in turn: naming its \
                    keyword ('search monolith') always finds it, \
                    otherwise your Intelligence is rolled against \
                    0-200. The first exit found is revealed (staff always find one). A \
@@ -5708,7 +5714,7 @@ struct SearchLag {
 }
 
 /// Staff (legacy `GET_LEVEL >= LVL_IMMORT`) always find hidden exits.
-fn is_immortal(world: &World, e: Entity) -> bool {
+pub(crate) fn is_immortal(world: &World, e: Entity) -> bool {
     world
         .get::<Account>(e)
         .is_some_and(|a| a.role.at_least(UserRole::Immortal))
@@ -5767,8 +5773,17 @@ pub(crate) fn search_with_roll(
         &format!("{player_name} searches the area.\r\n"),
     );
 
-    // Legacy `do_search`: doors first; only when none turn up does the
-    // searcher look for hiding characters.
+    // Legacy `do_search`: hidden objects first (the ones lying here, or the
+    // contents of a container named by the argument); only when none turn
+    // up, doors, then hiding characters.
+    let (items, in_container) = search_scope(world, player, room, args);
+    if search_objects(world, player, room, &items, staff, roll) {
+        return;
+    }
+    if in_container {
+        send_to(world, player, "You find nothing of interest.\r\n");
+        return;
+    }
     let Some(nothing) = search_exits(world, player, room, args, &player_name, staff, roll) else {
         return;
     };
@@ -5776,6 +5791,94 @@ pub(crate) fn search_with_roll(
         return;
     }
     send_to(world, player, nothing);
+}
+
+/// What `search` looks through: the contents of the container the
+/// argument names (legacy `generic_find` over inventory, equipment and
+/// room; `true` then means "skip doors and characters"), otherwise the
+/// items lying in the room.
+fn search_scope(
+    world: &mut World,
+    player: Entity,
+    room: Entity,
+    args: &str,
+) -> (Vec<Entity>, bool) {
+    let arg = args.split_whitespace().next().unwrap_or("");
+    let container = (!arg.is_empty())
+        .then(|| {
+            find_carried_by(world, arg, player, EquipFilter::Anywhere)
+                .or_else(|| find_in_room(world, arg, room))
+        })
+        .flatten()
+        .filter(|c| crate::commands::is_container_entity(world, *c));
+    let holder = container.unwrap_or(room);
+    let mut items: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Located), With<Item>>();
+        q.iter(world)
+            .filter(|(e, l)| l.0 == holder && *e != player)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    crate::commands::sort_newest_first(world, holder, &mut items, |e| *e);
+    (items, container.is_some())
+}
+
+/// The hidden-object half of `search` (legacy `do_search`,
+/// act.informative.cpp:1002): every hidden item the searcher could see
+/// if it were not hidden has its hiddenness cut by
+/// `random(perception / 2, perception)`, and is found once what is left
+/// is within the searcher's perception. The cut stays even when the item
+/// is not found. Staff find everything, and keep looking after the first
+/// find. `roll(hi)` draws `0..=hi`. True when something was found.
+fn search_objects(
+    world: &mut World,
+    player: Entity,
+    room: Entity,
+    items: &[Entity],
+    staff: bool,
+    roll: &mut dyn FnMut(i32) -> i32,
+) -> bool {
+    use crate::hiding;
+    let perception = hiding::perception_of(world, player);
+    let searcher_name = name_of(world, player);
+    let mut found = false;
+    for &item in items {
+        if found && !staff {
+            break;
+        }
+        let orig = hiding::hiddenness(world, item);
+        if orig == 0 {
+            continue;
+        }
+        // Could the searcher see it were it not hidden?
+        hiding::set_hiddenness(world, item, 0);
+        let sees = crate::commands::senses::item_visible_to(world, player, item);
+        hiding::set_hiddenness(world, item, orig);
+        if !sees {
+            continue;
+        }
+        let cut = perception / 2 + roll(perception - perception / 2);
+        hiding::set_hiddenness(world, item, (orig - cut).max(0));
+        if hiding::hiddenness(world, item) > perception && !staff {
+            continue;
+        }
+        hiding::set_hiddenness(world, item, 0);
+        let item_name = name_of(world, item);
+        let (mine, theirs) = if orig <= perception {
+            ("reveal", "reveals")
+        } else {
+            ("find", "finds")
+        };
+        send_rendered(world, player, &format!("You {mine} {item_name}!\r\n"));
+        broadcast_room_except_players_rendered(
+            world,
+            room,
+            &[player],
+            &format!("{searcher_name} {theirs} {item_name}!\r\n"),
+        );
+        found = true;
+    }
+    found
 }
 
 /// The hidden-exit half of `search`. `None` when an exit was found (and
@@ -10365,8 +10468,10 @@ fn get_plain(world: &mut World, player: Entity, args: &str) {
         return;
     }
 
-    // Plain `get <item>` from the floor.
-    let item = find_in_room(world, trimmed, room);
+    // Plain `get <item>` from the floor. Something the player cannot see
+    // (hidden until `search` turns it up) is not there to take.
+    let item = find_in_room(world, trimmed, room)
+        .filter(|i| crate::commands::senses::item_visible_to(world, player, *i));
     let Some(item) = item else {
         send_to(
             world,
@@ -10445,6 +10550,7 @@ fn get_plain(world: &mut World, player: Entity, args: &str) {
 
     if world.get::<Located>(item).is_some() {
         world.entity_mut(item).insert(Located(player));
+        crate::hiding::set_hiddenness(world, item, 0);
     }
 
     send_rendered(world, player, &format!("You pick up {item_name}.\r\n"));
@@ -10582,6 +10688,7 @@ fn get_from_container_inner(
         };
         let items = {
             let mut v = items;
+            v.retain(|(e, _)| crate::commands::senses::item_visible_to(world, player, *e));
             crate::commands::sort_newest_first(world, container, &mut v, |r| r.0);
             v
         };
@@ -10638,6 +10745,7 @@ fn get_from_container_inner(
             running += w;
             if world.get::<Located>(*item).is_some() {
                 world.entity_mut(*item).insert(Located(player));
+                crate::hiding::set_hiddenness(world, *item, 0);
             }
             send_rendered(
                 world,
@@ -10675,7 +10783,8 @@ fn get_from_container_inner(
     } else {
         None
     };
-    let item = find_in_container(world, needle, container);
+    let item = find_in_container(world, needle, container)
+        .filter(|i| crate::commands::senses::item_visible_to(world, player, *i));
     let Some(item) = item else {
         if coin_drained.is_none() {
             send_rendered(
@@ -10714,6 +10823,7 @@ fn get_from_container_inner(
     }
     if world.get::<Located>(item).is_some() {
         world.entity_mut(item).insert(Located(player));
+        crate::hiding::set_hiddenness(world, item, 0);
     }
     send_rendered(
         world,
@@ -10767,6 +10877,7 @@ fn get_all_from_floor(world: &mut World, player: Entity, room: Entity, filter: &
     };
     let items = {
         let mut v = items;
+        v.retain(|(e, _)| crate::commands::senses::item_visible_to(world, player, *e));
         crate::commands::sort_newest_first(world, room, &mut v, |r| r.0);
         v
     };
@@ -10823,6 +10934,7 @@ fn get_all_from_floor(world: &mut World, player: Entity, room: Entity, filter: &
         running += w;
         if world.get::<Located>(*item).is_some() {
             world.entity_mut(*item).insert(Located(player));
+            crate::hiding::set_hiddenness(world, *item, 0);
         }
         send_rendered(world, player, &format!("You pick up {item_name}.\r\n"));
         crate::triggers::fire_item_event(world, *item, player, mud_world::TriggerEvent::Get);
@@ -14682,6 +14794,7 @@ pub(crate) fn cmd_house_take(
     };
     if world.get::<Located>(item).is_some() {
         world.entity_mut(item).insert(Located(player));
+        crate::hiding::set_hiddenness(world, item, 0);
     }
     // Strip the FK so the item is now an ordinary carried item.
     if let Ok(mut e) = world.get_entity_mut(item) {

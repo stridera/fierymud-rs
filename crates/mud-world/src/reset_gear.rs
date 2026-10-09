@@ -153,6 +153,7 @@ fn spawn_item(
             .get(&(proto.zone_id, proto.id))
             .cloned()
     });
+    let on_mob = world.get::<crate::components::Mob>(parent).is_some();
     let mut bundle = world.spawn((
         Item,
         Named {
@@ -184,6 +185,13 @@ fn spawn_item(
     }
     if !proto.flags.is_empty() {
         bundle.insert(crate::components::ObjectFlags(proto.flags.clone()));
+    }
+    // A hidden prototype stays hidden inside a container; on a mob it is
+    // carried, and carried things are never hidden.
+    if let Some(h) = proto.initial_hiddenness()
+        && !on_mob
+    {
+        bundle.insert(h);
     }
     if !proto.restrictions.is_empty() {
         bundle.insert(crate::components::ObjectRestrictions(

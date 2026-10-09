@@ -147,23 +147,59 @@ fn lies_in_water(world: &World, item: Entity) -> bool {
         .is_some_and(|s| matches!(s.0, Sector::Shallows | Sector::Water | Sector::Underwater))
 }
 
-/// Legacy `CAN_SEE_OBJ`'s invisibility half (`OBJ_INVIS_TO_CHAR`): an
-/// `Invisible` item is hidden from a viewer who cannot pierce invisibility
-/// (detect invisible, `HOLY_LIGHT`, or an Immortal+ account). Light and
-/// per-viewer hiddenness are not modelled here.
+/// Legacy `OBJ_HIDDEN_TO_CHAR`: `item` carries a [`Hiddenness`] above
+/// `viewer`'s perception. Hiddenness only means something for an item
+/// lying in a room or inside a container: whoever carries or wears it has
+/// it in hand (legacy `unhide_object` clears it on pickup). Legacy also
+/// exempts the character who hid it (`last_to_hold`); nothing hides items
+/// in Rust yet, so only authored hiddenness exists and that clause has no
+/// holder to name.
+fn item_hidden_from(world: &World, viewer: Entity, item: Entity) -> bool {
+    let hid = crate::hiding::hiddenness(world, item);
+    if hid == 0 {
+        return false;
+    }
+    let carried = world
+        .get::<Located>(item)
+        .is_some_and(|l| world.get::<Player>(l.0).is_some() || world.get::<Mob>(l.0).is_some());
+    !carried && hid > crate::hiding::perception_of(world, viewer)
+}
+
+/// Legacy `CAN_SEE_OBJ`: `HOLY_LIGHT` sees everything; otherwise an
+/// `Invisible` item needs a viewer who pierces invisibility (detect
+/// invisible, `HOLY_LIGHT`, or an Immortal+ account), and a hidden one a
+/// viewer whose perception reaches its hiddenness (`search` finds it
+/// otherwise). Light (`LIGHT_OK`) is not modelled here.
 #[must_use]
 pub(crate) fn item_visible_to(world: &World, viewer: Entity, item: Entity) -> bool {
-    !world
+    if super::has_flag(world, viewer, mud_db::enums::PlayerFlag::HolyLight) {
+        return true;
+    }
+    (!world
         .get::<ObjectFlags>(item)
         .is_some_and(|f| f.has(ObjectFlag::Invisible))
-        || super::pierces_invisibility(world, viewer)
+        || super::pierces_invisibility(world, viewer))
+        && !item_hidden_from(world, viewer, item)
+}
+
+/// Legacy `IS_POISONED` for a `Food` item: the prototype's `Poisoned`
+/// value (drink containers and fountains keep theirs on the
+/// [`LiquidContainer`]).
+fn food_is_poisoned(world: &World, item: Entity) -> bool {
+    let Some(key) = world.get::<WorldKey>(item) else {
+        return false;
+    };
+    world
+        .get_resource::<ObjectPrototypes>()
+        .and_then(|p| p.by_key.get(&(key.zone, key.id)))
+        .is_some_and(|p| p.food_poisoned)
 }
 
 /// Every tag `viewer` perceives on `item`, in legacy
 /// `print_obj_flags_to_char` order: floating, illuminated, invisible,
-/// magic (detect magic), glowing, humming, poisoned (detect poison), then
-/// the detect-align aura. Legacy's `(hidden)` / `(hN)` (object
-/// hiddenness) and `(hovering)` (`ITEM_NOFALL`) have no Rust counterpart.
+/// hidden (`(hidden)`, or `(hN)` to staff), magic (detect magic), glowing,
+/// humming, poisoned (detect poison), the detect-align aura, then
+/// hovering (`ITEM_NOFALL`).
 #[must_use]
 pub(crate) fn item_tags(world: &World, viewer: Entity, item: Entity) -> Vec<String> {
     let flags = world.get::<ObjectFlags>(item);
@@ -178,6 +214,14 @@ pub(crate) fn item_tags(world: &World, viewer: Entity, item: Entity) -> Vec<Stri
     if flagged(ObjectFlag::Invisible) {
         tags.push("(invisible)".into());
     }
+    let hid = crate::hiding::hiddenness(world, item);
+    if hid > 0 {
+        if super::info::is_immortal(world, viewer) {
+            tags.push(format!("(h{hid})"));
+        } else {
+            tags.push("(hidden)".into());
+        }
+    }
     if flagged(ObjectFlag::Magic) && has_detect_magic(world, viewer) {
         tags.push("(<b:blue>magic</>)".into());
     }
@@ -187,15 +231,19 @@ pub(crate) fn item_tags(world: &World, viewer: Entity, item: Entity) -> Vec<Stri
     if flagged(ObjectFlag::Hum) {
         tags.push("<red>(</><cyan>humming</><red>)</>".into());
     }
-    if world
+    if (world
         .get::<LiquidContainer>(item)
         .is_some_and(|l| l.poisoned)
+        || food_is_poisoned(world, item))
         && has_detect_poison(world, viewer)
     {
         tags.push("(<b:magenta>poisoned</>)".into());
     }
     if let Some(aura) = item_alignment_aura(world, viewer, item) {
         tags.push(aura.into());
+    }
+    if flagged(ObjectFlag::NoFall) {
+        tags.push("<b:cyan>(</><magenta>hovering</><b:cyan>)</>".into());
     }
     tags
 }

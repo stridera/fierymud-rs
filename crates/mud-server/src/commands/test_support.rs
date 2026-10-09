@@ -96,6 +96,8 @@ pub(crate) fn object_proto(zone: i32, id: i32, kind: ObjectType) -> ObjectProto 
         min_size: None,
         max_size: None,
         camp_kit_tier: None,
+        concealment: 0,
+        food_poisoned: false,
     }
 }
 

@@ -1144,3 +1144,121 @@ fn a_hidden_wandering_mob_is_felt_leaving_too() {
     let got = drain(&mut rx);
     assert!(got.contains(FELT) && !got.contains("leaves"), "{got:?}");
 }
+
+/// A hidden item named `name` lying in `at` (room or container).
+fn hidden_item(fx: &mut Fx, name: &str, at: Entity, hid: i32) -> Entity {
+    fx.world
+        .spawn((
+            mud_world::Item,
+            Named { name: name.into() },
+            mud_world::Keywords(vec![name.rsplit(' ').next().unwrap_or("x").to_string()]),
+            Located(at),
+            Hiddenness(hid),
+        ))
+        .id()
+}
+
+#[test]
+fn search_cuts_an_objects_hiding_and_reveals_it_with_a_forced_roll() {
+    // Perception 200 against hiding 350: the cut is 100..=200, so the best
+    // case leaves 150 (found) and the worst 250 (not found).
+    let (mut fx, seeker, mut srx, _lurker, _lrx) = searcher_world(200, 0);
+    let a = fx.a;
+    let cache = hidden_item(&mut fx, "a mossy cache", a, 350);
+    assert!(!super::senses::item_visible_to(&fx.world, seeker, cache));
+    search_with_roll(&mut fx.world, seeker, "", &mut |_| 0);
+    let out = drain(&mut srx);
+    assert!(out.contains("You find nothing of interest."), "{out}");
+    assert_eq!(hiding::hiddenness(&fx.world, cache), 250);
+    advance(&mut fx.world, 100);
+    search_with_roll(&mut fx.world, seeker, "", &mut |hi| hi);
+    let out = drain(&mut srx);
+    assert!(out.contains("You find a mossy cache!"), "{out}");
+    assert_eq!(hiding::hiddenness(&fx.world, cache), 0);
+    assert!(super::senses::item_visible_to(&fx.world, seeker, cache));
+}
+
+#[test]
+fn search_reveals_an_object_the_searcher_already_out_perceives() {
+    let (mut fx, seeker, mut srx, lurker, mut lrx) = searcher_world(400, 0);
+    let a = fx.a;
+    hidden_item(&mut fx, "a mossy cache", a, 300);
+    let _ = drain(&mut lrx);
+    search_with_roll(&mut fx.world, seeker, "", &mut |_| 0);
+    let out = drain(&mut srx);
+    assert!(out.contains("You reveal a mossy cache!"), "{out}");
+    let told = drain(&mut lrx);
+    assert!(told.contains("Seeker reveals a mossy cache!"), "{told}");
+    let _ = lurker;
+}
+
+#[test]
+fn a_found_object_ends_the_search_before_doors_and_characters() {
+    let (mut fx, seeker, mut srx, lurker, _lrx) = searcher_world(200, 150);
+    let a = fx.a;
+    hidden_item(&mut fx, "a mossy cache", a, 100);
+    search_with_roll(&mut fx.world, seeker, "", &mut |_| 0);
+    let out = drain(&mut srx);
+    assert!(out.contains("You reveal a mossy cache!"), "{out}");
+    assert!(!out.contains("lurking here"), "{out}");
+    assert_eq!(hiding::hiddenness(&fx.world, lurker), 150);
+}
+
+#[test]
+fn staff_find_every_hidden_object() {
+    let (mut fx, seeker, mut srx, _lurker, _lrx) = searcher_world(10, 0);
+    let a = fx.a;
+    let one = hidden_item(&mut fx, "a mossy cache", a, 900);
+    let two = hidden_item(&mut fx, "a rusty hinge", a, 800);
+    fx.world.entity_mut(seeker).insert(Account {
+        user_id: String::new(),
+        character_id: "g".into(),
+        role: UserRole::Immortal,
+        account_role: UserRole::Immortal,
+        perms: vec![],
+    });
+    search_with_roll(&mut fx.world, seeker, "", &mut |_| 0);
+    let out = drain(&mut srx);
+    assert!(
+        out.contains("a mossy cache!") && out.contains("a rusty hinge!"),
+        "{out}"
+    );
+    assert_eq!(hiding::hiddenness(&fx.world, one), 0);
+    assert_eq!(hiding::hiddenness(&fx.world, two), 0);
+}
+
+#[test]
+fn search_with_a_container_argument_looks_only_inside_it() {
+    let (mut fx, seeker, mut srx, _lurker, _lrx) = searcher_world(200, 0);
+    let a = fx.a;
+    let mut protos = mud_world::ObjectPrototypes::default();
+    protos.by_key.insert(
+        (551, 2),
+        super::test_support::object_proto(551, 2, mud_db::enums::ObjectType::Container),
+    );
+    fx.world.insert_resource(protos);
+    let chest = fx
+        .world
+        .spawn((
+            mud_world::Item,
+            Named {
+                name: "an oak chest".into(),
+            },
+            mud_world::Keywords(vec!["chest".into()]),
+            mud_world::WorldKey { zone: 551, id: 2 },
+            Located(a),
+        ))
+        .id();
+    let coin = hidden_item(&mut fx, "a false coin", chest, 100);
+    let floor = hidden_item(&mut fx, "a mossy cache", a, 100);
+    search_with_roll(&mut fx.world, seeker, "chest", &mut |_| 0);
+    let out = drain(&mut srx);
+    assert!(out.contains("You reveal a false coin!"), "{out}");
+    assert_eq!(hiding::hiddenness(&fx.world, coin), 0);
+    assert_eq!(hiding::hiddenness(&fx.world, floor), 100);
+    // Nothing hidden inside: no door or character search follows.
+    advance(&mut fx.world, 100);
+    search_with_roll(&mut fx.world, seeker, "chest", &mut |_| 0);
+    let out = drain(&mut srx);
+    assert!(out.contains("You find nothing of interest."), "{out}");
+}

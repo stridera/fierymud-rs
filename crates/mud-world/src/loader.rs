@@ -1193,6 +1193,9 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                     proto.restrictions.clone(),
                 ));
             }
+            if let Some(h) = proto.initial_hiddenness() {
+                bundle.insert(h);
+            }
             objects_by_reset.insert(r.id, vec![bundle.id()]);
             stats.object_resets_spawned += 1;
         }
@@ -1470,6 +1473,9 @@ pub async fn load_object_prototypes(pool: &PgPool) -> sqlx::Result<ObjectPrototy
                 min_size: row.min_size,
                 max_size: row.max_size,
                 camp_kit_tier: row.camp_kit_tier,
+                concealment: row.concealment,
+                food_poisoned: matches!(row.r#type, mud_db::enums::ObjectType::Food)
+                    && parse_poisoned(&row.values),
             },
         );
     }
@@ -2191,6 +2197,15 @@ fn parse_recall_rooms(values: &serde_json::Value) -> Option<crate::resources::Re
         return None;
     }
     Some(crate::resources::RecallRooms { default, by_class })
+}
+
+/// `values."Poisoned"` as a bool (a JSON bool, or the string "true").
+fn parse_poisoned(values: &serde_json::Value) -> bool {
+    match values.get("Poisoned") {
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(serde_json::Value::String(s)) => s.eq_ignore_ascii_case("true"),
+        _ => false,
+    }
 }
 
 fn parse_liquid(values: &serde_json::Value) -> Option<LiquidProto> {
