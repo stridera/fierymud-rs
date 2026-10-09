@@ -5408,30 +5408,6 @@ mod tests {
         assert_eq!(evaluate_formula("clamp(5, 20, 10)", &ctx, &mut zero), None);
     }
 
-    /// I.9: Magic Missile multihit bolt-count formula. The classic
-    /// "1 missile + 1 per 2 caster levels above 1, max 5" curve.
-    /// Inlined where the damage step reads the multihit flag; this
-    /// test pins the curve so a tweak doesn't accidentally drop a
-    /// bolt at L11 or extend past 5.
-    #[test]
-    fn multihit_bolt_count_curve() {
-        let bolts = |level: i32| (1 + (level - 1) / 2).clamp(1, 5);
-        assert_eq!(bolts(1), 1);
-        assert_eq!(bolts(2), 1);
-        assert_eq!(bolts(3), 2);
-        assert_eq!(bolts(5), 3);
-        assert_eq!(bolts(7), 4);
-        assert_eq!(bolts(9), 5);
-        assert_eq!(bolts(15), 5);
-        assert_eq!(bolts(100), 5);
-        // Below-min defends against a malformed character with
-        // level=0 (shouldn't happen, but the apply path treats
-        // 0 bolts as "spell does nothing" which would silently
-        // eat the cast).
-        assert_eq!(bolts(0), 1);
-        assert_eq!(bolts(-5), 1);
-    }
-
     /// J2: `PROT_FROM_EVIL` / `PROT_FROM_GOOD` damage factor returns
     /// 0.8 only when alignments are mutually opposed AND the
     /// matching marker is present on the victim.
@@ -15705,13 +15681,14 @@ pub(crate) fn invoke_ability_with(
                     ..formula_ctx
                 };
                 // I.9: `multihit: true` in the effect params signals
-                // a Magic-Missile-style multi-bolt spell. Bolt count
-                // scales with caster level using the classic
-                // 1 + (level - 1)/2, capped at 5 D&D ladder. Each
-                // bolt runs the whole damage pipeline on its own roll
-                // and sends its own messages (legacy calls `mag_damage`
-                // once per missile). Non-multihit spells take the
-                // bolts=1 path (identical to the single-roll behavior).
+                // a Magic-Missile-style multi-bolt spell. The bolt count
+                // is the `boltCount` formula in the same params (legacy
+                // `spell_magic_missile`: 1 + one skill-gated chance roll
+                // per tier, see `resolve_bolt_count`). Each bolt runs the
+                // whole damage pipeline on its own roll and sends its own
+                // messages (legacy calls `mag_damage` once per missile).
+                // Non-multihit spells take the bolts=1 path (identical to
+                // the single-roll behavior).
                 let multihit = spec
                     .override_params
                     .as_ref()
@@ -15719,7 +15696,11 @@ pub(crate) fn invoke_ability_with(
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false);
                 let bolt_count: i32 = if multihit {
-                    (1 + (caster_level - 1) / 2).clamp(1, 5)
+                    resolve_bolt_count(
+                        spec.override_params.as_ref(),
+                        Some(&spec.default_params),
+                        &per_target_ctx,
+                    )
                 } else {
                     1
                 };
@@ -16290,6 +16271,19 @@ pub(crate) fn invoke_ability_with(
                             render_ability_template(&r, &actor_name_pre, &target_name_pre, false)
                         });
                         cleanse_notes.push((line, room));
+                    }
+                }
+                if removed == 0 {
+                    // Legacy `spell_remove_paralysis`: "<target> can already
+                    // move just fine" when the target had nothing to lift.
+                    if let Some(t) = resolve_cleanse_noop_message(
+                        spec.override_params.as_ref(),
+                        Some(&spec.default_params),
+                        target_entity == player,
+                    ) {
+                        let line =
+                            render_ability_template(&t, &actor_name_pre, &target_name_pre, false);
+                        send_to(world, player, format!("{line}\r\n"));
                     }
                 }
                 applied_msgs.push(if removed == 0 {
@@ -19657,6 +19651,46 @@ pub(crate) fn resolve_cleanse_messages(
             .map(str::to_string)
     };
     (pick("message"), pick("roomMessage"))
+}
+
+/// The caster-only line a `cleanse` row prints when it finds nothing to
+/// remove (`noopMessage`; `noopMessageSelf` when the caster cleanses
+/// themselves, falling back to `noopMessage`). Override wins over default;
+/// a row without either stays silent.
+pub(crate) fn resolve_cleanse_noop_message(
+    override_params: Option<&serde_json::Value>,
+    default_params: Option<&serde_json::Value>,
+    is_self: bool,
+) -> Option<String> {
+    let pick = |key: &str| -> Option<String> {
+        [override_params, default_params]
+            .into_iter()
+            .flatten()
+            .find_map(|p| p.get(key).and_then(serde_json::Value::as_str))
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    if is_self {
+        pick("noopMessageSelf").or_else(|| pick("noopMessage"))
+    } else {
+        pick("noopMessage")
+    }
+}
+
+/// Number of bolts a `multihit` damage row fires: its `boltCount` formula
+/// (override wins over default), at least 1. A row without one fires a
+/// single bolt. The formula is re-rolled per cast, so it may use `random`.
+pub(crate) fn resolve_bolt_count(
+    override_params: Option<&serde_json::Value>,
+    default_params: Option<&serde_json::Value>,
+    ctx: &FormulaCtx,
+) -> i32 {
+    [override_params, default_params]
+        .into_iter()
+        .flatten()
+        .find_map(|p| p.get("boltCount"))
+        .and_then(|v| numeric_or_formula(v, ctx))
+        .map_or(1, |n| n.max(1))
 }
 
 /// Add `amount` to `target.Health.hp`, capped at `max`. Returns the

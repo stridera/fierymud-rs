@@ -22,6 +22,8 @@ fn remove_paralysis_row() -> EffectRows {
             "scope": "all",
             "message": "<b:yellow>Your body begins to move again.</>",
             "roomMessage": "<b:yellow>{target.name} begins to move again.</>",
+            "noopMessage": "{target.name} can already move just fine.",
+            "noopMessageSelf": "You can already move just fine.",
         })),
     )]
 }
@@ -166,7 +168,7 @@ fn remove_paralysis_leaves_web_alone_like_legacy() {
 }
 
 #[test]
-fn remove_paralysis_on_a_free_target_prints_nothing() {
+fn remove_paralysis_on_a_free_target_tells_only_the_caster() {
     let (mut fx, caster, mut crx, seer, mut srx, mut orx) = setup();
     cast(&mut fx, caster, "cast 'bless' seer");
     let _ = (drain(&mut crx), drain(&mut srx), drain(&mut orx));
@@ -174,7 +176,26 @@ fn remove_paralysis_on_a_free_target_prints_nothing() {
     cast(&mut fx, caster, "cast 'remove paralysis' seer");
 
     assert_eq!(effect_names(&mut fx.world, seer), vec!["bless"]);
-    for out in [drain(&mut srx), drain(&mut crx), drain(&mut orx)] {
+    // Legacy `spell_remove_paralysis`: "$N can already move just fine." to the caster only.
+    let said = drain(&mut crx);
+    assert!(said.contains("Seer can already move just fine."), "{said}");
+    let (patient, bystander) = (drain(&mut srx), drain(&mut orx));
+    for out in [&said, &patient, &bystander] {
         assert!(!out.contains("begins to move again"), "{out}");
     }
+    for out in [&patient, &bystander] {
+        assert!(!out.contains("can already move"), "{out}");
+    }
+}
+
+#[test]
+fn remove_paralysis_on_yourself_with_nothing_to_lift_says_you() {
+    let (mut fx, caster, mut crx, _seer, _srx, mut orx) = setup();
+    let _ = (drain(&mut crx), drain(&mut orx));
+
+    cast(&mut fx, caster, "cast 'remove paralysis' self");
+
+    let said = drain(&mut crx);
+    assert!(said.contains("You can already move just fine."), "{said}");
+    assert!(!drain(&mut orx).contains("can already move"));
 }
