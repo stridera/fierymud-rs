@@ -5,12 +5,13 @@
 use bevy_ecs::prelude::*;
 use mud_db::enums::{UserRole, effective_rank};
 use mud_world::{
-    Account, CommandGrants, Located, Named, Online, Player, Profile, Room, WorldKeyIndex,
+    Account, CommandGrants, ConfigValue, GrantEntry, GrantUsability, Located, Named, Online,
+    Player, Profile, Room, RuntimeConfig, WorldKeyIndex,
 };
 
 use super::dispatch;
 use super::test_support::{Rx, drain};
-use crate::commands::{Abbrev, Connection, resolve_abbrev};
+use crate::commands::{Abbrev, Command, Connection, all_commands, grant_usability, resolve_abbrev};
 
 fn world() -> (World, Entity) {
     let mut world = World::new();
@@ -108,24 +109,153 @@ fn a_revoke_closes_a_command_the_rank_allows() {
     assert!(drain(&mut bob_rx).contains("You can't do that."));
 }
 
+fn allow(world: &mut World, json: &str) {
+    let mut cfg = RuntimeConfig::default();
+    cfg.by_key.insert(
+        ("grants".into(), "mortal_allowlist".into()),
+        ConfigValue::Json(json.into()),
+    );
+    world.insert_resource(cfg);
+}
+
+fn entry(command: &str) -> GrantEntry {
+    GrantEntry {
+        command: command.into(),
+        grantor: "Boss".into(),
+        level: 105,
+    }
+}
+
+fn find(name: &str) -> &'static Command {
+    all_commands()
+        .find(|c| c.names[0] == name)
+        .unwrap_or_else(|| panic!("no command {name}"))
+}
+
 #[test]
-fn a_mortal_cannot_be_granted_above_the_cap() {
+fn a_mortal_is_refused_a_command_not_on_the_allowlist() {
     let (mut w, room) = world();
     let (boss, mut boss_rx) = person(&mut w, room, "Boss", 105);
     let (mort, _rx) = person(&mut w, room, "Mort", 20);
 
-    // Builder and Implementor commands are over the immortal-rank cap.
-    for cmd in ["goto", "send", "areload"] {
+    // The default allowlist is empty: even an immortal-rank command is refused.
+    for cmd in ["ptell", "goto", "send", "areload"] {
         dispatch(&mut w, boss, &format!("grant mort command {cmd}"));
         let out = drain(&mut boss_rx);
         assert!(out.contains("mortals can only be granted"), "{cmd}: {out}");
     }
+    // A listed command is still refused when it is over the rank cap or is a
+    // delegation command.
+    allow(&mut w, r#"["goto", "ptell", "grant"]"#);
+    dispatch(&mut w, boss, "grant mort command goto");
+    assert!(drain(&mut boss_rx).contains("mortals can only be granted"));
+    dispatch(&mut w, boss, "grant mort command grant");
+    assert!(drain(&mut boss_rx).contains("cannot itself be granted"));
     assert!(w.get::<CommandGrants>(mort).is_none());
+}
 
-    // An immortal-rank command is within the cap.
+#[test]
+fn a_mortal_granted_an_allowlisted_command_can_use_it() {
+    let (mut w, room) = world();
+    allow(&mut w, r#"["PTell"]"#);
+    let (boss, mut boss_rx) = person(&mut w, room, "Boss", 105);
+    let (mort, mut mort_rx) = person(&mut w, room, "Mort", 20);
+
+    dispatch(&mut w, mort, "ptell boss hi");
+    assert!(drain(&mut mort_rx).contains("You can't do that."));
+
     dispatch(&mut w, boss, "grant mort command ptell");
     assert!(drain(&mut boss_rx).contains("Granted ptell to Mort"));
     assert_eq!(grants_of(&w, mort).grants[0].command, "ptell");
+    dispatch(&mut w, mort, "ptell boss hi");
+    assert!(!drain(&mut mort_rx).contains("You can't do that."));
+
+    // Dropping it from the allowlist takes effect at the next use.
+    allow(&mut w, "[]");
+    dispatch(&mut w, mort, "ptell boss hi");
+    assert!(drain(&mut mort_rx).contains("You can't do that."));
+}
+
+#[test]
+fn a_demoted_accounts_staff_grants_are_ignored_at_use() {
+    let (mut w, room) = world();
+    allow(&mut w, "[]");
+    // A mortal-role account carrying hand-edited / left-over grants.
+    let (mort, mut rx) = person(&mut w, room, "Mort", 20);
+    w.entity_mut(mort).insert(CommandGrants {
+        grants: vec![entry("snoop"), entry("set")],
+        revokes: vec![],
+    });
+    for line in ["snoop boss", "set mort level 105"] {
+        dispatch(&mut w, mort, line);
+        assert!(drain(&mut rx).contains("You can't do that."), "{line}");
+    }
+    // The same grants work while the holder is still staff.
+    let (imm, mut imm_rx) = person(&mut w, room, "Imm", 100);
+    w.entity_mut(imm).insert(CommandGrants {
+        grants: vec![entry("snoop")],
+        revokes: vec![],
+    });
+    dispatch(&mut w, imm, "snoop nobody");
+    assert!(!drain(&mut imm_rx).contains("You can't do that."));
+    // Demote: the account role (and so the effective role) drops to Player.
+    {
+        let mut a = w.get_mut::<Account>(imm).unwrap();
+        a.account_role = UserRole::Player;
+        a.role = UserRole::Player;
+    }
+    dispatch(&mut w, imm, "snoop nobody");
+    assert!(drain(&mut imm_rx).contains("You can't do that."));
+}
+
+#[test]
+fn a_raised_min_role_makes_a_mortal_grant_ignored() {
+    // `Command` records are static, so build the "raised" copy by hand.
+    let ptell = find("ptell");
+    let raised = Command {
+        min_role: UserRole::Coder,
+        ..*ptell
+    };
+    let g = CommandGrants {
+        grants: vec![entry("ptell")],
+        revokes: vec![],
+    };
+    let list = vec!["ptell".to_string()];
+    assert_eq!(
+        grant_usability(ptell, UserRole::Player, Some(&g), &list),
+        GrantUsability::Granted
+    );
+    assert_eq!(
+        grant_usability(&raised, UserRole::Player, Some(&g), &list),
+        GrantUsability::NotGranted
+    );
+    // Staff still hold it (the staff rule is the role, not the command rank).
+    assert_eq!(
+        grant_usability(&raised, UserRole::Builder, Some(&g), &list),
+        GrantUsability::Granted
+    );
+    // A required permission also voids a mortal grant.
+    let perm = Command {
+        required_perm: Some(mud_db::enums::Permission::Build),
+        ..raised
+    };
+    let low = Command {
+        min_role: UserRole::Player,
+        ..perm
+    };
+    assert_eq!(
+        grant_usability(&low, UserRole::Player, Some(&g), &list),
+        GrantUsability::NotGranted
+    );
+    // Delegation commands are never honoured, even for staff.
+    let g = CommandGrants {
+        grants: vec![entry("grant")],
+        revokes: vec![],
+    };
+    assert_eq!(
+        grant_usability(find("grant"), UserRole::Builder, Some(&g), &list),
+        GrantUsability::NotGranted
+    );
 }
 
 #[test]
@@ -247,10 +377,76 @@ fn abbreviations_honour_grants() {
     };
     let hit = |grants: Option<&CommandGrants>| {
         matches!(
-            resolve_abbrev("sen", UserRole::Builder, &[], grants, None),
+            resolve_abbrev("sen", UserRole::Builder, &[], grants, &[], None),
             Some(Abbrev::Command(c)) if c.names[0] == "send"
         )
     };
     assert!(hit(Some(&g)));
     assert!(!hit(None));
+}
+
+#[test]
+fn nobody_can_edit_their_own_entries() {
+    let (mut w, room) = world();
+    let (coder, mut rx) = person(&mut w, room, "Coder", 104);
+    // A revoke placed above the coder's own level by a higher staffer.
+    let placed = CommandGrants {
+        grants: vec![],
+        revokes: vec![GrantEntry {
+            command: "goto".into(),
+            grantor: "Boss".into(),
+            level: 105,
+        }],
+    };
+    w.entity_mut(coder).insert(placed.clone());
+    for line in [
+        "grant coder clear",
+        "grant coder command stat",
+        "revoke coder command stat",
+        "ungrant coder command goto",
+        "ungrant coder command goto 105",
+    ] {
+        dispatch(&mut w, coder, line);
+        let out = drain(&mut rx);
+        assert!(
+            out.contains("You cannot grant or revoke your own commands."),
+            "{line}: {out}"
+        );
+        assert_eq!(grants_of(&w, coder), placed, "{line}");
+    }
+    // Listing your own is fine.
+    dispatch(&mut w, coder, "grant coder list");
+    assert!(drain(&mut rx).contains("Coder's revocations:"));
+}
+
+#[test]
+fn authority_ignores_a_character_level_above_the_implementor_cap() {
+    use super::grants::authority_level;
+    let (mut w, room) = world();
+    let (boss, mut boss_rx) = person(&mut w, room, "Boss", 105);
+    let (giant, mut giant_rx) = person(&mut w, room, "Giant", 130);
+    assert_eq!(authority_level(&w, giant), 105);
+    assert_eq!(authority_level(&w, boss), 105);
+
+    // Equal authority: neither can touch the other.
+    dispatch(&mut w, giant, "revoke boss command stat");
+    assert!(drain(&mut giant_rx).contains("You cannot grant or revoke Boss's commands."));
+    dispatch(&mut w, boss, "revoke giant command stat");
+    assert!(drain(&mut boss_rx).contains("You cannot grant or revoke Giant's commands."));
+    assert!(w.get::<CommandGrants>(boss).is_none());
+    assert!(w.get::<CommandGrants>(giant).is_none());
+
+    // The role sets the band: a mortal-role account with a runaway level
+    // stays below staff, and a coder's level cannot lift them past 104.
+    let (mort, _rx) = person(&mut w, room, "Mort", 130);
+    {
+        let mut a = w.get_mut::<Account>(mort).unwrap();
+        a.role = UserRole::Player;
+        a.account_role = UserRole::Player;
+    }
+    assert_eq!(authority_level(&w, mort), 99);
+    let (coder, _rx) = person(&mut w, room, "Coder", 104);
+    w.get_mut::<Profile>(coder).unwrap().level = 130;
+    w.get_mut::<Account>(coder).unwrap().role = UserRole::Coder;
+    assert_eq!(authority_level(&w, coder), 104);
 }

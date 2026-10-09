@@ -212,3 +212,76 @@ fn wave_wand_at_a_mob_spends_a_charge() {
     assert!(out.contains("Name: a snarling goblin"), "{out}");
     assert_eq!(world.get::<Charges>(wand).map(|c| c.0), Some(2));
 }
+
+#[test]
+fn the_wait_after_a_broken_cast_blocks_every_kind_of_cast_but_not_movement() {
+    use crate::casting::{cast_lag_active, impose_cast_lag};
+    let (mut world, room, caster, mut rx) = world_with_identify();
+    world.insert_resource(crate::TickCount(100));
+    // A chant and a song alongside the spell, all known to the caster.
+    let mut catalog = world.resource_mut::<AbilityCatalog>();
+    for (id, name, kind) in [
+        (1, "Dirge", AbilityKind::Chant),
+        (2, "Aria", AbilityKind::Song),
+    ] {
+        let mut def = ability_def(id, name, kind);
+        def.cast_time_rounds = 0;
+        catalog.by_name.insert(name.to_lowercase(), def);
+    }
+    world.entity_mut(caster).insert(mud_world::KnownAbilities {
+        entries: vec![(IDENTIFY, 500, true), (1, 500, true), (2, 500, true)],
+    });
+    let goblin = goblin(&mut world, room);
+    let scroll = carry(
+        &mut world,
+        caster,
+        "a scroll of identify",
+        "scroll",
+        (30, 1),
+    );
+    let wand = carry(&mut world, caster, "a wand of identify", "wand", (30, 2));
+    let held = carry(&mut world, caster, "a held wand", "rod", (30, 2));
+    world
+        .entity_mut(held)
+        .insert(mud_world::EquippedSlot(mud_world::Slot::Hold));
+
+    impose_cast_lag(&mut world, caster);
+    assert!(cast_lag_active(&world, caster));
+    for line in [
+        "cast identify goblin",
+        "chant dirge",
+        "perform aria",
+        "recite scroll goblin",
+        "wave wand goblin",
+        "tap wand",
+        "use rod goblin",
+    ] {
+        dispatch(&mut world, caster, line);
+        let out = drain(&mut rx);
+        assert!(
+            out.contains("You are still recovering your concentration."),
+            "{line}: {out}"
+        );
+        assert!(!out.contains("Name: a snarling goblin"), "{line}: {out}");
+    }
+    assert!(alive(&world, scroll) && alive(&world, goblin));
+    assert_eq!(world.get::<Charges>(wand).map(|c| c.0), Some(3));
+    assert_eq!(world.get::<Charges>(held).map(|c| c.0), Some(3));
+
+    // Movement and flee are not casts.
+    for line in ["flee", "north", "look"] {
+        dispatch(&mut world, caster, line);
+        let out = drain(&mut rx);
+        assert!(
+            !out.contains("recovering your concentration"),
+            "{line}: {out}"
+        );
+    }
+
+    // The lag passes after two seconds and the same casts work again.
+    world.insert_resource(crate::TickCount(120));
+    dispatch(&mut world, caster, "recite scroll goblin");
+    let out = drain(&mut rx);
+    assert!(out.contains("Name: a snarling goblin"), "{out}");
+    assert!(!alive(&world, scroll), "scroll is spent by a landed cast");
+}

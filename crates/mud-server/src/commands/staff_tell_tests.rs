@@ -154,6 +154,22 @@ fn page_reaches_its_target_and_echoes() {
 }
 
 #[test]
+fn the_page_bells_survive_the_output_encoder() {
+    use mud_net::output::encode_frame;
+    use mud_net::{Charset, ColorDepth};
+    let (mut w, room) = world();
+    let (god, _god_rx) = person(&mut w, room, "God", 101);
+    let (_bob, mut bob_rx) = person(&mut w, room, "Bob", 20);
+    dispatch(&mut w, god, "page bob come here");
+    let mut wire = Vec::new();
+    while let Ok(frame) = bob_rx.try_recv() {
+        wire.extend(encode_frame(frame, ColorDepth::Ansi16, Charset::Utf8));
+    }
+    let text = String::from_utf8(wire).unwrap();
+    assert!(text.starts_with("\x07\x07*God* come here"), "{text:?}");
+}
+
+#[test]
 fn page_refusals_and_rules() {
     let (mut w, room) = world();
     let (god, mut god_rx) = person(&mut w, room, "God", 101);

@@ -900,11 +900,13 @@ pub async fn try_dispatch_async(
             |a| (a.role, a.perms.clone()),
         );
         let grants = world.get::<mud_world::CommandGrants>(player);
+        let allow = grants::mortal_allowlist_for(world, role, grants);
         match resolve_abbrev(
             &head,
             role,
             &perms,
             grants,
+            &allow,
             world.get_resource::<SocialRegistry>(),
         ) {
             Some(Abbrev::Command(cmd)) if abbrev_allowed(cmd) => {
@@ -1301,7 +1303,8 @@ fn dispatch_line(world: &mut World, player: Entity, line: &str, run: &mut AliasR
             |a| (a.role, a.perms.clone()),
         );
         let grants = world.get::<mud_world::CommandGrants>(player);
-        match resolve_abbrev(tokens[0], role, &perms, grants, registry)? {
+        let allow = grants::mortal_allowlist_for(world, role, grants);
+        match resolve_abbrev(tokens[0], role, &perms, grants, &allow, registry)? {
             Abbrev::Command(winner) => Some((winner, usize::from(abbrev_allowed(winner)))),
             Abbrev::Social(name) => {
                 social_word = name.to_string();
@@ -1459,6 +1462,10 @@ fn strip_articles(args: &str) -> String {
     }
 }
 
+/// Refusal for a new cast (spell, chant, song or item) during the wait
+/// state a broken-off cast leaves behind.
+pub(crate) const CAST_LAG_MSG: &str = "You are still recovering your concentration.\r\n";
+
 /// Legacy interpreter refusal for a non-`CMD_CAST` command mid-cast.
 const CASTING_BUSY_MSG: &str = "You are busy spellcasting...\r\n";
 
@@ -1557,11 +1564,9 @@ fn command_permitted(world: &World, player: Entity, cmd: &Command) -> bool {
         // whatever the rank. Only the typed-by-the-player origin reaches
         // here (the script-origin gate above already refused non-Player
         // commands), so a grant never widens what a script can run.
-        match world
-            .get::<mud_world::CommandGrants>(player)
-            .map_or(mud_world::GrantUsability::NotGranted, |g| {
-                g.usability(cmd.names[0])
-            }) {
+        let grants = world.get::<mud_world::CommandGrants>(player);
+        let allow = grants::mortal_allowlist_for(world, a.role, grants);
+        match grant_usability(cmd, a.role, grants, &allow) {
             mud_world::GrantUsability::Granted => return true,
             mud_world::GrantUsability::Revoked => return false,
             mud_world::GrantUsability::NotGranted => {}
@@ -1864,7 +1869,7 @@ pub(crate) fn resolve_by_prefix(
     role: UserRole,
     perms: &[Permission],
 ) -> Option<&'static Command> {
-    match resolve_abbrev(typed, role, perms, None, None) {
+    match resolve_abbrev(typed, role, perms, None, &[], None) {
         Some(Abbrev::Command(c)) => Some(c),
         _ => None,
     }
@@ -1882,6 +1887,7 @@ pub(crate) fn resolve_abbrev<'a>(
     role: UserRole,
     perms: &[Permission],
     grants: Option<&mud_world::CommandGrants>,
+    mortal_allowlist: &[String],
     socials: Option<&'a SocialRegistry>,
 ) -> Option<Abbrev<'a>> {
     if typed.is_empty() {
@@ -1893,7 +1899,7 @@ pub(crate) fn resolve_abbrev<'a>(
     // of theirs has a table position), by their primary name.
     let mut best_new_cmd: Option<(PrefixKey<'_>, &'static Command)> = None;
     for cmd in all_commands() {
-        if !visible_with(cmd, role, perms, grants) {
+        if !visible_with(cmd, role, perms, grants, mortal_allowlist) {
             continue;
         }
         let new_to_rust = cmd.names.iter().all(|n| priority::legacy_rank(n).is_none());
@@ -9701,18 +9707,40 @@ pub(crate) fn visible(cmd: &Command, role: UserRole, perms: &[Permission]) -> bo
     role.at_least(cmd.min_role) && cmd.required_perm.is_none_or(|p| perms.contains(&p))
 }
 
+/// What the character's `grant` / `revoke` lists say about `cmd` *right
+/// now*. A revoke always stands. A grant is only a grant while
+/// [`grants::grant_honoured`] still allows it for the holder's current role
+/// and the command's current rank, so a demoted account, a command raised
+/// since, or a hand-edited row cannot keep a command it should not have.
+/// `mortal_allowlist` is the `grants.mortal_allowlist` config (see
+/// [`grants::mortal_allowlist_for`]).
+pub(crate) fn grant_usability(
+    cmd: &Command,
+    role: UserRole,
+    grants: Option<&mud_world::CommandGrants>,
+    mortal_allowlist: &[String],
+) -> mud_world::GrantUsability {
+    use mud_world::GrantUsability;
+    match grants.map_or(GrantUsability::NotGranted, |g| g.usability(cmd.names[0])) {
+        GrantUsability::Granted if grants::grant_honoured(cmd, role, mortal_allowlist) => {
+            GrantUsability::Granted
+        }
+        GrantUsability::Granted => GrantUsability::NotGranted,
+        other => other,
+    }
+}
+
 /// [`visible`] with the character's `grant` / `revoke` lists applied
-/// (legacy `can_use_command`): a granted command is visible whatever the
-/// rank, a revoked one is not.
+/// (legacy `can_use_command`): a honoured grant is visible whatever the
+/// rank, a revoked command is not. See [`grant_usability`].
 pub(crate) fn visible_with(
     cmd: &Command,
     role: UserRole,
     perms: &[Permission],
     grants: Option<&mud_world::CommandGrants>,
+    mortal_allowlist: &[String],
 ) -> bool {
-    match grants.map_or(mud_world::GrantUsability::NotGranted, |g| {
-        g.usability(cmd.names[0])
-    }) {
+    match grant_usability(cmd, role, grants, mortal_allowlist) {
         mud_world::GrantUsability::Granted => true,
         mud_world::GrantUsability::Revoked => false,
         mud_world::GrantUsability::NotGranted => visible(cmd, role, perms),
@@ -12906,6 +12934,12 @@ pub(crate) fn invoke_item_abilities(
     single_use: bool,
     flavor: Option<UseFlavor>,
 ) {
+    // Every item cast (recite, wave, tap, use, play, quaff) waits out the
+    // lag a broken-off cast leaves, before anything is shown or spent.
+    if crate::casting::cast_lag_active(world, player) {
+        send_to(world, player, CAST_LAG_MSG);
+        return;
+    }
     let item_name = name_of(world, item);
     let key = world.get::<WorldKey>(item).copied();
     let Some(key) = key else {
@@ -14994,18 +15028,15 @@ pub(crate) fn invoke_ability_with(
         return;
     }
     // A chant that was broken off leaves the caster in a short wait state
-    // (legacy `STOP_CASTING`); no new cast until it passes.
-    if !skip_queue
-        && !from_item
+    // (legacy `STOP_CASTING`); no new cast until it passes. Item casts
+    // wait too: the legacy wait state blocked every command. (A queued
+    // cast resolving after its wind-up is not a new cast.)
+    if (from_item || !skip_queue)
         && !aoe_repeat
         && !matches!(kind, mud_db::abilities::AbilityKind::Skill)
         && crate::casting::cast_lag_active(world, player)
     {
-        send_to(
-            world,
-            player,
-            "You are still recovering your concentration.\r\n",
-        );
+        send_to(world, player, CAST_LAG_MSG);
         return;
     }
     // NoMagicRoom gate — `Room.allows_magic = false` marks dead-

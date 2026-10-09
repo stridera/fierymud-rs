@@ -16,8 +16,15 @@
 //! Tightened (this is authorization code):
 //! - the entry level cannot exceed the grantor's own level;
 //! - the delegation commands themselves cannot be granted;
-//! - a mortal can only be granted commands up to immortal rank with no
-//!   permission requirement ([`MORTAL_GRANT_CAP`]).
+//! - a mortal (effective role Player) can only be granted a command that is
+//!   on the `grants.mortal_allowlist` `GameConfig` row (a JSON array of command
+//!   names, empty by default), has no permission requirement, is no higher than
+//!   [`MORTAL_GRANT_CAP`] and is not a delegation command;
+//! - a grant is re-checked every time the command is used
+//!   ([`grant_honoured`]), not just when it is made, so a demotion, a command
+//!   raised since, or a hand-edited row cannot keep access the rules would
+//!   not give today;
+//! - nobody can grant, revoke, ungrant or clear their own entries.
 //!
 //! Not ported: command groups and privilege flags (`grant <n> group|flag`).
 //! This server has no command-group table or privilege-flag set.
@@ -31,14 +38,77 @@ use crate::commands::{
     try_insert, visible_with,
 };
 
-/// Highest command rank a mortal (no staff role) may be granted. Legacy
-/// had no explicit cap beyond "the grantor can use it"; granting a mortal
-/// builder or coder commands is an escalation path this port refuses.
+/// Staff floor and mortal ceiling for grants. A grant is honoured for a
+/// holder whose effective role is at least this; a mortal's grant must
+/// also be no higher than this rank (on top of the allowlist). Legacy had
+/// no cap beyond "the grantor can use it"; granting builder or coder
+/// commands to mortals is an escalation path this port refuses.
 pub(crate) const MORTAL_GRANT_CAP: UserRole = UserRole::Immortal;
 
 /// Commands that hand out or take back access. Granting these would let a
 /// grantee mint further grants, so they are never grantable.
 const DELEGATION_COMMANDS: &[&str] = &["grant", "revoke", "ungrant"];
+
+/// `GameConfig` `(category, key)` of the mortal allowlist: a JSON array of
+/// command names a mortal may hold a grant for. Empty (no mortal grants)
+/// when the row is missing or malformed.
+const MORTAL_ALLOWLIST_KEY: (&str, &str) = ("grants", "mortal_allowlist");
+
+/// The `grants.mortal_allowlist` command names, lowercased.
+fn mortal_allowlist(world: &World) -> Vec<String> {
+    let raw = world
+        .get_resource::<mud_world::RuntimeConfig>()
+        .map_or("", |c| {
+            c.get_string(MORTAL_ALLOWLIST_KEY.0, MORTAL_ALLOWLIST_KEY.1, "")
+        });
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    match serde_json::from_str::<Vec<String>>(raw) {
+        Ok(names) => names.into_iter().map(|n| n.to_ascii_lowercase()).collect(),
+        Err(e) => {
+            tracing::error!(error = %e, "GameConfig grants.mortal_allowlist is not a JSON array of command names");
+            Vec::new()
+        }
+    }
+}
+
+/// The allowlist to apply to a holder, read only when it can matter (a
+/// mortal with grants) so ordinary dispatch does not touch the config.
+pub(crate) fn mortal_allowlist_for(
+    world: &World,
+    role: UserRole,
+    grants: Option<&CommandGrants>,
+) -> Vec<String> {
+    if role == UserRole::Player && grants.is_some_and(|g| !g.grants.is_empty()) {
+        mortal_allowlist(world)
+    } else {
+        Vec::new()
+    }
+}
+
+/// Whether a grant on `cmd` stands for a holder whose *current* effective
+/// role is `role`. Evaluated on every use and again when a grant is made,
+/// so `grant` refuses exactly what use would ignore.
+/// - delegation commands are never honoured;
+/// - a mortal needs the command on the allowlist, no `required_perm`, and a
+///   `min_role` no higher than [`MORTAL_GRANT_CAP`];
+/// - staff need a role of at least [`MORTAL_GRANT_CAP`].
+pub(crate) fn grant_honoured(cmd: &Command, role: UserRole, mortal_allowlist: &[String]) -> bool {
+    if DELEGATION_COMMANDS.contains(&cmd.names[0]) {
+        return false;
+    }
+    if role == UserRole::Player {
+        cmd.required_perm.is_none()
+            && MORTAL_GRANT_CAP.at_least(cmd.min_role)
+            && cmd
+                .names
+                .iter()
+                .any(|n| mortal_allowlist.iter().any(|a| a == n))
+    } else {
+        role.at_least(MORTAL_GRANT_CAP)
+    }
+}
 
 const NO_PERSON: &str = "There is no one by that name here.\r\n";
 
@@ -67,8 +137,8 @@ impl Action {
 const GRANT_LONG: &str = "Coder+. Per-character command access. A grant lets a character use one \
 command above their rank; a revoke takes a command away. Only online players strictly below \
 your level, and only commands you can use yourself. 'grant <name>' lists a character's grants \
-and revokes; 'grant <name> clear' drops the ones at or below your level. A mortal can be \
-granted commands up to immortal rank only. Command groups and privilege flags do not exist \
+and revokes; 'grant <name> clear' drops the ones at or below your level. A mortal can only be \
+granted commands on the grants.mortal_allowlist config row (empty by default). Command groups and privilege flags do not exist \
 on this server.";
 
 macro_rules! grant_command {
@@ -121,20 +191,28 @@ fn cmd_ungrant(world: &mut World, player: Entity, args: &str) {
     run(world, player, args, Action::Ungrant);
 }
 
-/// Effective level for the grant ordering: the character level, raised to
-/// the floor of their staff role so an account-promoted staffer whose
-/// character is still low level outranks the people they manage.
+/// Highest level that counts for the grant ordering: the implementor
+/// level. A character level above it (set through Muditor, say) must not
+/// outrank an implementor.
+const MAX_AUTHORITY_LEVEL: i32 = 105;
+
+/// Effective level for the grant ordering. The staff role comes first: it
+/// sets a band, and the character level only places someone inside their
+/// band (an account-promoted staffer whose character is still low level
+/// sits at the floor of the band and outranks the people they manage; a
+/// character level past the band does not lift them out of it). A mortal's
+/// level never reaches staff territory. Capped at [`MAX_AUTHORITY_LEVEL`].
 pub(crate) fn authority_level(world: &World, e: Entity) -> i32 {
     let level = world.get::<Profile>(e).map_or(0, |p| p.level);
-    let floor = match world.get::<Account>(e).map(|a| a.role) {
-        Some(UserRole::Implementor) => 105,
-        Some(UserRole::Coder) => 104,
-        Some(UserRole::HeadBuilder) => 103,
-        Some(UserRole::Builder) => 101,
-        Some(UserRole::Immortal) => 100,
-        _ => 0,
+    let (floor, ceiling) = match world.get::<Account>(e).map(|a| a.role) {
+        Some(UserRole::Implementor) => (105, 105),
+        Some(UserRole::Coder) => (104, 104),
+        Some(UserRole::HeadBuilder) => (103, 103),
+        Some(UserRole::Builder) => (101, 102),
+        Some(UserRole::Immortal) => (100, 100),
+        _ => (0, 99),
     };
-    level.max(floor)
+    level.clamp(floor, ceiling).min(MAX_AUTHORITY_LEVEL)
 }
 
 fn run(world: &mut World, player: Entity, args: &str, action: Action) {
@@ -168,7 +246,13 @@ fn run(world: &mut World, player: Entity, args: &str, action: Action) {
 
     if action == Action::Grant && mine >= theirs && (sub.is_empty() || abbrev(sub, "list")) {
         list_grants(world, player, target, &target_display);
-    } else if target != player && mine <= theirs {
+    } else if target == player {
+        send_to(
+            world,
+            player,
+            "You cannot grant or revoke your own commands.\r\n",
+        );
+    } else if mine <= theirs {
         send_to(
             world,
             player,
@@ -240,21 +324,18 @@ fn find_command(world: &World, player: Entity, typed: &str) -> Option<&'static C
         return Some(c);
     }
     let acct = world.get::<Account>(player)?;
-    match resolve_abbrev(
-        &typed,
-        acct.role,
-        &acct.perms,
-        world.get::<CommandGrants>(player),
-        None,
-    )? {
+    let grants = world.get::<CommandGrants>(player);
+    let allow = mortal_allowlist_for(world, acct.role, grants);
+    match resolve_abbrev(&typed, acct.role, &acct.perms, grants, &allow, None)? {
         Abbrev::Command(c) => Some(c),
         Abbrev::Social(_) => None,
     }
 }
 
 /// Why `player` may not apply `action` for `cmd` to `target`, if they may
-/// not: the command must be one they can use, and a grant is further
-/// limited by the delegation rule and the mortal cap.
+/// not: the command must be one they can use, and a grant must be one that
+/// would be honoured at use ([`grant_honoured`]) for the target's current
+/// role, so `grant` never records an entry the dispatcher would ignore.
 fn grant_refusal(
     world: &World,
     player: Entity,
@@ -263,9 +344,11 @@ fn grant_refusal(
     action: Action,
     cmd: &'static Command,
 ) -> Option<String> {
-    let usable = world
-        .get::<Account>(player)
-        .is_some_and(|a| visible_with(cmd, a.role, &a.perms, world.get::<CommandGrants>(player)));
+    let usable = world.get::<Account>(player).is_some_and(|a| {
+        let grants = world.get::<CommandGrants>(player);
+        let allow = mortal_allowlist_for(world, a.role, grants);
+        visible_with(cmd, a.role, &a.perms, grants, &allow)
+    });
     if !usable {
         return Some("You cannot grant or revoke a command you yourself cannot use.\r\n".into());
     }
@@ -275,15 +358,21 @@ fn grant_refusal(
     if DELEGATION_COMMANDS.contains(&cmd.names[0]) {
         return Some("Access to grant, revoke and ungrant cannot itself be granted.\r\n".into());
     }
-    let target_is_mortal = world
+    let target_role = world
         .get::<Account>(target)
-        .is_some_and(|a| a.role == UserRole::Player);
-    if target_is_mortal && (!MORTAL_GRANT_CAP.at_least(cmd.min_role) || cmd.required_perm.is_some())
-    {
-        return Some(format!(
-            "{target_name} is a mortal; mortals can only be granted commands up to immortal \
-             rank.\r\n"
-        ));
+        .map_or(UserRole::Player, |a| a.role);
+    if !grant_honoured(cmd, target_role, &mortal_allowlist(world)) {
+        return Some(if target_role == UserRole::Player {
+            format!(
+                "{target_name} is a mortal; mortals can only be granted commands on the mortal \
+                 allowlist (up to immortal rank, no permission requirement).\r\n"
+            )
+        } else {
+            format!(
+                "{target_name}'s role cannot be granted {}.\r\n",
+                cmd.names[0]
+            )
+        });
     }
     None
 }

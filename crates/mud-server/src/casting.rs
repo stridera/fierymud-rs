@@ -138,7 +138,7 @@ pub(crate) fn cast_lag_active(world: &World, caster: Entity) -> bool {
 /// Leave the caster of a wind-up that was just stopped in the legacy
 /// post-`STOP_CASTING` wait state. Staff have no wait states (`WAIT_STATE`
 /// clears theirs).
-fn impose_cast_lag(world: &mut World, caster: Entity) {
+pub(crate) fn impose_cast_lag(world: &mut World, caster: Entity) {
     if is_staff(world, caster) {
         return;
     }

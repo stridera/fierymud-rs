@@ -286,7 +286,7 @@ fn abbrev_name(typed: &str, role: UserRole, reg: &SocialRegistry) -> Option<Stri
     if longest_prefix_match(&[typed]).is_some() || reg.get(typed).is_some() {
         return Some(typed.to_string());
     }
-    match resolve_abbrev(typed, role, &[], None, Some(reg))? {
+    match resolve_abbrev(typed, role, &[], None, &[], Some(reg))? {
         Abbrev::Command(c) => Some(c.names[0].to_string()),
         Abbrev::Social(n) => Some(n.to_string()),
     }

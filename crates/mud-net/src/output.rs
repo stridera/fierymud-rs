@@ -301,10 +301,16 @@ fn is_clear_screen_frame(text: &str) -> bool {
 }
 
 /// Control characters that never belong in game text. Newlines and tabs
-/// survive (the encoder normalises line endings itself); everything else
-/// in C0, DEL and C1 is dropped.
+/// survive (the encoder normalises line endings itself), and so does BEL,
+/// the terminal bell the `page` command rings; everything else in C0, DEL
+/// and C1 is dropped. This is safe because no player-controlled text can
+/// carry a BEL to here: input drops every C0 byte at the line reader, and
+/// the colour renderer ([`strip_non_sgr_escapes`]) and the `sanitize_*`
+/// helpers still strip it, so only a raw frame built by the server (the
+/// `page` bells) delivers one. A BEL that ends an OSC sequence is consumed
+/// with the rest of that sequence before this check runs.
 fn is_forbidden_control(c: char) -> bool {
-    c.is_control() && !matches!(c, '\n' | '\r' | '\t')
+    c.is_control() && !matches!(c, '\n' | '\r' | '\t' | '\x07')
 }
 
 /// Result of scanning one escape sequence that starts at an `ESC`.
@@ -954,9 +960,40 @@ mod tests {
             // DCS, bare ESC resets, C1 introducers, stray controls.
             assert_eq!(enc("a\x1bPq data\x1b\\b", depth, Charset::Utf8), "ab");
             assert_eq!(enc("a\x1bcb\x1b7c", depth, Charset::Utf8), "abc");
-            assert_eq!(enc("a\u{9b}2Jb\u{9d}x\x07", depth, Charset::Utf8), "a2Jbx");
+            assert_eq!(enc("a\u{9b}2Jb\u{9d}x", depth, Charset::Utf8), "a2Jbx");
             assert_eq!(enc("a\x08\x0c\x7fb", depth, Charset::Utf8), "ab");
         }
+    }
+
+    #[test]
+    fn bel_survives_encoding_and_nothing_else_does() {
+        for depth in [ColorDepth::None, ColorDepth::Ansi16, ColorDepth::TrueColor] {
+            for charset in [Charset::Utf8, Charset::Ascii] {
+                // The `page` frame: two bells in front of the text, as bytes.
+                assert_eq!(
+                    encode_frame(b"\x07\x07Boss pages you: hi\r\n".to_vec(), depth, charset),
+                    b"\x07\x07Boss pages you: hi\r\n".to_vec()
+                );
+                // A bare LF still becomes CRLF around a bell.
+                assert_eq!(
+                    encode_frame(b"\x07x\n".to_vec(), depth, charset),
+                    b"\x07x\r\n".to_vec()
+                );
+                // Every other C0 byte, DEL and the escape sequences still go;
+                // an OSC ended by BEL is consumed whole, bell included.
+                assert_eq!(
+                    encode_frame(
+                        b"a\x07\x01\x08\x0c\x7f\x1b[2J\x1b]52;c;QUJD\x07b".to_vec(),
+                        depth,
+                        charset
+                    ),
+                    b"a\x07b".to_vec()
+                );
+            }
+        }
+        // The text sanitisers still strip it: it can only be added by the server.
+        assert_eq!(sanitize_text("a\x07b", false), "ab");
+        assert_eq!(strip_non_sgr_escapes("a\x07b"), "ab");
     }
 
     #[test]
