@@ -485,6 +485,9 @@ mod item_effects_tests;
 #[path = "commands/item_tag_tests.rs"]
 mod item_tag_tests;
 #[cfg(test)]
+#[path = "commands/legacy_spell_data_tests.rs"]
+mod legacy_spell_data_tests;
+#[cfg(test)]
 #[path = "commands/look_aura_tests.rs"]
 mod look_aura_tests;
 #[cfg(test)]
@@ -4965,6 +4968,69 @@ mod tests {
             evaluate_formula("pow(skill, 1 + min_level / 10)", &ctx, &mut zero),
             Some(80)
         );
+    }
+
+    /// `caster_is_player` / `target_is_player` (legacy `IS_NPC` checks) and
+    /// `target_max_stamina` (legacy `GET_MAX_MOVE`): 0 by default, aliased.
+    #[test]
+    fn evaluate_formula_player_and_max_stamina_symbols() {
+        let mut zero = |_: &str, _: i32, _: i32| 0i32;
+        let neutral = FormulaCtx::default();
+        for sym in [
+            "caster_is_player",
+            "actor_is_player",
+            "target_is_player",
+            "victim_is_player",
+            "target_max_stamina",
+            "victim_max_stamina",
+            "target_max_move",
+        ] {
+            assert_eq!(evaluate_formula(sym, &neutral, &mut zero), Some(0), "{sym}");
+        }
+        let pvp = FormulaCtx {
+            caster_is_player: 1,
+            target_is_player: 1,
+            target_max_stamina: 180,
+            ..FormulaCtx::default()
+        };
+        assert_eq!(
+            evaluate_formula("actor_is_player", &pvp, &mut zero),
+            Some(1)
+        );
+        assert_eq!(
+            evaluate_formula("caster_is_player", &pvp, &mut zero),
+            Some(1)
+        );
+        assert_eq!(
+            evaluate_formula("target_is_player", &pvp, &mut zero),
+            Some(1)
+        );
+        assert_eq!(
+            evaluate_formula("victim_is_player", &pvp, &mut zero),
+            Some(1)
+        );
+        assert_eq!(
+            evaluate_formula("target_max_stamina", &pvp, &mut zero),
+            Some(180)
+        );
+        assert_eq!(
+            evaluate_formula("target_max_move", &pvp, &mut zero),
+            Some(180)
+        );
+        // The Sunray dice: an arithmetic dice count from the two flags.
+        let dice = "roll_dice(20 + 10 * actor_is_player * target_is_player, 10)";
+        let mut echo = |_: &str, n: i32, m: i32| n * 1000 + m;
+        assert_eq!(evaluate_formula(dice, &pvp, &mut echo), Some(30_010));
+        let pve = FormulaCtx {
+            caster_is_player: 1,
+            ..FormulaCtx::default()
+        };
+        assert_eq!(evaluate_formula(dice, &pve, &mut echo), Some(20_010));
+        let eve = FormulaCtx {
+            target_is_player: 1,
+            ..FormulaCtx::default()
+        };
+        assert_eq!(evaluate_formula(dice, &eve, &mut echo), Some(20_010));
     }
 
     /// Wave 2 of the per-target lifeform symbols. Used by smite-type
@@ -15033,6 +15099,10 @@ pub(crate) fn invoke_ability_with(
         victim_is_demonic: 0,
         victim_is_celestial: 0,
         victim_is_elemental: 0,
+        caster_is_player: i32::from(world.get::<Player>(player).is_some()),
+        // Populated per-target at apply time, like the victim_* fields.
+        target_is_player: 0,
+        target_max_stamina: 0,
     };
     // A violent ability (backstab included) gives a hiding caster away;
     // `caster_hidden` above already carries the opening-strike bonus.
@@ -15420,6 +15490,8 @@ pub(crate) fn invoke_ability_with(
                     victim_is_demonic: lf(mud_db::enums::LifeForce::Demonic),
                     victim_is_celestial: lf(mud_db::enums::LifeForce::Celestial),
                     victim_is_elemental: lf(mud_db::enums::LifeForce::Elemental),
+                    target_is_player: i32::from(world.get::<Player>(target_entity).is_some()),
+                    target_max_stamina: world.get::<Stamina>(target_entity).map_or(0, |s| s.max),
                     ..formula_ctx
                 };
                 // I.9: `multihit: true` in the effect params signals
@@ -15841,10 +15913,19 @@ pub(crate) fn invoke_ability_with(
                 }
             }
             "heal" => {
+                // Target-side symbols (`target_max_stamina`, ...) resolve
+                // against whoever this heal lands on.
+                let heal_ctx = FormulaCtx {
+                    target_max_hp: world.get::<Health>(target_entity).map_or(0, |h| h.max),
+                    target_level: world.get::<Profile>(target_entity).map_or(0, |p| p.level),
+                    target_is_player: i32::from(world.get::<Player>(target_entity).is_some()),
+                    target_max_stamina: world.get::<Stamina>(target_entity).map_or(0, |s| s.max),
+                    ..formula_ctx
+                };
                 let amount = resolve_effect_amount(
                     spec.override_params.as_ref(),
                     Some(&spec.default_params),
-                    &formula_ctx,
+                    &heal_ctx,
                 );
                 let Some(mut amount) = amount else {
                     applied_msgs.push(format!("{pretty} (no amount resolved)"));
@@ -20198,6 +20279,19 @@ pub(crate) struct FormulaCtx {
     /// 1 when the target carries `LifeForceTag(Elemental)`. Used
     /// by abjuration / dispel-elemental spells.
     victim_is_elemental: i32,
+    /// 1 when the caster is a player (`Player` marker), 0 for a mob.
+    /// With `target_is_player` it expresses legacy's PC-vs-PC branch
+    /// (`!IS_NPC(ch) && !IS_NPC(victim)`): SUNRAY rolls 30d10 then,
+    /// 20d10 otherwise.
+    caster_is_player: i32,
+    /// 1 when the target is a player (`Player` marker), 0 for a mob.
+    /// Populated per-target at apply time.
+    target_is_player: i32,
+    /// Target's `Stamina.max` (legacy `GET_MAX_MOVE`). INVIGORATE's
+    /// "restore all stamina" is `target_max_stamina`; the heal clamps
+    /// at the maximum, so it fills exactly. 0 when the target has no
+    /// stamina pool or no target has resolved yet.
+    target_max_stamina: i32,
 }
 
 impl FormulaCtx {
@@ -20245,6 +20339,11 @@ impl FormulaCtx {
             }
             "victim_is_elemental" | "victim_elemental" | "target_is_elemental" => {
                 Some(self.victim_is_elemental)
+            }
+            "caster_is_player" | "actor_is_player" => Some(self.caster_is_player),
+            "target_is_player" | "victim_is_player" => Some(self.target_is_player),
+            "target_max_stamina" | "victim_max_stamina" | "target_max_move" => {
+                Some(self.target_max_stamina)
             }
             _ => None,
         }

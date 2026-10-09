@@ -411,7 +411,7 @@ fn caster_with_blind_spells() -> (Fx, Entity, Rx) {
 pub(super) const STATUS: i32 = 10;
 pub(super) const CLEANSE: i32 = 11;
 pub(super) const MODIFY: i32 = 12;
-const DAMAGE: i32 = 13;
+pub(super) const DAMAGE: i32 = 13;
 
 /// `(effect id, override params)` rows of one ability.
 pub(super) type EffectRows = Vec<(i32, Option<serde_json::Value>)>;
