@@ -1409,19 +1409,24 @@ async fn qreward_claim(
         );
         return;
     }
-    // Grant the simple reward via the existing path (ITEM/HOUSING
-    // are announced rather than spawned). The single-row slice
-    // keeps the DB code shared with the auto-grant flow.
+    // Grant the simple reward via the existing path (ITEM is spawned
+    // by the update below). The single-row slice keeps the DB code
+    // shared with the auto-grant flow.
     let single = vec![reward.clone()];
-    if let Err(e) =
-        mud_db::quest_objectives::grant_simple_rewards(pool, character_id, &single).await
-    {
-        send_to(world, player, format!("Reward grant failed: {e}\r\n"));
-        return;
-    }
+    let outcome =
+        match mud_db::quest_objectives::grant_simple_rewards(pool, character_id, &single).await {
+            Ok(o) => o,
+            Err(e) => {
+                send_to(world, player, format!("Reward grant failed: {e}\r\n"));
+                return;
+            }
+        };
     // Mirror live ECS state for the running player. SpawnItem only
     // works for ITEM; the rest update Profile / Wealth / etc.
     let update_tx = world.get_resource::<PlayerUpdateTx>().map(|t| t.0.clone());
+    if outcome.house_created {
+        crate::quest_progress::announce_house(pool, character_id, update_tx.as_ref()).await;
+    }
     if let Some(tx) = update_tx {
         let upd = match reward.reward_type.as_str() {
             "EXPERIENCE" => reward.amount.map(|a| PendingPlayerUpdate::ExperienceDelta {
@@ -1474,6 +1479,9 @@ async fn qreward_claim(
     // content size, which is small relative to a single combat round.
     let remaining = count_pending_claims(pool, character_id, &new_claimed).await;
     let mut msg = format!("You claim your reward: {}.\r\n", describe_reward(&reward));
+    if reward.reward_type == "HOUSING" && !outcome.house_created {
+        msg.push_str("You already own a house, so nothing more is added.\r\n");
+    }
     msg.push_str(&match remaining {
         0 => "All your conditional / choice rewards are now claimed.\r\n".to_string(),
         1 => "1 reward still pending — type 'qreward' to view.\r\n".to_string(),
@@ -1565,7 +1573,7 @@ fn describe_reward(r: &mud_db::quest_objectives::QuestRewardRow) -> String {
             (Some(z), Some(id)) => format!("{q} × item ({z}, {id})"),
             _ => format!("{q} × item"),
         },
-        ("HOUSING", _, _) => "housing access".to_string(),
+        ("HOUSING", _, _) => "a house of your own".to_string(),
         (t, _, _) => format!("({t})"),
     }
 }
@@ -1666,7 +1674,7 @@ mod tests {
     #[test]
     fn describe_reward_housing() {
         let r = reward(8, "HOUSING");
-        assert_eq!(describe_reward(&r), "housing access");
+        assert_eq!(describe_reward(&r), "a house of your own");
     }
 
     #[test]

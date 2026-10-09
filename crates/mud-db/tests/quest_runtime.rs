@@ -6,7 +6,8 @@
 //! dev database is not reachable, like the other live-DB tests.
 
 use mud_db::quest_objectives::{
-    PhaseAdvance, list_kill_mob_progress, try_advance_phase, upsert_progress,
+    PhaseAdvance, QuestRewardRow, grant_simple_rewards, list_kill_mob_progress, try_advance_phase,
+    upsert_progress,
 };
 use mud_db::quests::{AcceptOutcome, accept_for_player};
 use sqlx::PgPool;
@@ -590,6 +591,58 @@ async fn concurrent_phase_checks_complete_the_quest_once() {
     let count: i32 =
         sqlx::query_scalar("SELECT completion_count FROM \"CharacterQuest\" WHERE id = $1")
             .bind(&cq)
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 1);
+    fx.end().await;
+}
+
+/// A HOUSING reward creates one house (with a foyer) and is a no-op
+/// the second time, so re-completing a quest never yields two houses.
+#[tokio::test]
+async fn housing_reward_is_granted_once() {
+    let Some(fx) = fixture().await else { return };
+    // Entrance fallback for races with no start room on record.
+    sqlx::query(
+        "UPDATE \"Characters\" SET current_room_zone_id = 1, current_room_id = 1 WHERE id = $1",
+    )
+    .bind(&fx.char_id)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    let housing = QuestRewardRow {
+        id: 1,
+        reward_type: "HOUSING".into(),
+        amount: None,
+        object_zone_id: None,
+        object_id: None,
+        ability_id: None,
+        quantity: 1,
+        choice_group: None,
+        condition: None,
+    };
+    let first = grant_simple_rewards(&fx.pool, &fx.char_id, std::slice::from_ref(&housing))
+        .await
+        .unwrap();
+    assert!(first.house_created);
+    let second = grant_simple_rewards(&fx.pool, &fx.char_id, &[housing.clone(), housing])
+        .await
+        .unwrap();
+    assert!(!second.house_created, "repeat grant is a no-op");
+
+    let house = mud_db::housing::for_character(&fx.pool, &fx.char_id)
+        .await
+        .unwrap()
+        .expect("house exists");
+    let rooms = mud_db::housing::rooms_for_house(&fx.pool, house.id)
+        .await
+        .unwrap();
+    assert_eq!(rooms.len(), 1);
+    assert_eq!(rooms[0].local_index, 0, "foyer");
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM player_houses WHERE character_id = $1")
+            .bind(&fx.char_id)
             .fetch_one(&fx.pool)
             .await
             .unwrap();

@@ -227,8 +227,8 @@ pub async fn create_house(
     let house_row = sqlx::query!(
         r#"
         INSERT INTO player_houses
-            (character_id, entrance_room_zone_id, entrance_room_id)
-        VALUES ($1, $2, $3)
+            (character_id, entrance_room_zone_id, entrance_room_id, updated_at)
+        VALUES ($1, $2, $3, NOW())
         RETURNING id
         "#,
         character_id,
@@ -237,18 +237,63 @@ pub async fn create_house(
     )
     .fetch_one(&mut *tx)
     .await?;
+    let foyer_id = insert_foyer(&mut tx, house_row.id).await?;
+    tx.commit().await?;
+    Ok((house_row.id, foyer_id))
+}
+
+async fn insert_foyer(conn: &mut sqlx::PgConnection, house_id: i32) -> sqlx::Result<i32> {
     let foyer_row = sqlx::query!(
         r#"
-        INSERT INTO player_house_rooms (house_id, local_index, name, description)
-        VALUES ($1, 0, 'Your Foyer', 'A simple foyer welcomes you home.')
+        INSERT INTO player_house_rooms (house_id, local_index, name, description, updated_at)
+        VALUES ($1, 0, 'Your Foyer', 'A simple foyer welcomes you home.', NOW())
         RETURNING id
         "#,
-        house_row.id,
+        house_id,
     )
-    .fetch_one(&mut *tx)
+    .fetch_one(conn)
     .await?;
-    tx.commit().await?;
-    Ok((house_row.id, foyer_row.id))
+    Ok(foyer_row.id)
+}
+
+/// Quest-reward housing grant: give `character_id` a house (with a
+/// foyer) unless they already own one. The entrance is the character's
+/// race start room, falling back to the room they last stood in; with
+/// neither on record nothing is granted. Idempotent: the unique
+/// `character_id` constraint turns a repeat into a no-op, so
+/// re-completing a quest never yields a second house. Runs on the
+/// caller's connection so it commits with the rest of the rewards.
+/// Returns `Some(house_id)` only when a house was created now.
+pub async fn grant_house(
+    conn: &mut sqlx::PgConnection,
+    character_id: &str,
+) -> sqlx::Result<Option<i32>> {
+    let created = sqlx::query!(
+        r#"
+        INSERT INTO player_houses
+            (character_id, entrance_room_zone_id, entrance_room_id, updated_at)
+        SELECT
+            c.id,
+            COALESCE(r.start_room_zone_id, c.current_room_zone_id),
+            COALESCE(r.start_room_id, c.current_room_id),
+            NOW()
+        FROM "Characters" c
+        LEFT JOIN "Races" r ON r.race = c.race
+        WHERE c.id = $1
+          AND COALESCE(r.start_room_zone_id, c.current_room_zone_id) IS NOT NULL
+          AND COALESCE(r.start_room_id, c.current_room_id) IS NOT NULL
+        ON CONFLICT (character_id) DO NOTHING
+        RETURNING id
+        "#,
+        character_id,
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some(row) = created else {
+        return Ok(None);
+    };
+    insert_foyer(conn, row.id).await?;
+    Ok(Some(row.id))
 }
 
 /// Delete a house. Cascades remove rooms / items / guests / exits

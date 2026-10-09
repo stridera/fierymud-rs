@@ -231,8 +231,15 @@ pub(crate) async fn grant_completion_rewards(
         return;
     }
     let cid = &notify.character_id;
-    if let Err(e) = mud_db::quest_objectives::grant_simple_rewards(pool, cid, &rewards).await {
-        tracing::warn!(error = %e, "reward grant failed");
+    let outcome = match mud_db::quest_objectives::grant_simple_rewards(pool, cid, &rewards).await {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!(error = %e, "reward grant failed");
+            mud_db::quest_objectives::GrantOutcome::default()
+        }
+    };
+    if outcome.house_created {
+        announce_house(pool, cid, notify.update_tx.as_ref()).await;
     }
     for r in &rewards {
         let update = match r.reward_type.as_str() {
@@ -277,7 +284,10 @@ pub(crate) async fn grant_completion_rewards(
             ("SKILL_POINTS", Some(a), _) => format!("  +{a} skill points\r\n"),
             ("ABILITY", _, _) => "  +1 new ability\r\n".to_string(),
             ("ITEM", _, q) => format!("  +{q} item(s)\r\n"),
-            ("HOUSING", _, _) => "  +housing access — see questgiver\r\n".to_string(),
+            ("HOUSING", _, _) if outcome.house_created => {
+                "  +a house of your own — type 'home'\r\n".to_string()
+            }
+            ("HOUSING", _, _) => "  housing (you already own a house)\r\n".to_string(),
             _ => continue,
         };
         buf.push_str(&line);
@@ -285,6 +295,34 @@ pub(crate) async fn grant_completion_rewards(
     if buf.len() > "Rewards:\r\n".len() {
         notify.say(&buf);
     }
+}
+
+/// Hand the online player the house a HOUSING reward just created:
+/// load the new rows and queue the world-side `HouseSummary` insert.
+pub(crate) async fn announce_house(
+    pool: &mud_db::sqlx::PgPool,
+    character_id: &str,
+    update_tx: Option<&tokio::sync::mpsc::Sender<PendingPlayerUpdate>>,
+) {
+    let Some(tx) = update_tx else { return };
+    let house = match mud_db::housing::for_character(pool, character_id).await {
+        Ok(Some(h)) => h,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!(error = %e, "housing reward: reload failed");
+            return;
+        }
+    };
+    let rooms = mud_db::housing::rooms_for_house(pool, house.id)
+        .await
+        .unwrap_or_default();
+    let _ = tx
+        .send(PendingPlayerUpdate::HouseGranted {
+            character_id: character_id.to_string(),
+            house,
+            rooms,
+        })
+        .await;
 }
 
 /// How many of each prototype `holder` carries directly (inventory and

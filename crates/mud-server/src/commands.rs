@@ -76,6 +76,14 @@ pub enum PendingPlayerUpdate {
         object_id: i32,
         quantity: i32,
     },
+    /// A HOUSING quest reward just created this character's house in
+    /// the database: give the online player its `HouseSummary` so
+    /// `home` works without a relog.
+    HouseGranted {
+        character_id: String,
+        house: mud_db::housing::PlayerHouseRow,
+        rooms: Vec<mud_db::housing::PlayerHouseRoomRow>,
+    },
     /// The character's quest just entered a new phase; credit any
     /// COLLECT objectives from what they already carry.
     QuestPhaseEntered { character_id: String },
@@ -134,6 +142,7 @@ impl PendingPlayerUpdate {
             | Self::SkillPointsDelta { character_id, .. }
             | Self::AbilityKnown { character_id, .. }
             | Self::SpawnItem { character_id, .. }
+            | Self::HouseGranted { character_id, .. }
             | Self::QuestPhaseEntered { character_id }
             | Self::CollectClaimed { character_id, .. }
             | Self::CollectTargets { character_id, .. }
@@ -224,6 +233,40 @@ pub fn drain_player_updates(world: &mut World) {
                 {
                     k.entries.push((ability_id, 1, true));
                 }
+            }
+            PendingPlayerUpdate::HouseGranted { house, rooms, .. } => {
+                if world.get::<mud_world::HouseSummary>(entity).is_none() {
+                    world.entity_mut(entity).insert(mud_world::HouseSummary {
+                        house_id: house.id,
+                        entrance_room: WorldKey {
+                            zone: house.entrance_room_zone_id,
+                            id: house.entrance_room_id,
+                        },
+                        return_room: house
+                            .return_room_zone_id
+                            .zip(house.return_room_id)
+                            .map(|(zone, id)| WorldKey { zone, id }),
+                        rooms: rooms
+                            .into_iter()
+                            .map(|r| mud_world::HouseRoomEntry {
+                                id: r.id,
+                                local_index: r.local_index,
+                                name: r.name,
+                                description: r.description,
+                                is_peaceful: r.is_peaceful,
+                                capacity: r.capacity,
+                            })
+                            .collect(),
+                        exits: Vec::new(),
+                        items: Vec::new(),
+                        guests: Vec::new(),
+                    });
+                }
+                send_to(
+                    world,
+                    entity,
+                    "A house of your own is now yours. Type 'home' to step inside.\r\n",
+                );
             }
             PendingPlayerUpdate::QuestPhaseEntered { .. } => {
                 crate::quest_progress::recheck_collect_objectives(world, entity);

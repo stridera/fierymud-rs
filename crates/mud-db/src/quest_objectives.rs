@@ -749,16 +749,24 @@ pub async fn get_reward(pool: &PgPool, reward_id: i32) -> sqlx::Result<Option<Qu
     .await
 }
 
-/// Apply EXPERIENCE / GOLD / SKILL_POINTS / ABILITY rewards
-/// directly via DB updates. ITEM and HOUSING are skipped — they
-/// need world-side spawning that the async path can't do; the
-/// completion message tells the player to talk to the questgiver
-/// for those.
+/// What [`grant_simple_rewards`] did beyond the plain numeric deltas.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GrantOutcome {
+    /// A HOUSING reward created a house just now (false when the
+    /// character already owned one, so a repeat grant is a no-op).
+    pub house_created: bool,
+}
+
+/// Apply EXPERIENCE / GOLD / SKILL_POINTS / ABILITY / HOUSING rewards
+/// directly via DB updates. ITEM is skipped — it needs world-side
+/// spawning that the async path can't do. HOUSING creates the
+/// character's `PlayerHouse` (see [`crate::housing::grant_house`]).
 pub async fn grant_simple_rewards(
     pool: &PgPool,
     character_id: &str,
     rewards: &[QuestRewardRow],
-) -> sqlx::Result<()> {
+) -> sqlx::Result<GrantOutcome> {
+    let mut out = GrantOutcome::default();
     let mut tx = pool.begin().await?;
     for r in rewards {
         match r.reward_type.as_str() {
@@ -812,13 +820,20 @@ pub async fn grant_simple_rewards(
                     .await?;
                 }
             }
-            // ITEM / HOUSING — skipped here; the runtime announces
-            // them and expects a turn-in flow.
+            "HOUSING" => {
+                if crate::housing::grant_house(&mut tx, character_id)
+                    .await?
+                    .is_some()
+                {
+                    out.house_created = true;
+                }
+            }
+            // ITEM — spawned by the runtime from the world thread.
             _ => {}
         }
     }
     tx.commit().await?;
-    Ok(())
+    Ok(out)
 }
 
 /// Outcome of the post-completion phase-advance check.

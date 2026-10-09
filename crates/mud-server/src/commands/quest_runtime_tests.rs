@@ -434,6 +434,66 @@ async fn qcomplete_pays_the_quest_rewards() {
     fx.end().await;
 }
 
+/// A HOUSING reward creates the character's house, tells them so, and
+/// gives the online player the house to `home` into. Completing the
+/// quest again must not grant a second house.
+#[tokio::test(flavor = "current_thread")]
+async fn housing_reward_grants_one_house() {
+    let Some(fx) = fixture().await else { return };
+    fx.visit_objective(1).await;
+    sqlx::query(
+        "INSERT INTO \"QuestReward\" (quest_zone_id, quest_id, phase_id, reward_type) \
+         VALUES ($1, $2, 1, 'HOUSING'::\"QuestRewardType\")",
+    )
+    .bind(fx.zone)
+    .bind(fx.quest)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    // Entrance fallback when the race has no start room on record.
+    sqlx::query(
+        "UPDATE \"Characters\" SET current_room_zone_id = $2, current_room_id = $3 WHERE id = $1",
+    )
+    .bind(&fx.char_id)
+    .bind(fx.room.0)
+    .bind(fx.room.1)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    let (mut world, player, _room, mut rx) = fx.world_as(UserRole::Coder);
+    Fx::with_updates(&mut world);
+    let houses = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM player_houses h JOIN player_house_rooms r ON r.house_id = h.id \
+             WHERE h.character_id = $1 AND r.local_index = 0",
+        )
+        .bind(&fx.char_id)
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap()
+    };
+
+    fx.accept().await;
+    assert!(super::try_dispatch_async(&mut world, player, &fx.pool, "qcomplete 1").await);
+    assert_eq!(houses().await, 1, "house with a foyer created");
+    Fx::settle_once(&mut world).await;
+    let out = drain(&mut rx);
+    assert!(out.contains("+a house of your own"), "{out}");
+    assert!(out.contains("Type 'home'"), "{out}");
+    let summary = world.get::<mud_world::HouseSummary>(player).unwrap();
+    assert_eq!(summary.rooms.len(), 1);
+
+    // Completing again leaves the one house alone and says so.
+    fx.accept().await;
+    assert!(super::try_dispatch_async(&mut world, player, &fx.pool, "qcomplete 1").await);
+    Fx::settle_once(&mut world).await;
+    assert_eq!(houses().await, 1, "no second house");
+    let out = drain(&mut rx);
+    assert!(out.contains("already own a house"), "{out}");
+    assert!(!out.contains("Type 'home'"), "{out}");
+    fx.end().await;
+}
+
 /// `qreset` wipes the character's record so the quest can be given
 /// again; mortals cannot use it.
 #[tokio::test(flavor = "current_thread")]
