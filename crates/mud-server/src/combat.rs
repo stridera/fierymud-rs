@@ -852,7 +852,13 @@ pub fn combat_tick(world: &mut World) {
             &Named,
             Option<&Posture>,
             Option<&Stunned>,
-        ), (Without<Ghost>, Without<mud_world::Frozen>)>();
+        ), (
+            Without<Ghost>,
+            Without<mud_world::Frozen>,
+            // Legacy `perform_violence`: `if (CASTING(ch)) continue;` —
+            // a caster mid-chant skips its melee rounds.
+            Without<mud_world::Casting>,
+        )>();
         q.iter(world)
             .filter(|(_, _, _, _, posture, stunned)| {
                 stunned.is_none()
@@ -1017,6 +1023,7 @@ pub(crate) fn engage_swing_now(world: &mut World, attacker: Entity, target: Enti
     if world.get::<Ghost>(attacker).is_some()
         || world.get::<mud_world::Frozen>(attacker).is_some()
         || world.get::<Stunned>(attacker).is_some()
+        || world.get::<mud_world::Casting>(attacker).is_some()
     {
         return;
     }
@@ -3087,6 +3094,33 @@ mod tests {
         FORCED_HIT_ROLL.with(|c| c.set(Some(1)));
         combat_tick(world);
         FORCED_HIT_ROLL.with(|c| c.set(None));
+    }
+
+    /// Legacy `perform_violence`: `if (CASTING(ch)) continue;` — a caster
+    /// mid-chant skips its melee rounds and swings again once the cast ends.
+    #[test]
+    fn a_caster_mid_chant_does_not_melee() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let target = make_target(&mut world, room, 100);
+        let attacker = make_attacker(&mut world, room, target, 5);
+        world.entity_mut(attacker).insert(mud_world::Casting {
+            ability_id: 1,
+            ability_name: "Ice Darts".into(),
+            args: String::new(),
+            kind_label: "spell".into(),
+            verb: "cast".into(),
+            ticks_remaining: 8,
+            ticks_total: 10,
+            target: mud_world::CastTarget::Caster,
+            recognized_by: Vec::new(),
+            slot_reservation: None,
+        });
+        run_combat_tick(&mut world);
+        assert_eq!(world.get::<Health>(target).unwrap().hp, 100);
+        world.entity_mut(attacker).remove::<mud_world::Casting>();
+        run_combat_tick(&mut world);
+        assert!(world.get::<Health>(target).unwrap().hp < 100);
     }
 
     /// A6: a hidden attacker's swing applies an opening-strike
