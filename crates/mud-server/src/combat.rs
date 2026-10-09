@@ -463,9 +463,22 @@ fn hit_roll() -> i32 {
     rand::random_range(1..=100)
 }
 
+/// The signed per-swing damage variance in `-band..=band`. Tests can pin
+/// it (per test thread) via `FORCED_VARIANCE_DELTA` (clamped to the band)
+/// so a "hidden swing out-damages an open one" comparison isn't subject to
+/// the +/-25% bands of the two swings overlapping.
+fn variance_roll(band: i32) -> i32 {
+    #[cfg(test)]
+    if let Some(d) = FORCED_VARIANCE_DELTA.with(std::cell::Cell::get) {
+        return d.clamp(-band, band);
+    }
+    rand::random_range(-band..=band)
+}
+
 #[cfg(test)]
 thread_local! {
     static FORCED_HIT_ROLL: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
+    static FORCED_VARIANCE_DELTA: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
 }
 
 /// Resolve one swing under the accuracy/evasion d100 contest from
@@ -1415,7 +1428,7 @@ fn apply_swing(world: &mut World, s: &Swing) {
     // outcome and the dmg_roll stat decorative.
     let variance_band = damage / 4;
     if variance_band > 0 {
-        let delta = rand::random_range(-variance_band..=variance_band);
+        let delta = variance_roll(variance_band);
         damage = damage.saturating_add(delta).max(1);
         mit.variance_delta = delta;
     }
@@ -3169,11 +3182,16 @@ mod tests {
         };
         let (_, left) = hp_lost(400);
         assert_eq!(left, 0, "hiddenness dropped by the swing");
-        // The forced hit roll always lands, so any difference is the bonus
-        // damage a hiding attacker gets (+50% at zero defender perception).
+        // The forced hit roll always lands and the variance is pinned to 0,
+        // so the difference is exactly the bonus damage a hiding attacker
+        // gets (+50% at zero defender perception): 5 -> 7 (the unpinned
+        // +/-25% bands of the two swings overlap, which made this flaky).
+        FORCED_VARIANCE_DELTA.with(|c| c.set(Some(0)));
         let (hidden, _) = hp_lost(400);
         let (open, _) = hp_lost(0);
-        assert!(hidden > open, "hidden {hidden} vs open {open}");
+        FORCED_VARIANCE_DELTA.with(|c| c.set(None));
+        assert_eq!(open, 5, "open swing deals the base damage");
+        assert_eq!(hidden, 7, "hidden swing gets the +50% opening bonus");
     }
 
     /// Blur gives one extra swing pass per round, like Haste: summed over
