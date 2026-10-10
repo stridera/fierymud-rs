@@ -5056,6 +5056,10 @@ pub(crate) struct PlayerSaveSnapshot {
     /// Corpses a resurrection emptied into this player: deleted in this
     /// write's transaction, after their items are re-homed.
     retired_corpses: Vec<i32>,
+    /// `PlayerHouseItem` rows of items this player picked up: deleted in
+    /// this write's transaction, the one that inserts the items into the
+    /// pack, so a pickup is never persisted twice or not at all.
+    house_row_deletes: Vec<i32>,
     /// Corpses this player has looted since their last settled mark:
     /// `(PlayerCorpses.id, loot sequence)`. This commit is what makes those
     /// takes durable, so [`apply_commit`] clears exactly these marks and
@@ -5539,6 +5543,10 @@ pub(crate) fn snapshot_player(
         now_inst,
         new_time_played,
         death,
+        house_row_deletes: world
+            .get::<crate::house_items::PendingHouseDeletes>(entity)
+            .map(|p| p.0.clone())
+            .unwrap_or_default(),
         corpse_coin_takes: world
             .get::<crate::corpses::PendingCorpseCoinTakes>(entity)
             .map(|t| t.0.clone())
@@ -5975,6 +5983,11 @@ pub(crate) async fn write_snapshot(
     };
     let assigned =
         mud_db::character_items::save_inventory_diff(&mut tx, cid, &snap.items, corpse_id).await?;
+    // Items picked up out of a house enter the pack and leave the house in
+    // the same commit.
+    for id in &snap.house_row_deletes {
+        mud_db::housing::remove_item(&mut *tx, *id).await?;
+    }
     // Coins this player took from player corpses leave the corpse in the
     // very commit that credits their wealth (written above).
     for (taken_from, amount) in &snap.corpse_coin_takes {
@@ -6108,6 +6121,7 @@ pub(crate) fn apply_commit(
             }
         }
     }
+    crate::house_items::settle_deletes(world, snap.entity, &snap.house_row_deletes);
     crate::corpses::settle_coin_takes(world, snap.entity, &snap.corpse_coin_takes);
     crate::corpses::settle_retired(world, snap.entity, &snap.retired_corpses);
     crate::corpses::settle_loot(world, snap.entity, &snap.corpse_loot_marks);
@@ -11158,6 +11172,222 @@ mod tests {
                 .unwrap();
             drop_item_rows(&pool, &[&c.id]).await;
         }
+    }
+
+    /// A house row for `foyer` holding prototype `key`, returned with the
+    /// in-world item standing in `house_room` the way a boot load builds it.
+    async fn house_item_in_world(
+        pool: &PgPool,
+        world: &mut World,
+        foyer: i32,
+        house_room: Entity,
+        key: (i32, i32),
+    ) -> (i32, Entity) {
+        let row = mud_db::housing::place_item(
+            pool,
+            foyer,
+            key.0,
+            key.1,
+            &mud_db::housing::HouseItemCustom::default(),
+            None,
+        )
+        .await
+        .unwrap();
+        let item = world
+            .spawn((
+                Item,
+                WorldKey {
+                    zone: key.0,
+                    id: key.1,
+                },
+                mud_world::HouseItem(row),
+                Located(house_room),
+            ))
+            .id();
+        (row, item)
+    }
+
+    /// Picking a placed item up deletes its house row in the transaction that
+    /// saves the pack: a save that fails leaves the item in the house (and
+    /// out of the pack) in the database, and the save that lands writes one
+    /// pack row and no house row. Never both, never neither.
+    #[tokio::test(flavor = "current_thread")]
+    async fn house_pickup_and_pack_save_commit_together() {
+        let Some((pool, _db_lock)) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let Some(key) = first_object(&pool).await else {
+            return;
+        };
+        let (_user, c) = temp_unlinked_char(&pool, "hpk").await;
+        let Some((house_id, foyer)) = temp_house(&pool, &c.id).await else {
+            temp_cleanup(&pool, &[], &[&c.id], &[]).await;
+            return;
+        };
+        let mut world = World::new();
+        world.insert_resource(SaveCoordinator::default());
+        world.insert_resource(commands::DbPool(pool.clone()));
+        crate::house_items::register_observers(&mut world);
+        let room = world.spawn_empty().id();
+        let house_room = world
+            .spawn(mud_world::HouseRoom {
+                house_id,
+                local_index: 0,
+            })
+            .id();
+        let me = spawn_player_for(&mut world, &c.id, room);
+        let (row, item) = house_item_in_world(&pool, &mut world, foyer, house_room, key).await;
+
+        // `get`: the observer hands the row to the player's next save.
+        world.entity_mut(item).insert(Located(me));
+        assert_eq!(
+            world
+                .get::<crate::house_items::PendingHouseDeletes>(me)
+                .map(|p| p.0.clone()),
+            Some(vec![row])
+        );
+        assert!(world.get::<mud_world::HouseItem>(item).is_none());
+
+        // The database is down for the first save: nothing changed there.
+        let out = save_player(&mut world, me, &failing_pool()).await;
+        assert!(!out.committed);
+        assert_eq!(
+            house_item_count(&pool, foyer).await,
+            1,
+            "still in the house"
+        );
+        assert!(
+            item_rows(&pool, &[&c.id]).await.is_empty(),
+            "not in the pack"
+        );
+        assert_eq!(
+            world
+                .get::<crate::house_items::PendingHouseDeletes>(me)
+                .map(|p| p.0.clone()),
+            Some(vec![row]),
+            "the failed save keeps the delete queued"
+        );
+
+        // The next save lands pack row and delete together.
+        let out = save_player(&mut world, me, &pool).await;
+        assert!(out.committed, "{:?}", out.error);
+        assert_eq!(house_item_count(&pool, foyer).await, 0, "left the house");
+        assert_eq!(item_rows(&pool, &[&c.id]).await.len(), 1, "in the pack");
+        assert!(
+            world
+                .get::<crate::house_items::PendingHouseDeletes>(me)
+                .is_none(),
+            "committed deletes are settled"
+        );
+        mud_db::housing::delete_house(&pool, house_id)
+            .await
+            .unwrap();
+        drop_item_rows(&pool, &[&c.id]).await;
+    }
+
+    /// An `order`ed pet picks a placed item up and the owner quits: the
+    /// item moves into the owner's pack and the house row goes in the same
+    /// commit as that pack row.
+    #[tokio::test(flavor = "current_thread")]
+    async fn pet_pickup_of_a_house_item_survives_the_owners_quit() {
+        let Some((pool, _db_lock)) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let Some(key) = first_object(&pool).await else {
+            return;
+        };
+        let (_user, c) = temp_unlinked_char(&pool, "hpp").await;
+        let Some((house_id, foyer)) = temp_house(&pool, &c.id).await else {
+            temp_cleanup(&pool, &[], &[&c.id], &[]).await;
+            return;
+        };
+        let mut world = World::new();
+        world.insert_resource(SaveCoordinator::default());
+        world.insert_resource(commands::DbPool(pool.clone()));
+        crate::house_items::register_observers(&mut world);
+        let room = world.spawn_empty().id();
+        let house_room = world
+            .spawn(mud_world::HouseRoom {
+                house_id,
+                local_index: 0,
+            })
+            .id();
+        let me = spawn_player_for(&mut world, &c.id, room);
+        let wolf = world
+            .spawn((
+                Mob,
+                Named {
+                    name: "a wolf".into(),
+                },
+                WorldKey { zone: 30, id: 1 },
+                Health { hp: 20, max: 20 },
+                Located(house_room),
+                Follower(me),
+                mud_world::PersistentPet,
+            ))
+            .id();
+        let (_row, item) = house_item_in_world(&pool, &mut world, foyer, house_room, key).await;
+        world.entity_mut(item).insert(Located(wolf));
+
+        let mut router = ConnRouter::new();
+        router.playing.insert(1, me);
+        router.on_disconnect(&mut world, 1, &pool).await;
+        let coordinator = world.resource::<SaveCoordinator>().clone();
+        assert!(coordinator.flush(&mut world, Duration::from_secs(10)).await);
+
+        assert_eq!(house_item_count(&pool, foyer).await, 0, "left the house");
+        assert_eq!(item_rows(&pool, &[&c.id]).await.len(), 1, "owner has it");
+        mud_db::housing::delete_house(&pool, house_id)
+            .await
+            .unwrap();
+        drop_item_rows(&pool, &[&c.id]).await;
+    }
+
+    /// A picker with no save to carry the delete (a scavenger mob) gets a
+    /// tracked delete that keeps retrying through failures.
+    #[tokio::test(flavor = "current_thread")]
+    async fn row_delete_retries_until_it_succeeds() {
+        let attempts = std::sync::atomic::AtomicU32::new(0);
+        crate::house_items::retry_until_ok("test delete", 7, || async {
+            if attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2 {
+                Err("db blip")
+            } else {
+                Ok(())
+            }
+        })
+        .await;
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    /// A mob (no `Account`) taking a placed item queues no player delete.
+    #[test]
+    fn mob_pickup_of_a_house_item_is_not_queued_on_a_player() {
+        let mut world = World::new();
+        crate::house_items::register_observers(&mut world);
+        let room = world.spawn_empty().id();
+        let house_room = world
+            .spawn(mud_world::HouseRoom {
+                house_id: 1,
+                local_index: 0,
+            })
+            .id();
+        let player = spawn_player_for(&mut world, "pc-x", room);
+        let mob = world.spawn((Mob, Located(room))).id();
+        let item = world
+            .spawn((Item, mud_world::HouseItem(9), Located(house_room)))
+            .id();
+        world.entity_mut(item).insert(Located(mob));
+        assert!(
+            world.get::<mud_world::HouseItem>(item).is_none(),
+            "released"
+        );
+        assert!(
+            world
+                .get::<crate::house_items::PendingHouseDeletes>(player)
+                .is_none()
+        );
     }
 
     static RELOG_RETRY: &[Duration] = &[Duration::from_millis(150)];

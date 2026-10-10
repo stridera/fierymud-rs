@@ -282,6 +282,13 @@ impl HousePlacement {
         row
     }
 
+    /// The item already left the house (a pickup beat the insert task to its
+    /// turn): there is nothing to insert.
+    #[must_use]
+    pub fn is_released(&self) -> bool {
+        *self.state() == PlacementState::Released
+    }
+
     /// Row id once the insert has finished and the item is still placed.
     #[must_use]
     pub fn row_id(&self) -> Option<i32> {

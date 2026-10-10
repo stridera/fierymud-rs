@@ -14,9 +14,18 @@
 //! background insert settles once it has the row id; a pickup that races
 //! the insert marks the slot released and the insert task deletes the row
 //! it just wrote.
+//!
+//! The row delete is tied to the picker's persistence. When a player (or a
+//! player's pet) takes the item, the row id rides on the player as
+//! [`PendingHouseDeletes`] and the player's next save snapshot carries it:
+//! the save deletes the house row in the same transaction that inserts the
+//! item into the pack, so the item is never in both places and never in
+//! neither. A picker that is not a player's (a scavenger mob) has no save to
+//! ride on; its delete is a tracked task that retries until it succeeds and
+//! that shutdown waits for.
 
 use bevy_ecs::prelude::*;
-use mud_world::{HouseItem, HousePlacement, HouseRoom, Located};
+use mud_world::{Account, Follower, HouseItem, HousePlacement, HouseRoom, Located, PersistentPet};
 
 use crate::autosave::SaveCoordinator;
 use crate::commands::DbPool;
@@ -57,41 +66,118 @@ pub(crate) fn detach_house_item(world: &mut World, item: Entity) -> Detached {
     row.map_or(Detached::InFlight, Detached::Row)
 }
 
+/// `PlayerHouseItem` rows a player has picked up, not yet deleted in the
+/// database. The player's save snapshot carries them and deletes them in the
+/// transaction that writes their pack; [`settle_deletes`] clears what a
+/// committed save carried. Rows stay until a save commits, so a failed save
+/// simply carries them into the next attempt.
+#[derive(Component, Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct PendingHouseDeletes(pub Vec<i32>);
+
+/// The player whose save should carry the row delete for `item`: whoever
+/// holds it (directly or inside carried containers), or the owner of the
+/// persistent pet holding it. `None` when no player's save will include it.
+fn save_owner(world: &World, item: Entity) -> Option<Entity> {
+    let mut cur = item;
+    // Real nesting is a handful of bags; the cap guards a malformed cycle.
+    for _ in 0..16 {
+        let holder = world.get::<Located>(cur)?.0;
+        if world.get::<Account>(holder).is_some() {
+            return Some(holder);
+        }
+        if world.get::<PersistentPet>(holder).is_some()
+            && let Some(owner) = world.get::<Follower>(holder).map(|f| f.0)
+            && world.get::<Account>(owner).is_some()
+        {
+            return Some(owner);
+        }
+        cur = holder;
+    }
+    None
+}
+
 /// The one way an item stops being a house item: strips its markers and
-/// deletes its row in the background. Used by `house take` and by the
-/// `Located` observer, so every pickup behaves identically.
+/// arranges for its row to be deleted (see the module docs). Used by
+/// `house take` and by the `Located` observer, so every pickup behaves
+/// identically.
 pub(crate) fn release_house_item(world: &mut World, item: Entity) -> bool {
     let id = match detach_house_item(world, item) {
         Detached::NotHouseItem => return false,
         Detached::InFlight => None,
         Detached::Row(id) => Some(id),
     };
-    if let Some(id) = id
-        && let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone())
-    {
-        tokio::spawn(async move {
-            delete_row_with_retry(&pool, id).await;
-        });
+    if let Some(id) = id {
+        match save_owner(world, item) {
+            Some(owner) => {
+                let mut e = world.entity_mut(owner);
+                match e.get_mut::<PendingHouseDeletes>() {
+                    Some(mut pending) => pending.0.push(id),
+                    None => {
+                        e.insert(PendingHouseDeletes(vec![id]));
+                    }
+                }
+            }
+            None => delete_row_tracked(world, id),
+        }
     }
     true
 }
 
-/// Delete a house item row, retrying a few times: a row that survives a
-/// pickup is a duplicate after the next boot.
-pub(crate) async fn delete_row_with_retry(pool: &mud_db::sqlx::PgPool, id: i32) {
-    for attempt in 0..4_u32 {
-        match mud_db::housing::remove_item(pool, id).await {
-            Ok(_) => return,
+/// A committed save wrote `deleted` (its snapshot's [`PendingHouseDeletes`]):
+/// forget exactly those, keeping rows queued since the snapshot.
+pub(crate) fn settle_deletes(world: &mut World, player: Entity, deleted: &[i32]) {
+    if deleted.is_empty() {
+        return;
+    }
+    let Some(mut pending) = world.get_mut::<PendingHouseDeletes>(player) else {
+        return;
+    };
+    pending.0.retain(|id| !deleted.contains(id));
+    if pending.0.is_empty() {
+        world.entity_mut(player).remove::<PendingHouseDeletes>();
+    }
+}
+
+/// Delete a house row with no player save to carry it: a task shutdown waits
+/// for, retrying until the row is gone (a row that survives a pickup is a
+/// duplicate after the next boot). No-op without a database (unit tests).
+fn delete_row_tracked(world: &World, id: i32) {
+    let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
+        return;
+    };
+    let coordinator = world
+        .get_resource::<SaveCoordinator>()
+        .cloned()
+        .unwrap_or_default();
+    coordinator.spawn_tracked(delete_row_until_gone(pool, id));
+}
+
+/// Retry `op` with a growing, capped delay until it succeeds.
+pub(crate) async fn retry_until_ok<F, Fut, E>(what: &str, id: i32, mut op: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<(), E>>,
+    E: std::fmt::Display,
+{
+    let mut attempt = 0_u32;
+    loop {
+        match op().await {
+            Ok(()) => return,
             Err(e) => {
-                tracing::warn!(error = %e, id, attempt, "house item remove failed");
-                tokio::time::sleep(std::time::Duration::from_millis(250 << attempt)).await;
+                tracing::warn!(error = %e, id, attempt, "{what} failed; retrying");
+                let delay_ms = (250_u64 << attempt.min(7)).min(30_000);
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                attempt = attempt.saturating_add(1);
             }
         }
     }
-    tracing::error!(
-        id,
-        "house item row could not be removed; it will reappear on reload"
-    );
+}
+
+async fn delete_row_until_gone(pool: mud_db::sqlx::PgPool, id: i32) {
+    retry_until_ok("house item row delete", id, || async {
+        mud_db::housing::remove_item(&pool, id).await.map(|_| ())
+    })
+    .await;
 }
 
 /// What a placement needs to persist itself.
@@ -124,7 +210,14 @@ pub(crate) fn persist_placement(world: &World, w: PlacementWrite) {
         .cloned()
         .unwrap_or_default();
     let character_id = w.character_id.clone();
+    let tracker = coordinator.clone();
     coordinator.spawn_ordered(&character_id, move |mut ordered| async move {
+        if w.placement.is_released() {
+            // Picked up before this turn came: the item is back in a pack
+            // (its stale pack row, if any, goes with the next save's diff)
+            // and there is nothing to insert.
+            return;
+        }
         let result = mud_db::housing::place_item(
             &pool,
             w.room_row_id,
@@ -139,12 +232,17 @@ pub(crate) fn persist_placement(world: &World, w: PlacementWrite) {
                 // Snapshots taken before the placement still list the item
                 // in the pack; none may land after its row is gone.
                 ordered.supersede_earlier_snapshots();
-                drop(ordered);
                 tracing::debug!(item_id = id, "house item placed");
                 if !w.placement.settle(id) {
-                    // Picked up before the insert finished.
-                    delete_row_with_retry(&pool, id).await;
+                    // Picked up while the insert was in flight. Remove the
+                    // row before giving up the turn, so the picker's queued
+                    // save cannot commit the pack row ahead of it; if the
+                    // delete fails keep retrying where shutdown waits.
+                    if mud_db::housing::remove_item(&pool, id).await.is_err() {
+                        tracker.spawn_tracked(delete_row_until_gone(pool.clone(), id));
+                    }
                 }
+                drop(ordered);
             }
             Err(e) => {
                 tracing::warn!(error = %e, "house item place failed");

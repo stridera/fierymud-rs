@@ -296,15 +296,19 @@ pub async fn place_item(
 }
 
 /// Delete one placed item by primary key. Returns the number of
-/// rows actually removed (0 if the row was already gone).
-pub async fn remove_item(pool: &PgPool, item_id: i32) -> sqlx::Result<u64> {
+/// rows actually removed (0 if the row was already gone). Takes any
+/// executor so a character save can delete the row in its own transaction.
+pub async fn remove_item<'e, E>(executor: E, item_id: i32) -> sqlx::Result<u64>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     let res = sqlx::query!(
         r#"
         DELETE FROM player_house_items WHERE id = $1
         "#,
         item_id,
     )
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(res.rows_affected())
 }

@@ -421,13 +421,6 @@ impl HouseDb {
         .unwrap()
     }
 
-    async fn id_sequence(&self) -> i64 {
-        mud_db::sqlx::query_scalar("SELECT last_value FROM player_house_items_id_seq")
-            .fetch_one(&self.pool)
-            .await
-            .unwrap()
-    }
-
     /// Poll until `done` or five seconds pass.
     async fn wait_for<F, Fut>(&self, mut done: F) -> bool
     where
@@ -582,9 +575,17 @@ async fn place_get_reload_leaves_exactly_one_sword() {
     );
     assert_eq!(db.reloaded_swords().await, 1);
 
-    // Plain get: the house row goes, so a reboot does not rebuild a copy.
+    // Plain get: the house row goes with the pack save that records the
+    // sword in the pack, so a reboot does not rebuild a copy.
     cmd_get(&mut world, owner, "sword");
-    assert!(db.wait_for(|| async { db.rows().await.is_empty() }).await);
+    assert_eq!(db.rows().await.len(), 1, "the row waits for the pack save");
+    assert!(
+        crate::login::save_player(&mut world, owner, &db.pool)
+            .await
+            .committed
+    );
+    assert!(db.rows().await.is_empty());
+    assert_eq!(db.pack_rows().await, 1, "in the pack, exactly once");
     assert_eq!(db.reloaded_swords().await, 0, "no ghost copy after get");
 
     // And again, repeatedly: still never more than the one sword in play.
@@ -592,23 +593,37 @@ async fn place_get_reload_leaves_exactly_one_sword() {
         cmd_house_place(&mut world, owner, &db.summary(), "sword");
         assert!(db.wait_for(|| async { db.rows().await.len() == 1 }).await);
         cmd_get(&mut world, owner, "sword");
-        assert!(db.wait_for(|| async { db.rows().await.is_empty() }).await);
+        assert!(
+            crate::login::save_player(&mut world, owner, &db.pool)
+                .await
+                .committed
+        );
+        assert!(db.rows().await.is_empty());
+        assert_eq!(db.pack_rows().await, 1);
     }
     assert_eq!(db.reloaded_swords().await, 0);
 
-    // Place and get in the same breath, before the insert has finished.
-    let seq_before = db.id_sequence().await;
+    // Place and get in the same breath: the placement either finds the item
+    // already taken back and writes nothing, or inserts and deletes the row
+    // in its own turn, whichever thread gets there first.
     cmd_house_place(&mut world, owner, &db.summary(), "sword");
     cmd_get(&mut world, owner, "sword");
+    let coordinator = world.resource::<crate::autosave::SaveCoordinator>().clone();
     assert!(
-        db.wait_for(|| async { db.id_sequence().await > seq_before })
-            .await,
-        "the insert never ran"
+        coordinator
+            .flush(&mut world, std::time::Duration::from_secs(10))
+            .await
     );
     assert!(
-        db.wait_for(|| async { db.rows().await.is_empty() }).await,
+        db.rows().await.is_empty(),
         "the raced insert left a ghost row"
     );
+    assert!(
+        crate::login::save_player(&mut world, owner, &db.pool)
+            .await
+            .committed
+    );
+    assert_eq!(db.pack_rows().await, 1);
     assert_eq!(db.reloaded_swords().await, 0);
     assert_eq!(world.get::<Located>(sword).unwrap().0, owner);
     db.end().await;
