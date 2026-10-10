@@ -15,9 +15,40 @@ pub fn is_abbrev(word: &str, candidate: &str) -> bool {
         && candidate.as_bytes()[..word.len()].eq_ignore_ascii_case(word.as_bytes())
 }
 
-/// True when every whitespace-separated word of `needle` is a prefix of at
-/// least one whitespace-separated word of some name in `names`. An empty
-/// needle never matches.
+/// True when the typed `word` matches one of `names`' words.
+///
+/// A plain word matches when it is a prefix of a name word (legacy
+/// `isname`). A hyphenated word (`short-sword`) matches either as a whole
+/// (a keyword that itself contains a hyphen, `half-elf`) or, legacy
+/// style, when *every* hyphen-separated part is a prefix of some name
+/// word: `x-y-z` targets the thing whose keywords include `x`, `y` and `z`.
+/// Builders no longer hyphenate keywords by hand, so this is how aliases
+/// written against `short-sword` keep working.
+fn word_matches(word: &str, names: &[&str]) -> bool {
+    let direct = |w: &str| {
+        names
+            .iter()
+            .any(|name| name.split_whitespace().any(|n| is_abbrev(w, n)))
+    };
+    if direct(word) {
+        return true;
+    }
+    if !word.contains('-') {
+        return false;
+    }
+    let mut any_part = false;
+    for part in word.split('-').filter(|p| !p.is_empty()) {
+        any_part = true;
+        if !direct(part) {
+            return false;
+        }
+    }
+    any_part
+}
+
+/// True when every whitespace-separated word of `needle` matches (see
+/// [`word_matches`]: prefix of a name word, or all parts of a hyphenated
+/// word). An empty needle never matches.
 pub fn names_match<'a, I>(needle: &str, names: I) -> bool
 where
     I: IntoIterator<Item = &'a str>,
@@ -26,10 +57,7 @@ where
     let mut any_word = false;
     for word in needle.split_whitespace() {
         any_word = true;
-        let found = names
-            .iter()
-            .any(|name| name.split_whitespace().any(|w| is_abbrev(word, w)));
-        if !found {
+        if !word_matches(word, &names) {
             return false;
         }
     }
@@ -136,6 +164,39 @@ mod tests {
         let k = kw(&["cure", "light"]);
         assert!(names_match("cure l", k.iter().map(String::as_str)));
         assert!(!names_match("cure x", k.iter().map(String::as_str)));
+    }
+
+    #[test]
+    fn hyphenated_needle_requires_every_part() {
+        let k = kw(&["sword", "short", "steel"]);
+        assert!(entity_matches("short-sword", "a short sword", Some(&k)));
+        assert!(entity_matches("sh-sw", "a short sword", Some(&k)));
+        assert!(entity_matches(
+            "steel-short-sword",
+            "a short sword",
+            Some(&k)
+        ));
+        assert!(!entity_matches("long-sword", "a short sword", Some(&k)));
+        assert!(!entity_matches("short-axe", "a short sword", Some(&k)));
+        // Stray or trailing hyphens degrade to their real parts; all-hyphen
+        // input matches nothing.
+        assert!(entity_matches("short-", "a short sword", Some(&k)));
+        assert!(!entity_matches("-", "a short sword", Some(&k)));
+        assert!(!entity_matches("--", "a short sword", Some(&k)));
+    }
+
+    #[test]
+    fn hyphenated_keyword_still_matches_whole() {
+        let k = kw(&["half-elf", "guard"]);
+        assert!(entity_matches("half-elf", "a guard", Some(&k)));
+        assert!(entity_matches("half-e", "a guard", Some(&k)));
+        assert!(entity_matches("half-guard", "a guard", Some(&k)));
+    }
+
+    #[test]
+    fn hyphenated_needle_falls_back_to_name_words() {
+        assert!(entity_matches("big-str", "Big Strider", None));
+        assert!(!entity_matches("big-rider", "Big Strider", None));
     }
 
     #[test]
