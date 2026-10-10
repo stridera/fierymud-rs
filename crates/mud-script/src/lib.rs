@@ -955,439 +955,14 @@ impl LuaHost {
             // Private environment: bindings below and anything the body
             // assigns land here, never in the shared sandbox globals.
             let globals = self.new_trigger_env()?;
-            globals.set(
-                "actor",
-                LuaActor {
-                    entity: acting_entity,
-                },
+            self.bind_globals(
+                &globals,
+                world,
+                listener,
+                acting_entity,
+                object_entity,
+                extras,
             )?;
-            // `self` is the canonical name in DG-Script-converted bodies
-            // ("set_level(self, ...)"). For SPEECH / LOAD / etc. it
-            // points at the same entity as `actor`; for GREET / RECEIVE
-            // / FIGHT it points at the listener while `actor` is the
-            // entering / giving / attacking entity. Lua treats `self`
-            // as an ordinary identifier outside of `:` method
-            // definitions.
-            globals.set("self", LuaActor { entity: listener })?;
-            // `object` is the item-context binding for RECEIVE / GIVE
-            // / GET / DROP / WEAR / etc. Nil when the event doesn't
-            // carry an object (LOAD, SPEECH, GREET, DEATH).
-            match object_entity {
-                Some(e) => globals.set("object", LuaActor { entity: e })?,
-                None => globals.set("object", Value::Nil)?,
-            }
-
-            // Override print so output flows back to the caller.
-            globals.set(
-                "print",
-                self.lua
-                    .create_function(|lua, args: Variadic<Value>| -> mlua::Result<()> {
-                        let line = format_args(&args);
-                        if let Some(mut cap) = lua.app_data_mut::<LuaCapture>() {
-                            cap.lines.push(line);
-                        }
-                        Ok(())
-                    })?,
-            )?;
-
-            // `globals` is a script-scoped scratchpad table. The
-            // DG-Script-converted corpus uses the
-            // `globals.x = globals.x or true` pattern as a "first-time
-            // only" guard. v1: per-call empty table — writes/reads are
-            // consistent within the body. Persistence (round-trip via
-            // `Triggers.variables` jsonb) is a follow-up.
-            globals.set("globals", self.lua.create_table()?)?;
-
-            // `skills.set_level(actor, name, level)` upserts an entry
-            // into the actor's `KnownAbilities`. Used by the
-            // breathe-* family of LOAD triggers to grant abilities at
-            // mob spawn time.
-            //
-            // `skills.execute(actor, name, target)` dispatches a named
-            // skill via `SkillExecutor`, the fn-ptr resource that
-            // mud-server installs at boot. Used by combat AI scripts
-            // to fire `bash` / `kick` / `backstab` mid-fight. Target
-            // can be a `LuaActor` userdata (its `Named.name` is used)
-            // or a string name; nil falls through to the no-target
-            // form (which `invoke_ability` handles as a self-cast or
-            // current-target lookup).
-            let skills_tbl = self.lua.create_table()?;
-            skills_tbl.set(
-                "set_level",
-                self.lua.create_function(
-                    |lua, (a, name, level): (AnyUserData, String, i32)| -> mlua::Result<()> {
-                        let entity = a.borrow::<LuaActor>()?.entity;
-                        skills_set_level(lua, entity, &name, level)
-                    },
-                )?,
-            )?;
-            skills_tbl.set(
-                "execute",
-                self.lua.create_function(
-                    |lua, (a, name, target): (AnyUserData, String, Value)| -> mlua::Result<()> {
-                        let caster = a.borrow::<LuaActor>()?.entity;
-                        let target_name = resolve_target_name(lua, &target)?;
-                        skills_execute(lua, caster, &name, target_name.as_deref())
-                    },
-                )?,
-            )?;
-            globals.set("skills", skills_tbl)?;
-
-            // `spells.cast(actor, name, target?, level?)` dispatches a
-            // named spell via `SpellExecutor`. The corpus passes the
-            // caster as `self`, the spell name, an optional target
-            // (LuaActor or string), and an optional level — the level
-            // is currently ignored by the runtime since
-            // `invoke_ability` derives caster level itself, but the
-            // parameter is accepted so existing trigger bodies work
-            // unchanged. 100+ corpus refs across mob combat AI and
-            // greet flavor scripts.
-            let spells_tbl = self.lua.create_table()?;
-            spells_tbl.set(
-                "cast",
-                self.lua
-                    .create_function(|lua, args: MultiValue| -> mlua::Result<()> {
-                        spells_cast_dispatch(lua, args)
-                    })?,
-            )?;
-            globals.set("spells", spells_tbl)?;
-
-            // `world` namespace: read-only queries against the live
-            // world. `count_mobiles` / `count_objects` return how many
-            // entities of the given proto `(zone, id)` are currently
-            // alive. `find_mobile` returns the first matching mob as
-            // a LuaActor or nil. Mutating verbs (destroy / load) are
-            // deliberately omitted from v1 — triggers calling them
-            // error cleanly with a "nil value" message instead of
-            // silently corrupting world state.
-            let world_tbl = self.lua.create_table()?;
-            world_tbl.set(
-                "count_mobiles",
-                self.lua
-                    .create_function(|lua, (zone, id): (i32, i32)| -> mlua::Result<i64> {
-                        world_count_kind(lua, zone, id, EntityKind::Mob)
-                    })?,
-            )?;
-            world_tbl.set(
-                "count_objects",
-                self.lua
-                    .create_function(|lua, (zone, id): (i32, i32)| -> mlua::Result<i64> {
-                        world_count_kind(lua, zone, id, EntityKind::Item)
-                    })?,
-            )?;
-            world_tbl.set(
-                "find_mobile",
-                self.lua
-                    .create_function(|lua, (zone, id): (i32, i32)| -> mlua::Result<Value> {
-                        world_find_kind(lua, zone, id, EntityKind::Mob)
-                    })?,
-            )?;
-            // `world.destroy(actor)` despawns the target entity.
-            // Mobs destroyed mid-trigger are removed cleanly; any
-            // subsequent field access against them returns defaults
-            // (since the components are gone). 344 corpus refs.
-            // `MobResetCatalog` accounting is unaffected — a
-            // reset-spawned mob's reset row will still respawn it
-            // on the next refill cycle.
-            world_tbl.set(
-                "destroy",
-                self.lua
-                    .create_function(|lua, target: AnyUserData| -> mlua::Result<()> {
-                        let entity = target.borrow::<LuaActor>()?.entity;
-                        world_mut_from_lua(lua, |world| {
-                            if let Ok(em) = world.get_entity_mut(entity) {
-                                em.despawn();
-                            }
-                        })
-                    })?,
-            )?;
-            globals.set("world", world_tbl)?;
-
-            // `run_room_trigger(zone, id)` — invoke a room trigger
-            // by composite key. Used by quest scripts that hand off
-            // between rooms (zones 117, 123, 163, 185, etc.).
-            //
-            // mlua's per-`Lua` re-entrancy guard would panic if we
-            // fired the target trigger synchronously from inside the
-            // current Lua frame. Instead we enqueue onto the
-            // `DeferredRoomTriggerFires` resource; mud-server drains
-            // the queue after the current Lua frame returns (see
-            // `triggers::drain_deferred_room_triggers`). Always
-            // returns `nil`; the actual fire is asynchronous from
-            // the caller's perspective.
-            globals.set(
-                "run_room_trigger",
-                self.lua
-                    .create_function(|lua, (zone, id): (i32, i32)| -> mlua::Result<()> {
-                        let caller = lua.app_data_ref::<SelfEntity>().map(|s| s.0);
-                        world_mut_from_lua(lua, |world| {
-                            if !world.contains_resource::<mud_world::DeferredRoomTriggerFires>() {
-                                world.insert_resource(
-                                    mud_world::DeferredRoomTriggerFires::default(),
-                                );
-                            }
-                            world
-                                .resource_mut::<mud_world::DeferredRoomTriggerFires>()
-                                .queue
-                                .push(mud_world::DeferredRoomTriggerFire {
-                                    room_zone: zone,
-                                    room_id: id,
-                                    caller,
-                                });
-                        })
-                    })?,
-            )?;
-
-            // `_seconds_until(hour, minute)` — internal helper that
-            // returns real-time seconds until `MudClock` reaches the
-            // target hour:minute. Minute defaults to 0 if omitted.
-            // The clock advances one game hour every 750 real ticks
-            // (~75s real) and we expose minute granularity from the
-            // within-hour tick position, so a game minute is 5/4 of
-            // a real second. Used by the Lua `wait_until` wrapper.
-            //
-            // Same minute-of-day returns a full 24-hour wait (matching
-            // the legacy "wait until next occurrence" semantic).
-            globals.set(
-                "_seconds_until",
-                self.lua
-                    .create_function(|lua, (h, m): (i32, i32)| -> mlua::Result<i64> {
-                        let target_h = h.rem_euclid(24);
-                        let target_m = m.rem_euclid(60);
-                        let target = i64::from(target_h * 60 + target_m);
-                        let current = world_from_lua(lua, |w| {
-                            w.get_resource::<mud_world::MudClock>().map_or(0, |c| {
-                                i64::from(c.hour.rem_euclid(24) * 60 + c.minute.rem_euclid(60))
-                            })
-                        })?;
-                        let mut delta_minutes = target - current;
-                        if delta_minutes <= 0 {
-                            delta_minutes += 24 * 60;
-                        }
-                        // 75 real-time seconds per 60 game minutes
-                        // = 5/4 real seconds per game minute.
-                        Ok(delta_minutes.saturating_mul(5).saturating_div(4).max(1))
-                    })?,
-            )?;
-
-            // `wait_until(hour, minute)` — clock-aligned wait for
-            // game-time triggers (academy class schedule, market
-            // openings, dawn-opens-the-gate). Implemented as
-            // sugar over `wait(N)` via the internal
-            // `_seconds_until` helper, so it parks on the same
-            // coroutine-yield mechanism the rest of the host uses.
-            // Minute is fully honored (12.5 ticks ≈ 1 game minute).
-            globals.set(
-                "wait_until",
-                self.lua
-                    .load(
-                        "local y = coroutine.yield; \
-                         local s = _seconds_until; \
-                         return function(h, m) y(s(h, m or 0)) end",
-                    )
-                    .eval::<Function>()?,
-            )?;
-
-            // `combat` namespace — engage/rescue. Implemented via
-            // direct Fighting component manipulation; the regular
-            // combat tick picks up the new pairing on its next pass.
-            let combat_tbl = self.lua.create_table()?;
-            combat_tbl.set(
-                "engage",
-                self.lua
-                    .create_function(|lua, target: AnyUserData| -> mlua::Result<()> {
-                        let target_entity = target.borrow::<LuaActor>()?.entity;
-                        world_mut_from_lua(lua, |world| {
-                            // `self` (in trigger context) is the engager;
-                            // we don't have that entity here. The corpus
-                            // calls are always `combat.engage(actor)`
-                            // where `self` triggers the engagement, so
-                            // bind via the Lua-globals `self` lookup.
-                            if let Some(self_ud) = lua.app_data_ref::<SelfEntity>().map(|s| s.0) {
-                                world.entity_mut(self_ud).insert(Fighting(target_entity));
-                            }
-                        })
-                    })?,
-            )?;
-            combat_tbl.set(
-                "rescue",
-                self.lua
-                    .create_function(|lua, victim: AnyUserData| -> mlua::Result<()> {
-                        let victim_entity = victim.borrow::<LuaActor>()?.entity;
-                        world_mut_from_lua(lua, |world| {
-                            let Some(self_ent) = lua.app_data_ref::<SelfEntity>().map(|s| s.0)
-                            else {
-                                return;
-                            };
-                            // Find any entity attacking the victim — if
-                            // exists, swap them onto `self` (we draw aggro)
-                            // and have us start fighting them.
-                            let mut attackers: Vec<Entity> = Vec::new();
-                            {
-                                let mut q = world.query::<(Entity, &Fighting)>();
-                                for (e, f) in q.iter(world) {
-                                    if f.0 == victim_entity {
-                                        attackers.push(e);
-                                    }
-                                }
-                            }
-                            if let Some(&attacker) = attackers.first() {
-                                world.entity_mut(attacker).insert(Fighting(self_ent));
-                                world.entity_mut(self_ent).insert(Fighting(attacker));
-                            }
-                        })
-                    })?,
-            )?;
-            globals.set("combat", combat_tbl)?;
-
-            // `wait(seconds)` is the legacy DG coroutine sleep. The
-            // body runs inside a coroutine thread (see below), so
-            // `coroutine.yield(N)` parks it. The dispatcher
-            // (`tick_yielded`) resumes due threads each tick. Pure
-            // Lua so the yield works without mlua's async feature.
-            globals.set(
-                "wait",
-                self.lua
-                    .load("local y = coroutine.yield; return function(n) y(n or 1) end")
-                    .eval::<Function>()?,
-            )?;
-
-            // `mobiles.template(zone, id)` and `objects.template(zone,
-            // id)` return a read-only LuaProto userdata wrapping the
-            // catalog entry. The corpus uses these as
-            // `objects.template(555, 77).name` to get a proto's
-            // display name without spawning. 363 + 353 corpus refs.
-            let mobiles_tbl = self.lua.create_table()?;
-            mobiles_tbl.set(
-                "template",
-                self.lua
-                    .create_function(|lua, (zone, id): (i32, i32)| -> mlua::Result<Value> {
-                        Ok(Value::UserData(lua.create_userdata(LuaProto {
-                            zone,
-                            id,
-                            kind: ProtoKind::Mob,
-                        })?))
-                    })?,
-            )?;
-            globals.set("mobiles", mobiles_tbl)?;
-            let objects_tbl = self.lua.create_table()?;
-            objects_tbl.set(
-                "template",
-                self.lua
-                    .create_function(|lua, (zone, id): (i32, i32)| -> mlua::Result<Value> {
-                        Ok(Value::UserData(lua.create_userdata(LuaProto {
-                            zone,
-                            id,
-                            kind: ProtoKind::Item,
-                        })?))
-                    })?,
-            )?;
-            globals.set("objects", objects_tbl)?;
-
-            // `time` namespace — read-only clock fields. `time.stamp`
-            // is Unix epoch seconds (used by FIGHT bodies to throttle
-            // their "every 5s" actions); `.hour`/`.day`/`.month`/
-            // `.year` come from `MudClock` — advanced one game hour
-            // every 750 ticks (~75s real). Total ~32 corpus refs.
-            let time_tbl = self.lua.create_table()?;
-            let clock = world
-                .get_resource::<mud_world::MudClock>()
-                .cloned()
-                .unwrap_or_default();
-            time_tbl.set("stamp", clock.stamp)?;
-            time_tbl.set("hour", i64::from(clock.hour))?;
-            time_tbl.set("minute", i64::from(clock.minute))?;
-            time_tbl.set("day", i64::from(clock.day))?;
-            time_tbl.set("month", i64::from(clock.month))?;
-            time_tbl.set("year", i64::from(clock.year))?;
-            // String views of the calendar — let triggers branch on
-            // "if time.season == 'Winter' then …" without rebuilding
-            // the 16-month name table in every script.
-            time_tbl.set("month_name", mud_world::month_name(world, clock.month))?;
-            time_tbl.set("season", clock.season().label())?;
-            // Day/night convenience flag matches `commands::room_is_dark`'s
-            // window (22..=05) so triggers don't have to redo the math.
-            let is_night = matches!(clock.hour, 0..=4 | 22..=23);
-            time_tbl.set("is_night", is_night)?;
-            time_tbl.set("is_day", !is_night)?;
-            globals.set("time", time_tbl)?;
-
-            // `find_actor(keyword)` searches the entire world for the
-            // first actor (mob or player) whose Named or Keywords
-            // match. Returns a LuaActor or nil. 589 corpus refs —
-            // typically used by scripted summons that need to find
-            // a target by keyword.
-            globals.set(
-                "find_actor",
-                self.lua
-                    .create_function(|lua, needle: String| -> mlua::Result<Value> {
-                        find_actor(lua, &needle)
-                    })?,
-            )?;
-
-            // `Effect.<Name>` resolves to a lowercased name string,
-            // so `actor:has_effect(Effect.Invisible)` matches the
-            // EffectCatalog by case-insensitive name. The corpus
-            // uses these as effectively-typed enum constants
-            // (`Effect.Bless`, `Effect.Sanctuary`, ...). Implemented
-            // via metatable __index.
-            let effect_tbl = self.lua.create_table()?;
-            let effect_meta = self.lua.create_table()?;
-            effect_meta.set(
-                "__index",
-                self.lua.create_function(
-                    |_, (_t, key): (Value, String)| -> mlua::Result<String> {
-                        Ok(key.to_ascii_lowercase())
-                    },
-                )?,
-            )?;
-            let _ = effect_tbl.set_metatable(Some(effect_meta));
-            globals.set("Effect", effect_tbl)?;
-
-            // `random(low, high)` returns a uniform integer in
-            // `[low, high]`. Distinct from Lua's stdlib
-            // `math.random` because the corpus uses bare `random(...)`
-            // exclusively. 859 corpus refs.
-            globals.set(
-                "random",
-                self.lua
-                    .create_function(|_, (low, high): (i64, i64)| -> mlua::Result<i64> {
-                        if low > high {
-                            return Ok(low);
-                        }
-                        Ok(rand::random_range(low..=high))
-                    })?,
-            )?;
-
-            // `percent_chance(N)` returns true with N% probability.
-            // 629 corpus refs — typically gates flavor emotes,
-            // random combat moves, or ambient room behavior.
-            globals.set(
-                "percent_chance",
-                self.lua
-                    .create_function(|_, n: i64| -> mlua::Result<bool> {
-                        Ok(rand::random_range(1i64..=100) <= n.clamp(0, 100))
-                    })?,
-            )?;
-
-            // `get_room(zone, id)` returns a LuaRoom by lookup against
-            // `WorldKeyIndex.rooms`, or nil if not found. 1019 corpus
-            // refs — quest hints, scripted teleports, room reset
-            // checks all use this.
-            globals.set(
-                "get_room",
-                self.lua
-                    .create_function(|lua, (zone, id): (i32, i32)| -> mlua::Result<Value> {
-                        get_room(lua, zone, id)
-                    })?,
-            )?;
-
-            // Caller-supplied event-context globals (`speech` for
-            // SPEECH triggers, etc.). Cleaned up alongside the
-            // built-ins below.
-            for (name, value) in extras {
-                globals.set(*name, *value)?;
-            }
 
             // Wrap the body in a coroutine thread instead of a
             // straight `eval`. `wait(N)` (= coroutine.yield) parks
@@ -1482,10 +1057,10 @@ impl LuaHost {
     /// Bind every host-supplied global the trigger body can see —
     /// `actor` / `self` / `object`, `print`, `wait`, `world`,
     /// `combat`, `skills`, `Effect`, `mobiles`, `objects`, `time`,
-    /// plus any caller-provided extras. Used by both the initial fire
-    /// path (above) and `resume_thread` since Lua globals are shared
-    /// across threads — any other trigger that fired between yield
-    /// and resume would have trampled them.
+    /// plus any caller-provided extras. The single binding site for
+    /// both the initial fire path and `resume_thread`: a resumed body
+    /// must see exactly the same surface (`time.minute` etc.) as a
+    /// fresh one, and the clock fields are refreshed on every resume.
     #[allow(clippy::too_many_lines)]
     fn bind_globals(
         &self,
@@ -1497,11 +1072,23 @@ impl LuaHost {
         extras: &[(&str, &str)],
     ) -> mlua::Result<()> {
         globals.set("actor", LuaActor { entity: acting })?;
+        // `self` is the canonical name in DG-Script-converted bodies
+        // ("set_level(self, ...)"). For SPEECH / LOAD / etc. it
+        // points at the same entity as `actor`; for GREET / RECEIVE
+        // / FIGHT it points at the listener while `actor` is the
+        // entering / giving / attacking entity. Lua treats `self`
+        // as an ordinary identifier outside of `:` method
+        // definitions.
         globals.set("self", LuaActor { entity: listener })?;
+        // `object` is the item-context binding for RECEIVE / GIVE
+        // / GET / DROP / WEAR / etc. Nil when the event doesn't
+        // carry an object (LOAD, SPEECH, GREET, DEATH).
         match object {
             Some(e) => globals.set("object", LuaActor { entity: e })?,
             None => globals.set("object", Value::Nil)?,
         }
+
+        // Override print so output flows back to the caller.
         globals.set(
             "print",
             self.lua
@@ -1513,8 +1100,31 @@ impl LuaHost {
                     Ok(())
                 })?,
         )?;
-        globals.set("globals", self.lua.create_table()?)?;
 
+        // `globals` is a script-scoped scratchpad table. The
+        // DG-Script-converted corpus uses the
+        // `globals.x = globals.x or true` pattern as a "first-time
+        // only" guard. v1: per-call empty table — writes/reads are
+        // consistent within the body. Persistence (round-trip via
+        // `Triggers.variables` jsonb) is a follow-up. On resume the
+        // body's own table is kept so state survives a `wait`.
+        if globals.raw_get::<Value>("globals")?.is_nil() {
+            globals.set("globals", self.lua.create_table()?)?;
+        }
+
+        // `skills.set_level(actor, name, level)` upserts an entry
+        // into the actor's `KnownAbilities`. Used by the
+        // breathe-* family of LOAD triggers to grant abilities at
+        // mob spawn time.
+        //
+        // `skills.execute(actor, name, target)` dispatches a named
+        // skill via `SkillExecutor`, the fn-ptr resource that
+        // mud-server installs at boot. Used by combat AI scripts
+        // to fire `bash` / `kick` / `backstab` mid-fight. Target
+        // can be a `LuaActor` userdata (its `Named.name` is used)
+        // or a string name; nil falls through to the no-target
+        // form (which `invoke_ability` handles as a self-cast or
+        // current-target lookup).
         let skills_tbl = self.lua.create_table()?;
         skills_tbl.set(
             "set_level",
@@ -1537,6 +1147,15 @@ impl LuaHost {
         )?;
         globals.set("skills", skills_tbl)?;
 
+        // `spells.cast(actor, name, target?, level?)` dispatches a
+        // named spell via `SpellExecutor`. The corpus passes the
+        // caster as `self`, the spell name, an optional target
+        // (LuaActor or string), and an optional level — the level
+        // is currently ignored by the runtime since
+        // `invoke_ability` derives caster level itself, but the
+        // parameter is accepted so existing trigger bodies work
+        // unchanged. 100+ corpus refs across mob combat AI and
+        // greet flavor scripts.
         let spells_tbl = self.lua.create_table()?;
         spells_tbl.set(
             "cast",
@@ -1547,6 +1166,14 @@ impl LuaHost {
         )?;
         globals.set("spells", spells_tbl)?;
 
+        // `world` namespace: read-only queries against the live
+        // world. `count_mobiles` / `count_objects` return how many
+        // entities of the given proto `(zone, id)` are currently
+        // alive. `find_mobile` returns the first matching mob as
+        // a LuaActor or nil. Mutating verbs (destroy / load) are
+        // deliberately omitted from v1 — triggers calling them
+        // error cleanly with a "nil value" message instead of
+        // silently corrupting world state.
         let world_tbl = self.lua.create_table()?;
         world_tbl.set(
             "count_mobiles",
@@ -1569,6 +1196,13 @@ impl LuaHost {
                     world_find_kind(lua, zone, id, EntityKind::Mob)
                 })?,
         )?;
+        // `world.destroy(actor)` despawns the target entity.
+        // Mobs destroyed mid-trigger are removed cleanly; any
+        // subsequent field access against them returns defaults
+        // (since the components are gone). 344 corpus refs.
+        // `MobResetCatalog` accounting is unaffected — a
+        // reset-spawned mob's reset row will still respawn it
+        // on the next refill cycle.
         world_tbl.set(
             "destroy",
             self.lua
@@ -1583,61 +1217,18 @@ impl LuaHost {
         )?;
         globals.set("world", world_tbl)?;
 
-        let combat_tbl = self.lua.create_table()?;
-        combat_tbl.set(
-            "engage",
-            self.lua
-                .create_function(|lua, target: AnyUserData| -> mlua::Result<()> {
-                    let target_entity = target.borrow::<LuaActor>()?.entity;
-                    world_mut_from_lua(lua, |world| {
-                        if let Some(self_ud) = lua.app_data_ref::<SelfEntity>().map(|s| s.0) {
-                            world.entity_mut(self_ud).insert(Fighting(target_entity));
-                        }
-                    })
-                })?,
-        )?;
-        combat_tbl.set(
-            "rescue",
-            self.lua
-                .create_function(|lua, victim: AnyUserData| -> mlua::Result<()> {
-                    let victim_entity = victim.borrow::<LuaActor>()?.entity;
-                    world_mut_from_lua(lua, |world| {
-                        let Some(self_ent) = lua.app_data_ref::<SelfEntity>().map(|s| s.0) else {
-                            return;
-                        };
-                        let mut attackers: Vec<Entity> = Vec::new();
-                        {
-                            let mut q = world.query::<(Entity, &Fighting)>();
-                            for (e, f) in q.iter(world) {
-                                if f.0 == victim_entity {
-                                    attackers.push(e);
-                                }
-                            }
-                        }
-                        if let Some(&attacker) = attackers.first() {
-                            world.entity_mut(attacker).insert(Fighting(self_ent));
-                            world.entity_mut(self_ent).insert(Fighting(attacker));
-                        }
-                    })
-                })?,
-        )?;
-        globals.set("combat", combat_tbl)?;
-
-        // wait(N) → coroutine.yield(N). Pure-Lua so the yield works
-        // without mlua's async feature.
-        globals.set(
-            "wait",
-            self.lua
-                .load("local y = coroutine.yield; return function(n) y(n or 1) end")
-                .eval::<Function>()?,
-        )?;
-
-        // run_room_trigger(zone, id) — enqueue a deferred fire onto
-        // `DeferredRoomTriggerFires`. mud-server drains the queue
-        // after the current Lua frame returns. See the matching
-        // binding in `exec_for_event_with_value` for the full
-        // commentary; this mirror exists for the coroutine-resume
-        // path where Lua globals are re-bound after a wait.
+        // `run_room_trigger(zone, id)` — invoke a room trigger
+        // by composite key. Used by quest scripts that hand off
+        // between rooms (zones 117, 123, 163, 185, etc.).
+        //
+        // mlua's per-`Lua` re-entrancy guard would panic if we
+        // fired the target trigger synchronously from inside the
+        // current Lua frame. Instead we enqueue onto the
+        // `DeferredRoomTriggerFires` resource; mud-server drains
+        // the queue after the current Lua frame returns (see
+        // `triggers::drain_deferred_room_triggers`). Always
+        // returns `nil`; the actual fire is asynchronous from
+        // the caller's perspective.
         globals.set(
             "run_room_trigger",
             self.lua
@@ -1659,8 +1250,16 @@ impl LuaHost {
                 })?,
         )?;
 
-        // `_seconds_until(hour, minute)` mirror — see the matching
-        // binding in `exec_for_event_with_value` for the rationale.
+        // `_seconds_until(hour, minute)` — internal helper that
+        // returns real-time seconds until `MudClock` reaches the
+        // target hour:minute. Minute defaults to 0 if omitted.
+        // The clock advances one game hour every 750 real ticks
+        // (~75s real) and we expose minute granularity from the
+        // within-hour tick position, so a game minute is 5/4 of
+        // a real second. Used by the Lua `wait_until` wrapper.
+        //
+        // Same minute-of-day returns a full 24-hour wait (matching
+        // the legacy "wait until next occurrence" semantic).
         globals.set(
             "_seconds_until",
             self.lua
@@ -1677,22 +1276,98 @@ impl LuaHost {
                     if delta_minutes <= 0 {
                         delta_minutes += 24 * 60;
                     }
+                    // 75 real-time seconds per 60 game minutes
+                    // = 5/4 real seconds per game minute.
                     Ok(delta_minutes.saturating_mul(5).saturating_div(4).max(1))
                 })?,
         )?;
 
-        // wait_until(hour, minute) — sugar over wait(_seconds_until(h, m)).
+        // `wait_until(hour, minute)` — clock-aligned wait for
+        // game-time triggers (academy class schedule, market
+        // openings, dawn-opens-the-gate). Implemented as
+        // sugar over `wait(N)` via the internal
+        // `_seconds_until` helper, so it parks on the same
+        // coroutine-yield mechanism the rest of the host uses.
+        // Minute is fully honored (12.5 ticks ≈ 1 game minute).
         globals.set(
             "wait_until",
             self.lua
                 .load(
                     "local y = coroutine.yield; \
-                     local s = _seconds_until; \
-                     return function(h, m) y(s(h, m or 0)) end",
+                         local s = _seconds_until; \
+                         return function(h, m) y(s(h, m or 0)) end",
                 )
                 .eval::<Function>()?,
         )?;
 
+        // `combat` namespace — engage/rescue. Implemented via
+        // direct Fighting component manipulation; the regular
+        // combat tick picks up the new pairing on its next pass.
+        let combat_tbl = self.lua.create_table()?;
+        combat_tbl.set(
+            "engage",
+            self.lua
+                .create_function(|lua, target: AnyUserData| -> mlua::Result<()> {
+                    let target_entity = target.borrow::<LuaActor>()?.entity;
+                    world_mut_from_lua(lua, |world| {
+                        // `self` (in trigger context) is the engager;
+                        // we don't have that entity here. The corpus
+                        // calls are always `combat.engage(actor)`
+                        // where `self` triggers the engagement, so
+                        // bind via the Lua-globals `self` lookup.
+                        if let Some(self_ud) = lua.app_data_ref::<SelfEntity>().map(|s| s.0) {
+                            world.entity_mut(self_ud).insert(Fighting(target_entity));
+                        }
+                    })
+                })?,
+        )?;
+        combat_tbl.set(
+            "rescue",
+            self.lua
+                .create_function(|lua, victim: AnyUserData| -> mlua::Result<()> {
+                    let victim_entity = victim.borrow::<LuaActor>()?.entity;
+                    world_mut_from_lua(lua, |world| {
+                        let Some(self_ent) = lua.app_data_ref::<SelfEntity>().map(|s| s.0) else {
+                            return;
+                        };
+                        // Find any entity attacking the victim — if
+                        // exists, swap them onto `self` (we draw aggro)
+                        // and have us start fighting them.
+                        let mut attackers: Vec<Entity> = Vec::new();
+                        {
+                            let mut q = world.query::<(Entity, &Fighting)>();
+                            for (e, f) in q.iter(world) {
+                                if f.0 == victim_entity {
+                                    attackers.push(e);
+                                }
+                            }
+                        }
+                        if let Some(&attacker) = attackers.first() {
+                            world.entity_mut(attacker).insert(Fighting(self_ent));
+                            world.entity_mut(self_ent).insert(Fighting(attacker));
+                        }
+                    })
+                })?,
+        )?;
+        globals.set("combat", combat_tbl)?;
+
+        // `wait(seconds)` is the legacy DG coroutine sleep. The
+        // body runs inside a coroutine thread (see below), so
+        // `coroutine.yield(N)` parks it. The dispatcher
+        // (`tick_yielded`) resumes due threads each tick. Pure
+        // Lua so the yield works without mlua's async feature.
+        globals.set(
+            "wait",
+            self.lua
+                .load("local y = coroutine.yield; return function(n) y(n or 1) end")
+                .eval::<Function>()?,
+        )?;
+
+        // `mobiles.template(zone, id)` and `objects.template(zone,
+        // id)` return a read-only LuaProto userdata wrapping the
+        // catalog entry. The corpus uses these as
+        // `objects.template(555, 77).name` to get a proto's
+        // display name without spawning. 363 + 353 corpus refs.
         let mobiles_tbl = self.lua.create_table()?;
         mobiles_tbl.set(
             "template",
@@ -1720,6 +1395,11 @@ impl LuaHost {
         )?;
         globals.set("objects", objects_tbl)?;
 
+        // `time` namespace — read-only clock fields. `time.stamp`
+        // is Unix epoch seconds (used by FIGHT bodies to throttle
+        // their "every 5s" actions); `.hour`/`.day`/`.month`/
+        // `.year` come from `MudClock` — advanced one game hour
+        // every 750 ticks (~75s real). Total ~32 corpus refs.
         let time_tbl = self.lua.create_table()?;
         let clock = world
             .get_resource::<mud_world::MudClock>()
@@ -1727,11 +1407,27 @@ impl LuaHost {
             .unwrap_or_default();
         time_tbl.set("stamp", clock.stamp)?;
         time_tbl.set("hour", i64::from(clock.hour))?;
+        time_tbl.set("minute", i64::from(clock.minute))?;
         time_tbl.set("day", i64::from(clock.day))?;
         time_tbl.set("month", i64::from(clock.month))?;
         time_tbl.set("year", i64::from(clock.year))?;
+        // String views of the calendar — let triggers branch on
+        // "if time.season == 'Winter' then …" without rebuilding
+        // the 16-month name table in every script.
+        time_tbl.set("month_name", mud_world::month_name(world, clock.month))?;
+        time_tbl.set("season", clock.season().label())?;
+        // Day/night convenience flag matches `commands::room_is_dark`'s
+        // window (22..=05) so triggers don't have to redo the math.
+        let is_night = matches!(clock.hour, 0..=4 | 22..=23);
+        time_tbl.set("is_night", is_night)?;
+        time_tbl.set("is_day", !is_night)?;
         globals.set("time", time_tbl)?;
 
+        // `find_actor(keyword)` searches the entire world for the
+        // first actor (mob or player) whose Named or Keywords
+        // match. Returns a LuaActor or nil. 589 corpus refs —
+        // typically used by scripted summons that need to find
+        // a target by keyword.
         globals.set(
             "find_actor",
             self.lua
@@ -1740,6 +1436,12 @@ impl LuaHost {
                 })?,
         )?;
 
+        // `Effect.<Name>` resolves to a lowercased name string,
+        // so `actor:has_effect(Effect.Invisible)` matches the
+        // EffectCatalog by case-insensitive name. The corpus
+        // uses these as effectively-typed enum constants
+        // (`Effect.Bless`, `Effect.Sanctuary`, ...). Implemented
+        // via metatable __index.
         let effect_tbl = self.lua.create_table()?;
         let effect_meta = self.lua.create_table()?;
         effect_meta.set(
@@ -1752,6 +1454,10 @@ impl LuaHost {
         let _ = effect_tbl.set_metatable(Some(effect_meta));
         globals.set("Effect", effect_tbl)?;
 
+        // `random(low, high)` returns a uniform integer in
+        // `[low, high]`. Distinct from Lua's stdlib
+        // `math.random` because the corpus uses bare `random(...)`
+        // exclusively. 859 corpus refs.
         globals.set(
             "random",
             self.lua
@@ -1763,6 +1469,9 @@ impl LuaHost {
                 })?,
         )?;
 
+        // `percent_chance(N)` returns true with N% probability.
+        // 629 corpus refs — typically gates flavor emotes,
+        // random combat moves, or ambient room behavior.
         globals.set(
             "percent_chance",
             self.lua
@@ -1771,6 +1480,10 @@ impl LuaHost {
                 })?,
         )?;
 
+        // `get_room(zone, id)` returns a LuaRoom by lookup against
+        // `WorldKeyIndex.rooms`, or nil if not found. 1019 corpus
+        // refs — quest hints, scripted teleports, room reset
+        // checks all use this.
         globals.set(
             "get_room",
             self.lua
@@ -1779,6 +1492,9 @@ impl LuaHost {
                 })?,
         )?;
 
+        // Caller-supplied event-context globals (`speech` for
+        // SPEECH triggers, etc.). Cleaned up alongside the
+        // built-ins below.
         for (name, value) in extras {
             globals.set(*name, *value)?;
         }
@@ -6201,5 +5917,64 @@ mod tests {
         .unwrap();
         assert_eq!(world.get::<Located>(mob).unwrap().0, room_b);
         assert_fight_ended(&world, mob, attacker);
+    }
+    // ----- single binding path: initial fire and resume agree -----
+
+    #[test]
+    fn time_fields_survive_a_wait() {
+        let (mut world, mob) = make_world_with_mob();
+        world.insert_resource(mud_world::MudClock {
+            hour: 6,
+            minute: 37,
+            ..Default::default()
+        });
+        let mut host = LuaHost::new();
+        host.set_current_tick(0);
+        host.exec_for_actor(
+            &mut world,
+            mob,
+            "self:setvar('before', time.minute)\n\
+             wait(1)\n\
+             self:setvar('after', time.minute)\n\
+             self:setvar('month_name', time.month_name)\n\
+             self:setvar('is_day', time.is_day)\n\
+             self:setvar('season', time.season)",
+        )
+        .unwrap();
+        // The clock moves while the thread is parked; the resumed body
+        // must see the new reading, not nil.
+        world.resource_mut::<mud_world::MudClock>().minute = 41;
+        host.set_current_tick(10);
+        assert_eq!(host.tick_yielded(&mut world), 1);
+        let cache = world.resource::<EntityVariableCache>();
+        let get = |k: &str| cache.get(EntityType::Mob, 99, 1, k).cloned();
+        assert_eq!(get("before"), Some(serde_json::json!(37)));
+        assert_eq!(get("after"), Some(serde_json::json!(41)));
+        assert!(
+            get("month_name").is_some(),
+            "time.month_name nil after wait"
+        );
+        assert_eq!(get("is_day"), Some(serde_json::json!(true)));
+        assert!(get("season").is_some(), "time.season nil after wait");
+    }
+
+    #[test]
+    fn globals_scratch_table_survives_a_wait() {
+        let (mut world, mob) = make_world_with_mob();
+        let mut host = LuaHost::new();
+        host.set_current_tick(0);
+        host.exec_for_actor(
+            &mut world,
+            mob,
+            "globals.seen = 7\nwait(1)\nself:setvar('seen', globals.seen)",
+        )
+        .unwrap();
+        host.set_current_tick(10);
+        host.tick_yielded(&mut world);
+        let cache = world.resource::<EntityVariableCache>();
+        assert_eq!(
+            cache.get(EntityType::Mob, 99, 1, "seen"),
+            Some(&serde_json::json!(7))
+        );
     }
 }
