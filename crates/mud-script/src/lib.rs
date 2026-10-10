@@ -97,6 +97,16 @@ fn mob_block(world: &World, entity: Entity) -> Option<MobBlock> {
     None
 }
 
+/// True when a gated trigger on mob `entity` would not run its body
+/// right now: the mob is asleep (the script is aborted) or casting (the
+/// script is parked until the cast ends). Dispatchers that treat "ran
+/// but returned nothing" as a verdict (command triggers) use this to
+/// skip such a mob instead of reading the aborted run as one.
+#[must_use]
+pub fn mob_script_blocked(world: &World, entity: Entity) -> bool {
+    mob_block(world, entity).is_some()
+}
+
 /// Bevy resource wrapping the Lua interpreter and the parked-coroutine
 /// queue. mud-server stamps `current_tick` each frame; `tick_yielded`
 /// resumes any threads whose `resume_at_tick` has elapsed.

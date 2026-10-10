@@ -565,8 +565,14 @@ fn command_triggers_exempt(world: &World, actor: Entity) -> bool {
 /// get `location` (`"equip"` / `"inventory"` / `"room"`), the legacy
 /// `OCMD_*` mask the converter folds into a guard in the body.
 ///
-/// Returns `true` when a trigger returned `false`, consuming the
-/// command so the caller stops dispatch.
+/// Returns `true` when a trigger consumed the command, so the caller
+/// stops dispatch. Legacy `script_driver` starts with `ret_val = 1`,
+/// which blocks the command; only an explicit `return 0` lets it
+/// through, and a script that reaches a `wait` has already returned
+/// that default. So a run that ends `return true` (the Lua spelling of
+/// `return 0`, and of "not my command") lets the command continue, and
+/// anything else (`return false`, no return, a thread parked on
+/// `wait`) consumes it.
 pub fn fire_command_in_room(
     world: &mut World,
     player: Entity,
@@ -610,6 +616,12 @@ pub fn fire_command_in_room(
         if to_fire.is_empty() {
             continue;
         }
+        // A sleeping mob's script never starts and a casting mob's is
+        // parked: neither says anything about this command, so they
+        // must not read as a verdict.
+        if mud_script::mob_script_blocked(world, listener) {
+            continue;
+        }
         for (zone, id, name, body) in to_fire {
             let mut extras: Vec<(&str, &str)> = vec![("cmd", cmd), ("args", args), ("arg", args)];
             if let Some(loc) = location {
@@ -630,8 +642,8 @@ pub fn fire_command_in_room(
                 result.is_ok(),
             );
             match result {
-                Ok((_out, Some(false))) => return true,
-                Ok(_) => {}
+                Ok((_out, Some(true))) => {}
+                Ok(_) => return true,
                 Err(e) => record_failure(world, zone, id, &name, "COMMAND", &e),
             }
         }
@@ -1315,6 +1327,76 @@ mod dispatch_tests {
         assert!(ran(&world, 20, EntityType::Mob, "hit").is_some());
         assert!(ran(&world, 30, EntityType::Object, "hit").is_none());
         assert!(ran(&world, 31, EntityType::Object, "hit").is_none());
+    }
+
+    #[test]
+    fn command_trigger_that_waits_consumes_the_command() {
+        // Shape of 519_65 (academy deposit): a quest branch sends a forced
+        // `deposit` and waits; the typed command must not run as well.
+        let (mut world, room) = base_world();
+        let body = r#"
+if not (cmd == "deposit") then
+    return true  -- Not our command
+end
+local _return_value = false  -- legacy default
+if arg == "d" then
+    _return_value = true
+    return _return_value
+end
+if string.find(arg, "1 gold") then
+    self:setvar('forced', arg)
+    wait(2)
+    self:setvar('after_wait', 1)
+end
+if arg == "plain" then
+    _return_value = true
+end
+return _return_value"#;
+        add_trigger(&mut world, 1, vec![TriggerEvent::Command], body);
+        spawn_mob(&mut world, room, 1, vec![(99, 1)]);
+        let player = spawn_player(&mut world, room, "Pat");
+        // Waits: consumed, and the body is parked mid-way.
+        assert!(fire_command_in_room(
+            &mut world,
+            player,
+            room,
+            "deposit",
+            "1 gold 1 silver"
+        ));
+        assert_eq!(var(&world, 1, "forced"), Some("1 gold 1 silver".into()));
+        assert!(var(&world, 1, "after_wait").is_none(), "parked on wait");
+        // Explicit allow paths and other commands pass through.
+        assert!(!fire_command_in_room(
+            &mut world, player, room, "deposit", "d"
+        ));
+        assert!(!fire_command_in_room(
+            &mut world, player, room, "deposit", "plain"
+        ));
+        assert!(!fire_command_in_room(&mut world, player, room, "look", ""));
+        // No `return 0` on the path: the legacy default blocks.
+        assert!(fire_command_in_room(
+            &mut world, player, room, "deposit", "x"
+        ));
+    }
+
+    #[test]
+    fn sleeping_mob_does_not_swallow_commands() {
+        let (mut world, room) = base_world();
+        add_trigger(
+            &mut world,
+            1,
+            vec![TriggerEvent::Command],
+            "if cmd ~= 'rest' then return true end\nreturn false",
+        );
+        let mob = spawn_mob(&mut world, room, 1, vec![(99, 1)]);
+        let player = spawn_player(&mut world, room, "Pat");
+        assert!(fire_command_in_room(&mut world, player, room, "rest", ""));
+        world.entity_mut(mob).insert(Posture(PostureKind::Sleeping));
+        assert!(
+            !fire_command_in_room(&mut world, player, room, "rest", ""),
+            "an asleep mob's aborted script is not a verdict"
+        );
+        assert!(!fire_command_in_room(&mut world, player, room, "look", ""));
     }
 
     #[test]
