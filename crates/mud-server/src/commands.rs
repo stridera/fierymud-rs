@@ -23990,7 +23990,7 @@ pub(crate) fn try_engage_remembered_mob(world: &mut World, player: Entity, room:
             .find(|(e, l, mem)| {
                 l.0 == room
                     && mem.0.contains(&player)
-                    && crate::mob_ai::mob_can_swing(world, *e)
+                    && crate::mob_ai::mob_can_act(world, *e)
                     && can_see_player(world, *e, player)
                     && !attack_ok::is_servant(world, *e)
                     && !wimpy_mob_is_scared(world, *e)
@@ -24112,11 +24112,16 @@ pub(crate) fn engage_combat(world: &mut World, attacker: Entity, defender: Entit
     if world.get::<mud_world::PeacefulRoom>(room).is_some() {
         return;
     }
-    // A mob that cannot act (asleep, paralysed, mesmerized, stunned, not on
-    // its feet) never opens or joins a fight: engaging it would publish
-    // `Fighting` (prompt, GMCP, "can't leave") while it swings at nothing.
-    if world.get::<Mob>(attacker).is_some() && !crate::mob_ai::mob_can_swing(world, attacker) {
-        return;
+    // A mob that cannot act (asleep, paralysed, mesmerized, stunned) never
+    // opens or joins a fight: engaging it would publish `Fighting` (prompt,
+    // GMCP, "can't leave") while it swings at nothing. One that is merely
+    // sitting or resting gets to its feet and engages (legacy only needs the
+    // mob awake).
+    if world.get::<Mob>(attacker).is_some() {
+        if !crate::mob_ai::mob_can_act(world, attacker) {
+            return;
+        }
+        crate::mob_ai::stand_up_for_fight(world, attacker);
     }
     let attacker_name = name_of(world, attacker);
     let defender_name = name_of(world, defender);
@@ -24183,7 +24188,7 @@ pub(crate) fn try_engage_aggressive_mob(world: &mut World, player: Entity, room:
         q.iter(world)
             .filter(|(e, l, _, _)| {
                 l.0 == room
-                    && crate::mob_ai::mob_can_swing(world, *e)
+                    && crate::mob_ai::mob_can_act(world, *e)
                     && can_see_player(world, *e, player)
                     && mob_will_start_fight(world, *e, player)
             })

@@ -25,7 +25,12 @@ enum Hold {
     Resting,
 }
 
-const HOLDS: [Hold; 4] = [Hold::Stunned, Hold::Asleep, Hold::Sitting, Hold::Resting];
+/// Holds that really stop a mob. Sitting and resting do not: the mob gets up
+/// and fights (legacy only needs it awake), see the tests at the bottom.
+const HOLDS: [Hold; 2] = [Hold::Stunned, Hold::Asleep];
+
+/// Postures a mob stands up from when it engages.
+const SEATED: [Hold; 2] = [Hold::Sitting, Hold::Resting];
 
 fn apply(world: &mut World, mob: Entity, hold: Hold) {
     let mut em = world.entity_mut(mob);
@@ -406,4 +411,126 @@ fn magical_sleep_cannot_be_woken_or_stood_up_from() {
     super::dispatch(&mut fx.world, victim, "stand");
     assert!(drain(&mut vrx).contains("You can't wake up!"));
     assert_eq!(posture_of(&fx.world, victim), Some(PostureKind::Sleeping));
+}
+
+#[test]
+fn a_seated_aggressive_mob_stands_and_attacks_on_the_pulse() {
+    for seat in SEATED {
+        let mut fx = fixture();
+        let wolf = wolf(&mut fx, "a wolf");
+        apply(&mut fx.world, wolf, seat);
+        let _ = drain(&mut fx.rx);
+        crate::commands::aggro_pulse(&mut fx.world);
+        assert_eq!(
+            fx.world.get::<Fighting>(wolf).map(|f| f.0),
+            Some(fx.player),
+            "{seat:?}"
+        );
+        assert_eq!(
+            posture_of(&fx.world, wolf),
+            Some(PostureKind::Standing),
+            "{seat:?}"
+        );
+        let out = drain(&mut fx.rx);
+        assert!(out.contains("scrambles to its feet"), "{seat:?}: {out}");
+        assert!(out.contains("attacks"), "{seat:?}: {out}");
+    }
+}
+
+#[test]
+fn a_seated_mob_holds_a_grudge_and_turns_on_its_hate_list() {
+    for seat in SEATED {
+        let mut fx = fixture();
+        let wolf = wolf(&mut fx, "a wolf");
+        fx.world.entity_mut(wolf).insert(CombatStats::default());
+        let mut memory = MobMemory::default();
+        memory.0.insert(fx.player);
+        fx.world.entity_mut(wolf).insert(memory);
+        apply(&mut fx.world, wolf, seat);
+        recheck_aggro_in_room(&mut fx.world, fx.player);
+        assert_eq!(
+            fx.world.get::<Fighting>(wolf).map(|f| f.0),
+            Some(fx.player),
+            "grudge {seat:?}"
+        );
+        assert_eq!(posture_of(&fx.world, wolf), Some(PostureKind::Standing));
+
+        let mut fx = fixture();
+        let hater = self::wolf(&mut fx, "a wolf");
+        fx.world.entity_mut(hater).insert(CombatStats::default());
+        let mut hate = HateList::default();
+        hate.push(fx.player);
+        fx.world.entity_mut(hater).insert(hate);
+        apply(&mut fx.world, hater, seat);
+        fx.world.insert_resource(crate::TickCount(0));
+        crate::combat::combat_tick(&mut fx.world);
+        assert_eq!(
+            fx.world.get::<Fighting>(hater).map(|f| f.0),
+            Some(fx.player),
+            "hate {seat:?}"
+        );
+    }
+}
+
+#[test]
+fn a_seated_mob_that_is_attacked_stands_then_fights_back() {
+    for seat in SEATED {
+        let mut fx = fixture();
+        let wolf = wolf(&mut fx, "a wolf");
+        fx.world.entity_mut(wolf).insert(CombatStats::default());
+        apply(&mut fx.world, wolf, seat);
+        // The player opened the fight; the mob has Fighting but is seated.
+        fx.world.entity_mut(fx.player).insert(Fighting(wolf));
+        fx.world.entity_mut(wolf).insert(Fighting(fx.player));
+        let hp = fx.world.get::<Health>(fx.player).map(|h| h.hp);
+        let _ = drain(&mut fx.rx);
+        fx.world.insert_resource(crate::TickCount(0));
+        // Round one: it gets to its feet and does not swing yet.
+        crate::combat::combat_tick(&mut fx.world);
+        assert_eq!(
+            posture_of(&fx.world, wolf),
+            Some(PostureKind::Standing),
+            "{seat:?}"
+        );
+        let out = drain(&mut fx.rx);
+        assert!(out.contains("scrambles to its feet"), "{seat:?}: {out}");
+        assert_eq!(
+            fx.world.get::<Health>(fx.player).map(|h| h.hp),
+            hp,
+            "{seat:?}"
+        );
+        // Later rounds: it swings.
+        let mut swung = false;
+        for t in 1..40 {
+            fx.world.insert_resource(crate::TickCount(t * 100));
+            crate::combat::combat_tick(&mut fx.world);
+            if fx.world.get::<Health>(fx.player).map(|h| h.hp) != hp {
+                swung = true;
+                break;
+            }
+        }
+        assert!(swung, "{seat:?}: the mob never fought back");
+    }
+}
+
+#[test]
+fn a_sleeping_or_stunned_mob_in_a_fight_stays_down() {
+    for hold in HOLDS {
+        let mut fx = fixture();
+        let wolf = wolf(&mut fx, "a wolf");
+        apply(&mut fx.world, wolf, hold);
+        fx.world.entity_mut(wolf).insert(Fighting(fx.player));
+        fx.world.insert_resource(crate::TickCount(0));
+        crate::combat::combat_tick(&mut fx.world);
+        let sleeping = matches!(hold, Hold::Asleep);
+        assert_eq!(
+            posture_of(&fx.world, wolf),
+            Some(if sleeping {
+                PostureKind::Sleeping
+            } else {
+                PostureKind::Standing
+            }),
+            "{hold:?}"
+        );
+    }
 }

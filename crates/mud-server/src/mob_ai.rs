@@ -59,16 +59,47 @@ pub(crate) fn mob_can_act(world: &World, mob: Entity) -> bool {
         && world.get::<mud_world::Ghost>(mob).is_none()
 }
 
-/// Whether a mob may start or carry on a fight, walk about, or otherwise
-/// move under its own power: [`mob_can_act`] and on its feet. Legacy
-/// `mobile_activity` only lets a mob wander while `GET_POS >= POS_STANDING`,
-/// and a sitting, resting or sleeping body does not swing in `combat_tick`
-/// either. A mob with no [`mud_world::Posture`] counts as standing.
+/// Whether a mob may walk about under its own power: [`mob_can_act`] and on
+/// its feet. Legacy `mobile_activity` only lets a mob wander while
+/// `GET_POS >= POS_STANDING`. Starting or joining a fight is gated on
+/// [`mob_can_act`] alone (legacy aggro and grudges only need the mob awake);
+/// a sitting or resting mob that engages gets up first, see
+/// [`stand_up_for_fight`]. A mob with no [`mud_world::Posture`] counts as
+/// standing.
 pub(crate) fn mob_can_swing(world: &World, mob: Entity) -> bool {
     mob_can_act(world, mob)
         && world
             .get::<mud_world::Posture>(mob)
             .is_none_or(|p| p.0 == mud_world::PostureKind::Standing)
+}
+
+/// Legacy `perform_mob_violence` (mobact.cpp:335): a mob below standing that
+/// is ready to act gets to its feet (announced to the room) before it
+/// swings. Sleeping mobs are left alone (they cannot act). Returns whether
+/// the mob stood up.
+pub(crate) fn stand_up_for_fight(world: &mut World, mob: Entity) -> bool {
+    use mud_world::PostureKind;
+    if !matches!(
+        world.get::<mud_world::Posture>(mob).map(|p| p.0),
+        Some(PostureKind::Sitting | PostureKind::Kneeling | PostureKind::Resting)
+    ) || !mob_can_act(world, mob)
+    {
+        return false;
+    }
+    world
+        .entity_mut(mob)
+        .insert(mud_world::Posture(PostureKind::Standing));
+    if let Some(room) = world.get::<Located>(mob).map(|l| l.0) {
+        let name = crate::commands::cap_sentence_start(&crate::commands::name_of(world, mob));
+        let their = crate::flight::possessive(world, mob);
+        crate::commands::broadcast_room_except_rendered(
+            world,
+            room,
+            &[mob],
+            &format!("<yellow>{name} scrambles to {their} feet!</>\r\n"),
+        );
+    }
+    true
 }
 
 /// A mob's percent in a skill at `level` once it has it. Legacy

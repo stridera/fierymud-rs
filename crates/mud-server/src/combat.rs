@@ -727,8 +727,9 @@ pub fn combat_tick(world: &mut World) {
                 if crate::commands::senses::is_blind(world, mob) {
                     return None;
                 }
-                // Asleep, held or sitting mobs do not turn on anyone.
-                if !crate::mob_ai::mob_can_swing(world, mob) {
+                // Asleep or held mobs do not turn on anyone; a sitting one
+                // gets up when it does (`engage_combat` / the combat round).
+                if !crate::mob_ai::mob_can_act(world, mob) {
                     return None;
                 }
                 hate.0
@@ -861,6 +862,33 @@ pub fn combat_tick(world: &mut World) {
     // snapshot — even if Fighting somehow lingers on a dead or
     // frozen entity, they can't swing. Stunned is checked
     // explicitly below for parity with the existing semantics.
+    // Legacy `perform_mob_violence`: a fighting mob below standing spends
+    // its round getting up and swings from the next one. (Sleeping, stunned,
+    // frozen and casting mobs stay as they are.)
+    let scrambled: std::collections::HashSet<Entity> = {
+        let mut q = world.query_filtered::<(Entity, &Posture), (
+            With<Mob>,
+            With<Fighting>,
+            Without<Ghost>,
+            Without<mud_world::Frozen>,
+            Without<Stunned>,
+            Without<mud_world::Casting>,
+        )>();
+        let sitters: Vec<Entity> = q
+            .iter(world)
+            .filter(|(_, p)| {
+                matches!(
+                    p.0,
+                    PostureKind::Sitting | PostureKind::Kneeling | PostureKind::Resting
+                )
+            })
+            .map(|(e, _)| e)
+            .collect();
+        sitters
+            .into_iter()
+            .filter(|&m| crate::mob_ai::stand_up_for_fight(world, m))
+            .collect()
+    };
     let swings: Vec<Swing> = {
         let mut q = world.query_filtered::<(
             Entity,
@@ -877,8 +905,9 @@ pub fn combat_tick(world: &mut World) {
             Without<mud_world::Casting>,
         )>();
         q.iter(world)
-            .filter(|(_, _, _, _, posture, stunned)| {
+            .filter(|(attacker, _, _, _, posture, stunned)| {
                 stunned.is_none()
+                    && !scrambled.contains(attacker)
                     && matches!(posture.map(|p| p.0), None | Some(PostureKind::Standing))
             })
             .map(|(attacker, fighting, cs, name, _, _)| {
