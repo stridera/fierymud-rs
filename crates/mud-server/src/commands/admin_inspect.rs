@@ -15,9 +15,9 @@ use mud_world::{
 
 use crate::TickCount;
 use crate::commands::{
-    AdminAuditLog, Category, Command, Connection, DbPool, Help, cap_sentence_start, direction_name,
-    direction_rank, drain_lua_outbox, find_actor_in_room, find_in_room, matches, name_of, name_or,
-    send_to,
+    AdminAuditLog, Category, Command, Connection, DbPool, Help, ItemClass, cap_sentence_start,
+    direction_name, direction_rank, drain_lua_outbox, find_actor_in_room, find_item, name_of,
+    name_or, send_to,
 };
 
 inventory::submit! {
@@ -549,7 +549,7 @@ pub(crate) fn cmd_triggers(world: &mut World, player: Entity, args: &str) {
                 targets.push(e);
             }
         }
-    } else if let Some(e) = find_in_room(world, body_arg, room)
+    } else if let Some(e) = find_item(world, player, body_arg, ItemClass::Room)
         .or_else(|| find_actor_in_room(world, body_arg, room, player))
     {
         targets.push(e);
@@ -710,7 +710,7 @@ pub(crate) fn cmd_firetrig(world: &mut World, player: Entity, args: &str) {
             send_to(world, player, "You're nowhere.\r\n");
             return;
         };
-        let Some(target) = find_in_room(world, &needle, room)
+        let Some(target) = find_item(world, player, &needle, ItemClass::Room)
             .or_else(|| find_actor_in_room(world, &needle, room, player))
         else {
             send_to(world, player, format!("No '{needle}' here.\r\n"));
@@ -754,8 +754,8 @@ fn resolve_var_target(world: &mut World, player: Entity, arg: &str) -> Option<En
     if arg.eq_ignore_ascii_case("me") || arg.eq_ignore_ascii_case("self") {
         return Some(player);
     }
-    if let Some(e) =
-        find_in_room(world, arg, room).or_else(|| find_actor_in_room(world, arg, room, player))
+    if let Some(e) = find_item(world, player, arg, ItemClass::Room)
+        .or_else(|| find_actor_in_room(world, arg, room, player))
     {
         return Some(e);
     }
@@ -2679,15 +2679,7 @@ pub(crate) fn cmd_stat(world: &mut World, player: Entity, args: &str) {
             // Try actor (mob/player) first, then item (room or carried).
             let needle = arg.to_ascii_lowercase();
             let actor = find_actor_in_room(world, arg, located.0, player);
-            let item = actor.or_else(|| {
-                let mut q = world
-                    .query_filtered::<(Entity, &Located, &Named, Option<&Keywords>), With<Item>>();
-                q.iter(world)
-                    .find(|(_, l, n, kw)| {
-                        (l.0 == located.0 || l.0 == player) && matches(&needle, n, *kw)
-                    })
-                    .map(|(e, _, _, _)| e)
-            });
+            let item = actor.or_else(|| find_item(world, player, &needle, ItemClass::RoomFirst));
             let Some(found) = item else {
                 send_to(world, player, format!("No '{arg}' here.\r\n"));
                 return;

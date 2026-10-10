@@ -3,12 +3,10 @@
 
 use bevy_ecs::prelude::*;
 use mud_db::enums::{ObjectType, UserRole};
-use mud_world::{
-    Fighting, Item, Keywords, Located, Named, ObjectPrototypes, WorldKey, WorldKeyIndex,
-};
+use mud_world::{Fighting, Located, ObjectPrototypes, WorldKey, WorldKeyIndex};
 
 use crate::commands::{
-    Category, Command, Help, cmd_look, matches, name_of, send_rendered, send_to,
+    Category, Command, Help, ItemClass, cmd_look, find_item, name_of, send_rendered, send_to,
 };
 
 inventory::submit! {
@@ -80,12 +78,8 @@ fn cmd_enter(world: &mut World, player: Entity, args: &str) {
     let from_room = located.0;
     let lc = needle.to_ascii_lowercase();
     let portal_match = {
-        let mut q = world
-            .query_filtered::<(Entity, &Located, &Named, Option<&Keywords>, &WorldKey), With<Item>>(
-            );
-        q.iter(world)
-            .find(|(_, l, n, kw, _)| l.0 == from_room && matches(&lc, n, *kw))
-            .map(|(e, _, _, _, k)| (e, *k))
+        find_item(world, player, &lc, ItemClass::Room)
+            .and_then(|e| world.get::<WorldKey>(e).map(|k| (e, *k)))
     };
     let Some((portal, key)) = portal_match else {
         send_rendered(

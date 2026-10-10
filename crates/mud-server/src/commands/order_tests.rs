@@ -171,11 +171,12 @@ fn container_contents_list_newest_first() {
 
 #[test]
 fn indexed_target_matches_the_displayed_order() {
-    let (mut world, room, _p, _rx) = setup();
+    let (mut world, room, p, _rx) = setup();
     let old = spawn_item(&mut world, room, "a rusty sword", "sword", 1);
     let new = spawn_item(&mut world, room, "a rusty sword", "sword", 1);
-    assert_eq!(super::find_in_room(&mut world, "sword", room), Some(new));
-    assert_eq!(super::find_in_room(&mut world, "2.sword", room), Some(old));
+    let find = |w: &mut World, n: &str| super::find_item(w, p, n, super::ItemClass::Room);
+    assert_eq!(find(&mut world, "sword"), Some(new));
+    assert_eq!(find(&mut world, "2.sword"), Some(old));
 }
 
 #[test]
@@ -373,15 +374,9 @@ fn indexed_worn_target_follows_equipment_slot_order() {
     // though the right ring arrived later.
     dispatch(&mut world, p, "equipment");
     assert_in_order(&drain(&mut rx), &["gold ring", "silver ring"]);
-    let eq = super::EquipFilter::Equipped;
-    assert_eq!(
-        super::find_carried_by(&mut world, "ring", p, eq),
-        Some(left)
-    );
-    assert_eq!(
-        super::find_carried_by(&mut world, "2.ring", p, eq),
-        Some(right)
-    );
+    let eq = super::ItemClass::Equipment;
+    assert_eq!(super::find_item(&mut world, p, "ring", eq), Some(left));
+    assert_eq!(super::find_item(&mut world, p, "2.ring", eq), Some(right));
 
     dispatch(&mut world, p, "remove 2.ring");
     let _ = drain(&mut rx);
@@ -390,7 +385,7 @@ fn indexed_worn_target_follows_equipment_slot_order() {
 }
 
 #[test]
-fn anywhere_search_checks_equipment_before_inventory_like_generic_find() {
+fn carried_search_checks_pack_before_equipment() {
     use mud_world::{EquippedSlot, Slot};
     let (mut world, _room, p, _rx) = setup();
     let packed = spawn_item(&mut world, p, "a brass ring", "ring", 1);
@@ -398,17 +393,17 @@ fn anywhere_search_checks_equipment_before_inventory_like_generic_find() {
     world
         .entity_mut(worn)
         .insert(EquippedSlot(Slot::LeftFinger));
-    let any = super::EquipFilter::Anywhere;
+    let carried = super::ItemClass::Carried;
     assert_eq!(
-        super::find_carried_by(&mut world, "ring", p, any),
-        Some(worn)
-    );
-    // The counter restarts per list (legacy copies the find context), so
-    // a second ring is looked for in the pack, not past the worn one.
-    assert_eq!(super::find_carried_by(&mut world, "2.ring", p, any), None);
-    assert_eq!(
-        super::find_carried_by(&mut world, "1.ring", p, super::EquipFilter::Inventory),
+        super::find_item(&mut world, p, "ring", carried),
         Some(packed)
+    );
+    // The counter restarts per place (legacy copies the find context), so
+    // a second ring is looked for among the worn items, not past the pack.
+    assert_eq!(super::find_item(&mut world, p, "2.ring", carried), None);
+    assert_eq!(
+        super::find_item(&mut world, p, "1.ring", super::ItemClass::Equipment),
+        Some(worn)
     );
 }
 
@@ -461,4 +456,68 @@ fn remove_all_strips_in_equipment_slot_order() {
     );
     assert!(world.get::<EquippedSlot>(left).is_none());
     assert!(world.get::<EquippedSlot>(right).is_none());
+}
+
+/// Issue #56: with the same keyword on the floor, in the pack and on the
+/// body, each command class picks the same place no matter which command
+/// of the class is typed (see `item_target` for the table).
+#[test]
+fn item_commands_agree_on_where_a_sword_comes_from() {
+    use mud_world::{EquippedSlot, Slot};
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Pick {
+        Room,
+        Pack,
+        Worn,
+    }
+    // (typed command, where the sword it acts on must have come from)
+    let table = [
+        ("get sword", Pick::Room),
+        ("take sword", Pick::Room),
+        ("get steel-sword", Pick::Room),
+        ("drop sword", Pick::Pack),
+        ("drop steel-sword", Pick::Pack),
+        ("junk sword", Pick::Pack),
+        ("remove sword", Pick::Worn),
+        ("remove steel-sword", Pick::Worn),
+    ];
+    for (cmd, expect) in table {
+        let (mut world, room, p, _rx) = setup();
+        let mk = |w: &mut World, holder: Entity, id: i32| {
+            let e = spawn_item(w, holder, "a steel sword", "sword", id);
+            w.entity_mut(e)
+                .insert(Keywords(vec!["sword".into(), "steel".into()]));
+            e
+        };
+        let in_room = mk(&mut world, room, 1);
+        let in_pack = mk(&mut world, p, 2);
+        let on_body = mk(&mut world, p, 3);
+        world.entity_mut(on_body).insert(EquippedSlot(Slot::Wield));
+        dispatch(&mut world, p, cmd);
+        let changed: Vec<Pick> = [
+            (Pick::Room, in_room, Located(p)),
+            (Pick::Pack, in_pack, Located(room)),
+        ]
+        .into_iter()
+        .filter(|(_, e, to)| world.get::<Located>(*e).is_none_or(|l| l.0 == to.0))
+        .map(|(pick, _, _)| pick)
+        .chain(
+            world
+                .get::<EquippedSlot>(on_body)
+                .is_none()
+                .then_some(Pick::Worn),
+        )
+        .collect();
+        // `junk` destroys its item, so it counts as the pack sword moving.
+        let changed: Vec<Pick> = if cmd.starts_with("junk") {
+            if world.get_entity(in_pack).is_err() {
+                vec![Pick::Pack]
+            } else {
+                changed
+            }
+        } else {
+            changed
+        };
+        assert_eq!(changed, vec![expect], "`{cmd}` acted on the wrong sword");
+    }
 }

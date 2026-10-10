@@ -42,8 +42,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::autosave::SaveCoordinator;
 use crate::commands::{
-    AsyncCommand, Category, Command, EquipFilter, Help, cmd_mail_stub, find_carried_by,
-    has_object_flag, has_restriction, name_of, send_to,
+    AsyncCommand, Category, Command, Help, ItemClass, cmd_mail_stub, find_item, has_object_flag,
+    has_restriction, name_of, send_to,
 };
 
 inventory::submit! {
@@ -219,7 +219,7 @@ async fn cmd_chest_deposit(
     else {
         return;
     };
-    let Some(item) = find_carried_by(world, target, player, EquipFilter::Inventory) else {
+    let Some(item) = find_item(world, player, target, ItemClass::Inventory) else {
         send_to(
             world,
             player,

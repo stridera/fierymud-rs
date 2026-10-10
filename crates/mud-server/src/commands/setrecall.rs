@@ -8,11 +8,11 @@
 
 use bevy_ecs::prelude::*;
 use mud_db::enums::{ObjectType, UserRole};
-use mud_world::{Item, Keywords, Located, Named, ObjectPrototypes, RecallPoint, WorldKey};
+use mud_world::{Located, ObjectPrototypes, RecallPoint, WorldKey};
 
 use crate::commands::{
-    Category, Command, Help, broadcast_room_except_players_rendered, matches, name_of, name_or,
-    send_to, try_insert,
+    Category, Command, Help, ItemClass, broadcast_room_except_players_rendered, find_item, name_of,
+    name_or, send_to, try_insert,
 };
 
 inventory::submit! {
@@ -83,19 +83,7 @@ fn cmd_touch(world: &mut World, player: Entity, args: &str) {
     // Inventory match wins over room match (player can carry a
     // pocket-touchstone), but we accept either since touchstones are
     // typically placed in fixed rooms.
-    let candidate: Option<Entity> = {
-        let mut q =
-            world.query_filtered::<(Entity, &Located, &Named, Option<&Keywords>), With<Item>>();
-        let in_inv = q
-            .iter(world)
-            .find(|(_, l, n, kw)| l.0 == player && matches(&needle, n, *kw))
-            .map(|(e, _, _, _)| e);
-        in_inv.or_else(|| {
-            q.iter(world)
-                .find(|(_, l, n, kw)| l.0 == located.0 && matches(&needle, n, *kw))
-                .map(|(e, _, _, _)| e)
-        })
-    };
+    let candidate: Option<Entity> = find_item(world, player, &needle, ItemClass::CarriedFirst);
     let Some(item) = candidate else {
         send_to(world, player, format!("You don't see '{needle}' here.\r\n"));
         return;

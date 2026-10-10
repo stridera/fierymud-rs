@@ -11,13 +11,13 @@
 use bevy_ecs::prelude::*;
 use mud_db::enums::UserRole;
 use mud_world::{
-    Charges, Item, ItemCustomization, Keywords, Located, Named, ObjectPrototypes, PendingSave,
-    PlayerCorpse, WorldKey,
+    Charges, Item, ItemCustomization, Keywords, Named, ObjectPrototypes, PendingSave, PlayerCorpse,
+    WorldKey,
 };
 
 use crate::commands::{
-    Category, Command, EquipFilter, Help, find_carried_by, find_in_room, name_of,
-    record_admin_action, send_to, try_insert,
+    Category, Command, Help, ItemClass, find_item, name_of, record_admin_action, send_to,
+    try_insert,
 };
 use crate::item_custom::{
     MAX_EXAMINE_LEN, MAX_STAFF_NAME_LEN, edit, holder_of, sanitize_keywords, sanitize_player_name,
@@ -71,8 +71,7 @@ inventory::submit! {
 /// Inventory first, then worn items: the order `drop`, `give` and `put`
 /// use, so `nameitem bag` hits the bag in the pack before the one held.
 fn find_own_item(world: &mut World, needle: &str, player: Entity) -> Option<Entity> {
-    find_carried_by(world, needle, player, EquipFilter::Inventory)
-        .or_else(|| find_carried_by(world, needle, player, EquipFilter::Equipped))
+    find_item(world, player, needle, ItemClass::Carried)
 }
 
 fn cmd_nameitem(world: &mut World, player: Entity, args: &str) {
@@ -158,10 +157,7 @@ fn cmd_iedit(world: &mut World, player: Entity, args: &str) {
     let (needle, rest) = args
         .split_once(char::is_whitespace)
         .map_or((args, ""), |(n, r)| (n, r.trim()));
-    let item = find_carried_by(world, needle, player, EquipFilter::Anywhere).or_else(|| {
-        let room = world.get::<Located>(player)?.0;
-        find_in_room(world, needle, room)
-    });
+    let item = find_item(world, player, needle, ItemClass::CarriedFirst);
     let Some(item) = item else {
         send_to(world, player, "Item not found.\r\n");
         return;

@@ -7,7 +7,7 @@ use mud_db::enums::{MobProfession, UserRole};
 use mud_world::{Item, LightFuel, Located, Mob, Shopkeeper, Wealth};
 
 use crate::commands::{
-    Category, Command, EquipFilter, Help, find_carried_by, format_wealth, is_staff, name_of,
+    Category, Command, Help, ItemClass, find_item, format_wealth, is_staff, name_of,
     require_profession_in_room, send_to,
 };
 
@@ -221,7 +221,7 @@ fn cmd_repair(world: &mut World, player: Entity, args: &str) {
         );
         return;
     };
-    let Some(item) = find_carried_by(world, needle, player, EquipFilter::Anywhere) else {
+    let Some(item) = find_item(world, player, needle, ItemClass::Carried) else {
         send_to(world, player, format!("You don't have '{needle}'.\r\n"));
         return;
     };

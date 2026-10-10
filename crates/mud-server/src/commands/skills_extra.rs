@@ -16,8 +16,8 @@ use mud_db::enums::UserRole;
 use mud_world::{EquippedSlot, Fighting, Item, Located, Slot};
 
 use crate::commands::{
-    Category, Command, EquipFilter, Help, broadcast_room_except_players_rendered, check_stamina,
-    drain_stamina, find_carried_by, invoke_ability, name_of, refresh_player_items_gmcp,
+    Category, Command, Help, ItemClass, broadcast_room_except_players_rendered, check_stamina,
+    drain_stamina, find_item, invoke_ability, name_of, refresh_player_items_gmcp,
     require_alert_posture, send_to, skill_stamina_cost, try_remove,
 };
 
@@ -85,7 +85,7 @@ fn cmd_palm(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "palm") {
         return;
     }
-    if find_carried_by(world, needle, player, EquipFilter::Inventory).is_none() {
+    if find_item(world, player, needle, ItemClass::Inventory).is_none() {
         send_to(
             world,
             player,

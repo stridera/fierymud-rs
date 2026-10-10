@@ -3343,12 +3343,27 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
     }
     entity_matches.sort_by_key(|&e| {
         let holder = world.get::<Located>(e).map(|l| l.0);
-        let in_inv = holder == Some(player);
-        let rank = holder
-            .and_then(|h| ranks.get(&h))
-            .and_then(|m| m.get(&e))
-            .copied()
-            .unwrap_or(usize::MAX);
+        // The `RoomFirst` order (see `item_target`): room, then the pack,
+        // then what is worn (in `equipment` slot order).
+        let worn = holder == Some(player) && world.get::<EquippedSlot>(e).is_some();
+        let in_inv = if holder != Some(player) {
+            0u8
+        } else if worn {
+            2
+        } else {
+            1
+        };
+        let rank = if worn {
+            world
+                .get::<EquippedSlot>(e)
+                .map_or(usize::MAX, |s| crate::commands::item_target::slot_rank(s.0))
+        } else {
+            holder
+                .and_then(|h| ranks.get(&h))
+                .and_then(|m| m.get(&e))
+                .copied()
+                .unwrap_or(usize::MAX)
+        };
         // Mobs before players, as `look` and `find_actor_in_room` order them;
         // the looker themself only after everyone else a name matches.
         (
@@ -4985,7 +5000,7 @@ pub(crate) fn cmd_sell(world: &mut World, player: Entity, args: &str) {
     if !shopkeeper_sees_customer(world, player, keeper_entity, &keeper_name) {
         return;
     }
-    let Some(item) = find_carried_by(world, target_word, player, EquipFilter::Inventory) else {
+    let Some(item) = find_item(world, player, target_word, ItemClass::Inventory) else {
         send_rendered(
             world,
             player,
@@ -5118,18 +5133,12 @@ pub(crate) fn cmd_value(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "Value what?\r\n");
         return;
     }
-    let Some(located) = world.get::<Located>(player).copied() else {
+    if world.get::<Located>(player).is_none() {
         send_to(world, player, "You are nowhere.\r\n");
         return;
-    };
+    }
     let lc = needle.to_ascii_lowercase();
-    let target = {
-        let mut q =
-            world.query_filtered::<(Entity, &Located, &Named, Option<&Keywords>), With<Item>>();
-        q.iter(world)
-            .find(|(_, l, n, kw)| (l.0 == player || l.0 == located.0) && matches(&lc, n, *kw))
-            .map(|(e, _, _, _)| e)
-    };
+    let target = find_item(world, player, &lc, ItemClass::RoomFirst);
     let Some(target) = target else {
         send_to(
             world,
@@ -5896,10 +5905,7 @@ fn search_scope(
 ) -> (Vec<Entity>, bool) {
     let arg = args.split_whitespace().next().unwrap_or("");
     let container = (!arg.is_empty())
-        .then(|| {
-            find_carried_by(world, arg, player, EquipFilter::Anywhere)
-                .or_else(|| find_in_room(world, arg, room))
-        })
+        .then(|| find_item(world, player, arg, ItemClass::RoomFirst))
         .flatten()
         .filter(|c| crate::commands::is_container_entity(world, *c));
     let holder = container.unwrap_or(room);
@@ -7147,7 +7153,7 @@ pub(crate) fn cmd_summonmount(world: &mut World, player: Entity, _args: &str) {
 }
 
 pub(crate) fn cmd_camp(world: &mut World, player: Entity, args: &str) {
-    use mud_world::{Camping, Item, Keywords, ObjectPrototypes, WorldKey};
+    use mud_world::{Camping, ObjectPrototypes, WorldKey};
     if world.get::<Camping>(player).is_some() {
         send_to(world, player, "You're already setting up camp.\r\n");
         return;
@@ -7197,13 +7203,9 @@ pub(crate) fn cmd_camp(world: &mut World, player: Entity, args: &str) {
         // the proto's camp_kit_tier. A name-match that isn't a kit
         // surfaces a specific refusal so the player knows the item
         // is wrong, not the keyword.
-        let candidate: Option<(Entity, WorldKey)> = {
-            let mut q = world
-                .query_filtered::<(Entity, &Located, &Named, Option<&Keywords>, &WorldKey), With<Item>>();
-            q.iter(world)
-                .find(|(_, l, n, kw, _)| l.0 == player && matches(&needle, n, *kw))
-                .map(|(e, _, _, _, wk)| (e, *wk))
-        };
+        let candidate: Option<(Entity, WorldKey)> =
+            find_item(world, player, &needle, ItemClass::Carried)
+                .and_then(|e| world.get::<WorldKey>(e).map(|wk| (e, *wk)));
         let Some((item, wk)) = candidate else {
             send_to(
                 world,
@@ -7333,8 +7335,7 @@ pub(crate) fn cmd_point(world: &mut World, player: Entity, args: &str) {
     }
 
     // Object in the room or in inventory.
-    let item = find_in_room(world, arg, room)
-        .or_else(|| find_carried_by(world, arg, player, EquipFilter::Anywhere));
+    let item = find_item(world, player, arg, ItemClass::RoomFirst);
     if let Some(item) = item {
         let item_name = name_of(world, item);
         send_rendered(world, player, &format!("You point at {item_name}.\r\n"));
@@ -9381,20 +9382,14 @@ pub(crate) fn cmd_read(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "Read what?\r\n");
         return;
     }
-    let Some(located) = world.get::<Located>(player).copied() else {
+    if world.get::<Located>(player).is_none() {
         send_to(world, player, "You are nowhere.\r\n");
         return;
-    };
+    }
     let lc = needle.to_ascii_lowercase();
     // Match items only — mobs/players go to `examine`. Search the
     // player's inventory + the current room.
-    let target = {
-        let mut q =
-            world.query_filtered::<(Entity, &Located, &Named, Option<&Keywords>), With<Item>>();
-        q.iter(world)
-            .find(|(_, l, n, kw)| (l.0 == player || l.0 == located.0) && matches(&lc, n, *kw))
-            .map(|(e, _, _, _)| e)
-    };
+    let target = find_item(world, player, &lc, ItemClass::RoomFirst);
     let Some(target) = target else {
         send_to(
             world,
@@ -9435,7 +9430,7 @@ pub(crate) fn cmd_compare(world: &mut World, player: Entity, args: &str) {
     };
     let b_word: Option<&str> = parts.next().map(str::trim).filter(|s| !s.is_empty());
 
-    let Some(a) = find_carried_by(world, a_word, player, EquipFilter::Anywhere) else {
+    let Some(a) = find_item(world, player, a_word, ItemClass::Carried) else {
         send_to(world, player, format!("You don't have '{a_word}'.\r\n"));
         return;
     };
@@ -9444,7 +9439,7 @@ pub(crate) fn cmd_compare(world: &mut World, player: Entity, args: &str) {
     // wears in A's wearable slot — saves a manual `equipment` lookup
     // for the "is this new sword better?" question.
     let target_b: Entity = if let Some(word) = b_word {
-        let Some(found) = find_carried_by(world, word, player, EquipFilter::Anywhere) else {
+        let Some(found) = find_item(world, player, word, ItemClass::Carried) else {
             send_to(world, player, format!("You don't have '{word}'.\r\n"));
             return;
         };
@@ -10404,15 +10399,13 @@ fn collect_coin_pile(
 fn resolve_implicit_container<'a>(
     world: &mut World,
     player: Entity,
-    room: Entity,
     trimmed: &'a str,
 ) -> Option<(&'a str, Entity)> {
     let (needle, last_word) = trimmed.rsplit_once(char::is_whitespace)?;
-    if needle.trim().is_empty() || find_in_room(world, trimmed, room).is_some() {
+    if needle.trim().is_empty() || find_item(world, player, trimmed, ItemClass::Room).is_some() {
         return None;
     }
-    let container = find_in_room(world, last_word, room)
-        .or_else(|| find_carried_by(world, last_word, player, EquipFilter::Anywhere))?;
+    let container = find_item(world, player, last_word, ItemClass::RoomFirst)?;
     is_container_entity(world, container).then_some((needle.trim(), container))
 }
 
@@ -10436,10 +10429,8 @@ pub(crate) fn cmd_get(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let target = if let Some((needle, container_word)) = from_pair {
-        find_in_room(world, container_word, room)
-            .or_else(|| find_carried_by(world, container_word, player, EquipFilter::Anywhere))
-            .map(|c| (needle, Some(c)))
-    } else if let Some((needle, c)) = resolve_implicit_container(world, player, room, rest) {
+        find_item(world, player, container_word, ItemClass::RoomFirst).map(|c| (needle, Some(c)))
+    } else if let Some((needle, c)) = resolve_implicit_container(world, player, rest) {
         Some((needle, Some(c)))
     } else {
         Some((rest, None))
@@ -10452,7 +10443,7 @@ pub(crate) fn cmd_get(world: &mut World, player: Entity, args: &str) {
     for i in 0..n {
         let before = match container {
             Some(c) => find_in_container(world, needle, c),
-            None => find_in_room(world, needle, room),
+            None => find_item(world, player, needle, ItemClass::Room),
         };
         let Some(before) = before else {
             // Nothing (more) to take. Surface the usual message
@@ -10548,7 +10539,7 @@ fn repeat_carried(
     action: impl Fn(&mut World, Entity),
 ) {
     for i in 0..n {
-        let Some(before) = find_carried_by(world, item_word, player, EquipFilter::Inventory) else {
+        let Some(before) = find_item(world, player, item_word, ItemClass::Inventory) else {
             if i == 0 {
                 action(world, player);
             }
@@ -10577,8 +10568,7 @@ fn get_plain(world: &mut World, player: Entity, args: &str) {
     // `all.<filter>` as the item word loots everything (matching)
     // inside.
     if let Some((needle, container_word)) = split_preposition(trimmed, &["from"]) {
-        let container = find_in_room(world, container_word, room)
-            .or_else(|| find_carried_by(world, container_word, player, EquipFilter::Anywhere));
+        let container = find_item(world, player, container_word, ItemClass::RoomFirst);
         let Some(container) = container else {
             send_to(
                 world,
@@ -10596,7 +10586,7 @@ fn get_plain(world: &mut World, player: Entity, args: &str) {
     // whole string and the LAST word resolves to a container, treat
     // it as `get <rest> from <last>`. Anything else falls through
     // to the plain floor path below, unchanged.
-    if let Some((needle, container)) = resolve_implicit_container(world, player, room, trimmed) {
+    if let Some((needle, container)) = resolve_implicit_container(world, player, trimmed) {
         get_from_container(world, player, room, needle, container);
         return;
     }
@@ -10623,7 +10613,7 @@ fn get_plain(world: &mut World, player: Entity, args: &str) {
 
     // Plain `get <item>` from the floor. Something the player cannot see
     // (hidden until `search` turns it up) is not there to take.
-    let item = find_in_room(world, trimmed, room)
+    let item = find_item(world, player, trimmed, ItemClass::Room)
         .filter(|i| crate::commands::senses::item_visible_to(world, player, *i));
     let Some(item) = item else {
         send_to(
@@ -11142,8 +11132,7 @@ fn put_plain(world: &mut World, player: Entity, args: &str) {
     let room = located.0;
     let player_name = name_of(world, player);
 
-    let container = find_carried_by(world, container_word, player, EquipFilter::Anywhere)
-        .or_else(|| find_in_room(world, container_word, room));
+    let container = find_item(world, player, container_word, ItemClass::CarriedFirst);
     let Some(container) = container else {
         send_rendered(
             world,
@@ -11230,7 +11219,7 @@ fn put_plain(world: &mut World, player: Entity, args: &str) {
         return;
     }
 
-    let item = find_carried_by(world, item_word, player, EquipFilter::Inventory);
+    let item = find_item(world, player, item_word, ItemClass::Inventory);
     let Some(item) = item else {
         send_rendered(
             world,
@@ -11269,7 +11258,7 @@ pub(crate) fn cmd_junk(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "Junk what?\r\n");
         return;
     }
-    let Some(item) = find_carried_by(world, target_word, player, EquipFilter::Inventory) else {
+    let Some(item) = find_item(world, player, target_word, ItemClass::Inventory) else {
         send_rendered(
             world,
             player,
@@ -11303,7 +11292,7 @@ pub(crate) fn cmd_donate(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "Donate what?\r\n");
         return;
     }
-    let Some(item) = find_carried_by(world, target_word, player, EquipFilter::Inventory) else {
+    let Some(item) = find_item(world, player, target_word, ItemClass::Inventory) else {
         send_rendered(
             world,
             player,
@@ -11463,7 +11452,7 @@ fn drop_plain(world: &mut World, player: Entity, args: &str) {
         return;
     }
 
-    let item = find_carried_by(world, target_word, player, EquipFilter::Inventory);
+    let item = find_item(world, player, target_word, ItemClass::Inventory);
     let Some(item) = item else {
         send_rendered(
             world,
@@ -11537,7 +11526,7 @@ fn give_plain(world: &mut World, player: Entity, args: &str) {
     };
     let room = located.0;
 
-    let item = find_carried_by(world, item_word, player, EquipFilter::Inventory);
+    let item = find_item(world, player, item_word, ItemClass::Inventory);
     let Some(item) = item else {
         send_rendered(
             world,
@@ -11735,12 +11724,7 @@ pub(crate) fn cmd_wear(world: &mut World, player: Entity, args: &str) {
         // The last word is a body position; everything before it names
         // the item.
         let name = words[..words.len() - 1].join(" ");
-        let Some(item) = crate::commands::find_carried_by(
-            world,
-            &name,
-            player,
-            crate::commands::EquipFilter::Inventory,
-        ) else {
+        let Some(item) = find_item(world, player, &name, ItemClass::Inventory) else {
             send_to(world, player, format!("You aren't carrying '{name}'.\r\n"));
             return;
         };
@@ -11789,7 +11773,7 @@ pub(crate) fn cmd_light(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "Light what?\r\n");
         return;
     }
-    let Some(item) = find_carried_by(world, target_word, player, EquipFilter::Anywhere) else {
+    let Some(item) = find_item(world, player, target_word, ItemClass::Carried) else {
         send_to(
             world,
             player,
@@ -11852,7 +11836,7 @@ pub(crate) fn cmd_extinguish(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "Extinguish what?\r\n");
         return;
     }
-    let Some(item) = find_carried_by(world, target_word, player, EquipFilter::Anywhere) else {
+    let Some(item) = find_item(world, player, target_word, ItemClass::Carried) else {
         send_to(
             world,
             player,
@@ -12237,7 +12221,7 @@ fn god_eats_item(world: &mut World, player: Entity, args: &str) -> bool {
     if !is_god || target_word.is_empty() {
         return false;
     }
-    let Some(item) = find_carried_by(world, target_word, player, EquipFilter::Inventory) else {
+    let Some(item) = find_item(world, player, target_word, ItemClass::Inventory) else {
         return false;
     };
     let is_food = world
@@ -12295,12 +12279,7 @@ pub(crate) fn cmd_quaff(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "Quaff what?\r\n");
         return;
     };
-    let item = find_carried_by(
-        world,
-        item_word,
-        player,
-        crate::commands::EquipFilter::Inventory,
-    );
+    let item = find_item(world, player, item_word, ItemClass::Inventory);
     let has_bindings = item.is_some_and(|e| {
         world
             .get::<mud_world::WorldKey>(e)
@@ -12368,7 +12347,7 @@ pub(crate) fn cmd_pour(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let target_word = parts.next();
-    let Some(src) = find_carried_by(world, src_word, player, EquipFilter::Anywhere) else {
+    let Some(src) = find_item(world, player, src_word, ItemClass::Carried) else {
         send_to(
             world,
             player,
@@ -12405,7 +12384,7 @@ pub(crate) fn cmd_pour(world: &mut World, player: Entity, args: &str) {
         );
         return;
     };
-    let Some(dest) = find_carried_by(world, target_word, player, EquipFilter::Anywhere) else {
+    let Some(dest) = find_item(world, player, target_word, ItemClass::Carried) else {
         send_to(
             world,
             player,
@@ -12520,7 +12499,7 @@ pub(crate) fn cmd_fill(world: &mut World, player: Entity, args: &str) {
         return;
     };
 
-    let Some(dest) = find_carried_by(world, dest_word, player, EquipFilter::Anywhere) else {
+    let Some(dest) = find_item(world, player, dest_word, ItemClass::Carried) else {
         send_to(
             world,
             player,
@@ -12547,8 +12526,7 @@ pub(crate) fn cmd_fill(world: &mut World, player: Entity, args: &str) {
     // room. If not, auto-detect a fountain in the current room.
     let player_room = world.get::<Located>(player).map(|l| l.0);
     let src: Option<Entity> = if let Some(&src_word) = parts.get(1) {
-        find_carried_by(world, src_word, player, EquipFilter::Anywhere)
-            .or_else(|| player_room.and_then(|r| find_in_room(world, src_word, r)))
+        find_item(world, player, src_word, ItemClass::CarriedFirst)
     } else {
         player_room.and_then(|r| find_fountain_in_room(world, r))
     };
@@ -12666,7 +12644,7 @@ pub(crate) fn cmd_taste(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "Taste what?\r\n");
         return;
     }
-    let Some(item) = find_carried_by(world, target_word, player, EquipFilter::Anywhere) else {
+    let Some(item) = find_item(world, player, target_word, ItemClass::Carried) else {
         send_to(
             world,
             player,
@@ -12899,7 +12877,7 @@ fn wand_flavor(
         };
     }
     let thing = room
-        .and_then(|r| find_in_room(world, at, r))
+        .and_then(|_| find_item(world, player, at, ItemClass::CarriedFirst))
         .map_or_else(|| at.to_string(), |e| name_of(world, e));
     UseFlavor {
         you: format!("You point {item_name} at {thing}."),
@@ -12993,7 +12971,7 @@ pub(crate) fn cmd_remove(world: &mut World, player: Entity, args: &str) {
         refresh_player_items_gmcp(world, player);
         return;
     }
-    let item = find_carried_by(world, target_word, player, EquipFilter::Equipped);
+    let item = find_item(world, player, target_word, ItemClass::Equipment);
     let Some(item) = item else {
         send_rendered(
             world,
@@ -14697,7 +14675,7 @@ pub(crate) fn cmd_identify(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "Identify what?\r\n");
         return;
     }
-    let Some(item) = find_carried_by(world, needle, player, EquipFilter::Anywhere) else {
+    let Some(item) = find_item(world, player, needle, ItemClass::Carried) else {
         send_rendered(
             world,
             player,
@@ -15206,7 +15184,7 @@ pub(crate) fn cmd_house_place(
         send_to(world, player, "Couldn't resolve this house room.\r\n");
         return;
     };
-    let item = find_carried_by(world, target_word, player, EquipFilter::Inventory);
+    let item = find_item(world, player, target_word, ItemClass::Inventory);
     let Some(item) = item else {
         send_rendered(
             world,

@@ -9,10 +9,10 @@ use mud_world::{
 };
 
 use crate::commands::{
-    Category, Command, Help, broadcast_room_except_players_rendered, broadcast_room_player_diff,
-    carry_capacity, cmd_look, cmd_move, direction_name, find_actor_in_room, find_in_room,
-    has_restriction, is_staff, item_weight, name_of, parse_direction, send_room_players_snapshot,
-    send_to,
+    Category, Command, Help, ItemClass, broadcast_room_except_players_rendered,
+    broadcast_room_player_diff, carry_capacity, cmd_look, cmd_move, direction_name,
+    find_actor_in_room, find_item, has_restriction, is_staff, item_weight, name_of,
+    parse_direction, send_room_players_snapshot, send_to,
 };
 use crate::room_access::{entry_allowed_following, room_visible_to};
 
@@ -197,7 +197,7 @@ pub(crate) fn cmd_drag(world: &mut World, player: Entity, args: &str) {
     let staff = is_staff(world, player);
     let dragged = if let Some(actor) = find_actor_in_room(world, target_word, from_room, player) {
         Dragged::Body(actor)
-    } else if let Some(item) = find_in_room(world, target_word, from_room) {
+    } else if let Some(item) = find_item(world, player, target_word, ItemClass::Room) {
         Dragged::Object(item)
     } else {
         send_to(world, player, "Can't find that!\r\n");

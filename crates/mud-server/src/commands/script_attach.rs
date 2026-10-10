@@ -22,8 +22,8 @@ use mud_world::{
 };
 
 use crate::commands::{
-    Category, Command, EquipFilter, Help, find_actor_in_room, find_carried_by, find_in_room,
-    matches, name_of, parse_indexed_needle, record_admin_action, send_to,
+    Category, Command, Help, ItemClass, find_actor_in_room, find_item, matches, name_of,
+    parse_indexed_needle, record_admin_action, send_to,
 };
 
 inventory::submit! {
@@ -93,15 +93,8 @@ pub(crate) fn parse_key(s: &str) -> Option<(i32, i32)> {
 /// Legacy `find_obj_around_char`: carried or worn, then the room, then
 /// anywhere in the world.
 fn find_object_around(world: &mut World, player: Entity, needle: &str) -> Option<Entity> {
-    if let Some(e) = find_carried_by(world, needle, player, EquipFilter::Anywhere) {
-        return Some(e);
-    }
-    if let Some(room) = world.get::<Located>(player).map(|l| l.0)
-        && let Some(e) = find_in_room(world, needle, room)
-    {
-        return Some(e);
-    }
-    find_object_in_world(world, needle)
+    find_item(world, player, needle, ItemClass::CarriedFirst)
+        .or_else(|| find_object_in_world(world, needle))
 }
 
 fn find_object_in_world(world: &mut World, needle: &str) -> Option<Entity> {
@@ -390,7 +383,7 @@ fn cmd_detach(world: &mut World, player: Entity, args: &str) {
 /// Legacy `do_detach` short form: what you wear or carry first, then a
 /// mob in the room, an object in the room, any mob, any object.
 fn find_any(world: &mut World, player: Entity, name: &str) -> Option<Found> {
-    if let Some(e) = find_carried_by(world, name, player, EquipFilter::Anywhere) {
+    if let Some(e) = find_item(world, player, name, ItemClass::Carried) {
         return Some(Found::Object(e));
     }
     let room = world.get::<Located>(player).map(|l| l.0);
@@ -398,7 +391,7 @@ fn find_any(world: &mut World, player: Entity, name: &str) -> Option<Found> {
         if let Some(e) = find_actor_in_room(world, name, room, player) {
             return Some(Found::Mob(e));
         }
-        if let Some(e) = find_in_room(world, name, room) {
+        if let Some(e) = find_item(world, player, name, ItemClass::Room) {
             return Some(Found::Object(e));
         }
     }

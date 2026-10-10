@@ -460,6 +460,9 @@ mod enter;
 mod feedback;
 #[path = "commands/game.rs"]
 mod game;
+#[path = "commands/item_target.rs"]
+pub(crate) mod item_target;
+pub(crate) use item_target::{ItemClass, find_item};
 #[path = "commands/housing.rs"]
 mod housing;
 #[path = "commands/identify_actor.rs"]
@@ -11892,12 +11895,7 @@ fn zone_climate(world: &mut World, zone_id: i32) -> Option<mud_db::enums::Climat
 /// get a "you can't look inside that" since the inventory listing
 /// would be misleading.
 pub(crate) fn look_in_container(world: &mut World, player: Entity, target_word: &str) {
-    let Some(located) = world.get::<Located>(player).copied() else {
-        return;
-    };
-    let room = located.0;
-    let container = find_carried_by(world, target_word, player, EquipFilter::Anywhere)
-        .or_else(|| find_in_room(world, target_word, room));
+    let container = find_item(world, player, target_word, ItemClass::RoomFirst);
     let Some(container) = container else {
         send_to(
             world,
@@ -12563,7 +12561,7 @@ pub(crate) fn consume_item(
         send_to(world, player, format!("{} what?\r\n", capitalize(verb)));
         return false;
     }
-    let item = find_carried_by(world, target_word, player, EquipFilter::Inventory);
+    let item = find_item(world, player, target_word, ItemClass::Inventory);
     let Some(item) = item else {
         send_to(
             world,
@@ -12715,13 +12713,7 @@ pub(crate) fn drink_amount(world: &mut World, player: Entity, args: &str, units:
     }
     // Inventory match wins over room match — players carrying a
     // canteen want to drink from it before a roomside fountain.
-    let inv_match = find_carried_by(world, target_word, player, EquipFilter::Anywhere);
-    let item = inv_match.or_else(|| {
-        world
-            .get::<Located>(player)
-            .copied()
-            .and_then(|l| find_in_room(world, target_word, l.0))
-    });
+    let item = find_item(world, player, target_word, ItemClass::CarriedFirst);
     let Some(item) = item else {
         send_to(
             world,
@@ -12898,7 +12890,7 @@ pub(crate) fn invoke_object_abilities(
         send_to(world, player, format!("{} what?\r\n", capitalize(verb)));
         return;
     };
-    let item = find_carried_by(world, item_word, player, EquipFilter::Inventory);
+    let item = find_item(world, player, item_word, ItemClass::Inventory);
     let Some(item) = item else {
         send_to(
             world,
@@ -13166,11 +13158,11 @@ fn item_cast_target_refusal(
     {
         return None;
     }
-    let found = find_carried_by(world, needle, player, EquipFilter::Anywhere).is_some()
-        || world.get::<Located>(player).copied().is_some_and(|l| {
-            find_actor_in_room(world, needle, l.0, player).is_some()
-                || find_in_room(world, needle, l.0).is_some()
-        })
+    let found = find_item(world, player, needle, ItemClass::CarriedFirst).is_some()
+        || world
+            .get::<Located>(player)
+            .copied()
+            .is_some_and(|l| find_actor_in_room(world, needle, l.0, player).is_some())
         || (def.plain_name.eq_ignore_ascii_case("SUMMON")
             && find_online_player_anywhere(world, needle, player).is_some());
     (!found).then(|| format!("You can't see any {needle} here.\r\n"))
@@ -13290,7 +13282,7 @@ pub(crate) fn wear_into(
         send_to(world, player, "Wear what?\r\n");
         return;
     }
-    let Some(item) = find_carried_by(world, target_word, player, EquipFilter::Inventory) else {
+    let Some(item) = find_item(world, player, target_word, ItemClass::Inventory) else {
         send_to(
             world,
             player,
@@ -13643,17 +13635,6 @@ pub(crate) fn matches(needle: &str, name: &Named, kw: Option<&Keywords>) -> bool
     mud_world::targeting::entity_matches(needle, &name.name, kw.map(|k| k.0.as_slice()))
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EquipFilter {
-    /// Carried but not equipped (i.e. in inventory).
-    Inventory,
-    /// Currently equipped.
-    Equipped,
-    /// Either. Reserved for "look in self" flows we'll add later.
-    #[allow(dead_code)]
-    Anywhere,
-}
-
 /// Parse the legacy `CircleMUD` `N.needle` syntax for picking the
 /// Nth match from a stack of identically-named items / mobs.
 /// `2.ancient` returns `(2, "ancient")` so the caller skips to the
@@ -13689,72 +13670,6 @@ pub(crate) fn parse_count_prefix(input: &str) -> (Option<usize>, &str) {
         return (Some(n), rest.trim());
     }
     (None, input)
-}
-
-/// Resolve `[N.]needle` among the things `carrier` has on them.
-///
-/// Order is the display order of each list: inventory is newest-first (as
-/// `inventory` renders it), worn items follow `equipment`'s slot order
-/// ([`Slot::ORDER`]). With [`EquipFilter::Anywhere`] this mirrors legacy
-/// `generic_find(FIND_OBJ_EQUIP | FIND_OBJ_INV)` (`find.cpp`
-/// `universal_find`): equipment is searched first, then inventory, and the
-/// `N.` counter restarts for each list (the context is copied per call), so
-/// `2.ring` that has only one match among the worn items goes on to look
-/// for the second ring in the pack.
-pub(crate) fn find_carried_by(
-    world: &mut World,
-    needle: &str,
-    carrier: Entity,
-    filter: EquipFilter,
-) -> Option<Entity> {
-    let (index, needle) = parse_indexed_needle(needle);
-    let needle = needle.to_ascii_lowercase();
-    let mut q = world.query_filtered::<(
-        Entity,
-        &Located,
-        &Named,
-        Option<&Keywords>,
-        Option<&EquippedSlot>,
-    ), With<Item>>();
-    let mut worn: Vec<(Entity, Slot)> = Vec::new();
-    let mut packed: Vec<Entity> = Vec::new();
-    for (e, l, n, kw, eq) in q.iter(world) {
-        if l.0 != carrier || !matches(&needle, n, kw) {
-            continue;
-        }
-        match eq {
-            Some(slot) => worn.push((e, slot.0)),
-            None => packed.push(e),
-        }
-    }
-    let slot_rank = |s: Slot| {
-        Slot::ORDER
-            .iter()
-            .position(|x| *x == s)
-            .unwrap_or(usize::MAX)
-    };
-    worn.sort_by_key(|(_, s)| slot_rank(*s));
-    sort_newest_first(world, carrier, &mut packed, |e| *e);
-    let worn_hit = || worn.get(index - 1).map(|(e, _)| *e);
-    let packed_hit = || packed.get(index - 1).copied();
-    match filter {
-        EquipFilter::Inventory => packed_hit(),
-        EquipFilter::Equipped => worn_hit(),
-        EquipFilter::Anywhere => worn_hit().or_else(packed_hit),
-    }
-}
-
-pub(crate) fn find_in_room(world: &mut World, needle: &str, room: Entity) -> Option<Entity> {
-    let (index, needle) = parse_indexed_needle(needle);
-    let needle = needle.to_ascii_lowercase();
-    let mut q = world.query_filtered::<(Entity, &Located, &Named, Option<&Keywords>), With<Item>>();
-    let mut hits: Vec<Entity> = q
-        .iter(world)
-        .filter(|(_, l, n, kw)| l.0 == room && matches(&needle, n, *kw))
-        .map(|(e, _, _, _)| e)
-        .collect();
-    sort_newest_first(world, room, &mut hits, |e| *e);
-    hits.get(index - 1).copied()
 }
 
 /// Find a non-Item entity in `room` (player or mob) for give/attack-style
@@ -14805,7 +14720,7 @@ fn resolve_and_gate_target(
             return None;
         };
         let inv_match = if allows_inventory_target {
-            find_carried_by(world, word, player, EquipFilter::Anywhere)
+            find_item(world, player, word, ItemClass::Carried)
         } else {
             None
         };
@@ -14813,7 +14728,7 @@ fn resolve_and_gate_target(
             .or_else(|| find_actor_in_room(world, word, located.0, player))
             .or_else(|| {
                 if allows_room_object_target {
-                    find_in_room(world, word, located.0)
+                    find_item(world, player, word, ItemClass::Room)
                 } else {
                     None
                 }

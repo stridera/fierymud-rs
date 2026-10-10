@@ -8,11 +8,11 @@
 
 use bevy_ecs::prelude::*;
 use mud_db::enums::{ObjectType, UserRole};
-use mud_world::{Description, Item, Keywords, Located, Named, ObjectPrototypes, WorldKey};
+use mud_world::{Description, Located, ObjectPrototypes, WorldKey};
 
 use crate::commands::{
-    Category, Command, EquipFilter, Help, broadcast_room_except_players_rendered, find_carried_by,
-    matches, name_of, send_to,
+    Category, Command, Help, ItemClass, broadcast_room_except_players_rendered, find_item, name_of,
+    send_to,
 };
 
 inventory::submit! {
@@ -34,15 +34,7 @@ inventory::submit! {
 
 /// Inventory first, then the floor of the player's room.
 fn find_writable_target(world: &mut World, player: Entity, needle: &str) -> Option<Entity> {
-    if let Some(e) = find_carried_by(world, needle, player, EquipFilter::Anywhere) {
-        return Some(e);
-    }
-    let room = world.get::<Located>(player)?.0;
-    let lowered = needle.to_ascii_lowercase();
-    let mut q = world.query_filtered::<(Entity, &Located, &Named, Option<&Keywords>), With<Item>>();
-    q.iter(world)
-        .find(|(_, l, n, kw)| l.0 == room && matches(&lowered, n, *kw))
-        .map(|(e, _, _, _)| e)
+    find_item(world, player, needle, ItemClass::CarriedFirst)
 }
 
 fn cmd_write(world: &mut World, player: Entity, args: &str) {
@@ -113,6 +105,7 @@ fn cmd_write(world: &mut World, player: Entity, args: &str) {
 mod tests {
     use super::*;
     use crate::commands::test_support::{Rx, drain, object_proto, player_in};
+    use mud_world::{Item, Keywords, Named};
 
     fn setup() -> (World, Entity, Entity, Rx) {
         let mut world = World::new();
