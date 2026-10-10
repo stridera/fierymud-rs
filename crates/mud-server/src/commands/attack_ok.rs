@@ -200,6 +200,17 @@ pub(crate) fn attack_ok(world: &mut World, ch: Entity, victim: Entity, verbose: 
     true
 }
 
+/// The one gate every offensive command and skill passes before it spends
+/// stamina or touches HP: peaceful room, `Peaceful` mob, ghost, PK rules and
+/// pet ownership, all via [`attack_ok`]. The refusal is sent to `attacker`.
+pub(crate) fn offensive_target_allowed(
+    world: &mut World,
+    attacker: Entity,
+    target: Entity,
+) -> bool {
+    attack_ok(world, attacker, target, true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

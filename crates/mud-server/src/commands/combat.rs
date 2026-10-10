@@ -1255,7 +1255,7 @@ fn attack_with_switch_roll(world: &mut World, player: Entity, target_name: &str,
         return;
     }
 
-    if !super::attack_ok::attack_ok(world, player, target, true) {
+    if !super::attack_ok::offensive_target_allowed(world, player, target) {
         return;
     }
 
@@ -1557,7 +1557,7 @@ fn perform_class_strike(
         send_to(world, player, "Ouch, that would hurt.\r\n");
         return;
     }
-    if !super::attack_ok::attack_ok(world, player, target, true) {
+    if !super::attack_ok::offensive_target_allowed(world, player, target) {
         return;
     }
     let player_level = world.get::<Profile>(player).map_or(1, |p| p.level);
@@ -1718,10 +1718,9 @@ pub(crate) fn cmd_steal(world: &mut World, player: Entity, args: &str) {
         );
         return;
     }
-    // Legacy: player-stealing is only allowed during PK.
-    if world.get::<mud_world::Player>(target).is_some()
-        && !super::attack_ok::attack_ok(world, player, target, true)
-    {
+    // Legacy `do_steal` runs `attack_ok` on every victim: player-stealing is
+    // only allowed during PK, and peaceful mobs / pets are off limits.
+    if !super::attack_ok::offensive_target_allowed(world, player, target) {
         return;
     }
 
@@ -1883,6 +1882,7 @@ pub(crate) fn cmd_gretreat(world: &mut World, player: Entity, _args: &str) {
         })
         .unwrap_or_default();
     let mut candidates = candidates;
+    candidates.retain(|(dir, _)| hard_wall_label(world, from_room, *dir).is_none());
     crate::room_access::retain_admitted(world, &same_room, &mut candidates);
     if candidates.is_empty() {
         send_to(world, player, "There's nowhere to run!\r\n");
@@ -1930,6 +1930,16 @@ pub(crate) fn cmd_gretreat(world: &mut World, player: Entity, _args: &str) {
     }
 }
 
+/// Label of the solid wall (`WALL_OF_STONE`, ...) that bars the exit `dir` of
+/// `room`, if any. Fog and illusory walls don't bar flight.
+fn hard_wall_label(world: &World, room: Entity, dir: mud_db::enums::Direction) -> Option<String> {
+    world
+        .get::<mud_world::RoomBlockedExits>(room)
+        .and_then(|b| b.by_direction.get(&dir))
+        .filter(|w| matches!(w.traversal, mud_world::WallTraversal::Block))
+        .map(|w| w.kind_label.clone())
+}
+
 /// The `flee` command. Legacy `do_flee` refusals apply
 /// ([`crate::fear::can_flee_now`]).
 pub(crate) fn cmd_flee(world: &mut World, player: Entity, _args: &str) {
@@ -1965,6 +1975,7 @@ pub(crate) fn flee_through_exit(world: &mut World, player: Entity) {
         })
         .unwrap_or_default();
     let mut candidates = candidates;
+    candidates.retain(|(dir, _)| hard_wall_label(world, from_room, *dir).is_none());
     crate::room_access::retain_admitted(world, &[player], &mut candidates);
 
     if candidates.is_empty() {
@@ -2017,6 +2028,9 @@ pub(crate) fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
     if world.get_entity(target).is_err() {
         try_remove::<Fighting>(world, player);
         send_to(world, player, "Your target is gone.\r\n");
+        return;
+    }
+    if !super::attack_ok::offensive_target_allowed(world, player, target) {
         return;
     }
     let cost = skill_stamina_cost(world, "kick", KICK_COST);
@@ -2078,6 +2092,9 @@ pub(crate) fn cmd_stomp(world: &mut World, player: Entity, args: &str) {
     };
     if target == player {
         send_to(world, player, "You can't stomp yourself.\r\n");
+        return;
+    }
+    if !super::attack_ok::offensive_target_allowed(world, player, target) {
         return;
     }
     let cur_posture = world.get::<Posture>(target).map(|p| p.0);
@@ -2162,6 +2179,10 @@ pub(crate) fn cmd_tripup(world: &mut World, player: Entity, args: &str) {
     } else {
         format!("trip_up {arg}")
     };
+    let victim_word = dispatched.trim_start_matches("trip_up ");
+    if !offensive_word_allowed(world, player, victim_word) {
+        return;
+    }
     let cost = skill_stamina_cost(world, "tripup", TRIPUP_COST);
     if !check_stamina(world, player, cost, "tripup") {
         return;
@@ -2175,12 +2196,27 @@ pub(crate) fn cmd_tripup(world: &mut World, player: Entity, args: &str) {
         "use",
     );
 }
+/// Resolve `victim_word` among the actors in the attacker's room and run it through
+/// [`super::attack_ok::offensive_target_allowed`]. A word that names nobody
+/// passes: the ability dispatcher reports the miss (and gates the real target).
+fn offensive_word_allowed(world: &mut World, player: Entity, victim_word: &str) -> bool {
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return true;
+    };
+    match find_actor_in_room(world, victim_word, located.0, player) {
+        Some(target) if target != player => {
+            super::attack_ok::offensive_target_allowed(world, player, target)
+        }
+        _ => true,
+    }
+}
+
 /// Area attacks hit every mob in the room; drop what legacy `area_attack_target`
 /// spares: the attacker's group (`is_grouped`), the attacker's own followers
 /// and the one the attacker follows (`master` links, either way). Anything
 /// else that merely follows a groupmate is fair game. Then drop other
-/// players' pets the PK rule forbids `player` to attack (silently, as legacy
-/// `mass_attack_ok`).
+/// players' pets, peaceful mobs and anyone else `attack_ok` forbids `player` to
+/// attack (silently, as legacy `mass_attack_ok`).
 fn skip_forbidden_pets(world: &mut World, player: Entity, targets: Vec<Entity>) -> Vec<Entity> {
     let my_root = super::group_root(world, player);
     let party = super::group_members(world, my_root);
@@ -2193,10 +2229,24 @@ fn skip_forbidden_pets(world: &mut World, player: Entity, targets: Vec<Entity>) 
             !party.contains(t)
                 && Some(*t) != followed
                 && master != Some(player)
-                && (super::attack_ok::pet_owner(world, *t).is_none()
+                && (world.get::<Mob>(*t).is_none()
                     || super::attack_ok::attack_ok(world, player, *t, false))
         })
         .collect()
+}
+
+/// Area attacks never work in a `PeacefulRoom`; tell the attacker and return
+/// true when `room` is one.
+fn refuse_in_peaceful_room(world: &World, player: Entity, room: Entity) -> bool {
+    if world.get::<mud_world::PeacefulRoom>(room).is_none() {
+        return false;
+    }
+    send_to(
+        world,
+        player,
+        "A peaceful aura fills this place — violence simply won't happen here.\r\n",
+    );
+    true
 }
 
 pub(crate) fn cmd_sweep(world: &mut World, player: Entity, _args: &str) {
@@ -2211,6 +2261,9 @@ pub(crate) fn cmd_sweep(world: &mut World, player: Entity, _args: &str) {
         return;
     };
     let room = located.0;
+    if refuse_in_peaceful_room(world, player, room) {
+        return;
+    }
     let dmg = world
         .get::<CombatStats>(player)
         .map_or(1, |c| ((c.attack_power / 5) / 4).max(1));
@@ -2266,6 +2319,9 @@ pub(crate) fn cmd_roundhouse(world: &mut World, player: Entity, _args: &str) {
     if world.get_entity(target).is_err() {
         try_remove::<Fighting>(world, player);
         send_to(world, player, "Your target is gone.\r\n");
+        return;
+    }
+    if !super::attack_ok::offensive_target_allowed(world, player, target) {
         return;
     }
     let cost = skill_stamina_cost(world, "roundhouse", ROUNDHOUSE_COST);
@@ -2336,6 +2392,9 @@ pub(crate) fn cmd_rend(world: &mut World, player: Entity, args: &str) {
     } else {
         arg.to_string()
     };
+    if !offensive_word_allowed(world, player, &target_word) {
+        return;
+    }
     let cost = skill_stamina_cost(world, "rend", REND_COST);
     if !check_stamina(world, player, cost, "rend") {
         return;
@@ -2363,6 +2422,9 @@ pub(crate) fn cmd_gouge(world: &mut World, player: Entity, args: &str) {
     } else {
         arg.to_string()
     };
+    if !offensive_word_allowed(world, player, &target_word) {
+        return;
+    }
     let cost = skill_stamina_cost(world, "gouge", GOUGE_COST);
     if !check_stamina(world, player, cost, "gouge") {
         return;
@@ -2414,7 +2476,7 @@ pub(crate) fn cmd_springleap(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "They're already fighting; no surprise.\r\n");
         return;
     }
-    if !super::attack_ok::attack_ok(world, player, target, true) {
+    if !super::attack_ok::offensive_target_allowed(world, player, target) {
         return;
     }
     let cost = skill_stamina_cost(world, "springleap", SPRINGLEAP_COST);
@@ -2476,7 +2538,7 @@ pub(crate) fn cmd_throatcut(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "They're too alert.\r\n");
         return;
     }
-    if !super::attack_ok::attack_ok(world, player, target, true) {
+    if !super::attack_ok::offensive_target_allowed(world, player, target) {
         return;
     }
     let cost = skill_stamina_cost(world, "throatcut", THROATCUT_COST);
@@ -2536,7 +2598,7 @@ pub(crate) fn cmd_backstab(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "They're too alert to backstab.\r\n");
         return;
     }
-    if !super::attack_ok::attack_ok(world, player, target, true) {
+    if !super::attack_ok::offensive_target_allowed(world, player, target) {
         return;
     }
     let cost = skill_stamina_cost(world, "backstab", BACKSTAB_COST);
@@ -2580,6 +2642,9 @@ pub(crate) fn cmd_hitall(world: &mut World, player: Entity, _args: &str) {
         return;
     };
     let room = located.0;
+    if refuse_in_peaceful_room(world, player, room) {
+        return;
+    }
 
     let dmg = world
         .get::<CombatStats>(player)
@@ -2674,7 +2739,7 @@ pub(crate) fn cmd_disarm(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "You can't disarm yourself.\r\n");
         return;
     }
-    if !super::attack_ok::attack_ok(world, player, target, true) {
+    if !super::attack_ok::offensive_target_allowed(world, player, target) {
         return;
     }
 
@@ -2912,6 +2977,16 @@ pub(crate) fn cmd_retreat(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, crate::room_access::NEED_BOAT);
         return;
     }
+    if let Some(label) = hard_wall_label(world, from_room, dir) {
+        send_to(world, player, format!("A {label} blocks your path.\r\n"));
+        return;
+    }
+    // A retreat is a controlled flee: the same refusals (posture, held,
+    // stunned, berserk, ridden mount) apply, and bolting breaks a cast.
+    if !crate::fear::can_flee_now(world, player) {
+        return;
+    }
+    crate::casting::cancel_own_cast(world, player);
 
     let dir_name = direction_name(dir);
     let mover_name = name_of(world, player);
@@ -3170,7 +3245,7 @@ pub(crate) fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
         return;
     };
 
-    if !super::attack_ok::attack_ok(world, player, target, true) {
+    if !super::attack_ok::offensive_target_allowed(world, player, target) {
         return;
     }
 
@@ -3307,7 +3382,7 @@ pub(crate) fn cmd_taunt(world: &mut World, player: Entity, target_word: &str) {
         );
         return;
     }
-    if !super::attack_ok::attack_ok(world, player, target, true) {
+    if !super::attack_ok::offensive_target_allowed(world, player, target) {
         return;
     }
     drain_stamina(world, player, cost);
