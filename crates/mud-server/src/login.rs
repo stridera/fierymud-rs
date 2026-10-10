@@ -899,8 +899,15 @@ pub(crate) fn restore_persisted_effects(
             }
             i32::try_from(after).unwrap_or(eff.remaining_secs)
         };
-        if let Some(d) = eff.modify_delta.as_ref().filter(|d| !baked(d)) {
-            crate::commands::apply_modify_delta(world, entity, &d.0, d.1);
+        // Record the delta that actually landed: a clamped stat (max hp
+        // floored at 1, armor capped at 100) takes less than the saved
+        // amount, and expiry must give back exactly that.
+        let mut modify_delta = eff.modify_delta.clone();
+        if let Some(d) = modify_delta.as_mut().filter(|d| !baked(d))
+            && let Some(landed) =
+                crate::commands::apply_modify_delta_actual(world, entity, &d.0, d.1)
+        {
+            d.1 = landed;
         }
         let flag = restored_flag(world, eff.kind, &eff.name);
         let mut effect_entity = world.spawn((
@@ -914,7 +921,7 @@ pub(crate) fn restore_persisted_effects(
             },
             mud_world::AppliedTo(entity),
         ));
-        if let Some((target, amount)) = eff.modify_delta {
+        if let Some((target, amount)) = modify_delta {
             effect_entity.insert(mud_world::ModifyDelta { target, amount });
         }
         let effect = effect_entity.id();
@@ -1299,6 +1306,23 @@ fn go_linkdead(world: &mut World, entity: Entity) {
     info!(entity = ?entity, "connection lost mid-fight; character stays in the world");
 }
 
+/// Remove every `PersistentPet` (paid pet, charmed mob, saved mount)
+/// following `owner` from the world, with whatever it carries. Called when
+/// the owner leaves, after the save that records them.
+fn despawn_persistent_pets(world: &mut World, owner: Entity) {
+    let pets: Vec<Entity> = {
+        let mut q = world
+            .query_filtered::<(Entity, &Follower), (With<Mob>, With<mud_world::PersistentPet>)>();
+        q.iter(world)
+            .filter(|(_, f)| f.0 == owner)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for pet in pets {
+        commands::extract_mob(world, pet, None, true);
+    }
+}
+
 /// Take a character out of the world: tell the room, run the ordered save,
 /// then despawn it and everything it carries. The one exit shared by quit,
 /// camp, a dropped link out of combat, idle kicks, and linkdead timeouts.
@@ -1342,6 +1366,10 @@ async fn retire_player(world: &mut World, entity: Entity, pool: &PgPool) {
     commands::ungroup(world, entity, true, false);
     // A leaving rider leaves the mount behind, free of its rider link.
     crate::combat::clear_mount_links(world, entity);
+    // The save above recorded the persistent pets and mounts; login respawns
+    // them from that record, so the live ones must go or each relog leaves
+    // a duplicate standing in the room.
+    despawn_persistent_pets(world, entity);
     // Despawn the player AND every item they were carrying / wearing
     // (Located(player) catches both inventory and equipped —
     // EquippedSlot is additive), including items nested inside
@@ -10764,6 +10792,60 @@ mod tests {
             mud_world::group_members(&mut world, new_lead),
             vec![new_lead]
         );
+    }
+
+    /// Quitting saves the persistent pets and mounts, then removes them from
+    /// the world: login respawns them from the save, so leaving them standing
+    /// would leave a duplicate beside the respawned one on every relog.
+    #[tokio::test(flavor = "current_thread")]
+    async fn quitting_removes_the_saved_pets_and_mounts_and_nothing_else() {
+        let mut world = World::new();
+        world.insert_resource(SaveCoordinator::default());
+        let room = world.spawn_empty().id();
+        let me = spawn_player_for(&mut world, "pet-me", room);
+        let other = spawn_player_for(&mut world, "pet-other", room);
+        let mob = |world: &mut World, name: &str| {
+            world
+                .spawn((
+                    Mob,
+                    Named { name: name.into() },
+                    WorldKey { zone: 30, id: 1 },
+                    Health { hp: 20, max: 20 },
+                    Located(room),
+                ))
+                .id()
+        };
+        let mount = mob(&mut world, "a mare");
+        world
+            .entity_mut(mount)
+            .insert((Follower(me), mud_world::PersistentPet));
+        world.entity_mut(mount).insert(mud_world::RiddenBy(me));
+        world.entity_mut(me).insert(mud_world::Mounted(mount));
+        let wolf = mob(&mut world, "a wolf");
+        world
+            .entity_mut(wolf)
+            .insert((Follower(me), mud_world::PersistentPet));
+        let tagalong = mob(&mut world, "a tagalong");
+        world.entity_mut(tagalong).insert(Follower(me));
+        let others_pet = mob(&mut world, "another's cat");
+        world
+            .entity_mut(others_pet)
+            .insert((Follower(other), mud_world::PersistentPet));
+
+        let snap = snapshot_player(&mut world, me, 1).expect("snapshot");
+        let saved: PersistedPets =
+            serde_json::from_value(snap.pets_json.expect("pets recorded")).unwrap();
+        assert_eq!(saved.pets.len(), 2, "mount and wolf are saved");
+
+        let pool = failing_pool();
+        let mut router = ConnRouter::new();
+        router.playing.insert(1, me);
+        router.on_disconnect(&mut world, 1, &pool).await;
+        assert!(world.get_entity(me).is_err());
+        assert!(world.get_entity(mount).is_err(), "saved mount despawned");
+        assert!(world.get_entity(wolf).is_err(), "saved pet despawned");
+        assert!(world.get_entity(tagalong).is_ok(), "unsaved follower stays");
+        assert!(world.get_entity(others_pet).is_ok(), "other's pet stays");
     }
 
     static RELOG_RETRY: &[Duration] = &[Duration::from_millis(150)];

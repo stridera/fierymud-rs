@@ -505,6 +505,7 @@ mod violent_cast_tests;
 #[cfg(test)]
 pub(crate) use combat_commands::cmd_flee;
 pub(crate) use combat_commands::flee_through_exit;
+pub(crate) use combat_commands::hard_wall_label;
 #[path = "commands/enter.rs"]
 mod enter;
 #[path = "commands/feedback.rs"]
@@ -19496,6 +19497,10 @@ pub(crate) fn invoke_ability_core(
                     // everyone else stops fighting it), legacy `add_follower`
                     // + `stop_fighting`.
                     crate::combat::stop_fighting_both_ways(world, target_entity);
+                    // ...and forgets its grudges, or the re-engage pass would
+                    // put the master straight back into the fight.
+                    try_remove::<crate::combat::HateList>(world, target_entity);
+                    try_remove::<crate::combat::MobMemory>(world, target_entity);
                     // Spell-effort spent → tag as durable so the
                     // disconnect-save snapshots it for ≤1h restore.
                     try_insert(world, target_entity, mud_world::PersistentPet);
@@ -23550,6 +23555,8 @@ pub(crate) fn is_grouped(world: &mut World, ch: Entity) -> bool {
 pub(crate) fn release_from(world: &mut World, member: Entity, leader: Entity) {
     if world.get::<Follower>(member).is_some_and(|f| f.0 == leader) {
         try_remove::<Follower>(world, member);
+        // A dismissed pet is no longer the master's paid follower.
+        try_remove::<mud_world::PersistentPet>(world, member);
     }
     if world
         .get::<mud_world::GroupMember>(member)

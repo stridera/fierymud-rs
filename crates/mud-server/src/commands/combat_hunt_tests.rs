@@ -395,11 +395,12 @@ fn retreat_breaks_a_cast_in_progress() {
 
 // -- charm -------------------------------------------------------------------
 
-#[test]
-fn charming_a_mob_that_is_fighting_you_ends_the_fight() {
+/// An arena whose caster knows a working `charm` spell, plus a goblin
+/// fighting the caster (it carries the hate and memory a melee leaves).
+fn charm_arena() -> (World, Entity, Entity, Entity, Rx) {
     const CHARM: i32 = 1;
     const FX: i32 = 2;
-    let (mut world, room, caster, _rx) = arena();
+    let (mut world, room, caster, rx) = arena();
     let mut catalog = AbilityCatalog::default();
     let mut def = ability_def(CHARM, "charm", AbilityKind::Spell);
     def.violent = true;
@@ -435,11 +436,18 @@ fn charming_a_mob_that_is_fighting_you_ends_the_fight() {
         entries: vec![(CHARM, 500, true)],
     });
     let goblin = mob_in(&mut world, room, "a goblin", "goblin");
-    world.entity_mut(goblin).insert(Fighting(caster));
+    world.entity_mut(goblin).insert((
+        Fighting(caster),
+        crate::combat::HateList(vec![caster]),
+        crate::combat::MobMemory([caster].into_iter().collect()),
+    ));
     world.entity_mut(caster).insert(Fighting(goblin));
+    (world, room, caster, goblin, rx)
+}
 
+fn cast_charm(world: &mut World, caster: Entity) {
     invoke_ability_with(
-        &mut world,
+        world,
         caster,
         "'charm' goblin",
         AbilityKind::Spell,
@@ -449,6 +457,17 @@ fn charming_a_mob_that_is_fighting_you_ends_the_fight() {
         false,
         None,
     );
+}
+
+fn combat_round(world: &mut World) {
+    world.insert_resource(crate::TickCount(crate::combat::COMBAT_PERIOD_TICKS));
+    crate::combat::combat_tick(world);
+}
+
+#[test]
+fn charming_a_mob_that_is_fighting_you_ends_the_fight() {
+    let (mut world, _room, caster, goblin, _rx) = charm_arena();
+    cast_charm(&mut world, caster);
 
     assert_eq!(world.get::<Follower>(goblin).map(|f| f.0), Some(caster));
     assert!(
@@ -456,6 +475,49 @@ fn charming_a_mob_that_is_fighting_you_ends_the_fight() {
         "the pet stops swinging at its new master"
     );
     assert!(world.get::<Fighting>(caster).is_none());
+}
+
+#[test]
+fn a_charmed_pet_does_not_turn_on_its_new_master_next_round() {
+    // Control: the same goblin, not charmed, goes back to the fight.
+    let (mut world, _room, caster, goblin, _rx) = charm_arena();
+    stop_fight(&mut world, caster, goblin);
+    combat_round(&mut world);
+    assert!(
+        world.get::<Fighting>(goblin).is_some(),
+        "control: an uncharmed goblin re-engages from its hate list"
+    );
+
+    let (mut world, _room, caster, goblin, _rx) = charm_arena();
+    cast_charm(&mut world, caster);
+    assert!(world.get::<crate::combat::HateList>(goblin).is_none());
+    assert!(world.get::<crate::combat::MobMemory>(goblin).is_none());
+    combat_round(&mut world);
+    assert!(
+        world.get::<Fighting>(goblin).is_none(),
+        "the pet does not fight its master"
+    );
+    assert!(world.get::<Fighting>(caster).is_none());
+}
+
+#[test]
+fn a_servant_or_a_mob_in_a_peaceful_room_ignores_its_hate_list() {
+    for case in ["servant", "peaceful room"] {
+        let (mut world, room, caster, goblin, _rx) = charm_arena();
+        stop_fight(&mut world, caster, goblin);
+        if case == "servant" {
+            world.entity_mut(goblin).insert(Follower(caster));
+        } else {
+            world.entity_mut(room).insert(PeacefulRoom);
+        }
+        combat_round(&mut world);
+        assert!(world.get::<Fighting>(goblin).is_none(), "{case}");
+    }
+}
+
+fn stop_fight(world: &mut World, a: Entity, b: Entity) {
+    world.entity_mut(a).remove::<Fighting>();
+    world.entity_mut(b).remove::<Fighting>();
 }
 
 // -- AoE target selection ------------------------------------------------------
@@ -636,4 +698,165 @@ fn release_leaves_the_mount_behind() {
     assert_eq!(room_of(&world, steed), a, "the mount stays");
     assert!(world.get::<mud_world::Mounted>(p).is_none());
     assert!(world.get::<mud_world::RiddenBy>(steed).is_none());
+}
+
+#[test]
+fn sweep_and_hitall_spare_mounts_ridden_by_the_caster_or_a_groupmate() {
+    for hitall in [false, true] {
+        let (mut world, room, p, _rx) = arena();
+        let (mate, _mrx) = player_in(&mut world, room);
+        world.entity_mut(mate).insert(mud_world::GroupMember(p));
+        let mine = mob_in(&mut world, room, "my horse", "horse");
+        world.entity_mut(mine).insert(mud_world::RiddenBy(p));
+        let theirs = mob_in(&mut world, room, "a mate's mare", "mare");
+        world.entity_mut(theirs).insert(mud_world::RiddenBy(mate));
+        let goblin = mob_in(&mut world, room, "a goblin", "goblin");
+        if hitall {
+            cmd_hitall(&mut world, p, "");
+        } else {
+            cmd_sweep(&mut world, p, "");
+        }
+        assert_eq!(hp(&world, mine), 50, "hitall={hitall}: own mount spared");
+        assert_eq!(
+            hp(&world, theirs),
+            50,
+            "hitall={hitall}: mate's mount spared"
+        );
+        assert!(
+            hp(&world, goblin) < 50,
+            "hitall={hitall}: control, goblin hit"
+        );
+    }
+}
+
+// -- restored buffs ------------------------------------------------------------------
+
+#[test]
+fn a_clamped_buff_restored_at_login_reverses_exactly_on_expiry() {
+    let (mut world, _room, p, _rx) = arena();
+    world.entity_mut(p).insert(Health { hp: 5, max: 5 });
+    world.insert_resource(crate::TickCount(0));
+    let persisted: crate::login::PersistedEffects = serde_json::from_value(serde_json::json!({
+        "saved_at_unix": i64::MAX / 2,
+        "effects": [{
+            "kind": 1,
+            "name": "wither",
+            "strength": 1,
+            "remaining_secs": 30,
+            "source": "Spell",
+            "ability_id": null,
+            "modify_delta": ["max_hp", -20],
+        }],
+    }))
+    .expect("persisted effects shape");
+    crate::login::restore_persisted_effects(&mut world, p, persisted);
+    assert_eq!(world.get::<Health>(p).unwrap().max, 1, "debuff clamps at 1");
+    let recorded: Vec<i32> = world
+        .query::<&mud_world::ModifyDelta>()
+        .iter(&world)
+        .map(|d| d.amount)
+        .collect();
+    assert_eq!(
+        recorded,
+        vec![-4],
+        "the delta that landed, not the saved one"
+    );
+    {
+        let mut q = world.query::<&mut mud_world::EffectInstance>();
+        for mut i in q.iter_mut(&mut world) {
+            i.remaining_secs = 1;
+        }
+    }
+    world.insert_resource(crate::TickCount(10));
+    crate::effects::effects_tick(&mut world);
+    assert_eq!(
+        world.get::<Health>(p).unwrap().max,
+        5,
+        "expiry gives back exactly what was taken"
+    );
+}
+
+// -- stale pet markers ---------------------------------------------------------------
+
+#[test]
+fn persistent_pet_marker_is_dropped_when_the_follow_link_breaks() {
+    let (mut world, room, owner, _rx) = arena();
+    let pet = mob_in(&mut world, room, "a wolf", "wolf");
+    world
+        .entity_mut(pet)
+        .insert((Follower(owner), mud_world::PersistentPet));
+    crate::combat::prune_stale_pet_markers(&mut world);
+    assert!(
+        world.get::<mud_world::PersistentPet>(pet).is_some(),
+        "control: a followed pet keeps the marker"
+    );
+    // Unfollowed / ordered away.
+    world.entity_mut(pet).remove::<Follower>();
+    crate::combat::prune_stale_pet_markers(&mut world);
+    assert!(world.get::<mud_world::PersistentPet>(pet).is_none());
+
+    // The master is gone (quit / removed).
+    let other = world.spawn_empty().id();
+    world
+        .entity_mut(pet)
+        .insert((Follower(other), mud_world::PersistentPet));
+    world.despawn(other);
+    crate::combat::prune_stale_pet_markers(&mut world);
+    assert!(world.get::<mud_world::PersistentPet>(pet).is_none());
+
+    // Following a mob (a scripted escort) is not a player's pet.
+    let boss = mob_in(&mut world, room, "a boss", "boss");
+    world
+        .entity_mut(pet)
+        .insert((Follower(boss), mud_world::PersistentPet));
+    crate::combat::prune_stale_pet_markers(&mut world);
+    assert!(world.get::<mud_world::PersistentPet>(pet).is_none());
+}
+
+#[test]
+fn dismissing_a_pet_drops_the_persistent_marker_at_once() {
+    let (mut world, room, owner, _rx) = arena();
+    let pet = mob_in(&mut world, room, "a wolf", "wolf");
+    world
+        .entity_mut(pet)
+        .insert((Follower(owner), mud_world::PersistentPet));
+    crate::commands::release_from(&mut world, pet, owner);
+    assert!(world.get::<Follower>(pet).is_none());
+    assert!(world.get::<mud_world::PersistentPet>(pet).is_none());
+}
+
+#[test]
+fn a_dismissed_pet_pays_kill_credit_again_only_as_an_ordinary_mob() {
+    // The marker is what made its death pay nothing; with the link broken
+    // it is just a mob again.
+    let (mut world, room, owner, _rx) = arena();
+    let pet = mob_in(&mut world, room, "a wolf", "wolf");
+    world
+        .entity_mut(pet)
+        .insert((Follower(owner), mud_world::PersistentPet));
+    assert!(crate::combat::is_player_pet(&mut world, pet));
+    world.entity_mut(pet).remove::<Follower>();
+    crate::combat::prune_stale_pet_markers(&mut world);
+    assert!(!crate::combat::is_player_pet(&mut world, pet));
+}
+
+// -- retreat refusals ----------------------------------------------------------------
+
+#[test]
+fn retreat_tells_a_ghost_a_frozen_or_a_stunned_player_why_not() {
+    for (what, expect) in [
+        ("ghost", "disembodied"),
+        ("frozen", "frozen"),
+        ("stunned", "stunned"),
+    ] {
+        let (mut world, a, _b, p, mut rx) = retreat_world();
+        match what {
+            "ghost" => world.entity_mut(p).insert(Ghost),
+            "frozen" => world.entity_mut(p).insert(mud_world::Frozen),
+            _ => world.entity_mut(p).insert(mud_world::Stunned),
+        };
+        cmd_retreat(&mut world, p, "north");
+        assert_eq!(room_of(&world, p), a, "{what}");
+        assert!(drain(&mut rx).contains(expect), "{what}");
+    }
 }

@@ -1932,7 +1932,11 @@ pub(crate) fn cmd_gretreat(world: &mut World, player: Entity, _args: &str) {
 
 /// Label of the solid wall (`WALL_OF_STONE`, ...) that bars the exit `dir` of
 /// `room`, if any. Fog and illusory walls don't bar flight.
-fn hard_wall_label(world: &World, room: Entity, dir: mud_db::enums::Direction) -> Option<String> {
+pub(crate) fn hard_wall_label(
+    world: &World,
+    room: Entity,
+    dir: mud_db::enums::Direction,
+) -> Option<String> {
     world
         .get::<mud_world::RoomBlockedExits>(room)
         .and_then(|b| b.by_direction.get(&dir))
@@ -2226,7 +2230,13 @@ fn skip_forbidden_pets(world: &mut World, player: Entity, targets: Vec<Entity>) 
         .into_iter()
         .filter(|t| {
             let master = world.get::<mud_world::Follower>(*t).map(|f| f.0);
+            // Mounting adds no `Follower`: spare a mount any group member
+            // (the attacker included) is riding.
+            let ridden_by_party = world
+                .get::<mud_world::RiddenBy>(*t)
+                .is_some_and(|r| r.0 == player || party.contains(&r.0));
             !party.contains(t)
+                && !ridden_by_party
                 && Some(*t) != followed
                 && master != Some(player)
                 && (world.get::<Mob>(*t).is_none()

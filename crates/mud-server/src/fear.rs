@@ -154,10 +154,24 @@ pub(crate) fn can_flee_now(world: &mut World, actor: Entity) -> bool {
     let Some(room) = world.get::<Located>(actor).map(|l| l.0) else {
         return false;
     };
-    if world.get::<Ghost>(actor).is_some()
-        || world.get::<Frozen>(actor).is_some()
-        || world.get::<Stunned>(actor).is_some()
-    {
+    if world.get::<Ghost>(actor).is_some() {
+        send_to(
+            world,
+            actor,
+            "Your spirit can't flee; you are disembodied.\r\n",
+        );
+        return false;
+    }
+    if world.get::<Frozen>(actor).is_some() {
+        send_to(
+            world,
+            actor,
+            "You are frozen by an Implementor and cannot act.\r\n",
+        );
+        return false;
+    }
+    if world.get::<Stunned>(actor).is_some() {
+        send_to(world, actor, "You are too stunned to flee!\r\n");
         return false;
     }
     match world.get::<Posture>(actor).map(|p| p.0) {

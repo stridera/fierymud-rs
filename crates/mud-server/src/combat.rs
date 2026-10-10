@@ -25,7 +25,7 @@ use crate::commands::{
 
 /// Four real-time seconds per swing (40 ticks at 10Hz) — matches legacy
 /// `PULSE_VIOLENCE` so the DB-authored damage values stay calibrated.
-const COMBAT_PERIOD_TICKS: u64 = 40;
+pub(crate) const COMBAT_PERIOD_TICKS: u64 = 40;
 
 /// Maximum per-swing damage. Mirrors legacy `defines.hpp:349`'s
 /// `MAX_DAMAGE = 1000`. Caps even the wildest crits/burst boss
@@ -446,6 +446,9 @@ pub(crate) fn mob_flee(world: &mut World, mob: Entity, from_room: Entity) -> boo
         .unwrap_or_default();
     let mut candidates = candidates;
     crate::room_access::retain_admitted(world, &[mob], &mut candidates);
+    // Solid walls (stone, ice) bar flight for mobs as they do for players.
+    candidates
+        .retain(|(dir, _)| crate::commands::hard_wall_label(world, from_room, *dir).is_none());
     if candidates.is_empty() {
         return false;
     }
@@ -725,6 +728,7 @@ fn decay_milestone(prev: i32, now: i32, name: &str) -> Option<String> {
 
 #[allow(clippy::too_many_lines)]
 pub fn combat_tick(world: &mut World) {
+    prune_stale_pet_markers(world);
     let tick = world.resource::<TickCount>().0;
     if !tick.is_multiple_of(COMBAT_PERIOD_TICKS) {
         return;
@@ -760,6 +764,13 @@ pub fn combat_tick(world: &mut World) {
                 // Asleep or held mobs do not turn on anyone; a sitting one
                 // gets up when it does (`engage_combat` / the combat round).
                 if !crate::mob_ai::mob_can_act(world, mob) {
+                    return None;
+                }
+                // A pet or charmed mob never turns on anyone from its own
+                // hate list, and nobody starts a fight in a peaceful room.
+                if crate::commands::is_servant(world, mob)
+                    || world.get::<mud_world::PeacefulRoom>(loc.0).is_some()
+                {
                     return None;
                 }
                 hate.0
@@ -2406,6 +2417,28 @@ pub(crate) fn is_player_pet(world: &mut World, mob: Entity) -> bool {
     let mut q = world.query::<(&mud_world::EffectInstance, &mud_world::AppliedTo)>();
     q.iter(world)
         .any(|(i, a)| a.0 == mob && i.name.starts_with("summoned-"))
+}
+
+/// Drop the durable `PersistentPet` marker from every mob whose follow link
+/// to a player is gone (unfollowed, dismissed, the master quit or was
+/// removed, ...). The marker means "a player's paid-for follower": the
+/// disconnect save snapshots it and its death pays no XP or coin. Once the
+/// link is broken it is a stale claim, and the mob is an ordinary mob again.
+/// Cheap: only touches the few mobs carrying the marker.
+pub(crate) fn prune_stale_pet_markers(world: &mut World) {
+    let stale: Vec<Entity> = {
+        let mut q = world.query_filtered::<(Entity, Option<&mud_world::Follower>), (
+            With<Mob>,
+            With<mud_world::PersistentPet>,
+        )>();
+        q.iter(world)
+            .filter(|(_, f)| !f.is_some_and(|f| world.get::<Player>(f.0).is_some()))
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for mob in stale {
+        try_remove::<mud_world::PersistentPet>(world, mob);
+    }
 }
 
 /// True for a mob flagged illusory (`MobTrait::Illusion`, legacy
@@ -6149,7 +6182,10 @@ mod tests {
                     mud_world::AppliedTo(goblin),
                 ));
             } else {
-                world.entity_mut(goblin).insert(mud_world::PersistentPet);
+                let owner = credit_player(&mut world, room, "Owner", 0);
+                world
+                    .entity_mut(goblin)
+                    .insert((mud_world::PersistentPet, mud_world::Follower(owner)));
             }
             world.entity_mut(killer).insert(Fighting(goblin));
             run_combat_tick(&mut world);
@@ -6208,6 +6244,33 @@ mod tests {
             world.get::<mud_world::RiddenBy>(steed).is_none(),
             "the mount is free again"
         );
+    }
+
+    #[test]
+    fn a_fleeing_mob_will_not_run_through_a_solid_wall() {
+        let mut world = World::new();
+        let (room_a, _room_b, mob) = hurt_mob_under_attack(&mut world, vec![], 60);
+        let wall = |traversal| mud_world::RoomBlockedExits {
+            by_direction: std::collections::HashMap::from([(
+                mud_db::enums::Direction::North,
+                mud_world::RoomBlockedExit {
+                    kind_label: "wall of stone".into(),
+                    backed_by: mob,
+                    hp: 100,
+                    traversal,
+                },
+            )]),
+        };
+        world
+            .entity_mut(room_a)
+            .insert(wall(mud_world::WallTraversal::Block));
+        assert!(!mob_flee(&mut world, mob, room_a), "walled in");
+        assert_eq!(world.get::<Located>(mob).map(|l| l.0), Some(room_a));
+        // Fog does not bar flight (control).
+        world
+            .entity_mut(room_a)
+            .insert(wall(mud_world::WallTraversal::Slow));
+        assert!(mob_flee(&mut world, mob, room_a));
     }
 
     #[test]
