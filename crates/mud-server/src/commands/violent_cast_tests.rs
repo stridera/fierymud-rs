@@ -217,3 +217,71 @@ fn a_charmed_or_sleeping_victim_is_not_dragged_into_a_fight() {
     cast(&mut world, caster, "ray");
     assert_eq!(fighting(&world, mob), None);
 }
+
+/// Fly cast on someone else read as if the caster were the one rising:
+/// the caster line and the room line must name the target.
+fn fly_messages() -> mud_world::AbilityMessageSet {
+    mud_world::AbilityMessageSet {
+        success_to_caster: Some("{target.name} rises into the air and begins to fly.".into()),
+        success_to_victim: Some("You rise into the air and begin to fly.".into()),
+        success_to_room: Some("{target.name} rises into the air and begins to fly.".into()),
+        success_to_self: Some("You rise into the air and begin to fly.".into()),
+        success_self_room: Some("{actor.name} rises into the air and begins to fly.".into()),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_buff_cast_on_another_names_the_target_to_the_caster_and_the_room() {
+    let (mut world, room, caster, mut rx) = world_with_spells();
+    world
+        .resource_mut::<AbilityCatalog>()
+        .messages
+        .insert(BUFF, fly_messages());
+    let (watcher, mut wrx) = player_in(&mut world, room);
+    world.entity_mut(watcher).insert(Named {
+        name: "Watcher".into(),
+    });
+    goblin(&mut world, room);
+    drain(&mut rx);
+    cast(&mut world, caster, "buff");
+    let caster_out = drain(&mut rx);
+    assert!(
+        caster_out.contains("a goblin rises into the air and begins to fly."),
+        "{caster_out}"
+    );
+    assert!(
+        !caster_out.contains("You rise into the air"),
+        "{caster_out}"
+    );
+    let room_out = drain(&mut wrx);
+    assert!(
+        room_out.contains("a goblin rises into the air and begins to fly."),
+        "{room_out}"
+    );
+    assert!(!room_out.contains("Tester rises"), "{room_out}");
+}
+
+#[test]
+fn a_buff_cast_on_yourself_keeps_the_first_person_lines() {
+    let (mut world, room, caster, mut rx) = world_with_spells();
+    world
+        .resource_mut::<AbilityCatalog>()
+        .messages
+        .insert(BUFF, fly_messages());
+    let (_watcher, mut wrx) = player_in(&mut world, room);
+    drain(&mut rx);
+    invoke_ability_with(
+        &mut world,
+        caster,
+        "'buff' me",
+        AbilityKind::Spell,
+        "cast",
+        false,
+        false,
+        false,
+        None,
+    );
+    assert!(drain(&mut rx).contains("You rise into the air and begin to fly."));
+    assert!(drain(&mut wrx).contains("Tester rises into the air and begins to fly."));
+}
