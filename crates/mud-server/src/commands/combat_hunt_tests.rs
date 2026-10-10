@@ -741,6 +741,169 @@ fn a_buff_capped_at_the_ceiling_expires_back_to_base_in_any_order() {
     }
 }
 
+fn ledger(world: &World, e: Entity, key: &str) -> i32 {
+    crate::commands::stat_overflow_entries(world, e)
+        .into_iter()
+        .find(|(k, _)| *k == key)
+        .map_or(0, |(_, n)| n)
+}
+
+/// One level-up worth of gains: +20 max hp, +5 max stamina.
+fn one_level_up_world(world: &mut World, p: Entity) {
+    world.insert_resource(mud_world::LevelTable {
+        rows: (1..=11)
+            .map(|level| mud_world::LevelRow {
+                level,
+                name: None,
+                exp_required: level * 10,
+                hp_gain: 20,
+                stamina_gain: 5,
+                is_immortal: false,
+                permissions: vec![],
+            })
+            .collect(),
+    });
+    world.entity_mut(p).insert(mud_world::Profile {
+        level: 10,
+        class_id: None,
+        race: "HUMAN".into(),
+        experience: 110,
+        gender: "male".into(),
+    });
+}
+
+#[test]
+fn level_gains_go_through_the_clamp_ledger() {
+    let (mut world, _room, p, _rx) = arena();
+    one_level_up_world(&mut world, p);
+    // Base 100 with a -150 curse: max 1, 51 past the floor.
+    let curse = spell_buff(&mut world, p, "max_hp", -150);
+    let drain_stam = spell_buff(&mut world, p, "max_stamina", -130);
+    assert_eq!(world.get::<Health>(p).unwrap().max, 1);
+    assert_eq!(ledger(&world, p, "max_hp"), -51);
+    assert_eq!(world.get::<Stamina>(p).unwrap().max, 0);
+    assert_eq!(ledger(&world, p, "max_stamina"), -30);
+
+    crate::combat::check_level_up(&mut world, p);
+    assert_eq!(world.get::<mud_world::Profile>(p).unwrap().level, 11);
+    // The gains pay down the debt; the maximum stays floored.
+    let h = *world.get::<Health>(p).unwrap();
+    assert_eq!((h.max, h.hp), (1, 1));
+    assert_eq!(ledger(&world, p, "max_hp"), -31);
+    let st = *world.get::<Stamina>(p).unwrap();
+    assert_eq!((st.max, st.current), (0, 0));
+    assert_eq!(ledger(&world, p, "max_stamina"), -25);
+    // The saved hp is the capped one, not a number the ledger cannot explain.
+    let off = crate::equip_apply::gear_offsets(&world, p);
+    assert_eq!(crate::equip_apply::base_current(h.hp, h.max, off.max_hp), 1);
+
+    // The curse lifts: base plus the level gains, exactly.
+    crate::effects::remove_effect_instance(&mut world, p, curse);
+    crate::effects::remove_effect_instance(&mut world, p, drain_stam);
+    assert_eq!(world.get::<Health>(p).unwrap().max, 120);
+    assert_eq!(world.get::<Stamina>(p).unwrap().max, 105);
+    assert!(crate::commands::stat_overflow_entries(&world, p).is_empty());
+}
+
+#[test]
+fn level_gains_on_an_unclamped_character_are_unchanged() {
+    let (mut world, _room, p, _rx) = arena();
+    one_level_up_world(&mut world, p);
+    crate::combat::check_level_up(&mut world, p);
+    let h = *world.get::<Health>(p).unwrap();
+    assert_eq!((h.max, h.hp), (120, 120));
+    assert_eq!(world.get::<Stamina>(p).unwrap().max, 105);
+    assert!(crate::commands::stat_overflow_entries(&world, p).is_empty());
+}
+
+// -- admin writes and the ledger -----------------------------------------------------
+
+#[test]
+fn admin_set_discards_a_stale_ledger_entry() {
+    let (mut world, _room, p, _rx) = arena();
+    let a = spell_buff(&mut world, p, "armor_pct", 60);
+    let b = spell_buff(&mut world, p, "armor_pct", 60);
+    assert_eq!(armor_pct(&world, p), 100);
+    assert_eq!(ledger(&world, p, "armor_pct"), 20);
+    crate::admin::set_player_field(&mut world, "Tester", "armor_pct", 50).unwrap();
+    assert_eq!(armor_pct(&world, p), 50);
+    assert_eq!(
+        ledger(&world, p, "armor_pct"),
+        0,
+        "the old running total is gone"
+    );
+    // The first buff expires: 50 - 60 floors at 0. A stale +20 would have
+    // left 10 here.
+    crate::effects::remove_effect_instance(&mut world, p, a);
+    assert_eq!(armor_pct(&world, p), 0);
+    crate::effects::remove_effect_instance(&mut world, p, b);
+    assert_eq!(armor_pct(&world, p), 0);
+    // A new modifier is accounted from the live state, whatever the setter
+    // overwrote: the gear's +40 pays down the 70 the expiries left behind.
+    assert_eq!(ledger(&world, p, "armor_pct"), -70);
+    assert_eq!(
+        apply_modify_delta_recorded(&mut world, p, "armor_pct", 40),
+        Some(40)
+    );
+    assert_eq!(armor_pct(&world, p), 0);
+    assert_eq!(ledger(&world, p, "armor_pct"), -30);
+}
+
+#[test]
+fn admin_set_of_every_clamped_stat_clears_its_ledger_key() {
+    let cases = [
+        ("hp_max", "max_hp", -500),
+        ("stamina_max", "max_stamina", -500),
+        ("armor_pct", "armor_pct", 500),
+        ("armor_flat", "armor_flat", -500),
+        ("ward_pct", "ward_pct", 500),
+        ("hardness", "hardness", -500),
+    ];
+    for (field, key, nominal) in cases {
+        let (mut world, _room, p, _rx) = arena();
+        assert_eq!(
+            apply_modify_delta_recorded(&mut world, p, key, nominal),
+            Some(nominal)
+        );
+        assert_ne!(ledger(&world, p, key), 0, "{key}: clamped");
+        crate::admin::set_player_field(&mut world, "Tester", field, 7).unwrap();
+        assert_eq!(ledger(&world, p, key), 0, "{field}: ledger cleared");
+    }
+}
+
+#[test]
+fn in_game_set_discards_a_stale_ledger_entry() {
+    let (mut world, _room, p, _rx) = arena();
+    for (field, key) in [("maxhp", "max_hp"), ("maxstamina", "max_stamina")] {
+        apply_modify_delta_recorded(&mut world, p, key, -500);
+        assert_ne!(ledger(&world, p, key), 0);
+        super::admin_inspect::cmd_set(&mut world, p, &format!("me {field} 40"));
+        assert_eq!(ledger(&world, p, key), 0, "{field}");
+    }
+    assert_eq!(world.get::<Health>(p).unwrap().max, 40);
+    assert_eq!(world.get::<Stamina>(p).unwrap().max, 40);
+}
+
+#[test]
+fn actor_inspect_lists_non_zero_ledger_entries() {
+    let (mut world, _room, p, mut rx) = arena();
+    let v = crate::admin::inspect_actor(&mut world, "Tester").unwrap();
+    assert_eq!(v["stat_overflow"], serde_json::json!({}), "nothing stuck");
+    apply_modify_delta_recorded(&mut world, p, "max_hp", -150);
+    apply_modify_delta_recorded(&mut world, p, "armor_pct", 130);
+    let v = crate::admin::inspect_actor(&mut world, "Tester").unwrap();
+    assert_eq!(
+        v["stat_overflow"],
+        serde_json::json!({"max_hp": -51, "armor_pct": 30})
+    );
+    super::admin_inspect::cmd_stat(&mut world, p, "me");
+    let out = drain(&mut rx);
+    assert!(
+        out.contains("stat_overflow: armor_pct +30, max_hp -51"),
+        "{out}"
+    );
+}
+
 // -- release -------------------------------------------------------------------------
 
 #[test]

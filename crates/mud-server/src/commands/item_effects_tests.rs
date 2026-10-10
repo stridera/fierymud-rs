@@ -1890,3 +1890,40 @@ fn wearing_says_wear_before_any_effect_text() {
     let out = drain(&mut rx);
     assert!(out.starts_with("You slide a wing ring"), "{out:?}");
 }
+
+#[test]
+fn gear_offset_ignores_clamp_overflow_that_came_from_effects() {
+    use crate::commands::apply_modify_delta;
+    // Base 100, a -150 curse effect floors max hp at 1 (51 past the floor).
+    let (mut world, p, mut rx) = setup();
+    assert!(apply_modify_delta(&mut world, p, "max_hp", -150));
+    ring(&mut world, p, 30, "small", vec![modify("max_hp", 30)]);
+    wear(&mut world, p, &mut rx, "small");
+    assert_eq!(world.get::<Health>(p).unwrap().max, 1, "still floored");
+    // The gear-less maximum is the floor too: the ring adds nothing to the
+    // saved value, and the curse's overflow is not charged to the ring.
+    assert_eq!(gear_offsets(&world, p).max_hp, 0);
+
+    // A bigger ring lifts the maximum clear of the floor.
+    ring(&mut world, p, 31, "big", vec![modify("max_hp", 60)]);
+    wear(&mut world, p, &mut rx, "big");
+    let max = world.get::<Health>(p).unwrap().max;
+    assert_eq!(max, 40, "100 - 150 + 90");
+    let off = gear_offsets(&world, p);
+    assert_eq!(off.max_hp, 39, "gear-less max is the floor of 1");
+    world.get_mut::<Health>(p).unwrap().hp = 25;
+    let saved = base_current(25, max, off.max_hp);
+    assert_eq!(saved, 1, "capped at the gear-less maximum");
+
+    // Relog: the curse is restored, the rings re-apply on the base row.
+    let (mut world2, p2, mut rx2) = setup();
+    assert!(apply_modify_delta(&mut world2, p2, "max_hp", -150));
+    for (id, kw, amount) in [(30, "small", 30), (31, "big", 60)] {
+        ring(&mut world2, p2, id, kw, vec![modify("max_hp", amount)]);
+        wear(&mut world2, p2, &mut rx2, kw);
+    }
+    world2.get_mut::<Health>(p2).unwrap().hp = saved;
+    assert_eq!(world2.get::<Health>(p2).unwrap().max, max);
+    assert_eq!(gear_offsets(&world2, p2), off);
+    assert_eq!(world2.get::<Health>(p2).unwrap().hp, saved);
+}

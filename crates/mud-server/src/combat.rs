@@ -3144,12 +3144,15 @@ pub(crate) fn level_up_to(world: &mut World, entity: Entity, max_level: i32) {
         let total_hp_gain = race_scaled
             .saturating_add(class_hp_per_level)
             .saturating_add(class_hit_dice_roll);
+        // Level gains go through the clamp ledger (not straight onto
+        // `max`) so a floored maximum under a curse stays in step with
+        // `StatOverflow`; the full heal follows the resulting maximum.
+        crate::commands::apply_modify_delta(world, entity, "max_hp", total_hp_gain);
         if let Some(mut h) = world.get_mut::<mud_world::Health>(entity) {
-            h.max = h.max.saturating_add(total_hp_gain);
             h.hp = h.max; // full heal on level-up
         }
+        crate::commands::apply_modify_delta(world, entity, "max_stamina", next_row.stamina_gain);
         if let Some(mut s) = world.get_mut::<mud_world::Stamina>(entity) {
-            s.max = s.max.saturating_add(next_row.stamina_gain);
             s.current = s.max;
         }
         // Practice points per level: base of 1, +1 every 10 caster

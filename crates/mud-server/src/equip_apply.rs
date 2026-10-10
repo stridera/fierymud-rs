@@ -649,15 +649,31 @@ pub fn gear_offsets(world: &World, wearer: Entity) -> GearOffsets {
             *slot = slot.saturating_add(*amount);
         }
     }
-    // A clamped maximum (max hp floored at 1) moved by less than the
-    // nominal grants say; the ledger holds the part that did not land.
-    if let Some(o) = world.get::<mud_world::StatOverflow>(wearer) {
-        off.max_hp = off
-            .max_hp
-            .saturating_sub(o.0.get("max_hp").copied().unwrap_or(0));
-        off.max_stamina = off
-            .max_stamina
-            .saturating_sub(o.0.get("max_stamina").copied().unwrap_or(0));
+    // A clamped maximum moves by less than the nominal grants say, and the
+    // ledger also holds overflow that came from effects, not gear. Work out
+    // the maximum the wearer would have WITHOUT the gear (effects stay) from
+    // the unclamped running total, and take the offset as the real gap.
+    let ledger = |key: &str| {
+        world
+            .get::<mud_world::StatOverflow>(wearer)
+            .and_then(|o| o.0.get(key).copied())
+            .unwrap_or(0)
+    };
+    if let Some(h) = world.get::<mud_world::Health>(wearer) {
+        let gearless = h
+            .max
+            .saturating_add(ledger("max_hp"))
+            .saturating_sub(off.max_hp)
+            .max(1);
+        off.max_hp = h.max.saturating_sub(gearless);
+    }
+    if let Some(s) = world.get::<mud_world::Stamina>(wearer) {
+        let gearless = s
+            .max
+            .saturating_add(ledger("max_stamina"))
+            .saturating_sub(off.max_stamina)
+            .max(0);
+        off.max_stamina = s.max.saturating_sub(gearless);
     }
     off
 }

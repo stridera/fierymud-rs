@@ -21306,6 +21306,33 @@ fn clamped_add(
     new
 }
 
+/// Forget the `StatOverflow` ledger entry for `key` (`max_hp`, `max_stamina`,
+/// `armor_flat`, `hardness`, `ward_pct`, `armor_pct`). Call when a clamped
+/// stat is written outright (admin setters): the old entry described a
+/// running total that no longer exists, and leaving it would hand its
+/// remainder back to the next modifier as a phantom gain or loss.
+pub(crate) fn clear_stat_overflow(world: &mut World, target: Entity, key: &str) {
+    if let Some(mut o) = world.get_mut::<mud_world::StatOverflow>(target) {
+        o.0.remove(key);
+    }
+}
+
+/// Non-zero `StatOverflow` ledger entries on `target`, sorted by stat name,
+/// so stuck clamp debt is visible to staff inspection.
+pub(crate) fn stat_overflow_entries(world: &World, target: Entity) -> Vec<(&'static str, i32)> {
+    let mut v: Vec<(&'static str, i32)> = world
+        .get::<mud_world::StatOverflow>(target)
+        .map(|o| {
+            o.0.iter()
+                .filter(|(_, n)| **n != 0)
+                .map(|(k, n)| (*k, *n))
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort_unstable();
+    v
+}
+
 /// [`apply_modify_delta`], returning the amount to record for the later
 /// [`reverse_modify_delta`] (`None` for an unsupported stat). That is always
 /// the NOMINAL `amount`: a clamp that cuts the change short is tracked in the

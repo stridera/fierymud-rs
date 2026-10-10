@@ -1836,7 +1836,11 @@ pub(crate) fn cmd_set(world: &mut World, player: Entity, args: &str) {
                 h.max = value_i32.max(1);
                 h.hp = h.hp.min(h.max);
             })
-            .is_some(),
+            .is_some_and(|()| {
+                // Written outright: the clamp ledger no longer applies.
+                crate::commands::clear_stat_overflow(world, target, "max_hp");
+                true
+            }),
         "stamina" | "stam" => world
             .get_mut::<Stamina>(target)
             .map(|mut s| s.current = value_i32.max(0).min(s.max))
@@ -1847,7 +1851,10 @@ pub(crate) fn cmd_set(world: &mut World, player: Entity, args: &str) {
                 s.max = value_i32.max(1);
                 s.current = s.current.min(s.max);
             })
-            .is_some(),
+            .is_some_and(|()| {
+                crate::commands::clear_stat_overflow(world, target, "max_stamina");
+                true
+            }),
         "gold" | "copper" | "wealth" => {
             if let Some(mut w) = world.get_mut::<Wealth>(target) {
                 w.0 = value_i64.max(0);
@@ -2818,6 +2825,11 @@ pub(crate) fn cmd_stat(world: &mut World, player: Entity, args: &str) {
     }
     if let Some(s) = world.get::<Stamina>(target) {
         out.push_str(&format!("stamina:       {}/{}\r\n", s.current, s.max));
+    }
+    let overflow = crate::commands::stat_overflow_entries(world, target);
+    if !overflow.is_empty() {
+        let parts: Vec<String> = overflow.iter().map(|(k, n)| format!("{k} {n:+}")).collect();
+        out.push_str(&format!("stat_overflow: {}\r\n", parts.join(", ")));
     }
     if let Some(p) = world.get::<Posture>(target) {
         out.push_str(&format!("posture:       {}\r\n", p.0.label()));

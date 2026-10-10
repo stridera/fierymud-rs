@@ -1044,7 +1044,7 @@ fn service(world: &mut World, req: AdminRequest) -> AdminResponse {
 /// names yield a 400 so a typo never silently no-ops. Saturating
 /// casts on the i64 → narrower-int conversions to avoid wrap.
 #[allow(clippy::too_many_lines)]
-fn set_player_field(
+pub(crate) fn set_player_field(
     world: &mut World,
     player_name: &str,
     field: &str,
@@ -1066,6 +1066,7 @@ fn set_player_field(
             if let Some(mut h) = world.get_mut::<Health>(entity) {
                 h.max = v32.max(1);
                 h.hp = h.hp.min(h.max);
+                crate::commands::clear_stat_overflow(world, entity, "max_hp");
             } else {
                 applied = false;
             }
@@ -1081,6 +1082,7 @@ fn set_player_field(
             if let Some(mut s) = world.get_mut::<Stamina>(entity) {
                 s.max = v32.max(1);
                 s.current = s.current.min(s.max);
+                crate::commands::clear_stat_overflow(world, entity, "max_stamina");
             } else {
                 applied = false;
             }
@@ -1175,6 +1177,7 @@ fn set_player_field(
         "armor_pct" => {
             if let Some(mut cs) = world.get_mut::<CombatStats>(entity) {
                 cs.armor_pct = v32.clamp(0, 100);
+                crate::commands::clear_stat_overflow(world, entity, "armor_pct");
             } else {
                 applied = false;
             }
@@ -1182,6 +1185,7 @@ fn set_player_field(
         "armor_flat" => {
             if let Some(mut cs) = world.get_mut::<CombatStats>(entity) {
                 cs.armor_flat = v32.max(0);
+                crate::commands::clear_stat_overflow(world, entity, "armor_flat");
             } else {
                 applied = false;
             }
@@ -1189,6 +1193,7 @@ fn set_player_field(
         "ward_pct" => {
             if let Some(mut cs) = world.get_mut::<CombatStats>(entity) {
                 cs.ward_pct = v32.clamp(0, 100);
+                crate::commands::clear_stat_overflow(world, entity, "ward_pct");
             } else {
                 applied = false;
             }
@@ -1196,6 +1201,7 @@ fn set_player_field(
         "hardness" => {
             if let Some(mut cs) = world.get_mut::<CombatStats>(entity) {
                 cs.hardness = v32.max(0);
+                crate::commands::clear_stat_overflow(world, entity, "hardness");
             } else {
                 applied = false;
             }
@@ -1680,7 +1686,7 @@ fn look_room(world: &mut World, zone_id: i32, id: i32) -> AdminResponse {
     }))
 }
 
-fn inspect_actor(world: &mut World, name: &str) -> AdminResponse {
+pub(crate) fn inspect_actor(world: &mut World, name: &str) -> AdminResponse {
     let entity = find_actor_by_name(world, name)?;
     let actor_name = name_of(world, entity);
     let world_key = world
@@ -1699,6 +1705,13 @@ fn inspect_actor(world: &mut World, name: &str) -> AdminResponse {
     let posture = world
         .get::<Posture>(entity)
         .map(|p| p.0.label().to_string());
+    // Clamp-ledger debt per stat (non-zero entries only), so a stat stuck
+    // short of its bound is visible.
+    let stat_overflow: serde_json::Map<String, Value> =
+        crate::commands::stat_overflow_entries(world, entity)
+            .into_iter()
+            .map(|(k, n)| (k.to_string(), json!(n)))
+            .collect();
     let kind = if world.get::<Player>(entity).is_some() {
         "player"
     } else if world.get::<Mob>(entity).is_some() {
@@ -1733,6 +1746,7 @@ fn inspect_actor(world: &mut World, name: &str) -> AdminResponse {
         "hunger": hunger,
         "thirst": thirst,
         "posture": posture,
+        "stat_overflow": stat_overflow,
         "effects": effects,
     }))
 }
