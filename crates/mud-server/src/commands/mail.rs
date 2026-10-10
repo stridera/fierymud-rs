@@ -313,16 +313,22 @@ pub(crate) async fn cmd_mailbox(world: &mut World, player: Entity, pool: &mud_db
         return;
     };
     let user_id = account.user_id;
-    let rows = match mud_db::mail::inbox_for(pool, &user_id).await {
+    let pool = pool.clone();
+    reply_from_task(
+        world,
+        player,
+        async move { mailbox_text(&pool, &user_id).await },
+    )
+    .await;
+}
+
+async fn mailbox_text(pool: &mud_db::sqlx::PgPool, user_id: &str) -> String {
+    let rows = match mud_db::mail::inbox_for(pool, user_id).await {
         Ok(r) => r,
-        Err(e) => {
-            send_to(world, player, format!("Mail fetch failed: {e}\r\n"));
-            return;
-        }
+        Err(e) => return format!("Mail fetch failed: {e}\r\n"),
     };
     if rows.is_empty() {
-        send_to(world, player, "\r\nYour mailbox is empty.\r\n");
-        return;
+        return "\r\nYour mailbox is empty.\r\n".to_string();
     }
     let mut out = format!("\r\nMailbox ({} message(s)):\r\n", rows.len());
     for (i, row) in rows.iter().enumerate() {
@@ -336,7 +342,7 @@ pub(crate) async fn cmd_mailbox(world: &mut World, player: Entity, pool: &mud_db
         ));
     }
     out.push_str("\r\n* = unread.   Use 'readmail <#>' to read, 'delmail <#>' to delete.\r\n");
-    send_to(world, player, out);
+    out
 }
 
 /// `readmail <#>`: print the body of the slot-numbered mail (1-based,

@@ -771,12 +771,13 @@ async fn main() {
                     // so the kick notice lands ahead of the prompt
                     // refresh and the disconnect path runs cleanly
                     // through the canonical on_disconnect save flow.
-                    idle::drain_idle_kicks(&mut world, &mut router, &pool).await;
+                    idle::drain_idle_kicks(&mut world, &mut router, &pool);
                     tick_stats::lap(&mut world, "idle_kicks");
                     // Completed camps log out; linkdead characters whose
                     // fight is over are saved and removed.
-                    router.drain_quitting(&mut world, &pool).await;
-                    router.drain_linkdead(&mut world, &pool).await;
+                    router.drain_quitting(&mut world, &pool);
+                    login::ConnRouter::drain_linkdead(&mut world, &pool);
+                    login::ConnRouter::drain_retiring(&mut world, &pool);
                     tick_stats::lap(&mut world, "logouts");
                 }
                 // Drain real-time syslog WARN+ events to subscribers
@@ -841,7 +842,7 @@ async fn main() {
                     }
                     InboundKind::Disconnected => {
                         info!(conn_id = msg.conn, "client disconnected");
-                        router.on_disconnect(&mut world, msg.conn, &pool).await;
+                        router.on_disconnect(&mut world, msg.conn, &pool);
                     }
                 }
                 note_slow_turn(&mut world, turn_name, turn_start);

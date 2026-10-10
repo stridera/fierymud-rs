@@ -328,6 +328,70 @@ impl SaveCoordinator {
         }
     }
 
+    /// Take this character's write turn only if it is free right now.
+    /// `None` means a background write, a queued ordered write or a retry
+    /// attempt holds (or is waiting for) the turn. The world thread uses
+    /// this where it must not wait: it can then snapshot with the turn in
+    /// hand exactly as a foreground save would, or put the work off a tick.
+    pub(crate) fn try_begin_ordered(&self, character_id: &str) -> Option<OrderedSave> {
+        let slot = self.slot(character_id);
+        let last_committed = Arc::clone(&slot.order).try_lock_owned().ok()?;
+        Some(OrderedSave {
+            slot,
+            last_committed,
+        })
+    }
+
+    /// Write a session-ending snapshot from a spawned task. The caller took
+    /// the turn ([`Self::try_begin_ordered`]) and the snapshot with it, on
+    /// the world thread, so nothing can slip between the two; this only
+    /// moves the database write off the tick. The task counts as an
+    /// unfinished write synchronously, before this returns, so the relog
+    /// barrier and shutdown flush see it at once. A commit is folded into
+    /// the world by the next [`Self::apply_completions`] (the entity is
+    /// usually gone by then). A failed write registers the quit-save retry
+    /// ([`Self::retry_failed_snapshot`]) before the turn is released, so no
+    /// gap exists in which the character looks settled. Must be called
+    /// inside a tokio runtime.
+    pub(crate) fn spawn_final_save<W, Fut>(
+        &self,
+        mut ordered: OrderedSave,
+        snapshot: PlayerSaveSnapshot,
+        writer: W,
+    ) where
+        W: Fn(Arc<PlayerSaveSnapshot>) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<HashMap<usize, i32>, String>> + Send + 'static,
+    {
+        let slot = Arc::clone(&ordered.slot);
+        let shared = Arc::clone(&self.0);
+        shared.pending.fetch_add(1, Ordering::SeqCst);
+        slot.outstanding.fetch_add(1, Ordering::SeqCst);
+        let guard = PendingGuard(Arc::clone(&shared), Arc::clone(&slot));
+        let snap = Arc::new(snapshot);
+        let coordinator = self.clone();
+        tokio::spawn(async move {
+            let _guard = guard;
+            match writer(Arc::clone(&snap)).await {
+                Ok(assigned) => {
+                    ordered.record_commit(snap.generation);
+                    shared.done.lock().expect("done lock").push(Completion {
+                        snapshot: Arc::clone(&snap),
+                        slot: Arc::clone(&slot),
+                        outcome: Outcome::Committed(assigned),
+                        owns_in_flight: false,
+                    });
+                }
+                Err(e) => {
+                    error!(character_id = %snap.character_id, error = %e,
+                        "final save FAILED; handing the snapshot to the background writer \
+                         for retry");
+                    coordinator.retry_snapshot(Arc::clone(&snap), writer, QUIT_RETRY_BACKOFF);
+                }
+            }
+            drop(ordered);
+        });
+    }
+
     /// Queue a character's write turn NOW and run `work` once it is granted.
     ///
     /// Unlike spawning a task that calls [`Self::begin_ordered`] itself, the
@@ -502,12 +566,23 @@ impl SaveCoordinator {
         W: Fn(Arc<PlayerSaveSnapshot>) -> Fut + Send + 'static,
         Fut: Future<Output = Result<HashMap<usize, i32>, String>> + Send + 'static,
     {
-        let slot = self.slot(&snapshot.character_id);
+        self.retry_snapshot(Arc::new(snapshot), writer, schedule);
+    }
+
+    fn retry_snapshot<W, Fut>(
+        &self,
+        snap: Arc<PlayerSaveSnapshot>,
+        writer: W,
+        schedule: &'static [Duration],
+    ) where
+        W: Fn(Arc<PlayerSaveSnapshot>) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<HashMap<usize, i32>, String>> + Send + 'static,
+    {
+        let slot = self.slot(&snap.character_id);
         let shared = Arc::clone(&self.0);
         shared.pending.fetch_add(1, Ordering::SeqCst);
         slot.outstanding.fetch_add(1, Ordering::SeqCst);
         let guard = PendingGuard(Arc::clone(&shared), Arc::clone(&slot));
-        let snap = Arc::new(snapshot);
         tokio::spawn(async move {
             let _guard = guard;
             let mut attempt = 0usize;

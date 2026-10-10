@@ -1354,10 +1354,42 @@ fn despawn_persistent_pets(world: &mut World, owner: Entity) {
     }
 }
 
-/// Take a character out of the world: tell the room, run the ordered save,
+/// Marks a player whose session has ended but who could not be retired yet
+/// because their save turn was busy (see [`retire_player`]). The entity stays
+/// until [`ConnRouter::drain_retiring`] gets the turn; it has no connection.
+#[derive(Component)]
+pub(crate) struct Retiring;
+
+/// Take a character out of the world: tell the room, snapshot the save,
 /// then despawn it and everything it carries. The one exit shared by quit,
 /// camp, a dropped link out of combat, idle kicks, and linkdead timeouts.
-async fn retire_player(world: &mut World, entity: Entity, pool: &PgPool) {
+///
+/// Never waits on the database. The character's write turn is taken only if
+/// it is free right now ([`SaveCoordinator::try_begin_ordered`]); the
+/// snapshot is then taken here, on the world thread, with the turn held (so
+/// it sees every earlier write's item-id stamps and queued inbox updates,
+/// exactly as a foreground save would), and only the write itself runs in a
+/// spawned task ([`SaveCoordinator::spawn_final_save`]). The task counts as
+/// an unfinished write before this returns, so a relog waits on the barrier.
+///
+/// Returns `false`, having changed nothing, when the turn is busy (a
+/// background autosave, a chest or house write, a retry attempt is ahead):
+/// the caller leaves the entity in place and tries again next tick.
+#[must_use]
+fn retire_player(world: &mut World, entity: Entity, pool: &PgPool) -> bool {
+    let coordinator = world
+        .get_resource::<SaveCoordinator>()
+        .cloned()
+        .unwrap_or_default();
+    // An entity with no `Account` can't be saved; it is still removed.
+    let character_id = world.get::<Account>(entity).map(|a| a.character_id.clone());
+    let ordered = match &character_id {
+        Some(cid) => match coordinator.try_begin_ordered(cid) {
+            Some(ordered) => Some(ordered),
+            None => return false,
+        },
+        None => None,
+    };
     // Broadcast a Room.RemovePlayer diff so other clients in
     // the room update their "who's here" panel. Done before
     // save/despawn so the entity's Located is still valid.
@@ -1388,12 +1420,31 @@ async fn retire_player(world: &mut World, entity: Entity, pool: &PgPool) {
     // Gear on the owner's pets rides in the owner's pack: a pet is saved
     // without its items, so this must precede the save snapshot.
     hand_pet_gear_to_owner(world, entity);
-    // Disconnect path — player is gone before we could
-    // report a partial save. A failed write is handed to the
-    // background writer for retry before the entity (and its
-    // items) are despawned, so the state isn't lost with it.
-    let outcome = save_player_final(world, entity, pool).await;
-    retry_failed_save(world, outcome, pool);
+    // Disconnect path: the player is gone before any partial-save report
+    // could reach them. A failed write is retried by the coordinator from
+    // the snapshot it owns, so the state isn't lost with the entity.
+    if let Some(ordered) = ordered {
+        // Same prelude as `save_player_inner`, for the same reasons: fold in
+        // the write that just released the turn, then the DB-first updates
+        // (quest gold, a failed house placement's item) not yet applied.
+        coordinator.apply_completions(world);
+        if world.contains_resource::<commands::PlayerUpdateInbox>() {
+            commands::drain_player_updates(world);
+        }
+        let generation = ordered.next_generation();
+        if let Some(mut snap) = snapshot_player(world, entity, generation) {
+            snap.last_logout = Some(chrono::Utc::now().naive_utc());
+            let pool = pool.clone();
+            coordinator.spawn_final_save(ordered, snap, move |snap| {
+                let pool = pool.clone();
+                async move {
+                    write_snapshot(&pool, &snap)
+                        .await
+                        .map_err(|e| e.to_string())
+                }
+            });
+        }
+    }
     // Legacy `extract_char` -> `ungroup`: a leaving leader hands the group to
     // the next member, a leaving member just drops out. Quit, camp, idle
     // kicks and linkdead timeouts all land here.
@@ -1426,6 +1477,7 @@ async fn retire_player(world: &mut World, entity: Entity, pool: &PgPool) {
         world.despawn(item);
     }
     world.despawn(entity);
+    true
 }
 
 impl ConnRouter {
@@ -1525,7 +1577,10 @@ impl ConnRouter {
     /// connected ones plus linkdead characters still fighting in the world.
     fn online_entities(&self, world: &mut World) -> Vec<Entity> {
         let mut entities: Vec<Entity> = self.playing.values().copied().collect();
-        let mut q = world.query_filtered::<Entity, With<commands::Linkdead>>();
+        // A character waiting to be retired is still in the world and its
+        // latest state is not saved yet.
+        let mut q =
+            world.query_filtered::<Entity, Or<(With<commands::Linkdead>, With<Retiring>)>>();
         entities.extend(q.iter(world));
         entities
     }
@@ -1576,6 +1631,7 @@ impl ConnRouter {
         let online: HashMap<String, Entity> = self
             .online_entities(world)
             .into_iter()
+            .filter(|&e| world.get::<Retiring>(e).is_none())
             .filter_map(|e| world.get::<Account>(e).map(|a| (a.character_id.clone(), e)))
             .collect();
         let ids: Vec<String> = online.keys().cloned().collect();
@@ -1586,15 +1642,21 @@ impl ConnRouter {
         }
     }
 
-    pub async fn on_disconnect(&mut self, world: &mut World, conn_id: ConnId, pool: &PgPool) {
+    /// Never awaits the database: the save is snapshotted here and written by
+    /// a spawned task (see [`retire_player`]).
+    pub fn on_disconnect(&mut self, world: &mut World, conn_id: ConnId, pool: &PgPool) {
         // A device code whose connection vanished must not stay approvable.
         if let Some(LoginCtx {
             stage: Stage::AwaitingWebApproval(web),
             ..
         }) = self.login.remove(&conn_id)
-            && let Err(e) = mud_db::game_login_code::expire_pending(pool, &web.code_id).await
         {
-            warn!(conn_id, error = %e, "login code expire on disconnect failed");
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                if let Err(e) = mud_db::game_login_code::expire_pending(&pool, &web.code_id).await {
+                    warn!(conn_id, error = %e, "login code expire on disconnect failed");
+                }
+            });
         }
         self.caps.remove(&conn_id);
         if let Some(entity) = self.playing.remove(&conn_id) {
@@ -1610,21 +1672,39 @@ impl ConnRouter {
             // the IAC bytes, so this costs nothing on the
             // unsupported path.
             commands::send_core_goodbye(world, entity, "See you next time!");
-            retire_player(world, entity, pool).await;
+            if !retire_player(world, entity, pool) {
+                // The save turn is busy; `drain_retiring` finishes the job
+                // on a later tick instead of this one waiting for it.
+                world.entity_mut(entity).insert(Retiring);
+            }
+        }
+    }
+
+    /// Retire every character left by a busy save turn
+    /// ([`Retiring`]). Each tick, never awaits: one still busy is simply
+    /// tried again next tick.
+    pub fn drain_retiring(world: &mut World, pool: &PgPool) {
+        let pending: Vec<Entity> = {
+            let mut q = world.query_filtered::<Entity, With<Retiring>>();
+            q.iter(world).collect()
+        };
+        for entity in pending {
+            let _ = retire_player(world, entity, pool);
         }
     }
 
     /// Log out every player flagged [`commands::Quitting`] outside a typed
     /// command: a completed `camp` is the only such source today (`quit` and
     /// `rent` are drained by [`Self::on_line`] right after the command).
-    pub async fn drain_quitting(&mut self, world: &mut World, pool: &PgPool) {
+    pub fn drain_quitting(&mut self, world: &mut World, pool: &PgPool) {
         let pending: Vec<Entity> = {
-            let mut q = world.query_filtered::<Entity, With<commands::Quitting>>();
+            let mut q =
+                world.query_filtered::<Entity, (With<commands::Quitting>, Without<Retiring>)>();
             q.iter(world).collect()
         };
         for entity in pending {
             if let Some(conn_id) = self.find_conn(entity) {
-                self.on_disconnect(world, conn_id, pool).await;
+                self.on_disconnect(world, conn_id, pool);
                 (self.close_conn)(conn_id);
             } else if let Ok(mut e) = world.get_entity_mut(entity) {
                 // No connection to close (it already dropped): the marker
@@ -1639,7 +1719,7 @@ impl ConnRouter {
     /// keyboard), or out of combat for [`LINKDEAD_TIMEOUT_TICKS`]. While a
     /// fight lasts the timer is held at zero. Called every tick from the
     /// main loop; costs one query over linkdead characters only.
-    pub async fn drain_linkdead(&mut self, world: &mut World, pool: &PgPool) {
+    pub fn drain_linkdead(world: &mut World, pool: &PgPool) {
         let now = world.get_resource::<crate::TickCount>().map_or(0, |t| t.0);
         let linkdead: Vec<(Entity, u64)> = {
             let mut q = world.query::<(Entity, &commands::Linkdead)>();
@@ -1657,8 +1737,11 @@ impl ConnRouter {
                     continue;
                 }
             }
-            info!(entity = ?entity, "linkdead character removed from the world");
-            retire_player(world, entity, pool).await;
+            // A busy save turn leaves the character linkdead; the next
+            // tick tries again.
+            if retire_player(world, entity, pool) {
+                info!(entity = ?entity, "linkdead character removed from the world");
+            }
         }
     }
 
@@ -2036,7 +2119,7 @@ impl ConnRouter {
             commands::dispatch_with_async(world, entity, pool, &text).await;
             // `quit` flags the player; save, despawn and close the socket.
             if world.get::<commands::Quitting>(entity).is_some() {
-                self.on_disconnect(world, conn_id, pool).await;
+                self.on_disconnect(world, conn_id, pool);
                 (self.close_conn)(conn_id);
             }
             // dispatch marks the player for prompt at its start; flush
@@ -2062,7 +2145,7 @@ impl ConnRouter {
                 continue;
             }
             if world.get::<commands::Quitting>(entity).is_some() {
-                self.on_disconnect(world, conn_id, pool).await;
+                self.on_disconnect(world, conn_id, pool);
                 (self.close_conn)(conn_id);
             }
         }
@@ -3917,6 +4000,11 @@ impl ConnRouter {
         // Lines queued by the previous connection are not the new one's.
         commands::input_queue::clear(world, entity);
         let was_linkdead = world.get::<commands::Linkdead>(entity).is_some();
+        // A character still waiting for its save turn to retire is taken back
+        // into play: the quit / camp / kick that parked it is cancelled.
+        world
+            .entity_mut(entity)
+            .remove::<(Retiring, commands::Quitting, commands::Camped)>();
         let _ = outbound.try_send(if was_linkdead {
             b"Reconnecting.\r\n".to_vec()
         } else {
@@ -7809,7 +7897,7 @@ mod tests {
             .unwrap();
         assert_eq!(rx2.try_recv().unwrap(), b"hi");
         // The old socket's late disconnect must not save/despawn the entity.
-        router.on_disconnect(&mut world, 1, &pool).await;
+        router.on_disconnect(&mut world, 1, &pool);
         assert!(world.get_entity(entity).is_ok());
         // A different character is not a takeover.
         let (tx3, _rx3) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
@@ -7974,7 +8062,7 @@ mod tests {
         assert!(world.get_entity(watcher).is_ok());
         assert_eq!(router.playing.get(&2), Some(&watcher));
         // The late Disconnected event from the closed socket is a no-op.
-        router.on_disconnect(&mut world, 1, &pool).await;
+        router.on_disconnect(&mut world, 1, &pool);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -8097,7 +8185,7 @@ mod tests {
         let (fighter, foe, _rx) = fighter_in(&mut router, &mut world, room, 1);
         let (_watcher, mut rx_watcher) = playing_in(&mut router, &mut world, room, 2, "Watcher");
 
-        router.on_disconnect(&mut world, 1, &pool).await;
+        router.on_disconnect(&mut world, 1, &pool);
 
         // Still in the world, still fighting, no socket, not saved/despawned.
         assert!(world.get_entity(fighter).is_ok());
@@ -8136,7 +8224,7 @@ mod tests {
             perms: vec![],
         });
         commands::input_queue::seed_for_test(&mut world, fighter, &["cast 'fireball' orc"]);
-        router.on_disconnect(&mut world, 1, &pool).await;
+        router.on_disconnect(&mut world, 1, &pool);
         assert!(world.get::<commands::Linkdead>(fighter).is_some());
         assert_eq!(commands::input_queue::queued_len(&world, fighter), 0);
 
@@ -8162,7 +8250,7 @@ mod tests {
         world.entity_mut(victim).remove::<mud_world::Fighting>();
         world.entity_mut(foe).insert(mud_world::Fighting(victim));
 
-        router.on_disconnect(&mut world, 1, &pool).await;
+        router.on_disconnect(&mut world, 1, &pool);
 
         assert!(world.get::<commands::Linkdead>(victim).is_some());
         assert_eq!(world.resource::<SaveCoordinator>().pending(), 0);
@@ -8181,7 +8269,7 @@ mod tests {
         let attacker_b = world
             .spawn((mud_world::Mob, Located(room), Health { hp: 50, max: 50 }))
             .id();
-        router.on_disconnect(&mut world, 1, &pool).await;
+        router.on_disconnect(&mut world, 1, &pool);
         // Target A dies (player's own Fighting cleared, no retarget); B keeps
         // swinging at the player.
         world.despawn(target_a);
@@ -8191,7 +8279,7 @@ mod tests {
             .insert(mud_world::Fighting(player));
 
         world.insert_resource(crate::TickCount(LINKDEAD_TIMEOUT_TICKS + 5));
-        router.drain_linkdead(&mut world, &pool).await;
+        ConnRouter::drain_linkdead(&mut world, &pool);
         assert!(world.get_entity(player).is_ok(), "held while B swings");
         assert_eq!(
             world.get::<commands::Linkdead>(player).unwrap().since_tick,
@@ -8201,7 +8289,7 @@ mod tests {
         // B stops: after the timeout from the last round, the player goes.
         world.entity_mut(attacker_b).remove::<mud_world::Fighting>();
         world.insert_resource(crate::TickCount(2 * LINKDEAD_TIMEOUT_TICKS + 5));
-        router.drain_linkdead(&mut world, &pool).await;
+        ConnRouter::drain_linkdead(&mut world, &pool);
         assert!(world.get_entity(player).is_err());
     }
 
@@ -8215,7 +8303,7 @@ mod tests {
         let room = world.spawn(mud_world::Room).id();
         let (idler, _rx) = playing_in(&mut router, &mut world, room, 1, "Idler");
 
-        router.on_disconnect(&mut world, 1, &pool).await;
+        router.on_disconnect(&mut world, 1, &pool);
 
         assert!(world.get_entity(idler).is_err());
         assert_eq!(world.resource::<SaveCoordinator>().pending(), 1);
@@ -8231,7 +8319,7 @@ mod tests {
         let mut router = ConnRouter::new();
         let room = enter_game_room(&mut world);
         let (fighter, foe, _rx) = fighter_in(&mut router, &mut world, room, 1);
-        router.on_disconnect(&mut world, 1, &pool).await;
+        router.on_disconnect(&mut world, 1, &pool);
         assert!(world.get::<commands::Linkdead>(fighter).is_some());
 
         // The player comes back on connection 2. The pool is unreachable, so
@@ -8465,15 +8553,20 @@ mod tests {
         let (fighting, _foe, _rx1) = fighter_in(&mut router, &mut world, room, 1);
         let (dead, _foe2, _rx2) = fighter_in(&mut router, &mut world, room, 2);
         let (resting, _foe3, _rx3) = fighter_in(&mut router, &mut world, room, 3);
+        // Separate characters: retirements of one character queue on its
+        // single save turn (see `retire_player`), which is not under test.
+        for (e, cid) in [(fighting, "c-1"), (dead, "c-2"), (resting, "c-3")] {
+            world.get_mut::<Account>(e).unwrap().character_id = cid.to_string();
+        }
         for c in [1, 2, 3] {
-            router.on_disconnect(&mut world, c, &pool).await;
+            router.on_disconnect(&mut world, c, &pool);
         }
         world.entity_mut(dead).insert(Ghost);
         world.entity_mut(resting).remove::<mud_world::Fighting>();
 
         // Just under the timeout: the ghost goes, the other two stay.
         world.insert_resource(crate::TickCount(LINKDEAD_TIMEOUT_TICKS - 1));
-        router.drain_linkdead(&mut world, &pool).await;
+        ConnRouter::drain_linkdead(&mut world, &pool);
         assert!(world.get_entity(dead).is_err());
         assert!(world.get_entity(fighting).is_ok());
         assert!(world.get_entity(resting).is_ok());
@@ -8482,7 +8575,7 @@ mod tests {
         // At the timeout the idle one is saved and removed; the one still in
         // a fight has its clock held back and stays.
         world.insert_resource(crate::TickCount(LINKDEAD_TIMEOUT_TICKS));
-        router.drain_linkdead(&mut world, &pool).await;
+        ConnRouter::drain_linkdead(&mut world, &pool);
         assert!(world.get_entity(resting).is_err());
         assert!(world.get_entity(fighting).is_ok());
         assert_eq!(world.resource::<SaveCoordinator>().pending(), 2);
@@ -8616,7 +8709,7 @@ mod tests {
         // Countdown not over: still here.
         world.insert_resource(crate::TickCount(crate::camp::CAMP_DURATION_TICKS - 1));
         crate::camp::camp_tick(&mut world);
-        router.drain_quitting(&mut world, &pool).await;
+        router.drain_quitting(&mut world, &pool);
         assert!(world.get_entity(camper).is_ok());
 
         // Countdown over: the camp tick flags the player, the drain logs out.
@@ -8624,7 +8717,7 @@ mod tests {
         crate::camp::camp_tick(&mut world);
         let rest = *world.get::<mud_world::RestState>(camper).unwrap();
         assert_eq!(rest.source, mud_db::enums::RestSource::Camp);
-        router.drain_quitting(&mut world, &pool).await;
+        router.drain_quitting(&mut world, &pool);
 
         assert!(world.get_entity(camper).is_err());
         assert_eq!(world.resource::<SaveCoordinator>().pending(), 1);
@@ -10143,6 +10236,16 @@ mod tests {
         assert_eq!(offline_elapsed_secs(Some(naive_at(2_000)), 1_000), 0);
     }
 
+    /// Wait for the spawned session-ending writes (`retire_player` never
+    /// awaits its save) and fold their completions into the world.
+    async fn settle_saves(world: &mut World) {
+        let c = world.resource::<SaveCoordinator>().clone();
+        assert!(
+            c.flush(world, Duration::from_secs(10)).await,
+            "saves settle"
+        );
+    }
+
     async fn last_logout_of(pool: &PgPool, cid: &str) -> Option<chrono::NaiveDateTime> {
         mud_db::sqlx::query_scalar::<_, Option<chrono::NaiveDateTime>>(
             "SELECT last_logout FROM \"Characters\" WHERE id = $1",
@@ -10266,8 +10369,9 @@ mod tests {
         // Plain disconnect (not fighting): on_disconnect -> retire_player.
         let pa = spawn_player_for(&mut world, &a.id, room);
         router.playing.insert(1, pa);
-        router.on_disconnect(&mut world, 1, &pool).await;
+        router.on_disconnect(&mut world, 1, &pool);
         assert!(world.get_entity(pa).is_err());
+        settle_saves(&mut world).await;
         assert!(last_logout_of(&pool, &a.id).await.is_some(), "disconnect");
 
         // Linkdead character retired by the timeout.
@@ -10276,10 +10380,156 @@ mod tests {
             .entity_mut(pb)
             .insert(commands::Linkdead { since_tick: 0 });
         world.insert_resource(crate::TickCount(LINKDEAD_TIMEOUT_TICKS));
-        router.drain_linkdead(&mut world, &pool).await;
+        ConnRouter::drain_linkdead(&mut world, &pool);
         assert!(world.get_entity(pb).is_err());
+        settle_saves(&mut world).await;
         assert!(last_logout_of(&pool, &b.id).await.is_some(), "linkdead");
         temp_cleanup(&pool, &[], &[&a.id, &b.id], &[]).await;
+    }
+
+    /// The world loop never waits on Postgres to retire a player. The pool's
+    /// only connection is held, so any database round-trip would hang the
+    /// test: `drain_idle_kicks` and `drain_quitting` are plain functions, the
+    /// player is gone and the write is a pending task when they return, and
+    /// the state still lands once the database frees up.
+    #[tokio::test(flavor = "current_thread")]
+    async fn idle_kick_and_quit_retire_without_waiting_for_the_database() {
+        let Some((_shared, _db_lock)) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://strider@localhost/fierydev".into());
+        let pool = mud_db::connect_with(
+            &url,
+            mud_db::PoolSettings {
+                max_connections: 1,
+                acquire_timeout: Duration::from_secs(60),
+            },
+        )
+        .await
+        .unwrap();
+        let (_u1, a) = temp_unlinked_char(&pool, "ik1").await;
+        let (_u2, b) = temp_unlinked_char(&pool, "ik2").await;
+        let mut world = World::new();
+        world.insert_resource(mud_world::SocialRegistry::default());
+        world.insert_resource(SaveCoordinator::default());
+        world.insert_resource(crate::TickCount(0));
+        let mut router = ConnRouter::new();
+        router.close_conn = |_| true;
+        let room = world.spawn(mud_world::Room).id();
+        let kicked = spawn_player_for(&mut world, &a.id, room);
+        let quitter = spawn_player_for(&mut world, &b.id, room);
+        router.playing.insert(1, kicked);
+        router.playing.insert(2, quitter);
+        world
+            .entity_mut(kicked)
+            .insert(crate::idle::IdleKickPending);
+        world.entity_mut(quitter).insert(commands::Quitting);
+
+        // The slow database: nothing can run a query until this is dropped.
+        let held = pool.acquire().await.unwrap();
+        crate::idle::drain_idle_kicks(&mut world, &mut router, &pool);
+        router.drain_quitting(&mut world, &pool);
+
+        assert!(world.get_entity(kicked).is_err(), "idle-kicked player gone");
+        assert!(world.get_entity(quitter).is_err(), "quitter gone");
+        let c = world.resource::<SaveCoordinator>().clone();
+        assert_eq!(c.pending(), 2, "both writes are spawned tasks, not done");
+        assert!(c.has_unsettled_saves(&a.id) && c.has_unsettled_saves(&b.id));
+
+        drop(held);
+        settle_saves(&mut world).await;
+        assert!(last_logout_of(&pool, &a.id).await.is_some(), "idle kick");
+        assert!(last_logout_of(&pool, &b.id).await.is_some(), "quit");
+        temp_cleanup(&pool, &[], &[&a.id, &b.id], &[]).await;
+    }
+
+    /// A busy save turn (a background write ahead) must not make the world
+    /// wait: the player stays in the world, marked `Retiring`, and the next
+    /// `drain_retiring` after the turn frees retires and saves it. Nothing is
+    /// broadcast or spawned in the meantime.
+    #[tokio::test(flavor = "current_thread")]
+    async fn busy_save_turn_defers_the_retirement_instead_of_waiting() {
+        let mut world = World::new();
+        world.insert_resource(mud_world::SocialRegistry::default());
+        world.insert_resource(SaveCoordinator::default());
+        world.insert_resource(crate::TickCount(0));
+        let pool = failing_pool();
+        let mut router = ConnRouter::new();
+        let room = world.spawn(mud_world::Room).id();
+        let (player, _rx) = playing_in(&mut router, &mut world, room, 1, "Busy");
+        let (_watcher, mut watcher_rx) = playing_in(&mut router, &mut world, room, 2, "Watcher");
+        let c = world.resource::<SaveCoordinator>().clone();
+
+        let turn = c.try_begin_ordered("c-Busy").expect("turn is free");
+        router.on_disconnect(&mut world, 1, &pool);
+        assert!(world.get::<Retiring>(player).is_some());
+        assert_eq!(c.pending(), 0, "no write without the turn");
+        assert!(!drain(&mut watcher_rx).contains("fades from view"));
+        ConnRouter::drain_retiring(&mut world, &pool);
+        assert!(world.get_entity(player).is_ok(), "still busy: still here");
+
+        drop(turn);
+        ConnRouter::drain_retiring(&mut world, &pool);
+        assert!(world.get_entity(player).is_err());
+        assert_eq!(c.pending(), 1, "the save is a spawned task");
+        assert!(drain(&mut watcher_rx).contains("Busy fades from view"));
+    }
+
+    /// A relog that lands while the retirement is parked cancels it (and
+    /// the quit that caused it) instead of being kicked by the stale marker.
+    #[tokio::test(flavor = "current_thread")]
+    async fn takeover_cancels_a_parked_retirement() {
+        let mut world = World::new();
+        world.insert_resource(mud_world::SocialRegistry::default());
+        world.insert_resource(SaveCoordinator::default());
+        world.insert_resource(crate::TickCount(0));
+        let pool = failing_pool();
+        let mut router = ConnRouter::new();
+        let room = world.spawn(mud_world::Room).id();
+        let (player, _rx) = playing_in(&mut router, &mut world, room, 1, "Back");
+        let c = world.resource::<SaveCoordinator>().clone();
+        let _turn = c.try_begin_ordered("c-Back").expect("turn is free");
+        world.entity_mut(player).insert(commands::Quitting);
+        router.on_disconnect(&mut world, 1, &pool);
+        assert!(world.get::<Retiring>(player).is_some());
+
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+        router.on_connect(2, tx, None, &world);
+        assert!(router.try_takeover(&mut world, 2, "c-Back"));
+        assert!(world.get::<Retiring>(player).is_none());
+        assert!(world.get::<commands::Quitting>(player).is_none());
+        router.drain_quitting(&mut world, &pool);
+        ConnRouter::drain_retiring(&mut world, &pool);
+        assert!(world.get_entity(player).is_ok());
+        assert_eq!(router.find_conn(player), Some(2));
+    }
+
+    /// A final save that fails (unreachable database) is handed to the retry
+    /// writer without a gap: the character never looks settled in between,
+    /// so a relog keeps waiting rather than loading stale rows.
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_final_save_stays_unsettled_through_its_retry() {
+        let mut world = World::new();
+        world.insert_resource(mud_world::SocialRegistry::default());
+        world.insert_resource(SaveCoordinator::default());
+        world.insert_resource(crate::TickCount(0));
+        let pool = failing_pool();
+        let mut router = ConnRouter::new();
+        let room = world.spawn(mud_world::Room).id();
+        let (player, _rx) = playing_in(&mut router, &mut world, room, 1, "Flaky");
+        let c = world.resource::<SaveCoordinator>().clone();
+        router.on_disconnect(&mut world, 1, &pool);
+        assert!(world.get_entity(player).is_err());
+        assert!(c.has_unsettled_saves("c-Flaky"));
+        // The first attempt dies at the 200 ms acquire timeout; the retry
+        // backs off for a second after that.
+        for _ in 0..8 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert!(c.has_unsettled_saves("c-Flaky"), "settled early");
+        }
+        assert_eq!(c.pending(), 1);
     }
 
     fn failing_pool() -> PgPool {
@@ -10812,7 +11062,7 @@ mod tests {
         let pool = failing_pool();
         let mut router = ConnRouter::new();
         router.playing.insert(1, p);
-        router.on_disconnect(&mut world, 1, &pool).await;
+        router.on_disconnect(&mut world, 1, &pool);
         assert!(world.get_entity(p).is_err(), "player despawned");
         let coordinator = world.resource::<SaveCoordinator>().clone();
         assert_eq!(coordinator.pending(), 1, "retry task owns the snapshot");
@@ -10835,7 +11085,7 @@ mod tests {
         let mut router = ConnRouter::new();
 
         router.playing.insert(1, lead);
-        router.on_disconnect(&mut world, 1, &pool).await;
+        router.on_disconnect(&mut world, 1, &pool);
         assert!(world.get_entity(lead).is_err());
         let still: Vec<Entity> = [m1, m2]
             .into_iter()
@@ -10847,7 +11097,7 @@ mod tests {
 
         // The remaining member quits: the two-person group is gone.
         router.playing.insert(2, still[0]);
-        router.on_disconnect(&mut world, 2, &pool).await;
+        router.on_disconnect(&mut world, 2, &pool);
         assert_eq!(
             mud_world::group_members(&mut world, new_lead),
             vec![new_lead]
@@ -10900,7 +11150,7 @@ mod tests {
         let pool = failing_pool();
         let mut router = ConnRouter::new();
         router.playing.insert(1, me);
-        router.on_disconnect(&mut world, 1, &pool).await;
+        router.on_disconnect(&mut world, 1, &pool);
         assert!(world.get_entity(me).is_err());
         assert!(world.get_entity(mount).is_err(), "saved mount despawned");
         assert!(world.get_entity(wolf).is_err(), "saved pet despawned");
@@ -10948,7 +11198,7 @@ mod tests {
 
         let mut router = ConnRouter::new();
         router.playing.insert(1, me);
-        router.on_disconnect(&mut world, 1, &pool).await;
+        router.on_disconnect(&mut world, 1, &pool);
         let coordinator = world.resource::<SaveCoordinator>().clone();
         assert!(coordinator.flush(&mut world, Duration::from_secs(10)).await);
 
@@ -11336,7 +11586,7 @@ mod tests {
 
         let mut router = ConnRouter::new();
         router.playing.insert(1, me);
-        router.on_disconnect(&mut world, 1, &pool).await;
+        router.on_disconnect(&mut world, 1, &pool);
         let coordinator = world.resource::<SaveCoordinator>().clone();
         assert!(coordinator.flush(&mut world, Duration::from_secs(10)).await);
 

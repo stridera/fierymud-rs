@@ -141,6 +141,10 @@ pub enum PendingPlayerUpdate {
         mob: (i32, i32),
         open: crate::quest_dialogue::DialogueOpen,
     },
+    /// Text a command's database lookup produced off the world loop
+    /// ([`reply_from_task`]): shown to the player as if the command had
+    /// printed it.
+    Reply { character_id: String, text: String },
 }
 
 impl PendingPlayerUpdate {
@@ -163,7 +167,8 @@ impl PendingPlayerUpdate {
             | Self::GiverCandidates { character_id, .. }
             | Self::QuestAccepted { character_id, .. }
             | Self::HousePlaceFailed { character_id, .. }
-            | Self::DialogueReply { character_id, .. } => character_id,
+            | Self::DialogueReply { character_id, .. }
+            | Self::Reply { character_id, .. } => character_id,
         }
     }
 }
@@ -238,6 +243,40 @@ pub(crate) fn grant_item_to_offline(
 /// updates. Cloned by command handlers before `tokio::spawn`.
 #[derive(Resource, Clone)]
 pub struct PlayerUpdateTx(pub tokio::sync::mpsc::Sender<PendingPlayerUpdate>);
+
+/// Run a read-only database lookup for a command without holding the world
+/// loop: `lookup` is spawned and resolves to the text to show, which comes
+/// back through the player-update channel (drained next tick) like the other
+/// task results. Everything `lookup` needs from the world must be copied in
+/// by the caller first.
+///
+/// Falls back to awaiting `lookup` inline, then printing, when there is no
+/// channel or the entity has no character (unit-test worlds, a staff member
+/// switched into a mob), so a command never silently prints nothing.
+pub(crate) async fn reply_from_task<Fut>(world: &mut World, player: Entity, lookup: Fut)
+where
+    Fut: std::future::Future<Output = String> + Send + 'static,
+{
+    let target = world
+        .get::<Account>(player)
+        .map(|a| a.character_id.clone())
+        .zip(world.get_resource::<PlayerUpdateTx>().map(|t| t.0.clone()));
+    let Some((character_id, tx)) = target else {
+        let text = lookup.await;
+        send_to(world, player, text);
+        return;
+    };
+    tokio::spawn(async move {
+        let text = lookup.await;
+        if tx
+            .send(PendingPlayerUpdate::Reply { character_id, text })
+            .await
+            .is_err()
+        {
+            tracing::debug!("command reply dropped: world loop is gone");
+        }
+    });
+}
 
 /// Receiver side, drained once per tick by `drain_player_updates`.
 #[derive(Resource)]
@@ -413,6 +452,9 @@ pub fn drain_player_updates(world: &mut World) {
                         ),
                     );
                 }
+            }
+            PendingPlayerUpdate::Reply { text, .. } => {
+                send_to(world, entity, text);
             }
             PendingPlayerUpdate::DialogueReply {
                 mob_name,
@@ -25146,5 +25188,70 @@ mod mob_prototype_lookup_tests {
             carry_capacity(&w, e)
         };
         assert!((bare - 105.0).abs() < f64::EPSILON);
+    }
+}
+
+#[cfg(test)]
+mod reply_from_task_tests {
+    use super::test_support::{Rx, drain, player_in};
+    use super::*;
+    use std::time::Duration;
+
+    fn character(world: &mut World, cid: &str) -> (Entity, Rx) {
+        let room = world.spawn(mud_world::Room).id();
+        let (player, rx) = player_in(world, room);
+        world.entity_mut(player).insert(Account {
+            user_id: String::new(),
+            character_id: cid.to_string(),
+            role: UserRole::Player,
+            account_role: UserRole::Player,
+            perms: vec![],
+        });
+        (player, rx)
+    }
+
+    /// The command returns while its lookup is still blocked (the "slow
+    /// database"), prints nothing yet, and the text arrives through the
+    /// update channel once the lookup finishes.
+    #[tokio::test(flavor = "current_thread")]
+    async fn command_returns_before_a_slow_lookup_and_the_reply_lands_later() {
+        let mut world = World::new();
+        let (tx, rx_updates) = tokio::sync::mpsc::channel(8);
+        world.insert_resource(PlayerUpdateTx(tx));
+        world.insert_resource(PlayerUpdateInbox(std::sync::Mutex::new(rx_updates)));
+        let (player, mut rx) = character(&mut world, "reply-a");
+        let (release, gate) = tokio::sync::oneshot::channel::<()>();
+
+        reply_from_task(&mut world, player, async move {
+            let _ = gate.await;
+            "\r\nSlow answer.\r\n".to_string()
+        })
+        .await;
+        drain_player_updates(&mut world);
+        assert!(
+            !drain(&mut rx).contains("Slow answer"),
+            "not before the lookup"
+        );
+
+        release.send(()).unwrap();
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            drain_player_updates(&mut world);
+            let out = drain(&mut rx);
+            if out.contains("Slow answer.") {
+                return;
+            }
+        }
+        panic!("reply never reached the player");
+    }
+
+    /// No update channel (or no character): the text is still delivered,
+    /// inline.
+    #[tokio::test(flavor = "current_thread")]
+    async fn without_a_channel_the_reply_prints_inline() {
+        let mut world = World::new();
+        let (player, mut rx) = character(&mut world, "reply-b");
+        reply_from_task(&mut world, player, async { "Inline.\r\n".to_string() }).await;
+        assert!(drain(&mut rx).contains("Inline."));
     }
 }

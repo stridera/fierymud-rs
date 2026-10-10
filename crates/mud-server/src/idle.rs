@@ -112,7 +112,7 @@ pub fn sync_authenticated(world: &mut World, router: &crate::login::ConnRouter) 
 /// socket via `mud_net::close_connection` (queued notice is flushed
 /// before the FIN). Without the close the session would be detached
 /// but the TCP connection would linger until the client dropped it.
-pub async fn drain_idle_kicks(
+pub fn drain_idle_kicks(
     world: &mut World,
     router: &mut crate::login::ConnRouter,
     pool: &mud_db::sqlx::PgPool,
@@ -128,7 +128,7 @@ pub async fn drain_idle_kicks(
                 entity,
                 "\r\nYou have been idle for too long. Disconnecting.\r\n",
             );
-            router.on_disconnect(world, conn_id, pool).await;
+            router.on_disconnect(world, conn_id, pool);
             mud_net::close_connection(conn_id);
         } else if let Ok(mut e) = world.get_entity_mut(entity) {
             // Orphaned marker (e.g. the player despawned mid-tick

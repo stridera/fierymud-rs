@@ -675,24 +675,23 @@ pub(crate) async fn cmd_look_board(
         send_to(world, player, "That board's catalog entry is missing.\r\n");
         return;
     };
+    let pool = pool.clone();
+    reply_from_task(world, player, async move {
+        board_listing_text(&pool, board_id, &summary.title).await
+    })
+    .await;
+}
+
+async fn board_listing_text(pool: &mud_db::sqlx::PgPool, board_id: i32, title: &str) -> String {
     let messages = match mud_db::boards::messages_for_board(pool, board_id).await {
         Ok(m) => m,
-        Err(e) => {
-            send_to(world, player, format!("Message fetch failed: {e}\r\n"));
-            return;
-        }
+        Err(e) => return format!("Message fetch failed: {e}\r\n"),
     };
     if messages.is_empty() {
-        send_to(
-            world,
-            player,
-            format!("\r\n{} has no messages.\r\n", summary.title),
-        );
-        return;
+        return format!("\r\n{title} has no messages.\r\n");
     }
     let mut out = format!(
-        "\r\n{} ({} message{}):\r\n",
-        summary.title,
+        "\r\n{title} ({} message{}):\r\n",
         messages.len(),
         if messages.len() == 1 { "" } else { "s" },
     );
@@ -708,22 +707,23 @@ pub(crate) async fn cmd_look_board(
         ));
     }
     out.push_str("\r\nUse 'read <#>' to read a message, or 'post' to add one.\r\n");
-    send_to(world, player, out);
+    out
 }
 
 /// `boards`: list every available board with its alias and title.
 /// Lock state is shown — locked boards refuse posts.
 pub(crate) async fn cmd_boards(world: &mut World, player: Entity, pool: &mud_db::sqlx::PgPool) {
+    let pool = pool.clone();
+    reply_from_task(world, player, async move { boards_text(&pool).await }).await;
+}
+
+async fn boards_text(pool: &mud_db::sqlx::PgPool) -> String {
     let rows = match mud_db::boards::list_boards(pool).await {
         Ok(r) => r,
-        Err(e) => {
-            send_to(world, player, format!("Board fetch failed: {e}\r\n"));
-            return;
-        }
+        Err(e) => return format!("Board fetch failed: {e}\r\n"),
     };
     if rows.is_empty() {
-        send_to(world, player, "\r\nNo boards exist.\r\n");
-        return;
+        return "\r\nNo boards exist.\r\n".to_string();
     }
     let mut out = format!("\r\nBoards ({}):\r\n", rows.len());
     for b in &rows {
@@ -731,7 +731,7 @@ pub(crate) async fn cmd_boards(world: &mut World, player: Entity, pool: &mud_db:
         out.push_str(&format!("  {:<10} {} {}\r\n", b.alias, lock, b.title));
     }
     out.push_str("\r\nUse 'board <alias>' to list messages, 'board <alias> <#>' to read one.\r\n");
-    send_to(world, player, out);
+    out
 }
 
 /// `board <alias> [#]`: list messages on a board, or read a specific

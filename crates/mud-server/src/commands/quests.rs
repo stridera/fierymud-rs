@@ -234,20 +234,29 @@ pub(crate) async fn cmd_quests(world: &mut World, player: Entity, pool: &mud_db:
         send_to(world, player, "No account info; can't fetch quests.\r\n");
         return;
     };
-    let rows = match mud_db::quests::list_for_character(pool, &character_id).await {
+    let viewer_role = world
+        .get::<Account>(player)
+        .map_or(UserRole::Player, |a| a.role);
+    let pool = pool.clone();
+    reply_from_task(world, player, async move {
+        quests_text(&pool, &character_id, viewer_role).await
+    })
+    .await;
+}
+
+/// The `quests` listing: one query for the quests plus one per active
+/// quest for its objectives, so it runs off the world loop.
+async fn quests_text(
+    pool: &mud_db::sqlx::PgPool,
+    character_id: &str,
+    viewer_role: UserRole,
+) -> String {
+    let rows = match mud_db::quests::list_for_character(pool, character_id).await {
         Ok(r) => r,
-        Err(e) => {
-            send_to(world, player, format!("Quest fetch failed: {e}\r\n"));
-            return;
-        }
+        Err(e) => return format!("Quest fetch failed: {e}\r\n"),
     };
     if rows.is_empty() {
-        send_to(
-            world,
-            player,
-            "\r\nYou have no active or completed quests.\r\n",
-        );
-        return;
+        return "\r\nYou have no active or completed quests.\r\n".to_string();
     }
     let active: Vec<&mud_db::quests::CharacterQuestRow> =
         rows.iter().filter(|r| r.status == "IN_PROGRESS").collect();
@@ -274,9 +283,6 @@ pub(crate) async fn cmd_quests(world: &mut World, player: Entity, pool: &mud_db:
             // renders below the phase header when present.
             // Wave 4.7: `internal_note` renders next to its
             // objective for Builder+ viewers only.
-            let viewer_role = world
-                .get::<Account>(player)
-                .map_or(UserRole::Player, |a| a.role);
             let show_internal_notes = viewer_role.at_least(UserRole::Builder);
             match mud_db::quest_objectives::list_for_quest(pool, &q.id).await {
                 Ok(rows) => {
@@ -345,7 +351,7 @@ pub(crate) async fn cmd_quests(world: &mut World, player: Entity, pool: &mud_db:
             out.push_str("\r\n");
         }
     }
-    send_to(world, player, out);
+    out
 }
 
 /// `qload <zone> <id>`: admin command — assign a quest to the caller's
@@ -581,20 +587,22 @@ pub(crate) async fn cmd_innate(
         send_to(world, player, "You have no race assigned.\r\n");
         return;
     };
-    let rows = match mud_db::race_abilities::list_for_race(pool, &race).await {
+    let pool = pool.clone();
+    reply_from_task(
+        world,
+        player,
+        async move { innate_text(&pool, &race).await },
+    )
+    .await;
+}
+
+async fn innate_text(pool: &mud_db::sqlx::PgPool, race: &str) -> String {
+    let rows = match mud_db::race_abilities::list_for_race(pool, race).await {
         Ok(r) => r,
-        Err(e) => {
-            send_to(world, player, format!("Innate fetch failed: {e}\r\n"));
-            return;
-        }
+        Err(e) => return format!("Innate fetch failed: {e}\r\n"),
     };
     if rows.is_empty() {
-        send_to(
-            world,
-            player,
-            format!("\r\nThe {race} race has no innate abilities.\r\n"),
-        );
-        return;
+        return format!("\r\nThe {race} race has no innate abilities.\r\n");
     }
     let mut out = format!("\r\nInnate abilities for {race} ({}):\r\n", rows.len());
     for r in &rows {
@@ -606,7 +614,7 @@ pub(crate) async fn cmd_innate(
             cap = r.proficiency_cap,
         ));
     }
-    send_to(world, player, out);
+    out
 }
 
 /// `questinfo <zone> <id>`: read-only catalog view of one quest.
@@ -631,20 +639,28 @@ pub(crate) async fn cmd_questinfo(
         send_to(world, player, "Id must be an integer.\r\n");
         return;
     };
+    let viewer_role = world
+        .get::<Account>(player)
+        .map_or(UserRole::Player, |a| a.role);
+    let pool = pool.clone();
+    reply_from_task(world, player, async move {
+        questinfo_text(&pool, zone, id, viewer_role).await
+    })
+    .await;
+}
+
+async fn questinfo_text(
+    pool: &mud_db::sqlx::PgPool,
+    zone: i32,
+    id: i32,
+    viewer_role: UserRole,
+) -> String {
     let row = match mud_db::quests::get_quest(pool, zone, id).await {
         Ok(r) => r,
-        Err(e) => {
-            send_to(world, player, format!("Quest fetch failed: {e}\r\n"));
-            return;
-        }
+        Err(e) => return format!("Quest fetch failed: {e}\r\n"),
     };
     let Some(row) = row else {
-        send_to(
-            world,
-            player,
-            format!("No Quest defined at ({zone}, {id}).\r\n"),
-        );
-        return;
+        return format!("No Quest defined at ({zone}, {id}).\r\n");
     };
     let mut out = format!("\r\nQuest ({}, {}) — {}\r\n", row.zone_id, row.id, row.name);
     out.push_str(&format!(
@@ -685,9 +701,6 @@ pub(crate) async fn cmd_questinfo(
     // Wave 4.2-4.5: builder-visible trigger / gate info. Players
     // don't need to see exclusive groups or availability Lua, but
     // staff do for debugging and content review.
-    let viewer_role = world
-        .get::<Account>(player)
-        .map_or(UserRole::Player, |a| a.role);
     if viewer_role.at_least(UserRole::Builder) {
         out.push_str("\r\nBuilder info:\r\n");
         if let Some(t) = row.time_limit_minutes {
@@ -703,7 +716,7 @@ pub(crate) async fn cmd_questinfo(
             out.push_str(&format!("  Availability Lua: {a}\r\n"));
         }
     }
-    send_to(world, player, out);
+    out
 }
 
 /// `qgive <player> <zone> <quest-id>`: admin command — assign a
