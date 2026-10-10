@@ -4,8 +4,10 @@
 
 use bevy_ecs::prelude::*;
 
-use crate::components::{AppliedTo, EffectInstance, EffectSource};
-use crate::resources::{EffectCatalog, MobDefaultEffectCatalog, RaceEffectCatalog};
+use crate::components::{AppliedTo, EffectInstance, EffectSource, Mob, Profile, WorldKey};
+use crate::resources::{
+    EffectCatalog, MobDefaultEffectCatalog, MobProto, MobPrototypes, RaceCatalog, RaceEffectCatalog,
+};
 
 /// One row of the effect-flag -> marker-component table. Every path that
 /// grants a status flag (spell `status` arm, `MobDefaultEffects`,
@@ -24,6 +26,46 @@ struct FlagMarker {
     /// Backing that is not an instance named after one of `flags`
     /// (a spell-granted instance carrying a companion tag).
     tag_backed: Option<fn(&mut World, Entity) -> bool>,
+}
+
+/// Composition a mob renders with: its own `Mobs.composition`, or the
+/// race default (`Races.default_composition`, legacy `def_composition`)
+/// when the mob is left at the `FLESH` schema default. A mob explicitly
+/// authored as flesh on a non-flesh race therefore reads as the race;
+/// there is no separate "unset" state in the column.
+#[must_use]
+pub fn mob_composition(world: &World, proto: &MobProto) -> mud_db::enums::Composition {
+    use mud_db::enums::Composition;
+    if proto.composition != Composition::Flesh {
+        return proto.composition;
+    }
+    world
+        .get_resource::<RaceCatalog>()
+        .and_then(|c| c.get(&proto.race))
+        .map_or(Composition::Flesh, |r| r.default_composition)
+}
+
+/// Composition `target` has right now (legacy `GET_COMPOSITION`): a live
+/// Waterform / Vaporform override, else the mob proto's own, else the
+/// race default. Players carry no composition of their own.
+#[must_use]
+pub fn actor_composition(world: &World, target: Entity) -> mud_db::enums::Composition {
+    use mud_db::enums::Composition;
+    if let Some(over) = world.get::<crate::components::CompositionOverride>(target) {
+        return over.0;
+    }
+    if world.get::<Mob>(target).is_some()
+        && let Some(key) = world.get::<WorldKey>(target).copied()
+        && let Some(proto) = world
+            .get_resource::<MobPrototypes>()
+            .and_then(|p| p.by_key.get(&(key.zone, key.id)))
+    {
+        return mob_composition(world, proto);
+    }
+    world
+        .get::<Profile>(target)
+        .and_then(|p| world.get_resource::<RaceCatalog>()?.get(&p.race))
+        .map_or(Composition::Flesh, |r| r.default_composition)
 }
 
 fn protect_evil_tag_backed(world: &mut World, target: Entity) -> bool {

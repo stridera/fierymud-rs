@@ -1760,6 +1760,7 @@ pub async fn load_object_prototypes(pool: &PgPool) -> sqlx::Result<ObjectPrototy
                 concealment: row.concealment,
                 food_poisoned: matches!(row.r#type, mud_db::enums::ObjectType::Food)
                     && parse_poisoned(&row.values),
+                values: row.values,
             },
         );
     }

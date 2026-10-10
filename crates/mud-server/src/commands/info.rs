@@ -4371,46 +4371,7 @@ pub(crate) fn cmd_list(world: &mut World, player: Entity, _args: &str) {
     send_rendered(world, player, &out);
 }
 
-/// Composition a mob renders with: its own `Mobs.composition`, or the
-/// race default (`Races.default_composition`, legacy `def_composition`)
-/// when the mob is left at the `FLESH` schema default. A mob explicitly
-/// authored as flesh on a non-flesh race therefore reads as the race;
-/// there is no separate "unset" state in the column.
-pub(super) fn mob_composition(
-    world: &World,
-    proto: &mud_world::MobProto,
-) -> mud_db::enums::Composition {
-    use mud_db::enums::Composition;
-    if proto.composition != Composition::Flesh {
-        return proto.composition;
-    }
-    world
-        .get_resource::<mud_world::RaceCatalog>()
-        .and_then(|c| c.get(&proto.race))
-        .map_or(Composition::Flesh, |r| r.default_composition)
-}
-
-/// Composition `target` has right now (legacy `GET_COMPOSITION`): a live
-/// Waterform / Vaporform override, else the mob proto's own, else the
-/// race default. Players carry no composition of their own.
-pub(crate) fn actor_composition(world: &World, target: Entity) -> mud_db::enums::Composition {
-    use mud_db::enums::Composition;
-    if let Some(over) = world.get::<mud_world::CompositionOverride>(target) {
-        return over.0;
-    }
-    if world.get::<Mob>(target).is_some()
-        && let Some(key) = world.get::<WorldKey>(target).copied()
-        && let Some(proto) = world
-            .get_resource::<MobPrototypes>()
-            .and_then(|p| p.by_key.get(&(key.zone, key.id)))
-    {
-        return mob_composition(world, proto);
-    }
-    world
-        .get::<Profile>(target)
-        .and_then(|p| world.get_resource::<mud_world::RaceCatalog>()?.get(&p.race))
-        .map_or(Composition::Flesh, |r| r.default_composition)
-}
+pub(crate) use mud_world::actor_composition;
 
 /// Legacy `print_char_appearance_to_char` line for an actor:
 /// "He is large in size." for flesh, "... and is insubstantial." for

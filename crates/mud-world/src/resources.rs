@@ -1187,6 +1187,11 @@ pub struct ObjectProto {
     /// `VAL_FOOD_POISONED`). Drink containers and fountains carry theirs
     /// in `liquid`.
     pub food_poisoned: bool,
+    /// The row's raw `Objects.values` JSONB (type-specific keys, see
+    /// muditor `objectTypeValues.ts`). Read by the Lua `val0`..`val3`
+    /// object fields; everything the runtime acts on is parsed into the
+    /// typed fields above at load time.
+    pub values: serde_json::Value,
 }
 
 /// Per-town destinations of a scroll of recall: the guild hall that

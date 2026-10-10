@@ -53,6 +53,7 @@ pub use loader::{
 pub use mob_ai_rules::{
     AiAlign, AiCondition, AiKind, AiRule, AiTarget, MobAi, MobAiData, parse_conditions,
 };
+pub use mob_effects::{actor_composition, mob_composition};
 pub use mob_spawn::{mob_ai_enabled, spawn_mob_from_proto};
 pub use reset_gear::{
     ContentEntry, GearStats, MobGearCatalog, MobGearEntry, ObjectContentsCatalog,

@@ -923,6 +923,7 @@ mod tests {
                 camp_kit_tier: None,
                 concealment: 0,
                 food_poisoned: false,
+                values: serde_json::Value::Null,
             },
         );
         world.insert_resource(protos);
@@ -1048,6 +1049,7 @@ mod tests {
                 camp_kit_tier: None,
                 concealment: 0,
                 food_poisoned: false,
+                values: serde_json::Value::Null,
             },
         );
         world.insert_resource(protos);

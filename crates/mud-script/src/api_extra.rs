@@ -1,7 +1,10 @@
 //! Lua API the converted trigger corpus calls but the core bindings in
 //! `lib.rs` did not provide: `zone.echo`, `timestamp`, `trigger_log`,
 //! `find_player`, `get_obj_noadesc`, the `actor:get_*` world-query methods,
-//! `actor:set_skill`, and the `.group` / `.fighting` actor fields.
+//! `actor:set_skill`, and the `.group` / `.fighting` actor fields; plus
+//! `wait_ticks`, `wizard_notify`, `actor:cast`, `actor:has_effect_named`,
+//! the no-argument `get_people()` list, and the `.composition`,
+//! `.wearing` and `.val0`..`.val3` fields.
 //!
 //! Kept in its own module so `lib.rs` only needs three hook-up lines: the
 //! global binding call in `bind_globals`, `add_actor_methods` /
@@ -12,10 +15,12 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 use bevy_ecs::prelude::*;
-use mlua::{Lua, Table, UserDataMethods, Value, Variadic};
+use mlua::{Lua, MultiValue, Table, UserDataMethods, Value, Variadic};
+use mud_db::enums::{ObjectType, UserRole};
 use mud_world::components::{
-    EffectInstance, Fighting, Item, KnownAbilities, Located, Mob, MobBehaviors, MobTraits, Named,
-    ObjectFlags, ObjectRestrictions, Online, Player, PlayerFlags, Room, WorldKey,
+    Account, Charges, EffectInstance, EquippedSlot, Fighting, Item, KnownAbilities, LightFuel,
+    LiquidContainer, Located, Mob, MobBehaviors, MobTraits, Named, ObjectFlags, ObjectRestrictions,
+    Online, Player, PlayerFlags, Room, WorldKey,
 };
 use mud_world::resources::{
     AbilityCatalog, LuaOutbox, MudClock, ObjectPrototypes, TriggerCatalog, WorldKeyIndex,
@@ -33,6 +38,67 @@ const MONTHS_PER_YEAR: i64 = 16;
 /// Highest proficiency `actor:set_skill` will write (the same ceiling the
 /// staff `skillset` command documents).
 const MAX_SET_SKILL: i32 = 1000;
+
+/// Real seconds in one game hour (legacy `SECS_PER_MUD_HOUR`). The DG
+/// `wait N t` unit is "N game hours", and `wait_ticks(N)` sleeps that long.
+const SECS_PER_MUD_HOUR: i64 = 75;
+
+/// Legacy liquid codes, in the order the importer indexes them. `val2` of a
+/// drink container reads the position of its `Liquid`.
+const LIQUIDS: [&str; 42] = [
+    "WATER",
+    "BEER",
+    "WINE",
+    "ALE",
+    "DARKALE",
+    "WHISKY",
+    "LEMONADE",
+    "FIREBRT",
+    "LOCALSPC",
+    "SLIME",
+    "MILK",
+    "TEA",
+    "COFFEE",
+    "BLOOD",
+    "SALTWATER",
+    "RUM",
+    "NECTAR",
+    "SAKE",
+    "CIDER",
+    "TOMATOSOUP",
+    "POTATOSOUP",
+    "CHAI",
+    "APPLEJUICE",
+    "ORNGJUICE",
+    "PNAPLJUICE",
+    "GRAPEJUICE",
+    "POMJUICE",
+    "MELONAE",
+    "COCOA",
+    "ESPRESSO",
+    "CAPPUCCINO",
+    "MANGOLASSI",
+    "ROSEWATER",
+    "GREENTEA",
+    "CHAMOMILE",
+    "GIN",
+    "BRANDY",
+    "MEAD",
+    "CHAMPAGNE",
+    "VODKA",
+    "TEQUILA",
+    "ABSINTHE",
+];
+
+/// Legacy damage-type codes, as the importer indexes them (weapon `val3`).
+const DAMAGE_TYPES: [&str; 21] = [
+    "HIT", "STING", "WHIP", "SLASH", "BITE", "BLUDGEON", "CRUSH", "POUND", "CLAW", "MAUL",
+    "THRASH", "PIERCE", "BLAST", "PUNCH", "STAB", "FIRE", "COLD", "ACID", "SHOCK", "POISON",
+    "ALIGN",
+];
+
+/// Container flag bits (container `val1`).
+const CONTAINER_FLAGS: [&str; 4] = ["Closeable", "PickProof", "Closed", "Locked"];
 
 /// Fingerprint of the body about to run, stashed by the host right before
 /// a fire so `trigger_log` can name the trigger without the dispatcher
@@ -80,6 +146,24 @@ pub(crate) fn bind_globals(lua: &Lua, globals: &Table) -> mlua::Result<()> {
         "timestamp",
         lua.create_function(|lua, ()| -> mlua::Result<i64> {
             world_from_lua(lua, |w| w.get_resource::<MudClock>().map_or(0, game_hours))
+        })?,
+    )?;
+
+    // wait_ticks(n): legacy `wait N t`, sleep N game hours. Pure Lua so the
+    // yield works inside the coroutine the way `wait` does.
+    globals.set(
+        "wait_ticks",
+        lua.load(format!(
+            "local y = coroutine.yield; return function(n) y((n or 1) * {SECS_PER_MUD_HOUR}) end"
+        ))
+        .eval::<mlua::Function>()?,
+    )?;
+
+    // wizard_notify(msg): legacy `wizn`, a line on the staff channel.
+    globals.set(
+        "wizard_notify",
+        lua.create_function(|lua, args: Variadic<Value>| -> mlua::Result<()> {
+            wizard_notify(lua, &format_args(&args))
         })?,
     )?;
 
@@ -215,6 +299,34 @@ fn zone_echo(lua: &Lua, zone: i32, msg: &str) -> mlua::Result<()> {
         let mut out = world.resource_mut::<LuaOutbox>();
         for room in rooms {
             out.messages.push((room, msg.to_string(), None));
+        }
+    })
+}
+
+/// `wizard_notify(msg)`: one `[wiznet]` line to every online player of
+/// Immortal rank or above.
+fn wizard_notify(lua: &Lua, msg: &str) -> mlua::Result<()> {
+    if msg.is_empty() {
+        return Ok(());
+    }
+    world_mut_from_lua(lua, |world| {
+        let mut staff: Vec<Entity> = {
+            let mut q = world.query_filtered::<(Entity, &Account), (With<Player>, With<Online>)>();
+            q.iter(world)
+                .filter(|(_, a)| a.role.at_least(UserRole::Immortal))
+                .map(|(e, _)| e)
+                .collect()
+        };
+        if staff.is_empty() {
+            return;
+        }
+        staff.sort_unstable();
+        if !world.contains_resource::<LuaOutbox>() {
+            world.insert_resource(LuaOutbox::default());
+        }
+        let mut out = world.resource_mut::<LuaOutbox>();
+        for e in staff {
+            out.direct.push((e, format!("<b:cyan>[wiznet]</> {msg}")));
         }
     })
 }
@@ -490,18 +602,207 @@ pub(crate) fn resolve_destroy_name(world: &mut World, from: Entity, name: &str) 
     best.map(|(_, _, e)| e)
 }
 
+/// Characters (anything that is not an item) standing in `room`, in entity
+/// order so every caller sees the same sequence.
+fn people_in(world: &mut World, room: Entity) -> Vec<Entity> {
+    let mut q = world.query_filtered::<(Entity, &Located), Without<Item>>();
+    let mut out: Vec<Entity> = q
+        .iter(world)
+        .filter(|(_, l)| l.0 == room)
+        .map(|(e, _)| e)
+        .collect();
+    out.sort_unstable();
+    out
+}
+
+/// A 1-indexed Lua list of `LuaActor` wrappers.
+fn actor_list(lua: &Lua, entities: &[Entity]) -> mlua::Result<Value> {
+    let tbl = lua.create_table()?;
+    for (i, e) in entities.iter().enumerate() {
+        tbl.set(i + 1, lua.create_userdata(LuaActor { entity: *e })?)?;
+    }
+    Ok(Value::Table(tbl))
+}
+
+/// Legacy vnum of prototype `(zone, id)`: zone 1000 is the old zone 0.
+fn legacy_vnum(zone: i32, id: i32) -> i64 {
+    i64::from(zone % 1000) * 100 + i64::from(id)
+}
+
+/// `actor.wearing`: what the actor has equipped, keyed by the item's legacy
+/// vnum (`wearing[18880]`, the DG form) with the item as the value, so
+/// `if actor.wearing[id] then` and `pairs(actor.wearing)` both work.
+fn wearing_table(lua: &Lua, entity: Entity) -> mlua::Result<Value> {
+    let worn: Vec<(i64, Entity)> = world_mut_from_lua(lua, |w| {
+        let mut q =
+            w.query_filtered::<(Entity, &Located, &WorldKey), (With<Item>, With<EquippedSlot>)>();
+        let mut v: Vec<(i64, Entity)> = q
+            .iter(w)
+            .filter(|(_, l, _)| l.0 == entity)
+            .map(|(e, _, wk)| (legacy_vnum(wk.zone, wk.id), e))
+            .collect();
+        v.sort_unstable();
+        v
+    })?;
+    let tbl = lua.create_table()?;
+    for (vnum, item) in worn {
+        // The first item wins when two worn items share a prototype.
+        if tbl.raw_get::<Value>(vnum)?.is_nil() {
+            tbl.raw_set(vnum, lua.create_userdata(LuaActor { entity: item })?)?;
+        }
+    }
+    Ok(Value::Table(tbl))
+}
+
+/// A JSON scalar as the integer DG scripts compared: numbers truncate,
+/// booleans are 0/1, numeric strings parse, anything else is 0.
+fn json_int(v: Option<&serde_json::Value>) -> i64 {
+    match v {
+        Some(serde_json::Value::Number(n)) => n.as_i64().unwrap_or_else(|| {
+            #[allow(clippy::cast_possible_truncation)]
+            let t = n.as_f64().unwrap_or(0.0) as i64;
+            t
+        }),
+        Some(serde_json::Value::Bool(b)) => i64::from(*b),
+        Some(serde_json::Value::String(s)) => s.trim().parse().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// The `Objects.values` key each of `val0`..`val3` stands for, by object
+/// type: the importer's `obj_val` order, under the game key names of
+/// muditor `objectTypeValues.ts`. An empty key reads 0.
+fn value_keys(t: ObjectType) -> [&'static str; 4] {
+    match t {
+        ObjectType::Armor | ObjectType::Treasure => ["AC", "", "", ""],
+        ObjectType::Light => ["Is_Lit", "Capacity", "Remaining", ""],
+        ObjectType::Container => ["Capacity", "Flags", "Key", "IsCorpse"],
+        ObjectType::Drinkcontainer | ObjectType::Fountain => {
+            ["Capacity", "Remaining", "Liquid", "Poisoned"]
+        }
+        ObjectType::Food => ["Filling", "Poisoned", "", ""],
+        ObjectType::Scroll | ObjectType::Potion => ["Level", "", "", ""],
+        ObjectType::Wand | ObjectType::Staff | ObjectType::Instrument => {
+            ["Level", "Max_Charges", "Charges_Left", ""]
+        }
+        ObjectType::Money => ["Platinum", "Gold", "Silver", "Copper"],
+        ObjectType::Weapon => ["HitRoll", "", "", ""],
+        _ => ["", "", "", ""],
+    }
+}
+
+/// Position of `name` in `table`, ignoring case; 0 when absent.
+fn index_in(table: &[&str], name: &str) -> i64 {
+    table
+        .iter()
+        .position(|t| t.eq_ignore_ascii_case(name.trim()))
+        .and_then(|i| i64::try_from(i).ok())
+        .unwrap_or(0)
+}
+
+/// Legacy `GET_OBJ_VAL(obj, n)` of item `item`, or `None` when `item` is
+/// not an item. Type-specific, from the proto's `values` JSON; the state
+/// that changes in play (fuel, liquid, wand charges, lit) is read live.
+fn object_value(world: &World, item: Entity, n: usize) -> Option<i64> {
+    world.get::<Item>(item)?;
+    let Some(proto) = world.get::<WorldKey>(item).and_then(|wk| {
+        world
+            .get_resource::<ObjectPrototypes>()
+            .and_then(|p| p.by_key.get(&(wk.zone, wk.id)))
+    }) else {
+        return Some(0);
+    };
+    let t = proto.r#type;
+    // Typed columns the runtime already parsed out of the row.
+    match (t, n) {
+        (ObjectType::Weapon, 1) => return Some(i64::from(proto.weapon_dice_num)),
+        (ObjectType::Weapon, 2) => return Some(i64::from(proto.weapon_dice_size)),
+        (ObjectType::Weapon, 3) => {
+            return Some(
+                proto
+                    .weapon_damage_type
+                    .as_deref()
+                    .map_or(0, |d| index_in(&DAMAGE_TYPES, d)),
+            );
+        }
+        _ => {}
+    }
+    // Live per-instance state.
+    match (t, n) {
+        (ObjectType::Light, 0) => return Some(i64::from(mud_world::is_lit(world, item))),
+        (ObjectType::Light, 1 | 2) => {
+            if let Some(f) = world.get::<LightFuel>(item) {
+                return Some(i64::from(if n == 1 { f.capacity } else { f.remaining }));
+            }
+        }
+        (ObjectType::Drinkcontainer | ObjectType::Fountain, _) => {
+            if let Some(l) = world.get::<LiquidContainer>(item) {
+                return Some(match n {
+                    0 => i64::from(l.capacity),
+                    1 => i64::from(l.remaining),
+                    2 => index_in(&LIQUIDS, &l.liquid),
+                    _ => i64::from(l.poisoned),
+                });
+            }
+        }
+        (ObjectType::Wand | ObjectType::Staff | ObjectType::Instrument, 2) => {
+            if let Some(c) = world.get::<Charges>(item) {
+                return Some(i64::from(c.0));
+            }
+        }
+        _ => {}
+    }
+    let key = value_keys(t)[n];
+    if key.is_empty() {
+        return Some(0);
+    }
+    let v = proto.values.get(key);
+    Some(match (key, v) {
+        ("Liquid", Some(serde_json::Value::String(s))) => index_in(&LIQUIDS, s),
+        ("Flags", Some(serde_json::Value::Array(flags))) => flags
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .filter_map(|f| {
+                CONTAINER_FLAGS
+                    .iter()
+                    .position(|c| c.eq_ignore_ascii_case(f.trim()))
+            })
+            .fold(0, |acc, i| acc | (1 << i)),
+        _ => json_int(v),
+    })
+}
+
 /// Methods added to `LuaActor`.
 pub(crate) fn add_actor_methods<M: UserDataMethods<LuaActor>>(methods: &mut M) {
     // `self:get_people(zone, id)`: a character with that prototype in
     // the entity's room (the room itself for room triggers), or nil.
+    // `self:get_people()` with no arguments: every character in that room
+    // (carried items follow their carrier up to the room), as a list in a
+    // stable order, safe to iterate while the loop body moves or kills
+    // them. Replaces the DG `self.people` / `person.next_in_room` walk.
     methods.add_method(
         "get_people",
-        |lua, this, (zone, id): (i32, i32)| -> mlua::Result<Value> {
-            let found = world_mut_from_lua(lua, |w| {
-                let room = room_of(w, this.entity)?;
-                find_in_room(w, room, zone, id, false)
-            })?;
-            actor_value(lua, found)
+        |lua, this, (zone, id): (Option<i32>, Option<i32>)| -> mlua::Result<Value> {
+            match (zone, id) {
+                (Some(zone), Some(id)) => {
+                    let found = world_mut_from_lua(lua, |w| {
+                        let room = room_of(w, this.entity)?;
+                        find_in_room(w, room, zone, id, false)
+                    })?;
+                    actor_value(lua, found)
+                }
+                (None, None) => {
+                    let people = world_mut_from_lua(lua, |w| {
+                        enclosing_room(w, this.entity)
+                            .map(|r| people_in(w, r))
+                            .unwrap_or_default()
+                    })?;
+                    actor_list(lua, &people)
+                }
+                _ => Err(mlua::Error::external(
+                    "get_people takes (zone, id) or no arguments",
+                )),
+            }
         },
     );
     // `self:get_objects(zone, id)`: an item with that prototype in the
@@ -548,15 +849,49 @@ pub(crate) fn add_actor_methods<M: UserDataMethods<LuaActor>>(methods: &mut M) {
             set_skill(lua, this.entity, &name, prof)
         },
     );
+    // `self:cast(spell, target?)`: the method form of `spells.cast(self,
+    // spell, target)`.
+    methods.add_method(
+        "cast",
+        |lua, this, (spell, target): (String, Value)| -> mlua::Result<()> {
+            let caster = Value::UserData(lua.create_userdata(LuaActor {
+                entity: this.entity,
+            })?);
+            let name = Value::String(lua.create_string(&spell)?);
+            super::spells_cast_dispatch(lua, MultiValue::from_vec(vec![caster, name, target]))
+        },
+    );
+    // `actor:has_effect_named(name)`: whether an active effect is called
+    // `name` (case, spaces and punctuation ignored; a prefix counts, as for
+    // `get_eff_flagged`).
+    methods.add_method(
+        "has_effect_named",
+        |lua, this, name: String| -> mlua::Result<bool> {
+            world_mut_from_lua(lua, |w| has_eff_flag(w, this.entity, &name))
+        },
+    );
 }
 
 /// Methods added to `LuaRoom`.
 pub(crate) fn add_room_methods<M: UserDataMethods<LuaRoom>>(methods: &mut M) {
+    // `room:get_people(zone, id)` / `room:get_people()`: see the actor form.
     methods.add_method(
         "get_people",
-        |lua, this, (zone, id): (i32, i32)| -> mlua::Result<Value> {
-            let found = world_mut_from_lua(lua, |w| find_in_room(w, this.entity, zone, id, false))?;
-            actor_value(lua, found)
+        |lua, this, (zone, id): (Option<i32>, Option<i32>)| -> mlua::Result<Value> {
+            match (zone, id) {
+                (Some(zone), Some(id)) => {
+                    let found =
+                        world_mut_from_lua(lua, |w| find_in_room(w, this.entity, zone, id, false))?;
+                    actor_value(lua, found)
+                }
+                (None, None) => {
+                    let people = world_mut_from_lua(lua, |w| people_in(w, this.entity))?;
+                    actor_list(lua, &people)
+                }
+                _ => Err(mlua::Error::external(
+                    "get_people takes (zone, id) or no arguments",
+                )),
+            }
         },
     );
     methods.add_method(
@@ -594,6 +929,25 @@ pub(crate) fn actor_field(lua: &Lua, entity: Entity, key: &str) -> mlua::Result<
                     .filter(|t| w.get_entity(*t).is_ok())
             })?;
             actor_value(lua, target)
+        }
+        // `actor.composition`: the body composition in effect right now,
+        // lower case (`"flesh"`, `"air"`, `"bone"`): a live Waterform /
+        // Vaporform override, else the mob's own or its race's.
+        "composition" => {
+            let c = world_from_lua(lua, |w| mud_world::actor_composition(w, entity))?;
+            Ok(Value::String(
+                lua.create_string(format!("{c:?}").to_ascii_lowercase())?,
+            ))
+        }
+        // `actor.wearing[vnum]`: see `wearing_table`.
+        "wearing" => wearing_table(lua, entity),
+        // `object.val0`..`object.val3`: see `object_value`.
+        "val0" | "val1" | "val2" | "val3" => {
+            let n = usize::from(key.as_bytes()[3] - b'0');
+            match world_from_lua(lua, |w| object_value(w, entity, n))? {
+                Some(v) => Ok(Value::Integer(v)),
+                None => Ok(Value::Nil),
+            }
         }
         _ => Ok(Value::Nil),
     }
@@ -727,6 +1081,7 @@ mod tests {
             camp_kit_tier: None,
             concealment: 0,
             food_poisoned: false,
+            values: serde_json::Value::Null,
         }
     }
 
@@ -1304,5 +1659,309 @@ mod tests {
             .id();
         f.ok("world.destroy(self:get_objects(43, 51))");
         assert!(f.world.get_entity(coin).is_err());
+    }
+
+    // ----- wait_ticks -----
+
+    #[test]
+    fn wait_ticks_parks_the_script_for_game_hours() {
+        let mut f = fixture();
+        f.host.set_current_tick(0);
+        assert_eq!(f.ok("print('a') wait_ticks(2) print('b')"), "a\r\n");
+        assert_eq!(f.host.yielded_count(), 1);
+        // Two game hours: 2 * 75 s at 10 Hz.
+        f.host.set_current_tick(1499);
+        assert_eq!(f.host.tick_yielded(&mut f.world), 0);
+        f.host.set_current_tick(1500);
+        assert_eq!(f.host.tick_yielded(&mut f.world), 1);
+        assert_eq!(f.host.yielded_count(), 0);
+    }
+
+    // ----- wizard_notify -----
+
+    #[test]
+    fn wizard_notify_reaches_online_staff_only() {
+        let mut f = fixture();
+        let account = |role| Account {
+            user_id: "u".into(),
+            character_id: "c".into(),
+            role,
+            account_role: role,
+            perms: vec![],
+        };
+        f.world
+            .entity_mut(f.player)
+            .insert(account(UserRole::Player));
+        let god = f
+            .world
+            .spawn((
+                Player,
+                Online,
+                Named { name: "God".into() },
+                account(UserRole::Immortal),
+                Located(f.far_room),
+            ))
+            .id();
+        f.ok("wizard_notify('Now starting!')");
+        let out = f.world.resource::<LuaOutbox>();
+        assert_eq!(
+            out.direct,
+            vec![(god, "<b:cyan>[wiznet]</> Now starting!".to_string())]
+        );
+    }
+
+    // ----- actor:cast -----
+
+    #[derive(Resource, Default)]
+    struct CastLog(Vec<(Entity, String)>);
+
+    fn record_cast(world: &mut World, caster: Entity, args: &str) {
+        world
+            .resource_mut::<CastLog>()
+            .0
+            .push((caster, args.to_string()));
+    }
+
+    #[test]
+    fn cast_method_dispatches_like_spells_cast() {
+        let mut f = fixture();
+        f.world.init_resource::<CastLog>();
+        f.world
+            .insert_resource(crate::SpellExecutor(Some(record_cast)));
+        f.ok("self:cast('inspiration')");
+        f.ok("self:cast('sleep', actor)");
+        f.ok("self:cast('bless', 'Hero')");
+        assert_eq!(
+            f.world.resource::<CastLog>().0,
+            vec![
+                (f.mob, "inspiration".to_string()),
+                (f.mob, "sleep Hero".to_string()),
+                (f.mob, "bless Hero".to_string()),
+            ]
+        );
+    }
+
+    // ----- actor:has_effect_named -----
+
+    #[test]
+    fn has_effect_named_matches_the_active_effect_name() {
+        let mut f = fixture();
+        effect(&mut f.world, f.player, "comprehend languages");
+        assert_eq!(
+            f.ok("print(actor:has_effect_named('ComprehendLang'), actor:has_effect_named('sanctuary'), self:has_effect_named('ComprehendLang'))"),
+            "true\tfalse\tfalse\r\n"
+        );
+    }
+
+    // ----- get_people() -----
+
+    #[test]
+    fn get_people_without_arguments_lists_the_room() {
+        let mut f = fixture();
+        let guard = f
+            .world
+            .spawn((
+                Mob,
+                Named {
+                    name: "a guard".into(),
+                },
+                WorldKey { zone: 9, id: 2 },
+                Located(f.room),
+            ))
+            .id();
+        // Items and people elsewhere are not listed.
+        f.world.spawn((
+            Item,
+            Named {
+                name: "a coin".into(),
+            },
+            Located(f.room),
+        ));
+        f.world
+            .spawn((Mob, Named { name: "far".into() }, Located(f.other_room)));
+        let body = "local n, names = 0, {} \
+            for _, p in ipairs(self:get_people()) do n = n + 1; names[#names + 1] = p.name end \
+            table.sort(names) print(n, table.concat(names, ','))";
+        assert_eq!(f.ok(body), "3\tHero,a guard,a script keeper\r\n");
+        // The room form and a carried item's view give the same answer.
+        assert_eq!(
+            f.ok("print(#self.room:get_people(), #get_room(5, 1):get_people(), #get_room(5, 2):get_people())"),
+            "3\t3\t1\r\n"
+        );
+        // A purge during the walk is safe: the list is a snapshot.
+        f.ok("for _, p in ipairs(self:get_people()) do if p.id == 2 then world.destroy(p) end end");
+        assert!(f.world.get_entity(guard).is_err());
+        // The (zone, id) form is unchanged; half an argument list is an error.
+        assert_eq!(
+            f.ok("print(self:get_people(9, 1) ~= nil, self:get_people(9, 7))"),
+            "true\tnil\r\n"
+        );
+        assert!(f.run("self:get_people(9)").is_err());
+    }
+
+    // ----- actor.composition -----
+
+    #[test]
+    fn composition_reads_the_effective_composition() {
+        let mut f = fixture();
+        assert_eq!(
+            f.ok("print(self.composition, actor.composition)"),
+            "flesh\tflesh\r\n"
+        );
+        f.world
+            .entity_mut(f.mob)
+            .insert(mud_world::CompositionOverride(
+                mud_db::enums::Composition::Water,
+            ));
+        assert_eq!(f.ok("print(self.composition)"), "water\r\n");
+        f.world
+            .entity_mut(f.mob)
+            .remove::<mud_world::CompositionOverride>();
+        assert_eq!(f.ok("print(self.composition)"), "flesh\r\n");
+    }
+
+    // ----- actor.wearing -----
+
+    #[test]
+    fn wearing_lists_worn_items_by_legacy_vnum() {
+        let mut f = fixture();
+        let worn = |f: &mut Fixture, zone, id, slot: Option<mud_world::Slot>| {
+            let mut e = f.world.spawn((
+                Item,
+                Named {
+                    name: format!("flag {zone}:{id}"),
+                },
+                WorldKey { zone, id },
+                Located(f.player),
+            ));
+            if let Some(slot) = slot {
+                e.insert(EquippedSlot(slot));
+            }
+            e.id()
+        };
+        let flag = worn(&mut f, 188, 80, Some(mud_world::Slot::Head));
+        worn(&mut f, 188, 81, None); // carried, not worn
+        worn(&mut f, 1000, 7, Some(mud_world::Slot::Neck)); // zone 1000 is the old zone 0
+        assert_eq!(
+            f.ok("print(actor.wearing[18880] ~= nil, actor.wearing[18881] ~= nil, actor.wearing[7] ~= nil, actor.wearing[18880].name)"),
+            "true\tfalse\ttrue\tflag 188:80\r\n"
+        );
+        assert_eq!(
+            f.ok("local n = 0 for _ in pairs(actor.wearing) do n = n + 1 end print(n, self.wearing[18880])"),
+            "2\tnil\r\n"
+        );
+        let _ = flag;
+    }
+
+    // ----- object.val0 .. val3 -----
+
+    fn item_with(f: &mut Fixture, id: i32, t: ObjectType, values: serde_json::Value) -> Entity {
+        let mut p = proto(70, id, "a thing");
+        p.r#type = t;
+        p.values = values;
+        let mut protos = f
+            .world
+            .remove_resource::<ObjectPrototypes>()
+            .unwrap_or_default();
+        protos.by_key.insert((70, id), p);
+        f.world.insert_resource(protos);
+        f.world
+            .spawn((
+                Item,
+                Named {
+                    name: "a thing".into(),
+                },
+                WorldKey { zone: 70, id },
+                Located(f.room),
+            ))
+            .id()
+    }
+
+    #[test]
+    fn val_fields_follow_the_object_type() {
+        let mut f = fixture();
+        let vals = "print(self:get_objects(70, ID).val0, self:get_objects(70, ID).val1, self:get_objects(70, ID).val2, self:get_objects(70, ID).val3)";
+        let run = |f: &mut Fixture, id: i32| f.ok(&vals.replace("ID", &id.to_string()));
+        // Drink container: capacity, remaining, liquid code, poisoned.
+        item_with(
+            &mut f,
+            1,
+            ObjectType::Drinkcontainer,
+            serde_json::json!({"Capacity": 20, "Remaining": 0, "Liquid": "WHISKY", "Poisoned": true}),
+        );
+        assert_eq!(run(&mut f, 1), "20\t0\t5\t1\r\n");
+        // Live state wins over the proto once the instance has it.
+        let cup = item_with(
+            &mut f,
+            2,
+            ObjectType::Fountain,
+            serde_json::json!({"Capacity": 9, "Remaining": 9, "Liquid": "WATER"}),
+        );
+        f.world.entity_mut(cup).insert(LiquidContainer {
+            liquid: "tea".into(),
+            capacity: 9,
+            remaining: 4,
+            poisoned: false,
+        });
+        assert_eq!(run(&mut f, 2), "9\t4\t11\t0\r\n");
+        // Container: capacity, flag bits, key.
+        item_with(
+            &mut f,
+            3,
+            ObjectType::Container,
+            serde_json::json!({"Capacity": 150, "Flags": ["Closeable", "Locked"], "Key": 4}),
+        );
+        assert_eq!(run(&mut f, 3), "150\t9\t4\t0\r\n");
+        // Light: lit flag, capacity, remaining.
+        let lamp = item_with(
+            &mut f,
+            4,
+            ObjectType::Light,
+            serde_json::json!({"Capacity": -1, "Remaining": -1}),
+        );
+        f.world.entity_mut(lamp).insert(LightFuel {
+            capacity: -1,
+            remaining: -1,
+        });
+        assert_eq!(run(&mut f, 4), "1\t-1\t-1\t0\r\n");
+        // Wand: level, max charges, charges left (live), spell not exposed.
+        let wand = item_with(
+            &mut f,
+            5,
+            ObjectType::Wand,
+            serde_json::json!({"Level": 30, "Max_Charges": 5, "Charges_Left": 5, "Spell": "BLESS"}),
+        );
+        assert_eq!(run(&mut f, 5), "30\t5\t5\t0\r\n");
+        f.world.entity_mut(wand).insert(Charges(2));
+        assert_eq!(run(&mut f, 5), "30\t5\t2\t0\r\n");
+        // Food: hours of nourishment, poisoned.
+        item_with(
+            &mut f,
+            6,
+            ObjectType::Food,
+            serde_json::json!({"Filling": 12, "Poisoned": false}),
+        );
+        assert_eq!(run(&mut f, 6), "12\t0\t0\t0\r\n");
+        // Weapon: the typed dice and damage type columns.
+        let mut w = proto(70, 7, "a sword");
+        w.r#type = ObjectType::Weapon;
+        w.weapon_dice_num = 2;
+        w.weapon_dice_size = 6;
+        w.weapon_damage_type = Some("Slash".into());
+        f.world
+            .resource_mut::<ObjectPrototypes>()
+            .by_key
+            .insert((70, 7), w);
+        f.world.spawn((
+            Item,
+            Named {
+                name: "a sword".into(),
+            },
+            WorldKey { zone: 70, id: 7 },
+            Located(f.room),
+        ));
+        assert_eq!(run(&mut f, 7), "0\t2\t6\t3\r\n");
+        // Characters have no values.
+        assert_eq!(f.ok("print(actor.val0, self.val2)"), "nil\tnil\r\n");
     }
 }
