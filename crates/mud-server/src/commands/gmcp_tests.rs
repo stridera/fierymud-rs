@@ -204,6 +204,42 @@ fn exit_details_describe_doors() {
     assert_eq!(v["exit_details"]["north"]["door_name"], "gate");
     assert_eq!(v["exit_details"]["south"]["door"], true);
     assert!(v["doors"].get("south").is_none(), "open door not in doors");
+    assert_eq!(v["exit_details"]["north"]["door_state"], "locked");
+    assert_eq!(v["exit_details"]["south"]["door_state"], "open");
+}
+
+#[test]
+fn exit_details_door_state_follows_open_close_lock() {
+    let mut fx = fixture();
+    let (a, b) = (fx.a, fx.b);
+    fx.world.get_mut::<Exits>(a).unwrap().0.insert(
+        Direction::North,
+        exit(b, ExitState::Closed, false, &["gate"]),
+    );
+    fx.world
+        .get_mut::<Exits>(a)
+        .unwrap()
+        .0
+        .insert(Direction::East, exit(b, ExitState::Open, false, &[]));
+    let (p, mut rx) = player(&mut fx.world, a, "Seeker");
+    let (_, fr) = look_frames(&mut fx, p, &mut rx);
+    let v: Value = serde_json::from_str(&of(&fr, "Room.Info")[0]).unwrap();
+    assert_eq!(v["exit_details"]["north"]["door_state"], "closed");
+    assert!(v["exit_details"]["east"].get("door_state").is_none());
+    // Opening the door changes the payload, so the next prompt re-sends it.
+    fx.world
+        .get_mut::<Exits>(a)
+        .unwrap()
+        .0
+        .get_mut(&Direction::North)
+        .unwrap()
+        .state = ExitState::Open;
+    drain_bytes(&mut rx);
+    super::send_prompt(&mut fx.world, p);
+    let fr = frames(&drain_bytes(&mut rx));
+    let v: Value = serde_json::from_str(&of(&fr, "Room.Info")[0]).unwrap();
+    assert_eq!(v["exit_details"]["north"]["door_state"], "open");
+    assert!(v["doors"].get("north").is_none());
 }
 
 #[test]
@@ -623,4 +659,43 @@ fn combat_and_room_mobs_resend_when_they_change() {
     super::send_prompt(&mut fx.world, p);
     let fr = frames(&drain_bytes(&mut rx));
     assert_eq!(of(&fr, "Char.Combat").len(), 1, "{fr:?}");
+}
+
+#[test]
+fn char_effects_pushed_when_the_effect_set_changes_without_a_prompt() {
+    let (mut fx, p, mut rx) = world_with_armor();
+    // Establish the baseline: first prompt sends an empty list.
+    super::send_prompt(&mut fx.world, p);
+    super::push_effect_changes(&mut fx.world);
+    drain_bytes(&mut rx);
+    dispatch(&mut fx.world, p, "cast 'armor'");
+    for _ in 0..10 {
+        crate::casting::casting_tick(&mut fx.world);
+    }
+    drain_bytes(&mut rx);
+    super::push_effect_changes(&mut fx.world);
+    let fr = frames(&drain_bytes(&mut rx));
+    let eff = of(&fr, "Char.Effects");
+    assert_eq!(eff.len(), 1, "added effect pushed: {fr:?}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&eff[0]).unwrap()[0]["id"],
+        "armor"
+    );
+    // Nothing changed: nothing sent.
+    super::push_effect_changes(&mut fx.world);
+    assert!(of(&frames(&drain_bytes(&mut rx)), "Char.Effects").is_empty());
+    // Remove the effect silently: an empty list goes out.
+    let gone: Vec<Entity> = {
+        let mut q = fx.world.query::<(Entity, &mud_world::AppliedTo)>();
+        q.iter(&fx.world)
+            .filter(|(_, a)| a.0 == p)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for e in gone {
+        fx.world.despawn(e);
+    }
+    super::push_effect_changes(&mut fx.world);
+    let fr = frames(&drain_bytes(&mut rx));
+    assert_eq!(of(&fr, "Char.Effects"), vec!["[]".to_string()], "{fr:?}");
 }

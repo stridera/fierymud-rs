@@ -139,8 +139,11 @@ Array<{
 }>
 ```
 
-**Cadence:** On effect add/remove. Snapshot every effect each
-emission — the client diffs by `id`. Permanent effects
+**Cadence:** Sent at login (and after renegotiation / takeover), pushed
+the tick an effect is added, removed or restacked (even if the player
+receives no other output), and re-sent on a prompt when a duration
+changed. An empty array `[]` means no active effects. Snapshot every
+effect each emission — the client diffs by `id`. Permanent effects
 (`duration: -1`) tick at -1 forever; the client just doesn't decrement
 them.
 
@@ -192,15 +195,30 @@ Map widget + current-room tracking.
 {
   num: number,             // composite room key: zone * 100000 + id
   name: string,            // room title
-  area: string,            // zone display name
+  zone: string,            // zone display name ("" for god zones)
+  area: string,            // same as `zone` (older clients)
+  desc: string,            // room description, colour tags stripped
   environment: string,     // sector enum label ("Forest", "Inside", "City", "Mountains", ...)
   exits: { [direction: string]: number },  // dir → adjacent room num
-  doors: { [direction: string]: string },  // dir → "closed" | "locked"; absent = no door
+  doors: { [direction: string]: string },  // dir → "closed" | "locked"; absent = no door or open door
+  exit_details: {          // richer per-exit view; same keys as `exits`
+    [direction: string]: {
+      to: number,          // adjacent room num
+      door?: true,         // present when the exit is a door
+      door_name?: string,  // first door keyword ("gate")
+      door_state?: "open" | "closed" | "locked",  // present with `door`
+    }
+  },
   coords?: string,         // optional "x,y,z" — preferred over compass-walk inference
 }
 ```
 
-**Cadence:** On room entry + look. Coordinates are optional but
+Undiscovered hidden exits are omitted; one revealed by `search` appears
+(and `Room.Info` is re-sent) as soon as it is found. In a dark room the
+payload is `{}`.
+
+**Cadence:** On room entry + look, sent *before* the room text. Re-sent when
+the content changes (door opened/closed/locked, hidden exit found). Coordinates are optional but
 strongly preferred — without them, the mapper falls back to dead
 reckoning (offsets from the previous room by the player's last
 movement direction), which gets corner cases wrong.

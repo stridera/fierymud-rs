@@ -524,6 +524,7 @@ mod staff_tell;
 #[path = "commands/staff_tell_tests.rs"]
 mod staff_tell_tests;
 pub(crate) use gmcp::clear_gmcp_sent;
+pub(crate) use gmcp::push_effect_changes;
 #[cfg(test)]
 #[path = "commands/gmcp_tests.rs"]
 pub(crate) mod gmcp_tests;

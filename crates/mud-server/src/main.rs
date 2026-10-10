@@ -785,6 +785,7 @@ async fn main() {
                 // After all systems for this tick have run, refresh
                 // prompts for anyone who received output (combat hits,
                 // effect fades, broadcasts, etc.).
+                commands::push_effect_changes(&mut world);
                 commands::flush_prompts(&mut world);
                 tick_stats::lap(&mut world, "flush_prompts");
                 note_tick_finished(&mut world, tick_start);

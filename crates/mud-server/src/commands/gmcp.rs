@@ -250,6 +250,9 @@ pub(crate) fn build_room_info(world: &mut World, viewer: Entity) -> String {
             let is_door = door_state.is_some() || !data.keywords.is_empty();
             if is_door {
                 detail.insert("door".into(), json!(true));
+                // Full state, open doors included: `doors` above only lists
+                // the ones that block you.
+                detail.insert("door_state".into(), json!(door_state.unwrap_or("open")));
                 if let Some(kw) = data.keywords.first() {
                     detail.insert("door_name".into(), json!(strip(kw)));
                 }
@@ -328,6 +331,61 @@ pub(crate) fn build_char_effects(world: &mut World, target: Entity) -> String {
         .collect();
     Value::Array(entries).to_string()
 }
+
+/// Push `Char.Effects` the moment a connected player's effect set changes
+/// (an effect added, removed or restacked), rather than waiting for their
+/// next prompt: silent buffs and expiries would otherwise leave a client's
+/// icon bar stale until the player happens to receive output. Duration
+/// countdowns are deliberately not "changes" here; the prompt path still
+/// refreshes those. Players that have not yet been sent a full
+/// `Char.Effects` (login in progress) are only tracked, never pushed to.
+pub(crate) fn push_effect_changes(world: &mut World) {
+    type EffectKey = (i32, Option<i32>, i32, u8);
+    let mut sets: HashMap<Entity, Vec<EffectKey>> = HashMap::new();
+    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+    for (inst, applied) in q.iter(world) {
+        let source = match &inst.source {
+            EffectSource::Spell => 0u8,
+            EffectSource::Item => 1,
+            EffectSource::Room => 2,
+            EffectSource::Admin => 3,
+            EffectSource::Other(_) => 4,
+        };
+        sets.entry(applied.0).or_default().push((
+            inst.kind,
+            inst.ability_id,
+            inst.strength,
+            source,
+        ));
+    }
+    let mut players = world.query_filtered::<Entity, (With<Connection>, With<GmcpSent>)>();
+    let players: Vec<Entity> = players.iter(world).collect();
+    let mut todo: Vec<Entity> = Vec::new();
+    for p in players {
+        let mut keys = sets.remove(&p).unwrap_or_default();
+        keys.sort_unstable();
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        keys.hash(&mut h);
+        let hash = h.finish();
+        let Some(mut sent) = world.get_mut::<GmcpSent>(p) else {
+            continue;
+        };
+        if !sent.0.contains_key("Char.Effects") {
+            continue;
+        }
+        let prev = sent.0.insert(EFFECT_SET_KEY, hash);
+        if prev.is_some_and(|prev| prev != hash) {
+            todo.push(p);
+        }
+    }
+    for p in todo {
+        let payload = build_char_effects(world, p);
+        send_if_changed(world, p, "Char.Effects", &payload, false);
+    }
+}
+
+/// `GmcpSent` key holding the hash of the effect *set* (not durations).
+const EFFECT_SET_KEY: &str = "Char.Effects.set";
 
 /// The `Char.Aggro` payload: mobs that have `target` on their hate list
 /// (`hating`) or in their memory (`remembering`), anywhere in the world.
