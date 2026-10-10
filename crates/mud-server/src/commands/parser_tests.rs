@@ -763,6 +763,36 @@ fn ability_prefix_prefers_spells_the_caster_knows() {
 }
 
 #[test]
+fn ability_lookup_resolves_the_full_display_name_of_an_abbreviated_plain_name() {
+    use crate::commands::test_support::ability_def;
+    use mud_db::abilities::AbilityKind::Spell;
+    use mud_world::AbilityCatalog;
+
+    let mut catalog = AbilityCatalog::default();
+    for (id, plain, display) in [
+        (1, "ray_of_enfeeb", "Ray of Enfeeblement"),
+        (2, "gaias_cloak", "<b:green>Gaia's Cloak</>"),
+        (3, "cause_critic", "Cause Critical"),
+        (4, "cause_light", "Cause Light"),
+    ] {
+        let mut def = ability_def(id, plain, Spell);
+        def.name = display.to_string();
+        catalog.by_name.insert(plain.to_string(), def);
+    }
+    let find = |n: &str| catalog.find_by_prefix(n, Some(Spell), None).map(|d| d.id);
+    // `cast 'ray of enfeeblement'` reaches the handler as underscores.
+    assert_eq!(find("ray_of_enfeeblement"), Some(1), "full display name");
+    assert_eq!(find("ray of enfeeblement"), Some(1));
+    assert_eq!(find("ray of enfeeb"), Some(1), "internal name still works");
+    assert_eq!(find("ray"), Some(1), "unique prefix");
+    assert_eq!(find("ray of enfeebl"), Some(1), "display-name prefix");
+    assert_eq!(find("cause critical"), Some(3));
+    assert_eq!(find("cause c"), Some(3));
+    assert_eq!(find("gaias cloak"), Some(2), "tags and apostrophes ignored");
+    assert_eq!(find("ray of enfeeblements"), None);
+}
+
+#[test]
 fn online_player_lookup_exact_name_beats_longer_prefix() {
     use crate::commands::find_online_player_anywhere;
     use mud_world::{Online, Player};

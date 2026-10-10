@@ -2256,6 +2256,23 @@ pub struct AbilityCatalog {
     pub components: HashMap<i32, Vec<AbilityComponentReq>>,
 }
 
+/// Display name reduced to matchable words: colour tags and apostrophes
+/// dropped (`<b:red>Gaia's Cloak</>` -> `Gaias Cloak`).
+fn display_key(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut in_tag = false;
+    for c in name.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            '\'' | '\u{2019}' if !in_tag => {}
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
 impl AbilityCatalog {
     /// Resolve a typed ability name (`invis`, `c l`, `magic missile`) with
     /// legacy semantics. An exact name wins; otherwise each typed word must
@@ -2280,7 +2297,13 @@ impl AbilityCatalog {
             .values()
             .filter(|d| kind.is_none_or(|k| d.kind == k))
         {
-            match rank_ability_name(needle, &d.plain_name) {
+            // The internal plain name can be a legacy abbreviation
+            // (`ray_of_enfeeb`); the full display name must resolve too.
+            let rank = match rank_ability_name(needle, &d.plain_name) {
+                NameRank::None => rank_ability_name(needle, &display_key(&d.name)),
+                r => r,
+            };
+            match rank {
                 NameRank::Exact => {
                     if exact.is_none_or(|e| key(d) < key(e)) {
                         exact = Some(d);
