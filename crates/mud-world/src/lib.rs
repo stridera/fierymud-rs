@@ -51,7 +51,7 @@ pub use loader::{
     reload_zones, wear_flags_primary_slot, wear_flags_slots,
 };
 pub use mob_ai_rules::{
-    AiAlign, AiCondition, AiKind, AiRule, AiTarget, MobAi, MobAiData, parse_conditions,
+    AiAlign, AiCondition, AiKind, AiRule, AiTarget, AlignMask, MobAi, MobAiData, parse_conditions,
 };
 pub use mob_effects::{actor_composition, mob_composition};
 pub use mob_spawn::{mob_ai_enabled, spawn_mob_from_proto};

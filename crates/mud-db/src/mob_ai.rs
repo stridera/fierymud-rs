@@ -1,12 +1,14 @@
-//! Mob spellcasting / skill AI rows: `ClassAiRules` (per class), `MobAbilities`
-//! (per-mob rules, used when `Mobs.ai_mode = CUSTOM`) and the non-default
-//! `Mobs.ai_mode` values.
+//! Mob spellcasting / skill AI rows: `ClassAiRules` (per class), `RaceAiRules`
+//! (per race: dragon breath and the like), `MobAbilities` (per-mob rules, used
+//! when `Mobs.ai_mode = CUSTOM`) and the non-default `Mobs.ai_mode` values.
 //!
-//! These objects come from `fierylib/data/sql/2026-10-10-mob-ai-schema.sql`,
-//! which prod applies by hand, so every query lives in its own function and the
-//! runtime loader treats a missing table / column as "no rows" (see
-//! `mud_world::mob_ai_rules::load_mob_ai_data`). Nothing here is read unless
-//! the `mob_ai.enabled` `GameConfig` flag is on.
+//! These objects come from `fierylib/data/sql/2026-10-10-mob-ai-schema.sql`
+//! and `2026-10-10-mob-ai-race.sql`, which prod applies by hand, so every
+//! query lives in its own function and the runtime loader treats any failure
+//! (missing table / column, undecodable row) as "no rows" (see
+//! `mud_world::loader::load_mob_ai_data`). The loader reads these tables at
+//! every boot; nothing *uses* them while the `mob_ai.enabled` `GameConfig`
+//! flag is off.
 
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -47,6 +49,44 @@ pub async fn list_class_rules(pool: &PgPool) -> sqlx::Result<Vec<ClassAiRuleRow>
         JOIN "Ability" a ON a.id = r.ability_id
         WHERE r.enabled
         ORDER BY r.class_id, r.priority, r.id
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// One enabled `RaceAiRules` row joined with its ability's type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RaceAiRuleRow {
+    /// `Race` enum text (`DRAGON_FIRE`).
+    pub race: String,
+    pub ability_id: i32,
+    pub ability_type: String,
+    pub priority: i32,
+    pub chance_pct: i32,
+    pub cooldown_s: i32,
+    pub conditions: Option<serde_json::Value>,
+    pub target: String,
+}
+
+/// Enabled race rules, ordered by race then priority (lower first).
+pub async fn list_race_rules(pool: &PgPool) -> sqlx::Result<Vec<RaceAiRuleRow>> {
+    sqlx::query_as!(
+        RaceAiRuleRow,
+        r#"
+        SELECT
+            r.race::text AS "race!: String",
+            r.ability_id,
+            a."abilityType" AS "ability_type!",
+            r.priority,
+            r.chance_pct,
+            r.cooldown_s,
+            r.conditions,
+            r.target
+        FROM "RaceAiRules" r
+        JOIN "Ability" a ON a.id = r.ability_id
+        WHERE r.enabled
+        ORDER BY r.race::text, r.priority, r.id
         "#,
     )
     .fetch_all(pool)

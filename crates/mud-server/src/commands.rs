@@ -583,7 +583,7 @@ pub(crate) use admin_reload::shutdown_poll;
 mod admin_world;
 #[path = "commands/attack_ok.rs"]
 mod attack_ok;
-pub(crate) use attack_ok::{attack_ok, is_servant};
+pub(crate) use attack_ok::{attack_ok, is_servant, servant_master};
 #[path = "commands/balance.rs"]
 mod balance;
 #[path = "commands/banish.rs"]
@@ -14710,6 +14710,59 @@ fn aoe_preflight(
     true
 }
 
+/// Where a spell's slot would come from right now: `None` when the spell is
+/// outside the slot model (off-class, classless caster), else
+/// `Ok((native circle, circle that would be used))`, or `Err((native circle,
+/// used, max))` when every slot at or above the native circle is spent or
+/// reserved. Legacy upcasting: when the native circle is spent, the lowest
+/// higher circle with an open slot is used.
+#[allow(clippy::type_complexity)]
+fn pick_spell_slot(
+    world: &World,
+    caster: Entity,
+    ability_id: i32,
+) -> Option<Result<(i32, i32), (i32, i32, i32)>> {
+    let class_id = crate::mob_ai::spell_class_id(world, caster)?;
+    let native = world
+        .resource::<mud_world::SpellSlotData>()
+        .ability_circle
+        .get(&(class_id, ability_id))
+        .copied()?;
+    let level = mud_world::effective_level(world, caster);
+    let max_circle = i32::try_from(mud_world::CIRCLE_RECOVER_TIME.len()).unwrap_or(1) - 1;
+    let slot_state = |circle: i32| {
+        let max = world
+            .resource::<mud_world::SpellSlotData>()
+            .progression
+            .get(&(level, circle))
+            .copied()
+            .unwrap_or(0);
+        let used = world
+            .get::<mud_world::SpellSlots>(caster)
+            .map_or(0, |s| s.used_in_circle(circle));
+        (used, max)
+    };
+    Some(
+        (native..=max_circle)
+            .find(|&c| {
+                let (used, max) = slot_state(c);
+                used < max
+            })
+            .map(|circle| (native, circle))
+            .ok_or_else(|| {
+                let (used, max) = slot_state(native);
+                (native, used, max)
+            }),
+    )
+}
+
+/// Whether `caster` has a slot for `def` (always true outside the slot
+/// model). The mob AI asks before it telegraphs or attempts a spell, so a
+/// mob out of slots stays quiet instead of retrying every round.
+pub(crate) fn spell_slot_open(world: &World, caster: Entity, ability_id: i32) -> bool {
+    !matches!(pick_spell_slot(world, caster, ability_id), Some(Err(_)))
+}
+
 /// Take a slot for a spell that is about to start, when the caster's
 /// class gives it a circle: refuse (message sent, `Err`) if every slot
 /// of that circle is spent or reserved, otherwise hold one and return
@@ -14721,48 +14774,20 @@ fn reserve_spell_slot(
     player: Entity,
     def: &mud_world::AbilityDef,
 ) -> Result<Option<u64>, ()> {
-    let Some(class_id) = crate::mob_ai::spell_class_id(world, player) else {
-        return Ok(None);
-    };
-    let Some(circle) = world
-        .resource::<mud_world::SpellSlotData>()
-        .ability_circle
-        .get(&(class_id, def.id))
-        .copied()
-    else {
-        return Ok(None);
-    };
-    let level = mud_world::effective_level(world, player);
-    let native = circle;
-    let max_circle = i32::try_from(mud_world::CIRCLE_RECOVER_TIME.len()).unwrap_or(1) - 1;
-    // Legacy upcasting: when the native circle is spent, use the lowest
-    // higher circle that still has an open slot.
-    let slot_state = |circle: i32| {
-        let max = world
-            .resource::<mud_world::SpellSlotData>()
-            .progression
-            .get(&(level, circle))
-            .copied()
-            .unwrap_or(0);
-        let used = world
-            .get::<mud_world::SpellSlots>(player)
-            .map_or(0, |s| s.used_in_circle(circle));
-        (used, max)
-    };
-    let Some(circle) = (native..=max_circle).find(|&c| {
-        let (used, max) = slot_state(c);
-        used < max
-    }) else {
-        let (used, max) = slot_state(native);
-        send_to(
-            world,
-            player,
-            format!(
-                "Your circle {native} slots are spent ({used}/{max}). \
-                 Wait for one to recover.\r\n"
-            ),
-        );
-        return Err(());
+    let (native, circle) = match pick_spell_slot(world, player, def.id) {
+        None => return Ok(None),
+        Some(Ok(pair)) => pair,
+        Some(Err((native, used, max))) => {
+            send_to(
+                world,
+                player,
+                format!(
+                    "Your circle {native} slots are spent ({used}/{max}). \
+                     Wait for one to recover.\r\n"
+                ),
+            );
+            return Err(());
+        }
     };
     if circle != native {
         send_to(

@@ -17,20 +17,20 @@ use crate::combat::COMBAT_PERIOD_TICKS;
 use crate::commands::test_support::{Rx, ability_def, drain, mob_proto, player_in};
 use crate::mob_ai::mob_combat_ai_tick;
 
-const CLASS: i32 = 7;
-const FIREBALL: i32 = 1;
-const HEAL: i32 = 2;
-const KICK: i32 = 3;
-const DOOM: i32 = 4;
-const BREATH: i32 = 5;
-const DISPEL: i32 = 6;
-const BLESS: i32 = 7;
-const FX_DAMAGE: i32 = 10;
-const FX_HEAL: i32 = 11;
-const FX_BUFF: i32 = 12;
-const PLAYER_HP: i32 = 10_000;
+pub(crate) const CLASS: i32 = 7;
+pub(crate) const FIREBALL: i32 = 1;
+pub(crate) const HEAL: i32 = 2;
+pub(crate) const KICK: i32 = 3;
+pub(crate) const DOOM: i32 = 4;
+pub(crate) const BREATH: i32 = 5;
+pub(crate) const DISPEL: i32 = 6;
+pub(crate) const BLESS: i32 = 7;
+pub(crate) const FX_DAMAGE: i32 = 10;
+pub(crate) const FX_HEAL: i32 = 11;
+pub(crate) const FX_BUFF: i32 = 12;
+pub(crate) const PLAYER_HP: i32 = 10_000;
 
-fn effect_def(id: i32, effect_type: &str) -> EffectDef {
+pub(crate) fn effect_def(id: i32, effect_type: &str) -> EffectDef {
     EffectDef {
         id,
         name: effect_type.to_string(),
@@ -48,7 +48,7 @@ fn effect_def(id: i32, effect_type: &str) -> EffectDef {
     }
 }
 
-fn catalog() -> AbilityCatalog {
+pub(crate) fn catalog() -> AbilityCatalog {
     let mut catalog = AbilityCatalog::default();
     let mut add = |id: i32, name: &str, kind: AbilityKind, violent: bool, rounds: i32, fx: i32| {
         let mut def = ability_def(id, name, kind);
@@ -76,7 +76,7 @@ fn catalog() -> AbilityCatalog {
     catalog
 }
 
-fn rule(ability_id: i32, kind: AiKind, target: AiTarget) -> AiRule {
+pub(crate) fn rule(ability_id: i32, kind: AiKind, target: AiTarget) -> AiRule {
     AiRule {
         ability_id,
         kind,
@@ -89,21 +89,21 @@ fn rule(ability_id: i32, kind: AiKind, target: AiTarget) -> AiRule {
     }
 }
 
-fn fireball(target: AiTarget) -> AiRule {
+pub(crate) fn fireball(target: AiTarget) -> AiRule {
     rule(FIREBALL, AiKind::Spell, target)
 }
 
-struct Fixture {
-    world: World,
-    room: Entity,
-    mob: Entity,
-    player: Entity,
-    rx: Rx,
+pub(crate) struct Fixture {
+    pub(crate) world: World,
+    pub(crate) room: Entity,
+    pub(crate) mob: Entity,
+    pub(crate) player: Entity,
+    pub(crate) rx: Rx,
 }
 
 /// A level 10 caster-class mob fighting a player in one room, `mob_ai.enabled`
 /// on, circle 1 holding `slots` slots for Fireball.
-fn fixture_with(rules: Vec<AiRule>, slots: i32) -> Fixture {
+pub(crate) fn fixture_with(rules: Vec<AiRule>, slots: i32) -> Fixture {
     let mut world = World::new();
     world.insert_resource(catalog());
     let mut effects = EffectCatalog::default();
@@ -162,11 +162,11 @@ fn fixture_with(rules: Vec<AiRule>, slots: i32) -> Fixture {
     }
 }
 
-fn fixture(rules: Vec<AiRule>) -> Fixture {
+pub(crate) fn fixture(rules: Vec<AiRule>) -> Fixture {
     fixture_with(rules, 5)
 }
 
-fn spawn_mob(
+pub(crate) fn spawn_mob(
     world: &mut World,
     room: Entity,
     name: &str,
@@ -196,7 +196,7 @@ fn spawn_mob(
     mob
 }
 
-fn set_flag(world: &mut World, key: &str, value: ConfigValue) {
+pub(crate) fn set_flag(world: &mut World, key: &str, value: ConfigValue) {
     world
         .resource_mut::<RuntimeConfig>()
         .by_key
@@ -204,20 +204,20 @@ fn set_flag(world: &mut World, key: &str, value: ConfigValue) {
 }
 
 /// Run combat round `n` (1-based) of the engine alone.
-fn round(world: &mut World, n: u64) -> std::collections::HashSet<Entity> {
+pub(crate) fn round(world: &mut World, n: u64) -> std::collections::HashSet<Entity> {
     world.insert_resource(TickCount(n * COMBAT_PERIOD_TICKS));
     mob_combat_ai_tick(world)
 }
 
-fn hp(world: &World, e: Entity) -> i32 {
+pub(crate) fn hp(world: &World, e: Entity) -> i32 {
     world.get::<Health>(e).unwrap().hp
 }
 
-fn last_used(world: &World, mob: Entity, idx: usize) -> Option<u64> {
+pub(crate) fn last_used(world: &World, mob: Entity, idx: usize) -> Option<u64> {
     world.get::<MobAi>(mob).unwrap().last_used(idx)
 }
 
-fn silence(world: &mut World, target: Entity) {
+pub(crate) fn silence(world: &mut World, target: Entity) {
     world.spawn((
         EffectInstance {
             kind: 999,
@@ -276,8 +276,8 @@ fn the_cast_replaces_the_melee_swing() {
         .get_mut::<MobAi>(g.mob)
         .unwrap()
         .mark_used(0, COMBAT_PERIOD_TICKS - 1);
-    // Three rounds so a one-in-a-hundred miss cannot fake a pass.
-    for n in 1..=3 {
+    // Many rounds so a run of misses cannot fake a pass (a swing can miss).
+    for n in 1..=12 {
         g.world.insert_resource(TickCount(n * COMBAT_PERIOD_TICKS));
         crate::combat::combat_tick(&mut g.world);
     }

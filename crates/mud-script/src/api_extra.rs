@@ -101,8 +101,9 @@ const DAMAGE_TYPES: [&str; 21] = [
 const CONTAINER_FLAGS: [&str; 4] = ["Closeable", "PickProof", "Closed", "Locked"];
 
 /// Fingerprint of the body about to run, stashed by the host right before
-/// a fire so `trigger_log` can name the trigger without the dispatcher
-/// having to pass its id. Only set for bodies that mention `trigger_log`.
+/// a fire so `trigger_log` (and the `wizard_notify` rate limit) can tell the
+/// trigger without the dispatcher having to pass its id. Only set for bodies
+/// that mention `trigger_log` or `wizard_notify`.
 #[derive(Clone, Copy)]
 pub(crate) struct TriggerFingerprint(pub u64);
 
@@ -122,7 +123,7 @@ pub(crate) fn code_fingerprint(code: &str) -> u64 {
 /// fingerprint when the body can reach `trigger_log`, clears it otherwise.
 pub(crate) fn note_fire(lua: &Lua, code: &str) {
     lua.remove_app_data::<TriggerFingerprint>();
-    if code.contains("trigger_log") {
+    if code.contains("trigger_log") || code.contains("wizard_notify") {
         lua.set_app_data(TriggerFingerprint(code_fingerprint(code)));
     }
 }
@@ -159,10 +160,27 @@ pub(crate) fn bind_globals(lua: &Lua, globals: &Table) -> mlua::Result<()> {
         .eval::<mlua::Function>()?,
     )?;
 
-    // wizard_notify(msg): legacy `wizn`, a line on the staff channel.
+    // The fingerprint belongs to the trigger, so it lives in the trigger's
+    // private environment and survives `wait`. `trigger_log` names the
+    // trigger by it and `wizard_notify` rate-limits by it.
+    let fp = if let Value::Integer(i) = globals.raw_get::<Value>("__trigger_fp")? {
+        i.cast_unsigned()
+    } else {
+        let fp = lua
+            .remove_app_data::<TriggerFingerprint>()
+            .map_or(0, |f| f.0);
+        globals.raw_set("__trigger_fp", fp.cast_signed())?;
+        fp
+    };
+    // wizard_notify(msg): legacy `wizn`, a line on the staff channel. A
+    // trigger may send one a minute: a looping or spammy script must not
+    // flood the staff.
     globals.set(
         "wizard_notify",
-        lua.create_function(|lua, args: Variadic<Value>| -> mlua::Result<()> {
+        lua.create_function(move |lua, args: Variadic<Value>| -> mlua::Result<()> {
+            if !wizard_notify_allowed(lua, fp, std::time::Instant::now()) {
+                return Ok(());
+            }
             wizard_notify(lua, &format_args(&args))
         })?,
     )?;
@@ -189,17 +207,6 @@ pub(crate) fn bind_globals(lua: &Lua, globals: &Table) -> mlua::Result<()> {
         })?,
     )?;
 
-    // trigger_log(...): the fingerprint belongs to the trigger, so it
-    // lives in the trigger's private environment and survives `wait`.
-    let fp = if let Value::Integer(i) = globals.raw_get::<Value>("__trigger_fp")? {
-        i.cast_unsigned()
-    } else {
-        let fp = lua
-            .remove_app_data::<TriggerFingerprint>()
-            .map_or(0, |f| f.0);
-        globals.raw_set("__trigger_fp", fp.cast_signed())?;
-        fp
-    };
     globals.set(
         "trigger_log",
         lua.create_function(move |lua, args: Variadic<Value>| -> mlua::Result<()> {
@@ -301,6 +308,32 @@ fn zone_echo(lua: &Lua, zone: i32, msg: &str) -> mlua::Result<()> {
             out.messages.push((room, msg.to_string(), None));
         }
     })
+}
+
+/// Minimum gap between two `wizard_notify` lines from one trigger.
+const WIZARD_NOTIFY_GAP: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// When each trigger (by body fingerprint; 0 = unknown) last got a
+/// `wizard_notify` line through.
+#[derive(Default)]
+struct WizardNotifyLog(HashMap<u64, std::time::Instant>);
+
+/// Whether the trigger with fingerprint `fp` may send a staff line at `now`;
+/// records the send when it may.
+fn wizard_notify_allowed(lua: &Lua, fp: u64, now: std::time::Instant) -> bool {
+    if lua.app_data_ref::<WizardNotifyLog>().is_none() {
+        lua.set_app_data(WizardNotifyLog::default());
+    }
+    let Some(mut log) = lua.app_data_mut::<WizardNotifyLog>() else {
+        return true;
+    };
+    if let Some(last) = log.0.get(&fp)
+        && now.saturating_duration_since(*last) < WIZARD_NOTIFY_GAP
+    {
+        return false;
+    }
+    log.0.insert(fp, now);
+    true
 }
 
 /// `wizard_notify(msg)`: one `[wiznet]` line to every online player of
@@ -1708,6 +1741,55 @@ mod tests {
             out.direct,
             vec![(god, "<b:cyan>[wiznet]</> Now starting!".to_string())]
         );
+    }
+
+    #[test]
+    fn wizard_notify_is_limited_to_one_line_a_minute_per_trigger() {
+        let f = fixture();
+        let t0 = std::time::Instant::now();
+        let lua = &f.host.lua;
+        assert!(wizard_notify_allowed(lua, 7, t0));
+        assert!(!wizard_notify_allowed(
+            lua,
+            7,
+            t0 + std::time::Duration::from_secs(59)
+        ));
+        // Another trigger has its own allowance.
+        assert!(wizard_notify_allowed(
+            lua,
+            8,
+            t0 + std::time::Duration::from_secs(59)
+        ));
+        assert!(wizard_notify_allowed(
+            lua,
+            7,
+            t0 + std::time::Duration::from_secs(60)
+        ));
+        assert!(!wizard_notify_allowed(
+            lua,
+            7,
+            t0 + std::time::Duration::from_secs(61)
+        ));
+    }
+
+    #[test]
+    fn a_spammy_wizard_notify_script_reaches_staff_once() {
+        let mut f = fixture();
+        f.world.spawn((
+            Player,
+            Online,
+            Named { name: "God".into() },
+            Account {
+                user_id: "u".into(),
+                character_id: "c".into(),
+                role: UserRole::Immortal,
+                account_role: UserRole::Immortal,
+                perms: vec![],
+            },
+            Located(f.far_room),
+        ));
+        f.ok("for i = 1, 5 do wizard_notify('spam ' .. i) end");
+        assert_eq!(f.world.resource::<LuaOutbox>().direct.len(), 1);
     }
 
     // ----- actor:cast -----

@@ -33,6 +33,10 @@ mod login;
 mod memorize;
 mod mob_ai;
 #[cfg(test)]
+mod mob_ai_conditions_tests;
+#[cfg(test)]
+mod mob_ai_idle_tests;
+#[cfg(test)]
 mod mob_ai_loader_tests;
 #[cfg(test)]
 mod mob_combat_ai_tests;
@@ -618,8 +622,14 @@ async fn main() {
                 timed!(wander::wander_tick),
                 timed!(wander::scavenger_tick),
                 timed!(wander::mob_hide_tick),
-                // Mob AI pulse: pick fights first, then helpers join them.
-                (timed!(wander::aggro_tick), timed!(wander::assist_tick)).chain(),
+                // Mob AI pulse: pick fights first, then helpers join them; mobs
+                // left at peace buff, cure and meditate (behind `mob_ai.enabled`).
+                (
+                    timed!(wander::aggro_tick),
+                    timed!(wander::assist_tick),
+                    timed!(wander::mob_idle_ai_tick),
+                )
+                    .chain(),
                 timed!(idle::idle_kick_tick),
                 timed!(camp::camp_tick),
                 timed!(memorize::memorize_tick),

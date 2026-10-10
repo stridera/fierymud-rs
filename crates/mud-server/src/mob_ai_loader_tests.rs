@@ -212,3 +212,112 @@ async fn missing_tables_degrade_to_empty_rules() {
         .await
         .expect("drop schema");
 }
+
+/// `RaceAiRules` rows load into `by_race`, keyed by lowercase race text, in
+/// priority order; a disabled row and a row with a bad condition are dropped.
+#[tokio::test]
+async fn race_rules_round_trip_through_the_loader() {
+    let _lock = db_test_lock().await;
+    let Some(pool) = single_conn_pool().await else {
+        eprintln!("skipped: dev database unreachable");
+        return;
+    };
+    if sqlx::query("SELECT conditions FROM \"RaceAiRules\" LIMIT 1")
+        .execute(&pool)
+        .await
+        .is_err()
+    {
+        eprintln!("skipped: dev database without the RaceAiRules patch");
+        return;
+    }
+    let skill: Option<(i32,)> = sqlx::query_as(
+        "SELECT id FROM \"Ability\" WHERE \"abilityType\" = 'SKILL' ORDER BY id LIMIT 1",
+    )
+    .fetch_optional(&pool)
+    .await
+    .unwrap();
+    let Some((skill,)) = skill else {
+        eprintln!("skipped: dev database has no skill");
+        return;
+    };
+    sqlx::query("BEGIN").execute(&pool).await.unwrap();
+    let result = async {
+        sqlx::query("DELETE FROM \"RaceAiRules\"").execute(&pool).await?;
+        for (priority, cond, enabled) in [
+            (20, r#"{"in_combat": true, "level_roll": {"min": 5, "max": 10}}"#, true),
+            (10, r#"{"in_combat": true, "level_roll": {"min": 0, "max": 5}, "composition": ["FIRE", "LAVA"]}"#, true),
+            (30, r"{}", false),
+            (40, r#"{"level_roll": {"min": 9, "max": 2}}"#, true),
+        ] {
+            sqlx::query(
+                "INSERT INTO \"RaceAiRules\" (race, ability_id, priority, chance_pct, cooldown_s, \
+                 conditions, target, enabled) VALUES ('DRAGON_FIRE', $1, $2, 100, 0, $3::jsonb, 'auto', $4)",
+            )
+            .bind(skill)
+            .bind(priority)
+            .bind(cond)
+            .bind(enabled)
+            .execute(&pool)
+            .await?;
+        }
+        let mut world = World::new();
+        mud_world::load_mob_ai_data(&mut world, &pool).await?;
+        Ok::<_, sqlx::Error>(world)
+    }
+    .await;
+    sqlx::query("ROLLBACK").execute(&pool).await.unwrap();
+    let world = result.expect("round trip");
+    let data = world.resource::<MobAiData>();
+    let rules = &data.by_race["dragon_fire"];
+    assert_eq!(rules.len(), 2, "disabled and bad-value rows are dropped");
+    assert_eq!(rules[0].priority, 10);
+    assert_eq!(rules[0].kind, AiKind::Skill);
+    assert_eq!(rules[0].target, AiTarget::Auto);
+    assert!(
+        rules[0]
+            .when
+            .contains(&AiCondition::LevelRoll { min: 0, max: 5 })
+    );
+    assert!(rules[0].when.contains(&AiCondition::Composition(vec![
+        mud_db::enums::Composition::Fire,
+        mud_db::enums::Composition::Lava,
+    ])));
+    assert_eq!(rules[1].priority, 20);
+}
+
+/// A table that exists but will not decode (here: a `conditions` column holding text that is not JSON)
+/// is no reason to fail the boot either: the loader logs it and carries on
+/// with no rows for that table.
+#[tokio::test]
+async fn an_undecodable_table_degrades_to_empty_rules() {
+    let _lock = db_test_lock().await;
+    let Some(pool) = single_conn_pool().await else {
+        eprintln!("skipped: dev database unreachable");
+        return;
+    };
+    for stmt in [
+        "DROP SCHEMA IF EXISTS mob_ai_bad CASCADE",
+        "CREATE SCHEMA mob_ai_bad",
+        "SET search_path TO mob_ai_bad",
+        "CREATE TABLE \"Ability\" (id int, \"abilityType\" text)",
+        "INSERT INTO \"Ability\" VALUES (1, 'SKILL')",
+        "CREATE TABLE \"ClassAiRules\" (id int, class_id int, ability_id int, priority int, \
+         chance_pct int, cooldown_s int, conditions text, target text, min_level int, enabled bool)",
+        "INSERT INTO \"ClassAiRules\" VALUES (1, 1, 1, 1, 100, 0, 'not json', 'self', NULL, true)",
+    ] {
+        sqlx::query(stmt).execute(&pool).await.expect(stmt);
+    }
+    let mut world = World::new();
+    let res = mud_world::load_mob_ai_data(&mut world, &pool).await;
+    sqlx::query("SET search_path TO public")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP SCHEMA mob_ai_bad CASCADE")
+        .execute(&pool)
+        .await
+        .unwrap();
+    res.expect("an undecodable AI table must not fail the boot");
+    let data = world.resource::<MobAiData>();
+    assert!(data.by_class.is_empty() && data.by_race.is_empty());
+}

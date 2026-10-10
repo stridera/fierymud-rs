@@ -196,38 +196,68 @@ pub async fn load_content_tables(world: &mut World, pool: &PgPool) -> sqlx::Resu
     Ok(())
 }
 
-/// Load the mob spell / skill AI rule tables (`ClassAiRules`, `MobAbilities`
-/// rule columns, `Mobs.ai_mode`) into a [`MobAiData`] resource. The objects
-/// come from `fierylib/data/sql/2026-10-10-mob-ai-schema.sql`, which prod
-/// applies by hand, so a missing table / column logs an ERROR and leaves the
-/// affected part empty instead of failing the boot. The resource is inserted
-/// either way. Nothing consumes it while `mob_ai.enabled` is off.
+/// Rows of a mob AI table, or none: any error (a missing table / column, or a
+/// row that will not decode) logs an ERROR and leaves the table empty. Mob AI
+/// sits behind `mob_ai.enabled`, so a bad AI table must never keep the server
+/// from booting.
+fn mob_ai_rows<T>(res: sqlx::Result<Vec<T>>, what: &str, fix: &str, consequence: &str) -> Vec<T> {
+    match res {
+        Ok(rows) => rows,
+        Err(e) if is_missing_schema(&e) => {
+            let e = schema_gap(e, what, fix);
+            error!("{e}; booting with no rows ({consequence})");
+            Vec::new()
+        }
+        Err(e) => {
+            error!("mob AI: could not read {what}: {e}; booting with no rows ({consequence})");
+            Vec::new()
+        }
+    }
+}
+
+/// Load the mob spell / skill AI rule tables (`ClassAiRules`, `RaceAiRules`,
+/// `MobAbilities` rule columns, `Mobs.ai_mode`) into a [`MobAiData`] resource.
+/// The objects come from `fierylib/data/sql/2026-10-10-mob-ai-schema.sql` and
+/// `2026-10-10-mob-ai-race.sql`, which prod applies by hand. Whatever goes
+/// wrong with a table (missing, undecodable) logs an ERROR and leaves it
+/// empty; the boot never fails over mob AI. The queries run whether or not
+/// `mob_ai.enabled` is on (they are a handful of small reads); nothing
+/// consumes the resource while it is off.
 ///
 /// # Errors
-/// Any database error other than a missing table / column.
+/// None at present; the signature stays fallible for the caller's `?`.
+#[allow(clippy::unused_async, clippy::too_many_lines)]
 pub async fn load_mob_ai_data(world: &mut World, pool: &PgPool) -> sqlx::Result<()> {
     use crate::mob_ai_rules::{AiRule, MobAiData, RawRule, RuleDiagnostics, build_rule};
 
     const FIX: &str =
         "apply fierylib/data/sql/2026-10-10-mob-ai-schema.sql (and deploy the muditor schema)";
-    let class_rows = rows_or_empty_with_fix(
+    const RACE_FIX: &str =
+        "apply fierylib/data/sql/2026-10-10-mob-ai-race.sql (and deploy the muditor schema)";
+    let class_rows = mob_ai_rows(
         mob_ai::list_class_rules(pool).await,
         "table \"ClassAiRules\"",
         FIX,
         "class mobs have no spell / skill AI rules",
-    )?;
-    let mob_rows = rows_or_empty_with_fix(
+    );
+    let race_rows = mob_ai_rows(
+        mob_ai::list_race_rules(pool).await,
+        "table \"RaceAiRules\"",
+        RACE_FIX,
+        "dragons and demons have no breath / sweep / roar AI",
+    );
+    let mob_rows = mob_ai_rows(
         mob_ai::list_mob_rules(pool).await,
         "\"MobAbilities\" rule columns",
         FIX,
         "CUSTOM mobs have no spell / skill AI rules",
-    )?;
-    let mode_rows = rows_or_empty_with_fix(
+    );
+    let mode_rows = mob_ai_rows(
         mob_ai::list_non_class_modes(pool).await,
         "column \"Mobs\".\"ai_mode\"",
         FIX,
         "every mob uses its class rules",
-    )?;
+    );
 
     let mut diag = RuleDiagnostics::default();
     let mut by_class: HashMap<i32, Vec<AiRule>> = HashMap::new();
@@ -244,6 +274,25 @@ pub async fn load_mob_ai_data(world: &mut World, pool: &PgPool) -> sqlx::Result<
         };
         if let Some(rule) = build_rule(&raw, &mut diag) {
             by_class.entry(r.class_id).or_default().push(rule);
+        }
+    }
+    let mut by_race: HashMap<String, Vec<AiRule>> = HashMap::new();
+    for r in &race_rows {
+        let raw = RawRule {
+            ability_id: r.ability_id,
+            ability_type: &r.ability_type,
+            priority: r.priority,
+            chance_pct: r.chance_pct,
+            cooldown_s: r.cooldown_s,
+            conditions: r.conditions.as_ref(),
+            target: Some(&r.target),
+            min_level: None,
+        };
+        if let Some(rule) = build_rule(&raw, &mut diag) {
+            by_race
+                .entry(r.race.to_ascii_lowercase())
+                .or_default()
+                .push(rule);
         }
     }
     let mut by_mob: HashMap<(i32, i32), Vec<AiRule>> = HashMap::new();
@@ -272,16 +321,18 @@ pub async fn load_mob_ai_data(world: &mut World, pool: &PgPool) -> sqlx::Result<
         warn!("mob AI rule dropped: {why}");
     }
 
-    let data = MobAiData {
-        by_class: by_class.into_iter().map(|(k, v)| (k, v.into())).collect(),
-        by_mob: by_mob.into_iter().map(|(k, v)| (k, v.into())).collect(),
-        modes: mode_rows
+    let data = MobAiData::new(
+        by_class.into_iter().map(|(k, v)| (k, v.into())).collect(),
+        by_race.into_iter().map(|(k, v)| (k, v.into())).collect(),
+        by_mob.into_iter().map(|(k, v)| (k, v.into())).collect(),
+        mode_rows
             .into_iter()
             .map(|r| ((r.zone_id, r.id), r.ai_mode))
             .collect(),
-    };
+    );
     info!(
         classes = data.by_class.len(),
+        races = data.by_race.len(),
         custom_mobs = data.by_mob.len(),
         non_class_modes = data.modes.len(),
         "MobAiData loaded"

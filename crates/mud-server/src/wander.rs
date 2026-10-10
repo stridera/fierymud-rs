@@ -392,6 +392,19 @@ pub fn scavenger_tick(world: &mut World) {
     }
 }
 
+/// Idle mob spell / skill AI (legacy `mobile_activity` -> `check_mob_status`
+/// and `check_spellbank`, every `PULSE_MOBILE` = [`SCAVENGER_PERIOD_TICKS`]):
+/// mobs with a `MobAi` that are at peace in a room with a player buff and cure
+/// themselves, and casters with spent slots sit down to meditate. Does nothing
+/// unless `mob_ai.enabled` is on. See [`crate::mob_ai::mob_idle_ai_tick`].
+pub fn mob_idle_ai_tick(world: &mut World) {
+    let tick = world.resource::<TickCount>().0;
+    if !tick.is_multiple_of(SCAVENGER_PERIOD_TICKS) {
+        return;
+    }
+    crate::mob_ai::mob_idle_ai_tick(world);
+}
+
 /// Mob assist pulse (legacy `mobile_activity` -> `mob_assist`, every
 /// `PULSE_MOBILE` = [`SCAVENGER_PERIOD_TICKS`]): lets helper, protector and
 /// peacekeeper mobs join fights already underway in their room.

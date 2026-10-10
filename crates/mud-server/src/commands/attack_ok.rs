@@ -62,6 +62,16 @@ pub(super) fn pet_owner(world: &World, entity: Entity) -> Option<Entity> {
     world.get::<Player>(master).is_some().then_some(master)
 }
 
+/// The master of a servant (a player's pet, or a mob charmed by anyone), read
+/// only. `None` for a free mob, a player or anyone not following.
+pub(crate) fn servant_master(world: &World, entity: Entity) -> Option<Entity> {
+    if let Some(owner) = pet_owner(world, entity) {
+        return Some(owner);
+    }
+    let master = world.get::<Follower>(entity).map(|f| f.0)?;
+    (world.get::<Mob>(entity).is_some() && is_charmed_ro(world, entity)).then_some(master)
+}
+
 /// The master of a pet, if `entity` is one (any player-followed mob, or a
 /// charmed mob following anyone).
 fn charm_master(world: &mut World, entity: Entity) -> Option<Entity> {

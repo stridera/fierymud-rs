@@ -1,5 +1,9 @@
 //! Spell-slot recovery tick. Decrements `secs_remaining` on the
-//! oldest in-flight cooldown per circle for every online caster.
+//! oldest in-flight cooldown per circle for every online caster, and for every
+//! caster mob running spell AI (a mob carries `MobAi` only with
+//! `mob_ai.enabled` on, so with it off this tick sees players alone). A mob
+//! recovers on the same ladder: sitting doubles the pace, and a meditating mob
+//! (see `mob_ai::mob_idle_ai_tick`) doubles it again.
 //!
 //! Rate model:
 //!   posture base    Standing/Kneeling=1, Sitting=2, Resting=3, Sleeping=4
@@ -19,7 +23,7 @@
 //! focus / combat) is now richer than the early MVP.
 
 use bevy_ecs::prelude::*;
-use mud_world::{Fighting, Focus, Meditating, Online, Posture, PostureKind, SpellSlots};
+use mud_world::{Fighting, Focus, Meditating, MobAi, Online, Posture, PostureKind, SpellSlots};
 
 use crate::TickCount;
 use crate::commands::{Concentrating, send_to};
@@ -80,7 +84,7 @@ pub fn memorize_tick(world: &mut World) {
             Option<&Focus>,
             Option<&Fighting>,
             Option<&Concentrating>,
-        ), With<Online>>();
+        ), Or<(With<Online>, With<MobAi>)>>();
         for (entity, posture, mut slots, meditating, focus, fighting, concentrating) in
             q.iter_mut(world)
         {
@@ -136,6 +140,10 @@ pub fn memorize_tick(world: &mut World) {
     }
 
     for (entity, circles) in restored {
+        // A mob has no one to tell.
+        if world.get::<Online>(entity).is_none() {
+            continue;
+        }
         for circle in circles {
             send_to(
                 world,

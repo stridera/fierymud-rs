@@ -188,3 +188,137 @@ fn no_class_ai_behavior_gets_nothing() {
     assert!(world.get::<MobAi>(mob).is_none());
     assert!(world.get::<SpellSlots>(mob).is_none());
 }
+
+// ---- race rules (WP-D) ----
+
+fn breath_rules() -> Arc<[AiRule]> {
+    Arc::from(vec![rule(40, 10), rule(41, 20)])
+}
+
+fn proto_of_race(id: i32, class_id: Option<i32>, race: &str) -> mud_world::MobProto {
+    let mut p = proto(id, class_id);
+    p.race = race.to_string();
+    p
+}
+
+fn world_with_race_rules(enabled: bool) -> (World, Entity) {
+    let (mut world, room) = world_with(enabled);
+    world
+        .resource_mut::<MobAiData>()
+        .by_race
+        .insert("dragon_fire".into(), breath_rules());
+    (world, room)
+}
+
+#[test]
+fn flag_off_gives_a_dragon_nothing() {
+    let (mut world, room) = world_with_race_rules(false);
+    let dragon = mud_world::spawn_mob_from_proto(
+        &mut world,
+        &proto_of_race(1, Some(WARRIOR_CLASS), "DRAGON_FIRE"),
+        room,
+        None,
+    );
+    assert!(world.get::<MobAi>(dragon).is_none());
+}
+
+#[test]
+fn a_classless_dragon_gets_just_its_race_rules() {
+    let (mut world, room) = world_with_race_rules(true);
+    let dragon = mud_world::spawn_mob_from_proto(
+        &mut world,
+        &proto_of_race(1, None, "DRAGON_FIRE"),
+        room,
+        None,
+    );
+    let ai = world.get::<MobAi>(dragon).expect("race rules attached");
+    assert!(Arc::ptr_eq(
+        &ai.rules,
+        &world.resource::<MobAiData>().by_race["dragon_fire"]
+    ));
+    assert!(world.get::<SpellSlots>(dragon).is_none());
+}
+
+#[test]
+fn race_rules_run_ahead_of_the_class_rules() {
+    let (mut world, room) = world_with_race_rules(true);
+    let dragon = mud_world::spawn_mob_from_proto(
+        &mut world,
+        &proto_of_race(1, Some(CASTER_CLASS), "DRAGON_FIRE"),
+        room,
+        None,
+    );
+    let ids: Vec<i32> = world
+        .get::<MobAi>(dragon)
+        .expect("merged rules")
+        .rules
+        .iter()
+        .map(|r| r.ability_id)
+        .collect();
+    assert_eq!(ids, vec![40, 41, 11, 12], "race first, then the class kit");
+    assert!(
+        world.get::<SpellSlots>(dragon).is_some(),
+        "caster class keeps its slots"
+    );
+}
+
+#[test]
+fn the_merged_list_is_shared_between_mobs() {
+    let (mut world, room) = world_with_race_rules(true);
+    let p = proto_of_race(1, Some(WARRIOR_CLASS), "DRAGON_FIRE");
+    let a = mud_world::spawn_mob_from_proto(&mut world, &p, room, None);
+    let b = mud_world::spawn_mob_from_proto(&mut world, &p, room, None);
+    assert!(Arc::ptr_eq(
+        &world.get::<MobAi>(a).unwrap().rules,
+        &world.get::<MobAi>(b).unwrap().rules
+    ));
+}
+
+#[test]
+fn a_race_without_rules_keeps_the_plain_class_list() {
+    let (mut world, room) = world_with_race_rules(true);
+    let orc = mud_world::spawn_mob_from_proto(
+        &mut world,
+        &proto_of_race(1, Some(WARRIOR_CLASS), "ORC"),
+        room,
+        None,
+    );
+    assert!(Arc::ptr_eq(
+        &world.get::<MobAi>(orc).unwrap().rules,
+        &world.resource::<MobAiData>().by_class[&WARRIOR_CLASS]
+    ));
+}
+
+#[test]
+fn no_class_ai_and_ai_modes_switch_race_rules_off_too() {
+    let (mut world, room) = world_with_race_rules(true);
+    let mut p = proto_of_race(1, Some(WARRIOR_CLASS), "DRAGON_FIRE");
+    p.behaviors = vec![MobBehavior::NoClassAi];
+    let quiet = mud_world::spawn_mob_from_proto(&mut world, &p, room, None);
+    assert!(
+        world.get::<MobAi>(quiet).is_none(),
+        "NoClassAi silences the breath too"
+    );
+    // A CUSTOM dragon runs exactly its own list.
+    let custom = mud_world::spawn_mob_from_proto(
+        &mut world,
+        &proto_of_race(3, None, "DRAGON_FIRE"),
+        room,
+        None,
+    );
+    let ids: Vec<i32> = world
+        .get::<MobAi>(custom)
+        .unwrap()
+        .rules
+        .iter()
+        .map(|r| r.ability_id)
+        .collect();
+    assert_eq!(ids, vec![99]);
+    let none = mud_world::spawn_mob_from_proto(
+        &mut world,
+        &proto_of_race(4, None, "DRAGON_FIRE"),
+        room,
+        None,
+    );
+    assert!(world.get::<MobAi>(none).is_none());
+}
