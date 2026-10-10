@@ -4002,8 +4002,8 @@ impl ConnRouter {
     }
 
     /// The previous-session wait ended: refuse the login if the save is
-    /// still failing, else reload the character row (it was read before the
-    /// wait, so its stats may predate the save) and finish logging in.
+    /// still failing, else finish logging in (which re-reads the character
+    /// row: it was read before the wait, so its stats may predate the save).
     async fn finish_save_wait(
         &mut self,
         conn_id: ConnId,
@@ -4022,15 +4022,8 @@ impl ConnRouter {
             );
             return;
         }
-        let fresh = match reload_character_row(pool, &char_row, self.load_fault).await {
-            Ok(fresh) => fresh,
-            Err(failure) => {
-                failure.log(conn_id, &char_row.id);
-                self.refuse_login(conn_id, LOAD_FAILED_MESSAGE);
-                return;
-            }
-        };
-        self.complete_login_inner(conn_id, world, pool, user, fresh, true)
+        // `complete_login_inner` re-reads the row under the character's turn.
+        self.complete_login_inner(conn_id, world, pool, user, char_row, true)
             .await;
     }
 
@@ -4073,6 +4066,31 @@ impl ConnRouter {
             self.start_save_wait(conn_id, coordinator, user, char_row);
             return;
         }
+        // The character's write turn, from the row read to the spawned
+        // entity. Anything that writes this character's rows from outside
+        // the world (an offline quest item grant) takes the same turn, so
+        // it lands before the reads below or sees the live session.
+        let coordinator = world
+            .get_resource::<SaveCoordinator>()
+            .cloned()
+            .unwrap_or_default();
+        let ordered = coordinator.begin_ordered(&char_row.id).await;
+        // Updates queued for this (still absent) character were written to
+        // the database before they were queued, so the fresh row below
+        // already holds them: let the inbox discard them now rather than
+        // apply them a second time to the spawned entity. (The row passed in
+        // can be minutes old: character select waits on a human.)
+        if world.contains_resource::<commands::PlayerUpdateInbox>() {
+            commands::drain_player_updates(world);
+        }
+        let char_row = match reload_character_row(pool, &char_row, self.load_fault).await {
+            Ok(fresh) => fresh,
+            Err(failure) => {
+                failure.log(conn_id, &char_row.id);
+                self.refuse_login(conn_id, LOAD_FAILED_MESSAGE);
+                return;
+            }
+        };
         // Every per-character table the save path rewrites is loaded
         // here; a failed load refuses the login instead of continuing
         // with empty state that the next save would write over the
@@ -4146,6 +4164,10 @@ impl ConnRouter {
         let LoginCtx { outbound, .. } = self.login.remove(&conn_id).unwrap();
         let entity = spawn_player(world, &user, &char_row, outbound);
         let item_count = spawn_inventory(world, entity, &item_rows);
+        // From here the entity is the truth for this character: a grant that
+        // takes the turn next must go through the world, not the rows.
+        coordinator.set_session_live(&char_row.id, true);
+        drop(ordered);
         // Apply gear stat bonuses (ObjectAffects), per-element
         // resistances (ObjectResistance), and wear-granted effects
         // (ObjectEffects) for every item that just respawned with
@@ -10926,6 +10948,93 @@ mod tests {
         .unwrap();
         assert_eq!(rows.len(), 2, "both the carried and the worn item saved");
         drop_item_rows(&pool, &[&c.id]).await;
+        temp_cleanup(&pool, &[], &[&c.id], &[]).await;
+    }
+
+    /// A reward item for an offline character is granted under their save
+    /// turn. While a login holds that turn (reading the pack) the grant
+    /// waits; once the character is live it goes back through the world
+    /// instead of inserting a row the session's first save would delete.
+    #[tokio::test(flavor = "current_thread")]
+    async fn offline_item_grant_waits_for_login_and_then_goes_through_the_world() {
+        let mut world = World::new();
+        let coordinator = SaveCoordinator::default();
+        world.insert_resource(coordinator.clone());
+        world.insert_resource(commands::DbPool(failing_pool()));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        world.insert_resource(commands::PlayerUpdateTx(tx));
+
+        // Login mid-load: holds the turn.
+        let login_turn = coordinator.begin_ordered("grant-cid").await;
+        commands::grant_item_to_offline(&world, "grant-cid".to_string(), 3, 4, 2);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(rx.try_recv().is_err(), "the grant must wait for the turn");
+        // Login finishes: the entity exists.
+        coordinator.set_session_live("grant-cid", true);
+        drop(login_turn);
+        let msg = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("re-sent")
+            .unwrap();
+        assert!(matches!(
+            msg,
+            commands::PendingPlayerUpdate::SpawnItem {
+                ref character_id,
+                object_zone: 3,
+                object_id: 4,
+                quantity: 2,
+            } if character_id == "grant-cid"
+        ));
+        assert!(coordinator.flush(&mut world, Duration::from_secs(5)).await);
+    }
+
+    /// Login re-reads the character row under their turn and discards
+    /// updates queued for the (absent) character: the reward gold was
+    /// written to the database before it was queued, so a row read after it
+    /// already holds it and applying the queued delta would pay it twice.
+    #[tokio::test(flavor = "current_thread")]
+    async fn login_reads_a_fresh_row_and_does_not_replay_queued_rewards() {
+        let Some((pool, _db_lock)) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let (user, c) = temp_unlinked_char(&pool, "freshrow").await;
+        let stale = (*c).clone();
+        // The reward is written, queued, and then the player (whose row was
+        // read at auth time, before the write) finishes logging in.
+        mud_db::sqlx::query("UPDATE \"Characters\" SET wealth = wealth + 250 WHERE id = $1")
+            .bind(&c.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut world = auth_world(3);
+        enter_game_room(&mut world);
+        world.insert_resource(mud_world::RaceDefaults::default());
+        world.insert_resource(SaveCoordinator::default());
+        let (tx, inbox_rx) = tokio::sync::mpsc::channel(8);
+        world.insert_resource(commands::PlayerUpdateInbox(std::sync::Mutex::new(inbox_rx)));
+        tx.try_send(commands::PendingPlayerUpdate::WealthDelta {
+            character_id: c.id.clone(),
+            amount: 250,
+        })
+        .unwrap();
+        let (mut router, _orx) = load_guard_router(&world);
+        router
+            .complete_login(1, &mut world, &pool, user, stale.clone())
+            .await;
+        let entity = *router.playing.get(&1).expect("logged in");
+        assert_eq!(
+            world.get::<Wealth>(entity).unwrap().0,
+            stale.wealth + 250,
+            "stale row or double-applied reward"
+        );
+        // The queued delta was consumed by the login, not left for the tick.
+        commands::drain_player_updates(&mut world);
+        assert_eq!(world.get::<Wealth>(entity).unwrap().0, stale.wealth + 250);
+        assert!(
+            world.resource::<SaveCoordinator>().session_live(&c.id),
+            "login marks the character live"
+        );
         temp_cleanup(&pool, &[], &[&c.id], &[]).await;
     }
 

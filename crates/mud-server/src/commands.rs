@@ -163,8 +163,14 @@ impl PendingPlayerUpdate {
 }
 
 /// Insert a reward item for a character who is no longer in the world.
-/// Background write; a failure is logged with enough detail to restore it.
-fn grant_item_to_offline(
+///
+/// Runs under the character's save-order turn, which login also holds from
+/// its fresh row read to the spawned entity: the insert either lands before
+/// login reads the pack, or finds the character live and goes back through
+/// the update channel to be spawned in memory (a row written behind a live
+/// session's back is deleted by that session's next save). A failure is
+/// logged with enough detail to restore it. Tracked, so shutdown waits.
+pub(crate) fn grant_item_to_offline(
     world: &World,
     character_id: String,
     object_zone: i32,
@@ -174,7 +180,37 @@ fn grant_item_to_offline(
     let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
         return;
     };
-    tokio::spawn(async move {
+    let coordinator = world
+        .get_resource::<crate::autosave::SaveCoordinator>()
+        .cloned()
+        .unwrap_or_default();
+    let update_tx = world.get_resource::<PlayerUpdateTx>().map(|t| t.0.clone());
+    let turns = coordinator.clone();
+    coordinator.spawn_tracked(async move {
+        let ordered = turns.begin_ordered(&character_id).await;
+        if turns.session_live(&character_id) {
+            // Logged in since the drain found them gone.
+            drop(ordered);
+            let sent = match update_tx {
+                Some(tx) => tx
+                    .send(PendingPlayerUpdate::SpawnItem {
+                        character_id: character_id.clone(),
+                        object_zone,
+                        object_id,
+                        quantity,
+                    })
+                    .await
+                    .is_ok(),
+                None => false,
+            };
+            if !sent {
+                tracing::error!(
+                    %character_id, object_zone, object_id, quantity,
+                    "quest reward item for a character who logged in was lost"
+                );
+            }
+            return;
+        }
         if let Err(e) = mud_db::character_items::grant_items(
             &pool,
             &character_id,
@@ -251,6 +287,10 @@ pub fn drain_player_updates(world: &mut World) {
                 quantity,
             } = msg
             {
+                // No entity: whatever the live flag says is stale.
+                if let Some(c) = world.get_resource::<crate::autosave::SaveCoordinator>() {
+                    c.set_session_live(&character_id, false);
+                }
                 grant_item_to_offline(world, character_id, object_zone, object_id, quantity);
             }
             continue;

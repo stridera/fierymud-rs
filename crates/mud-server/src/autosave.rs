@@ -124,6 +124,12 @@ struct Slot {
     /// Set after a failed background write: the character is not retried
     /// before this instant.
     retry_after: Mutex<Option<Instant>>,
+    /// The character has a live entity in the world (set by login once the
+    /// entity is spawned, under the character's turn). A write that targets
+    /// an offline character's database rows checks this under the turn: a
+    /// row inserted behind a live session's back is deleted by that
+    /// session's next save.
+    session_live: AtomicBool,
 }
 
 impl Slot {
@@ -135,6 +141,7 @@ impl Slot {
             outstanding: AtomicUsize::new(0),
             last_save: Mutex::new(Instant::now()),
             retry_after: Mutex::new(None),
+            session_live: AtomicBool::new(false),
         }
     }
 
@@ -267,6 +274,17 @@ impl Drop for PendingGuard {
     }
 }
 
+/// Keeps `pending` accurate for a detached tracked task.
+struct TrackGuard(Arc<Shared>);
+
+impl Drop for TrackGuard {
+    fn drop(&mut self) {
+        if self.0.pending.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.0.idle.notify_waiters();
+        }
+    }
+}
+
 impl SaveCoordinator {
     pub(crate) fn new(max_background_writers: usize) -> Self {
         Self(Arc::new(Shared {
@@ -298,6 +316,40 @@ impl SaveCoordinator {
             slot,
             last_committed,
         }
+    }
+
+    /// Run a detached task that shutdown ([`Self::flush`]) waits for, for
+    /// writes that are not part of any character's save order (a retried
+    /// row delete). Must be called inside a tokio runtime.
+    pub(crate) fn spawn_tracked<Fut>(&self, fut: Fut)
+    where
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let shared = Arc::clone(&self.0);
+        shared.pending.fetch_add(1, Ordering::SeqCst);
+        let guard = TrackGuard(shared);
+        tokio::spawn(async move {
+            let _guard = guard;
+            fut.await;
+        });
+    }
+
+    /// Mark whether `character_id` has a live entity (see
+    /// [`Slot::session_live`]).
+    pub(crate) fn set_session_live(&self, character_id: &str, live: bool) {
+        self.slot(character_id)
+            .session_live
+            .store(live, Ordering::SeqCst);
+    }
+
+    /// Whether `character_id` currently has a live entity.
+    pub(crate) fn session_live(&self, character_id: &str) -> bool {
+        self.0
+            .slots
+            .lock()
+            .expect("slots lock")
+            .get(character_id)
+            .is_some_and(|s| s.session_live.load(Ordering::SeqCst))
     }
 
     /// Fold finished background writes back into the ECS (item-id stamps,
