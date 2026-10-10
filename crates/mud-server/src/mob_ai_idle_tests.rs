@@ -81,7 +81,53 @@ fn nothing_happens_with_the_flag_off() {
     let mut f = peaceful(vec![buff()]);
     set_flag(&mut f.world, "enabled", ConfigValue::Bool(false));
     mob_idle_ai_tick(&mut f.world);
-    assert!(last_used(&f.world, f.mob, 0).is_none());
+    assert!(
+        f.world.get::<MobAi>(f.mob).is_none(),
+        "the AI is taken back, not run"
+    );
+    assert!(
+        !f.world
+            .query::<&AppliedTo>()
+            .iter(&f.world)
+            .any(|a| a.0 == f.mob)
+    );
+}
+
+#[test]
+fn turning_the_flag_off_strips_the_ai_and_stands_meditating_mobs_up() {
+    let mut f = peaceful(vec![buff()]);
+    spend_slots(&mut f.world, f.mob, 30, 1);
+    // A pulse with the flag on: the buff first, then (spent slots) the sit.
+    mob_idle_ai_tick(&mut f.world);
+    f.world.spawn(effect(BLESS, "bless", f.mob));
+    mob_idle_ai_tick(&mut f.world);
+    assert!(f.world.get::<Meditating>(f.mob).is_some());
+    // A caster with no rules (slots, no MobAi), and a player's own slots.
+    let plain = spawn_mob(&mut f.world, f.room, "a novice", "novice", None);
+    f.world.entity_mut(plain).insert(SpellSlots::default());
+    f.world.entity_mut(f.player).insert(SpellSlots::default());
+    let mundane = spawn_mob(&mut f.world, f.room, "a rat", "rat", None);
+
+    set_flag(&mut f.world, "enabled", ConfigValue::Bool(false));
+    mob_idle_ai_tick(&mut f.world);
+
+    for mob in [f.mob, plain] {
+        assert!(f.world.get::<MobAi>(mob).is_none());
+        assert!(f.world.get::<SpellSlots>(mob).is_none());
+        assert!(f.world.get::<Meditating>(mob).is_none());
+    }
+    assert_eq!(
+        f.world.get::<Posture>(f.mob).unwrap().0,
+        PostureKind::Standing,
+        "the meditating mob stood up"
+    );
+    assert!(
+        f.world.get::<SpellSlots>(f.player).is_some(),
+        "players keep their slots"
+    );
+    assert!(f.world.get::<Posture>(mundane).is_some());
+    // Nothing more to do on later pulses with the flag off.
+    mob_idle_ai_tick(&mut f.world);
 }
 
 #[test]

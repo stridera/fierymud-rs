@@ -251,12 +251,14 @@ async fn race_rules_round_trip_through_the_loader() {
         ] {
             sqlx::query(
                 "INSERT INTO \"RaceAiRules\" (race, ability_id, priority, chance_pct, cooldown_s, \
-                 conditions, target, enabled) VALUES ('DRAGON_FIRE', $1, $2, 100, 0, $3::jsonb, 'auto', $4)",
+                 conditions, target, enabled, min_level) \
+                 VALUES ('DRAGON_FIRE', $1, $2, 100, 0, $3::jsonb, 'auto', $4, $5)",
             )
             .bind(skill)
             .bind(priority)
             .bind(cond)
             .bind(enabled)
+            .bind((priority == 10).then_some(15))
             .execute(&pool)
             .await?;
         }
@@ -273,6 +275,8 @@ async fn race_rules_round_trip_through_the_loader() {
     assert_eq!(rules[0].priority, 10);
     assert_eq!(rules[0].kind, AiKind::Skill);
     assert_eq!(rules[0].target, AiTarget::Auto);
+    assert_eq!(rules[0].min_level, Some(15), "race rules carry min_level");
+    assert_eq!(rules[1].min_level, None);
     assert!(
         rules[0]
             .when

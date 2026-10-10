@@ -286,7 +286,7 @@ pub async fn load_mob_ai_data(world: &mut World, pool: &PgPool) -> sqlx::Result<
             cooldown_s: r.cooldown_s,
             conditions: r.conditions.as_ref(),
             target: Some(&r.target),
-            min_level: None,
+            min_level: r.min_level,
         };
         if let Some(rule) = build_rule(&raw, &mut diag) {
             by_race

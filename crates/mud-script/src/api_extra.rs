@@ -173,12 +173,19 @@ pub(crate) fn bind_globals(lua: &Lua, globals: &Table) -> mlua::Result<()> {
         fp
     };
     // wizard_notify(msg): legacy `wizn`, a line on the staff channel. A
-    // trigger may send one a minute: a looping or spammy script must not
-    // flood the staff.
+    // trigger may send one a minute per entity it runs for: a looping or
+    // spammy script must not flood the staff, but one script body shared by
+    // many mobs must not let one mob silence the rest.
     globals.set(
         "wizard_notify",
         lua.create_function(move |lua, args: Variadic<Value>| -> mlua::Result<()> {
-            if !wizard_notify_allowed(lua, fp, std::time::Instant::now()) {
+            let runner = lua.app_data_ref::<SelfEntity>().map(|s| s.0);
+            if !wizard_notify_allowed(lua, fp, runner, std::time::Instant::now()) {
+                tracing::debug!(
+                    trigger_fp = fp,
+                    entity = ?runner,
+                    "wizard_notify dropped: rate limited to one line a minute"
+                );
                 return Ok(());
             }
             wizard_notify(lua, &format_args(&args))
@@ -313,26 +320,39 @@ fn zone_echo(lua: &Lua, zone: i32, msg: &str) -> mlua::Result<()> {
 /// Minimum gap between two `wizard_notify` lines from one trigger.
 const WIZARD_NOTIFY_GAP: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// When each trigger (by body fingerprint; 0 = unknown) last got a
-/// `wizard_notify` line through.
+/// When each (trigger body fingerprint, entity it runs for) pair last got a
+/// `wizard_notify` line through. The fingerprint is 0 when unknown and the
+/// entity `None` outside a fire.
 #[derive(Default)]
-struct WizardNotifyLog(HashMap<u64, std::time::Instant>);
+struct WizardNotifyLog(HashMap<(u64, Option<Entity>), std::time::Instant>);
 
-/// Whether the trigger with fingerprint `fp` may send a staff line at `now`;
-/// records the send when it may.
-fn wizard_notify_allowed(lua: &Lua, fp: u64, now: std::time::Instant) -> bool {
+/// Entries kept before the log drops the ones whose minute is over.
+const WIZARD_NOTIFY_PRUNE_AT: usize = 512;
+
+/// Whether the trigger with fingerprint `fp` running for `runner` may send a
+/// staff line at `now`; records the send when it may.
+fn wizard_notify_allowed(
+    lua: &Lua,
+    fp: u64,
+    runner: Option<Entity>,
+    now: std::time::Instant,
+) -> bool {
     if lua.app_data_ref::<WizardNotifyLog>().is_none() {
         lua.set_app_data(WizardNotifyLog::default());
     }
     let Some(mut log) = lua.app_data_mut::<WizardNotifyLog>() else {
         return true;
     };
-    if let Some(last) = log.0.get(&fp)
+    if let Some(last) = log.0.get(&(fp, runner))
         && now.saturating_duration_since(*last) < WIZARD_NOTIFY_GAP
     {
         return false;
     }
-    log.0.insert(fp, now);
+    if log.0.len() >= WIZARD_NOTIFY_PRUNE_AT {
+        log.0
+            .retain(|_, last| now.saturating_duration_since(*last) < WIZARD_NOTIFY_GAP);
+    }
+    log.0.insert((fp, runner), now);
     true
 }
 
@@ -1744,32 +1764,20 @@ mod tests {
     }
 
     #[test]
-    fn wizard_notify_is_limited_to_one_line_a_minute_per_trigger() {
+    fn wizard_notify_is_limited_to_one_line_a_minute_per_trigger_and_entity() {
         let f = fixture();
         let t0 = std::time::Instant::now();
         let lua = &f.host.lua;
-        assert!(wizard_notify_allowed(lua, 7, t0));
-        assert!(!wizard_notify_allowed(
-            lua,
-            7,
-            t0 + std::time::Duration::from_secs(59)
-        ));
+        let secs = std::time::Duration::from_secs;
+        let (a, b) = (Some(f.player), Some(f.far_room));
+        assert!(wizard_notify_allowed(lua, 7, a, t0));
+        assert!(!wizard_notify_allowed(lua, 7, a, t0 + secs(59)));
         // Another trigger has its own allowance.
-        assert!(wizard_notify_allowed(
-            lua,
-            8,
-            t0 + std::time::Duration::from_secs(59)
-        ));
-        assert!(wizard_notify_allowed(
-            lua,
-            7,
-            t0 + std::time::Duration::from_secs(60)
-        ));
-        assert!(!wizard_notify_allowed(
-            lua,
-            7,
-            t0 + std::time::Duration::from_secs(61)
-        ));
+        assert!(wizard_notify_allowed(lua, 8, a, t0 + secs(59)));
+        // So does the same script body running for another entity.
+        assert!(wizard_notify_allowed(lua, 7, b, t0 + secs(59)));
+        assert!(wizard_notify_allowed(lua, 7, a, t0 + secs(60)));
+        assert!(!wizard_notify_allowed(lua, 7, a, t0 + secs(61)));
     }
 
     #[test]

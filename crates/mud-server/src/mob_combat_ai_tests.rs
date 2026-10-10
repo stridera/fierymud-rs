@@ -336,19 +336,57 @@ fn min_level_and_conditions_gate_a_rule() {
 }
 
 #[test]
-fn at_most_three_rules_are_evaluated_per_round() {
-    // Three rules that fail their conditions use the whole budget, so a
-    // fourth that would pass is not reached.
+fn rules_that_fail_their_conditions_do_not_use_the_budget() {
+    // Five rules that fail their conditions are free: the sixth still runs.
     let mut blocked = fireball(AiTarget::Auto);
     blocked.when = vec![AiCondition::SelfHpBelow(1)];
+    let mut rules = vec![blocked; 5];
+    rules.push(fireball(AiTarget::Auto));
+    let mut f = fixture(rules);
+    assert_eq!(round(&mut f.world, 1).len(), 1);
+    assert!(hp(&f.world, f.player) < PLAYER_HP);
+    assert_eq!(last_used(&f.world, f.mob, 5), Some(COMBAT_PERIOD_TICKS));
+}
+
+#[test]
+fn at_most_three_rules_are_evaluated_per_round() {
+    // Three telegraphed rules each make an attempt (they warn) and use the
+    // whole budget, so a fourth that would pass is not reached.
+    let mut warn = rule(BREATH, AiKind::Spell, AiTarget::Room);
+    warn.when = vec![AiCondition::Telegraph];
     let mut f = fixture(vec![
-        blocked.clone(),
-        blocked.clone(),
-        blocked,
+        warn.clone(),
+        warn.clone(),
+        warn,
         fireball(AiTarget::Auto),
     ]);
     assert!(round(&mut f.world, 1).is_empty());
     assert_eq!(hp(&f.world, f.player), PLAYER_HP);
+    assert_eq!(last_used(&f.world, f.mob, 3), None);
+}
+
+#[test]
+fn a_healthy_cleric_casts_an_attack_spell_past_its_self_heals() {
+    // Legacy cleric layout: five self-heals (self_hp_below 60) ahead of the
+    // attack spell. At full HP the heals fail their conditions and must not
+    // eat the round's evaluations.
+    let mut heal = rule(HEAL, AiKind::Spell, AiTarget::SelfTarget);
+    heal.when = vec![AiCondition::InCombat, AiCondition::SelfHpBelow(60)];
+    let mut rules = vec![heal; 5];
+    let mut harm = fireball(AiTarget::WeakestAttacker);
+    harm.when = vec![AiCondition::InCombat];
+    rules.push(harm);
+    let mut f = fixture(rules);
+    f.world
+        .resource_mut::<SpellSlotData>()
+        .ability_circle
+        .insert((CLASS, HEAL), 1);
+    let cast_round = (1..=8).find(|&n| {
+        round(&mut f.world, n);
+        hp(&f.world, f.player) < PLAYER_HP
+    });
+    assert_eq!(cast_round, Some(1), "the attack spell was starved");
+    assert!(last_used(&f.world, f.mob, 5).is_some());
 }
 
 #[test]

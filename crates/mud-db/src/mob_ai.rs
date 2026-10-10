@@ -67,6 +67,8 @@ pub struct RaceAiRuleRow {
     pub cooldown_s: i32,
     pub conditions: Option<serde_json::Value>,
     pub target: String,
+    /// Mob level gate; `None` = none.
+    pub min_level: Option<i32>,
 }
 
 /// Enabled race rules, ordered by race then priority (lower first).
@@ -82,7 +84,8 @@ pub async fn list_race_rules(pool: &PgPool) -> sqlx::Result<Vec<RaceAiRuleRow>> 
             r.chance_pct,
             r.cooldown_s,
             r.conditions,
-            r.target
+            r.target,
+            r.min_level
         FROM "RaceAiRules" r
         JOIN "Ability" a ON a.id = r.ability_id
         WHERE r.enabled

@@ -1363,7 +1363,6 @@ fn run_mob_rules(
             }
             continue;
         }
-        evals += 1;
         let foes = foes.get_or_insert_with(|| {
             if in_combat {
                 foes_of(world, ctx, mob, room)
@@ -1383,6 +1382,10 @@ fn run_mob_rules(
             }
             continue;
         };
+        // Only a rule whose conditions passed (an attempt is made) counts
+        // against the round's budget; rules that fail their conditions are
+        // free, so a healthy cleric's self-heals do not starve its attacks.
+        evals += 1;
         if telegraphed && !follow_through {
             telegraph(world, mob, room, &info.display);
             if let Some(mut ai) = world.get_mut::<MobAi>(mob) {
@@ -1540,6 +1543,39 @@ fn end_meditation(world: &mut World, mob: Entity, room: Entity) {
     );
 }
 
+/// `mob_ai.enabled` was flipped off while mobs already carried the AI: take
+/// it back so the world matches a build that never had it. A mob loses its
+/// [`MobAi`], its [`SpellSlots`] and any meditation (a meditating mob stands
+/// up), so nothing keeps sitting, recovering slots or casting. Mobs spawn
+/// without these while the flag is off, so on a flag that stays off this
+/// finds nothing; turning the flag back on only equips mobs spawned after.
+fn strip_mob_ai(world: &mut World) {
+    let mobs: Vec<Entity> = {
+        let mut q = world.query_filtered::<Entity, (
+            With<mud_world::Mob>,
+            Or<(With<MobAi>, With<SpellSlots>, With<mud_world::Meditating>)>,
+        )>();
+        q.iter(world).collect()
+    };
+    for mob in mobs {
+        // Only a mob the AI sat down is stood back up: `Meditating` on a mob
+        // without `MobAi` belongs to something else (for example a switched-in immortal).
+        let was_ai = world.get::<MobAi>(mob).is_some();
+        if was_ai && world.get::<mud_world::Meditating>(mob).is_some() {
+            match world.get::<Located>(mob).map(|l| l.0) {
+                Some(room) => end_meditation(world, mob, room),
+                None => {
+                    world
+                        .entity_mut(mob)
+                        .remove::<mud_world::Meditating>()
+                        .insert(mud_world::Posture(mud_world::PostureKind::Standing));
+                }
+            }
+        }
+        world.entity_mut(mob).remove::<(MobAi, SpellSlots)>();
+    }
+}
+
 /// One 10 s pulse of idle mob AI (legacy `mobile_activity` -> `check_mob_status`
 /// and `check_spellbank`). Only mobs that carry a `MobAi`, are not fighting,
 /// and stand in a room with a player are considered, so the cost follows the
@@ -1550,10 +1586,11 @@ fn end_meditation(world: &mut World, mob: Entity, room: Entity) {
 ///     ability per pulse,
 ///   * and failing that, a caster with spent slots sits down to meditate.
 ///
-/// A mob someone is fighting is left to the combat tick. Call only when
-/// `mob_ai.enabled` is on; it does nothing otherwise.
+/// A mob someone is fighting is left to the combat tick. With
+/// `mob_ai.enabled` off it does no AI, only [`strip_mob_ai`].
 pub(crate) fn mob_idle_ai_tick(world: &mut World) {
     if !mud_world::mob_ai_enabled(world) {
+        strip_mob_ai(world);
         return;
     }
     let player_rooms: HashSet<Entity> = {
