@@ -1064,18 +1064,35 @@ pub fn combat_tick(world: &mut World) {
             apply_swing(world, s);
         }
     }
-    // Fire FIGHT triggers on every still-living target after the
-    // swing pass. Each fire binds `self` to the target and `actor`
-    // to the attacker. Bodies typically self-throttle via
-    // `time.stamp` deltas; the dispatcher just checks the flag.
-    for s in &swings {
-        if world.get_entity(s.target).is_err() {
+    // Fire FIGHT triggers once per round per fighting mob (legacy
+    // `fight_mtrigger` runs from the mob's own round, `self` = the
+    // mob, `actor` = its opponent). A mob that took five swings this
+    // round still fires once: every swing's attacker and target is a
+    // fighter, deduplicated, paired with the opponent it fought. Bodies
+    // typically self-throttle via `time.stamp` deltas; the dispatcher
+    // just checks the flag.
+    let mut fighters: Vec<(Entity, Entity)> = Vec::new();
+    {
+        let mut seen: std::collections::HashSet<Entity> = std::collections::HashSet::new();
+        for s in &swings {
+            if seen.insert(s.attacker) {
+                fighters.push((s.attacker, s.target));
+            }
+        }
+        for s in &swings {
+            if seen.insert(s.target) {
+                fighters.push((s.target, s.attacker));
+            }
+        }
+    }
+    for (fighter, opponent) in fighters {
+        if world.get_entity(fighter).is_err() || world.get_entity(opponent).is_err() {
             continue;
         }
         crate::triggers::fire_event_with_actor(
             world,
-            s.target,
-            s.attacker,
+            fighter,
+            opponent,
             mud_world::TriggerEvent::Fight,
         );
     }
@@ -5697,6 +5714,55 @@ mod tests {
             .get(mud_db::enums::EntityType::Mob, 1, 1, "killer")
             .cloned();
         assert_eq!(seen, Some("a goblin".into()));
+    }
+
+    /// FIGHT fires once per round per fighting mob, however many swings
+    /// land on it, with `actor` = its opponent.
+    #[test]
+    fn fight_trigger_fires_once_per_round_per_mob() {
+        use mud_world::{
+            AttachedTriggers, TriggerAttach, TriggerCatalog, TriggerDef, TriggerEvent,
+        };
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let goblin = credit_goblin(&mut world, room, 0, None);
+        world.entity_mut(goblin).insert(Health {
+            hp: 10_000,
+            max: 10_000,
+        });
+        let a = credit_player(&mut world, room, "Alpha", 0);
+        let b = credit_player(&mut world, room, "Bravo", 0);
+        let c = credit_player(&mut world, room, "Charlie", 0);
+        for p in [a, b, c] {
+            world.entity_mut(p).insert(Fighting(goblin));
+        }
+        world.entity_mut(goblin).insert(Fighting(a));
+        let mut catalog = TriggerCatalog::default();
+        catalog.by_key.insert(
+            (99, 1),
+            TriggerDef {
+                zone_id: 99,
+                id: 1,
+                name: "fight".to_string(),
+                attach_type: TriggerAttach::Mob,
+                commands:
+                    "self:setvar('n', (self:getvar('n') or 0) + 1)\nself:setvar('foe', actor.name)"
+                        .to_string(),
+                flags: vec![TriggerEvent::Fight],
+                arg_list: vec![],
+                num_args: 0,
+            },
+        );
+        world.insert_resource(catalog);
+        world.insert_resource(mud_script::LuaHost::new());
+        world
+            .entity_mut(goblin)
+            .insert(AttachedTriggers(vec![(99, 1)]));
+        run_combat_tick(&mut world);
+        let cache = world.resource::<mud_world::EntityVariableCache>();
+        let get = |k: &str| cache.get(mud_db::enums::EntityType::Mob, 1, 1, k).cloned();
+        assert_eq!(get("n"), Some(1.into()), "one fire for three attackers");
+        assert_eq!(get("foe"), Some("Alpha".into()), "actor = its opponent");
     }
 
     fn wealth_of(world: &World, e: Entity) -> i64 {
