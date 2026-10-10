@@ -67,6 +67,15 @@ fn run_effect_hook(world: &mut World, hook: EffectHook, target: Entity, effect_n
     if world.get_entity(target).is_err() {
         return;
     }
+    // Applied by a script's own spell or skill: the host is in use, so the
+    // hook runs once that script has returned.
+    if crate::deferred_triggers::lua_busy(world) {
+        let effect_name = effect_name.to_string();
+        crate::deferred_triggers::defer(world, move |w| {
+            run_effect_hook(w, hook, target, &effect_name);
+        });
+        return;
+    }
     let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
         host.exec_for_actor(world, target, &body)
     });

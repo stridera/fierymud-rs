@@ -484,6 +484,12 @@ pub(crate) fn eval_quest_availability(
     label: &str,
 ) -> bool {
     let body = format!("return ({expr})");
+    // Asked from inside a running script: no host to evaluate with, so the
+    // gate stays closed like any other failed evaluation.
+    if crate::deferred_triggers::lua_busy(world) {
+        tracing::warn!(gate = %label, "quest expression asked while a script runs; denying");
+        return false;
+    }
     let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
         host.exec_for_event_with_value(world, player, player, None, &body, &[])
     });

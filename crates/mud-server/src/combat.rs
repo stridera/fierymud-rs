@@ -1983,6 +1983,14 @@ fn resolve_killer(world: &mut World, victim: Entity, room: Entity) -> Option<Ent
 
 #[allow(clippy::too_many_lines)]
 pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str, room: Entity) {
+    // Already dead, waiting only for its deferred DEATH trigger (see below):
+    // a second blow in the same server call must not die twice.
+    if world
+        .get::<crate::deferred_triggers::DeathFirePending>(victim)
+        .is_some()
+    {
+        return;
+    }
     let is_player = world.get::<Player>(victim).is_some();
     // The dead do not hide.
     crate::hiding::reveal(world, victim);
@@ -2286,6 +2294,14 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
         // dispatcher takes a snapshot of bodies up front, so even if
         // the body somehow despawns mid-fire it still completes
         // safely.
+        //
+        // A script's own spell / skill / damage can kill the mob while that
+        // script holds the `LuaHost`. The fire is then queued until the
+        // script returns, and the mob has to outlive it: it is marked
+        // pending and `finish_mob_death` queues its despawn behind the fire.
+        if crate::deferred_triggers::lua_busy(world) {
+            try_insert(world, victim, crate::deferred_triggers::DeathFirePending);
+        }
         crate::triggers::fire_event(world, victim, mud_world::TriggerEvent::Death);
         let owned_items: Vec<Entity> = {
             let mut q = world.query_filtered::<(Entity, &Located), With<Item>>();
@@ -2452,6 +2468,19 @@ fn is_illusory_mob(world: &World, mob: Entity) -> bool {
 /// Tail of a mob death: stamp the death tick on the `MobReset` row's
 /// timer, then despawn the mob.
 fn finish_mob_death(world: &mut World, victim: Entity) {
+    // DEATH trigger still queued behind a running script: despawn after it.
+    if world
+        .get::<crate::deferred_triggers::DeathFirePending>(victim)
+        .is_some()
+    {
+        crate::deferred_triggers::defer(world, move |w| {
+            if w.get_entity(victim).is_ok() {
+                try_remove::<crate::deferred_triggers::DeathFirePending>(w, victim);
+                finish_mob_death(w, victim);
+            }
+        });
+        return;
+    }
     // G3.4: stamp the death tick on this MobReset row's timer
     // so the respawn loop honors the per-row cooldown. Read
     // BEFORE despawn or the FromMobReset component vanishes.

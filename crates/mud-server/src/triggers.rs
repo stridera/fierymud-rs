@@ -155,6 +155,10 @@ fn gated<R>(
 /// `LuaHost`); errors are logged at warn level — a broken trigger
 /// shouldn't crash a spawn or respawn.
 pub fn fire_event(world: &mut World, entity: Entity, event: TriggerEvent) {
+    if crate::deferred_triggers::lua_busy(world) {
+        crate::deferred_triggers::defer(world, move |w| fire_event(w, entity, event));
+        return;
+    }
     // Snapshot the (zone, id) keys + bodies+flags BEFORE entering
     // resource_scope. Cloning the bodies avoids re-borrowing the
     // catalog mid-execution.
@@ -206,6 +210,13 @@ pub fn fire_event(world: &mut World, entity: Entity, event: TriggerEvent) {
 /// binds to the speaker; `speech` (lowercased) carries the
 /// keyword.
 pub fn fire_speech_at(world: &mut World, listener: Entity, speaker: Entity, text: &str) {
+    if crate::deferred_triggers::lua_busy(world) {
+        let text = text.to_string();
+        crate::deferred_triggers::defer(world, move |w| {
+            fire_speech_at(w, listener, speaker, &text);
+        });
+        return;
+    }
     let to_fire: Vec<(i32, i32, String, String)> = {
         let Some(at) = world.get::<AttachedTriggers>(listener) else {
             return;
@@ -255,6 +266,13 @@ pub fn fire_speech_at(world: &mut World, listener: Entity, speaker: Entity, text
 }
 
 pub fn fire_speech_in_room(world: &mut World, speaker: Entity, room: Entity, text: &str) {
+    if crate::deferred_triggers::lua_busy(world) {
+        let text = text.to_string();
+        crate::deferred_triggers::defer(world, move |w| {
+            fire_speech_in_room(w, speaker, room, &text);
+        });
+        return;
+    }
     let listeners: Vec<Entity> = crate::room_index::contents_of(world, room)
         .filter(|&e| e != speaker && world.get::<AttachedTriggers>(e).is_some())
         .collect();
@@ -307,6 +325,10 @@ pub fn fire_speech_in_room(world: &mut World, speaker: Entity, room: Entity, tex
 /// bound to the entering player. PREENTRY fires before the player's
 /// `Located` is changed; POSTENTRY fires after.
 pub fn fire_room_entry(world: &mut World, room: Entity, entering: Entity, event: TriggerEvent) {
+    if crate::deferred_triggers::lua_busy(world) {
+        crate::deferred_triggers::defer(world, move |w| fire_room_entry(w, room, entering, event));
+        return;
+    }
     let to_fire: Vec<(i32, i32, String, String)> = {
         let Some(at) = world.get::<AttachedTriggers>(room) else {
             return;
@@ -345,6 +367,10 @@ pub fn fire_room_entry(world: &mut World, room: Entity, entering: Entity, event:
 /// room. Each fire binds `self` to the listener and `actor` to the
 /// entering player.
 pub fn fire_greet_in_room(world: &mut World, entering: Entity, room: Entity) {
+    if crate::deferred_triggers::lua_busy(world) {
+        crate::deferred_triggers::defer(world, move |w| fire_greet_in_room(w, entering, room));
+        return;
+    }
     let listeners: Vec<Entity> = crate::room_index::contents_of(world, room)
         .filter(|&e| e != entering && world.get::<AttachedTriggers>(e).is_some())
         .collect();
@@ -399,6 +425,10 @@ pub fn fire_greet_in_room(world: &mut World, entering: Entity, room: Entity) {
 /// object-attached event whose dispatch shape is "the item observed
 /// the actor doing X to it."
 pub fn fire_item_event(world: &mut World, item: Entity, actor: Entity, event: TriggerEvent) {
+    if crate::deferred_triggers::lua_busy(world) {
+        crate::deferred_triggers::defer(world, move |w| fire_item_event(w, item, actor, event));
+        return;
+    }
     let to_fire: Vec<(i32, i32, String, String)> = {
         let Some(at) = world.get::<AttachedTriggers>(item) else {
             return;
@@ -440,6 +470,12 @@ pub fn fire_event_with_actor(
     acting: Entity,
     event: TriggerEvent,
 ) {
+    if crate::deferred_triggers::lua_busy(world) {
+        crate::deferred_triggers::defer(world, move |w| {
+            fire_event_with_actor(w, listener, acting, event);
+        });
+        return;
+    }
     let to_fire: Vec<(i32, i32, String, String)> = {
         let Some(at) = world.get::<AttachedTriggers>(listener) else {
             return;
@@ -479,6 +515,10 @@ pub fn fire_event_with_actor(
 /// `object` to the item. RECEIVE bodies typically inspect `object.id`
 /// to handle quest item turn-ins.
 pub fn fire_receive(world: &mut World, recipient: Entity, giver: Entity, item: Entity) {
+    if crate::deferred_triggers::lua_busy(world) {
+        crate::deferred_triggers::defer(world, move |w| fire_receive(w, recipient, giver, item));
+        return;
+    }
     let to_fire: Vec<(i32, i32, String, String)> = {
         let Some(at) = world.get::<AttachedTriggers>(recipient) else {
             return;
@@ -533,6 +573,11 @@ pub fn fire_command_in_room(
     cmd: &str,
     args: &str,
 ) -> bool {
+    // A typed command cannot be replayed once the script that issued it is
+    // done, so while a script runs the command is simply not intercepted.
+    if crate::deferred_triggers::lua_busy(world) {
+        return false;
+    }
     let listeners: Vec<Entity> = crate::room_index::contents_of(world, room)
         .filter(|&e| e != player && world.get::<AttachedTriggers>(e).is_some())
         .collect();
@@ -776,6 +821,8 @@ pub fn lua_coroutine_tick(world: &mut World) {
         tracing::info!(resumed, parked, "lua_coroutine_tick resumed parked threads");
     }
     drain_deferred_room_triggers(world);
+    // Fires a script's server calls had to queue (see `deferred_triggers`).
+    crate::deferred_triggers::drain(world);
 }
 
 /// One trigger whose body failed to compile.

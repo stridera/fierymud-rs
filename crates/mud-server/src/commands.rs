@@ -607,6 +607,9 @@ mod conjuration;
 #[path = "commands/conjuration_tests.rs"]
 mod conjuration_tests;
 #[cfg(test)]
+#[path = "commands/lua_safety_tests.rs"]
+mod lua_safety_tests;
+#[cfg(test)]
 #[path = "commands/violent_cast_tests.rs"]
 mod violent_cast_tests;
 #[cfg(test)]
@@ -2484,6 +2487,13 @@ pub(crate) fn send_comm_channel_text(
 /// command handlers (`cmd_lua`, `cmd_firetrig`) and the trigger
 /// dispatcher after each `exec_for_actor` returns.
 pub(crate) fn drain_lua_outbox(world: &mut World) {
+    flush_lua_outbox(world);
+    // Trigger fires that a script's server calls could not run while it held
+    // the `LuaHost` (see `deferred_triggers`) run now that it is back.
+    crate::deferred_triggers::drain(world);
+}
+
+fn flush_lua_outbox(world: &mut World) {
     use mud_world::LuaOutbox;
     let (messages, direct, commands, corpse_loot) = if world.contains_resource::<LuaOutbox>() {
         let mut out = world.resource_mut::<LuaOutbox>();

@@ -8,6 +8,7 @@ mod commands;
 #[cfg(test)]
 mod content_tables_tests;
 mod corpses;
+mod deferred_triggers;
 mod drowning;
 mod effects;
 mod entity_vars;

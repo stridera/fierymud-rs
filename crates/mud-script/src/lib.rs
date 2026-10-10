@@ -159,6 +159,13 @@ pub struct ChantExecutor(pub Option<fn(&mut World, Entity, &str)>);
 #[derive(Resource, Default, Clone, Copy)]
 pub struct SongExecutor(pub Option<fn(&mut World, Entity, &str)>);
 
+/// Present in the world exactly while a script is running. A running
+/// script holds the `LuaHost` (mud-server takes it out of the world with
+/// `resource_scope`), so server code a binding calls into must not start
+/// another script; it checks this marker and defers the fire instead.
+#[derive(Resource, Default, Clone, Copy)]
+pub struct ScriptRunning;
+
 /// Hard cap on Lua instructions per resume / per call. Trips a Lua
 /// error that aborts the trigger and surfaces through the existing
 /// error-logging path (`ScriptErrorLog`). Sized so a normal trigger
@@ -724,6 +731,7 @@ impl LuaHost {
         if yielded.object.is_some_and(|o| world.get_entity(o).is_err()) {
             yielded.object = None;
         }
+        world.insert_resource(ScriptRunning);
         let world_ptr = WorldPtr(NonNull::from(&mut *world));
         self.lua.set_app_data(world_ptr);
         self.lua.set_app_data(LuaCapture::default());
@@ -774,6 +782,7 @@ impl LuaHost {
         self.lua.remove_app_data::<LuaCapture>();
         self.lua.remove_app_data::<WorldPtr>();
         self.lua.remove_app_data::<SelfEntity>();
+        world.remove_resource::<ScriptRunning>();
 
         match result {
             Ok(Some(wait_secs)) => {
@@ -958,6 +967,7 @@ impl LuaHost {
 
         // Stash a raw pointer to the world for callbacks. Cleared in the
         // cleanup arm below regardless of code outcome.
+        world.insert_resource(ScriptRunning);
         let world_ptr = WorldPtr(NonNull::from(&mut *world));
         self.lua.set_app_data(world_ptr);
         self.lua.set_app_data(LuaCapture::default());
@@ -1046,6 +1056,7 @@ impl LuaHost {
             .unwrap_or_default();
         self.lua.remove_app_data::<WorldPtr>();
         self.lua.remove_app_data::<SelfEntity>();
+        world.remove_resource::<ScriptRunning>();
         match result {
             Ok((return_bool, yield_info)) => {
                 let mut out = String::new();
