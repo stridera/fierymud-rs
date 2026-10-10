@@ -134,18 +134,26 @@ fn cancel(world: &mut World, entity: Entity, msg: &str) {
 }
 
 fn complete(world: &mut World, entity: Entity, camp: Camping) {
-    // Consume the kit first, BEFORE clearing the Camping component,
-    // so a despawn during item-removal doesn't strand us with a
-    // half-applied state.
-    if let Some(kit) = camp.kit_entity
-        && world.get_entity(kit).is_ok()
-        && world.get::<Item>(kit).is_some()
+    // The kit only counts if it is still in the camper's hands: one given
+    // away, dropped or traded mid-countdown earns no bonus and is not
+    // despawned from wherever it went. Consume it BEFORE clearing the
+    // Camping component, so a despawn during item-removal doesn't strand us
+    // with a half-applied state.
+    let kit = camp.kit_entity.filter(|&kit| {
+        world.get::<Item>(kit).is_some() && world.get::<Located>(kit).is_some_and(|l| l.0 == entity)
+    });
+    if let Some(kit) = kit
         && let Ok(em) = world.get_entity_mut(kit)
     {
         em.despawn();
     }
+    let (kit_tier_bonus, kit_world_key) = if kit.is_some() {
+        (camp.kit_tier_bonus, camp.kit_world_key)
+    } else {
+        (0, None)
+    };
     // Compute the rest tier from class + group composition + kit.
-    let tier = compute_camp_tier(world, entity, camp.kit_tier_bonus);
+    let tier = compute_camp_tier(world, entity, kit_tier_bonus);
     // Preserve any existing Repose; acquisition only overwrites the
     // source + tier per the design doc ("Pool is NEVER cleared by
     // acquisition — only by XP-gain consumption.").
@@ -160,7 +168,7 @@ fn complete(world: &mut World, entity: Entity, camp: Camping) {
             source: RestSource::Camp,
             tier,
         });
-        if let Some((zone, id)) = camp.kit_world_key {
+        if let Some((zone, id)) = kit_world_key {
             em.insert(PendingWakeAttachments {
                 kit_zone: zone,
                 kit_id: id,

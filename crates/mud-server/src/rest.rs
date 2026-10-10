@@ -432,10 +432,17 @@ mod tests {
         let (mut world, player) = setup(RestSource::None, 0);
         world.insert_resource(crate::TickCount(crate::camp::CAMP_DURATION_TICKS));
         let room = world.get::<Located>(player).unwrap().0;
+        // The kit the camper still carries (camping only counts a kit that is
+        // still in their hands at completion).
+        let kit_entity = kit.map(|_| {
+            world
+                .spawn((mud_world::Item, mud_world::Located(player)))
+                .id()
+        });
         world.entity_mut(player).insert(mud_world::Camping {
             since_tick: 0,
             started_in: room,
-            kit_entity: None,
+            kit_entity,
             kit_world_key: kit,
             kit_tier_bonus: 0,
         });
