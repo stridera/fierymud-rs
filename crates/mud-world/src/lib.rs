@@ -74,4 +74,6 @@ pub use resources::{
     TriggerHistoryEntry, TriggerHistoryLog, WeatherCatalog, WeatherDriftLocks, WeatherState,
     WizLock, WorldKeyIndex, effective_level, effective_race, month_name, parse_resistance_json,
 };
-pub use resources::{class_exp_factor, exp_to_reach, is_starstar, scale_exp, stars_for_name};
+pub use resources::{
+    clamp_sell_profit, class_exp_factor, exp_to_reach, is_starstar, scale_exp, stars_for_name,
+};

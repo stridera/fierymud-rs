@@ -315,10 +315,11 @@ inventory::submit! {
         help: Help {
             usage: "sell <item>",
             summary: "Sell a carried item to the shopkeeper here.",
-            long: "Pays 'proto.cost * sell_profit' rounded for any \
-                   carried item with positive cost. Equipped items \
-                   are refused ('remove' first). Item-type filters \
-                   ('ShopAccepts') are not enforced yet.",
+            long: "Pays 'proto.cost * sell_profit' rounded (never more \
+                   than the item's cost) for a carried item the keeper \
+                   trades in. Equipped items are refused ('remove' \
+                   first). A keeper with no 'ShopAccepts' rules buys \
+                   nothing.",
         },
         run: cmd_sell,
     }
@@ -5087,50 +5088,44 @@ pub(crate) fn cmd_sell(world: &mut World, player: Entity, args: &str) {
             .cloned()
     });
     let base_cost = item_proto.as_ref().map_or(0, |p| p.cost);
-    // Sell-side filter: if `accepts` is empty, anything goes; otherwise
-    // the item must match at least one rule. Type tokens normalize to
-    // upper + no-underscore on both sides so DRINK_CONTAINER matches
-    // the schema's DRINKCONTAINER. Keyword filter is empty = no extra
-    // gate; non-empty = at least one keyword must appear in the
-    // item's `Keywords`.
-    if !shop.accepts.is_empty() {
-        let item_type_norm = item_proto
-            .as_ref()
-            .map(|p| object_type_token(p.r#type))
-            .unwrap_or_default();
-        let item_kws: Vec<String> = world
-            .get::<Keywords>(item)
-            .map(|k| k.0.iter().map(|s| s.to_ascii_lowercase()).collect())
-            .unwrap_or_default();
-        let accepted = shop.accepts.iter().any(|rule| {
-            let rule_type = rule.object_type.replace('_', "").to_ascii_uppercase();
-            if rule_type != item_type_norm {
-                return false;
-            }
-            if rule.keywords.is_empty() {
-                return true;
-            }
-            rule.keywords.iter().any(|k| {
-                item_kws
-                    .iter()
-                    .any(|ik| ik.contains(&k.to_ascii_lowercase()))
-            })
-        });
-        if !accepted {
-            send_rendered(
-                world,
-                player,
-                &format!("{keeper_name} isn't interested in {item_name}.\r\n"),
-            );
-            return;
+    // Sell-side filter: the item must match at least one `accepts` rule. An
+    // empty list means the keeper buys nothing (legacy `trade_with`: no
+    // buytype matches). Type tokens normalize to upper + no-underscore on
+    // both sides so DRINK_CONTAINER matches the schema's DRINKCONTAINER.
+    // Keyword filter is empty = no extra gate; non-empty = at least one
+    // keyword must appear in the item's `Keywords`.
+    let item_type_norm = item_proto
+        .as_ref()
+        .map(|p| object_type_token(p.r#type))
+        .unwrap_or_default();
+    let item_kws: Vec<String> = world
+        .get::<Keywords>(item)
+        .map(|k| k.0.iter().map(|s| s.to_ascii_lowercase()).collect())
+        .unwrap_or_default();
+    let accepted = shop.accepts.iter().any(|rule| {
+        let rule_type = rule.object_type.replace('_', "").to_ascii_uppercase();
+        if rule_type != item_type_norm {
+            return false;
         }
+        if rule.keywords.is_empty() {
+            return true;
+        }
+        rule.keywords.iter().any(|k| {
+            item_kws
+                .iter()
+                .any(|ik| ik.contains(&k.to_ascii_lowercase()))
+        })
+    });
+    if !accepted {
+        send_rendered(
+            world,
+            player,
+            &format!("{keeper_name} isn't interested in {item_name}.\r\n"),
+        );
+        return;
     }
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
-    )]
-    let pay_copper: i64 = (f64::from(base_cost) * shop.sell_profit).round() as i64;
+    let item_key = world.get::<WorldKey>(item).map(|k| (k.zone, k.id));
+    let pay_copper = shop_sell_payout(&shop, base_cost, item_key);
     if pay_copper <= 0 {
         send_rendered(
             world,

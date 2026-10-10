@@ -1443,6 +1443,18 @@ pub struct ShopPetOffering {
     pub price: i32,
 }
 
+/// The rate a shop may pay for items it buys: `sell_profit` limited to
+/// `[0, min(buy_profit, 1.0)]`. A shop therefore never pays more than an
+/// item's cost nor more than it charges for it, so no buy/sell round trip
+/// is profitable. A non-finite value pays nothing.
+#[must_use]
+pub fn clamp_sell_profit(buy_profit: f64, sell_profit: f64) -> f64 {
+    if !sell_profit.is_finite() || !buy_profit.is_finite() {
+        return 0.0;
+    }
+    sell_profit.min(buy_profit).clamp(0.0, 1.0)
+}
+
 /// One entry in `ShopCatalog`. Keyed by the shop's `(zone_id, id)`;
 /// resolved from a keeper mob via `keeper_index`.
 #[derive(Debug, Clone)]
@@ -1451,11 +1463,15 @@ pub struct ShopDef {
     pub id: i32,
     pub keeper_zone_id: i32,
     pub keeper_id: i32,
+    /// Multiplier on an item's cost when the shop sells to a player.
     pub buy_profit: f64,
+    /// Multiplier on an item's cost when the shop buys from a player.
+    /// Always `<= min(buy_profit, 1.0)` once loaded (see
+    /// `clamp_sell_profit`).
     pub sell_profit: f64,
     pub items: Vec<ShopOffering>,
-    /// Sell-side filter rows. Empty Vec = accept anything (no filter
-    /// row in `ShopAccepts` for this shop). Non-empty = the item must
+    /// Sell-side filter rows. Empty Vec = the keeper buys nothing (legacy
+    /// `trade_with`: no buytype matches). Non-empty = the item must
     /// match at least one rule for `sell` to succeed.
     pub accepts: Vec<ShopAcceptRule>,
     /// Pet shop offerings (see `ShopPetOffering`). Empty for non-pet
@@ -3400,6 +3416,20 @@ impl QuestVariableCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sell_profit_never_exceeds_cost_or_buy_profit() {
+        // Faric's real row: buy 9.0 / sell 9.0 pays at most the item's cost.
+        assert!((clamp_sell_profit(9.0, 9.0) - 1.0).abs() < f64::EPSILON);
+        // A shop that sells below cost never pays more than it charges.
+        assert!((clamp_sell_profit(0.5, 0.8) - 0.5).abs() < f64::EPSILON);
+        // Sane rows pass through untouched.
+        assert!((clamp_sell_profit(1.5, 0.4) - 0.4).abs() < f64::EPSILON);
+        // Garbage pays nothing.
+        assert!(clamp_sell_profit(1.0, -2.0).abs() < f64::EPSILON);
+        assert!(clamp_sell_profit(1.0, f64::NAN).abs() < f64::EPSILON);
+        assert!(clamp_sell_profit(f64::INFINITY, f64::INFINITY).abs() < f64::EPSILON);
+    }
 
     fn clock_for_month(month: i32) -> MudClock {
         MudClock {

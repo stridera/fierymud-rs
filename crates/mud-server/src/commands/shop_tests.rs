@@ -6,10 +6,10 @@ use bevy_ecs::prelude::*;
 use mud_db::enums::{MobProfession, MobTrait, ObjectType, Sector};
 use mud_world::{
     Follower, Located, Mob, MobPrototypes, Mountable, Named, ObjectPrototypes, Room, RoomSector,
-    ShopCatalog, ShopDef, ShopOffering, ShopPetOffering, Shopkeeper, Wealth,
+    ShopAcceptRule, ShopCatalog, ShopDef, ShopOffering, ShopPetOffering, Shopkeeper, Wealth,
 };
 
-use super::info::{cmd_buy, cmd_inspect, cmd_list, cmd_mount, cmd_wealth};
+use super::info::{cmd_buy, cmd_inspect, cmd_list, cmd_mount, cmd_sell, cmd_wealth};
 use super::test_support::{Rx, drain, mob_proto, object_proto, player_in};
 
 const SHOP: (i32, i32) = (30, 91);
@@ -491,4 +491,108 @@ fn possessives_drop_the_leading_article() {
         "Mukashi's stout mare"
     );
     assert_eq!(fix_possessive_article("a goblin"), "a goblin");
+}
+
+fn sword_offer(price: i32) -> Vec<ShopOffering> {
+    vec![ShopOffering {
+        object_zone_id: 30,
+        object_id: 7,
+        amount: -1,
+        price,
+    }]
+}
+
+fn accepts_weapons() -> Vec<ShopAcceptRule> {
+    vec![ShopAcceptRule {
+        object_type: "WEAPON".to_string(),
+        keywords: Vec::new(),
+    }]
+}
+
+fn carried_swords(world: &mut World, player: Entity) -> usize {
+    world
+        .query_filtered::<&Located, With<mud_world::Item>>()
+        .iter(world)
+        .filter(|l| l.0 == player)
+        .count()
+}
+
+#[test]
+fn keeper_with_no_accepts_rules_buys_nothing() {
+    let mut def = shop_def(sword_offer(0), Vec::new());
+    def.accepts = Vec::new();
+    let (mut world, player, mut rx) = world_with_shop(def, 1_000);
+    cmd_buy(&mut world, player, "sword");
+    drain(&mut rx);
+    assert_eq!(world.get::<Wealth>(player).unwrap().0, 900);
+
+    cmd_sell(&mut world, player, "sword");
+    let out = drain(&mut rx);
+    assert!(out.contains("isn't interested"), "{out}");
+    assert_eq!(world.get::<Wealth>(player).unwrap().0, 900);
+    assert_eq!(carried_swords(&mut world, player), 1);
+}
+
+#[test]
+fn keeper_with_matching_accepts_rule_buys_at_a_capped_rate() {
+    let mut def = shop_def(sword_offer(0), Vec::new());
+    def.accepts = accepts_weapons();
+    def.sell_profit = 0.5;
+    let (mut world, player, mut rx) = world_with_shop(def, 1_000);
+    cmd_buy(&mut world, player, "sword");
+    drain(&mut rx);
+    cmd_sell(&mut world, player, "sword");
+    let out = drain(&mut rx);
+    assert!(out.contains("You sell"), "{out}");
+    assert_eq!(world.get::<Wealth>(player).unwrap().0, 950);
+    assert_eq!(carried_swords(&mut world, player), 0);
+}
+
+#[test]
+fn buy_then_sell_round_trip_is_never_profitable() {
+    // (buy_profit, sell_profit, offer override price). Includes the live
+    // Faric row (buy 9.0 / sell 9.0) fed through the loader clamp, a
+    // stocked override cheaper than the pay rate, and a sub-cost shop.
+    let cases = [
+        (9.0, 9.0, 0),
+        (1.0, 9.0, 0),
+        (0.5, 0.8, 0),
+        (1.5, 1.2, 0),
+        (1.0, 1.0, 10),
+        (2.0, 0.9, 5),
+    ];
+    for (buy, sell, price) in cases {
+        let mut def = shop_def(sword_offer(price), Vec::new());
+        def.accepts = accepts_weapons();
+        def.buy_profit = buy;
+        // The loader clamps sell_profit before the catalog sees it.
+        def.sell_profit = mud_world::clamp_sell_profit(buy, sell);
+        let start = 10_000;
+        let (mut world, player, mut rx) = world_with_shop(def, start);
+        for _ in 0..3 {
+            cmd_buy(&mut world, player, "sword");
+            cmd_sell(&mut world, player, "sword");
+        }
+        drain(&mut rx);
+        let end = world.get::<Wealth>(player).unwrap().0;
+        assert!(
+            end <= start,
+            "buy {buy} sell {sell} price {price}: {start} -> {end}"
+        );
+    }
+}
+
+#[test]
+fn unclamped_sell_profit_is_still_capped_at_the_asking_price() {
+    // Defence in depth: even if an unclamped row reached the catalog the
+    // payout never exceeds what the keeper charges for the same item.
+    let mut def = shop_def(sword_offer(0), Vec::new());
+    def.accepts = accepts_weapons();
+    def.buy_profit = 1.0;
+    def.sell_profit = 9.0;
+    let (mut world, player, mut rx) = world_with_shop(def, 1_000);
+    cmd_buy(&mut world, player, "sword");
+    cmd_sell(&mut world, player, "sword");
+    drain(&mut rx);
+    assert!(world.get::<Wealth>(player).unwrap().0 <= 1_000);
 }

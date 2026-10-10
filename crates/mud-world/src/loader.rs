@@ -904,7 +904,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 keeper_zone_id: row.keeper_zone_id,
                 keeper_id: row.keeper_id,
                 buy_profit: row.buy_profit,
-                sell_profit: row.sell_profit,
+                sell_profit: crate::resources::clamp_sell_profit(row.buy_profit, row.sell_profit),
                 items: Vec::new(),
                 accepts: Vec::new(),
                 pets: Vec::new(),

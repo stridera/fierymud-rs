@@ -9909,6 +9909,35 @@ pub(crate) fn shop_offer_price(
     }
 }
 
+/// Copper a shop pays for one item of base cost `base_cost`. The rate is
+/// `sell_profit`, clamped to `[0, min(buy_profit, 1.0)]` so a shop never pays
+/// more than the item's cost or more than it charges for it; when the shop
+/// stocks the item itself, the payout is also capped at its own asking price
+/// (a per-offering override can undercut `cost * buy_profit`). A buy-then-sell
+/// round trip at one shop therefore can never turn a profit.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+pub(crate) fn shop_sell_payout(
+    shop: &mud_world::ShopDef,
+    base_cost: i32,
+    item_key: Option<(i32, i32)>,
+) -> i64 {
+    let rate = mud_world::clamp_sell_profit(shop.buy_profit, shop.sell_profit);
+    let mut pay = (f64::from(base_cost) * rate).round() as i64;
+    if let Some((zone, id)) = item_key
+        && let Some(offer) = shop
+            .items
+            .iter()
+            .find(|o| o.object_zone_id == zone && o.object_id == id)
+    {
+        pay = pay.min(shop_offer_price(offer, base_cost, shop.buy_profit));
+    }
+    pay
+}
+
 /// Returns true (and lets the caller proceed) if a mob with the
 /// requested profession occupies the player's current room. Emits
 /// "You need a <kind> here to handle that." and returns false
