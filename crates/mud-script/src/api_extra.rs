@@ -427,6 +427,69 @@ fn set_skill(lua: &Lua, target: Entity, name: &str, prof: i32) -> mlua::Result<b
     })
 }
 
+/// The room the script's `self` is in, following containers upward (a
+/// carried item is `Located` in its carrier, who is `Located` in the room).
+fn enclosing_room(world: &World, entity: Entity) -> Option<Entity> {
+    let mut cur = entity;
+    for _ in 0..8 {
+        if world.get::<Room>(cur).is_some() {
+            return Some(cur);
+        }
+        cur = world.get::<Located>(cur)?.0;
+    }
+    None
+}
+
+/// Resolve the string form of `world.destroy(name)` the way legacy
+/// `mpurge` / `opurge` do: an object `self` carries, then an object lying
+/// in `self`'s room, then a non-player character in the room. The name is
+/// matched whole first (`object.name` is the item's full short name), then
+/// as a keyword. Players are never candidates.
+pub(crate) fn resolve_destroy_name(world: &mut World, from: Entity, name: &str) -> Option<Entity> {
+    let needle = name.trim().to_ascii_lowercase();
+    if needle.is_empty() {
+        return None;
+    }
+    let room = enclosing_room(world, from);
+    let mut q = world.query::<(
+        Entity,
+        &Located,
+        &Named,
+        Option<&mud_world::components::Keywords>,
+        Has<Item>,
+        Has<Player>,
+    )>();
+    // (priority, entity): carried item 0, room item 1, room character 2.
+    let mut best: Option<(u8, bool, Entity)> = None;
+    for (e, l, n, kw, is_item, is_player) in q.iter(world) {
+        if is_player || e == from {
+            continue;
+        }
+        let rank = if is_item && l.0 == from {
+            0
+        } else if is_item && Some(l.0) == room {
+            1
+        } else if !is_item && Some(l.0) == room {
+            2
+        } else {
+            continue;
+        };
+        let whole = n.name.eq_ignore_ascii_case(&needle);
+        if !whole
+            && !mud_world::targeting::entity_matches(&needle, &n.name, kw.map(|k| k.0.as_slice()))
+        {
+            continue;
+        }
+        // Lower rank first, whole-name hits before keyword hits, entity
+        // order last so the pick is stable.
+        let better = best.is_none_or(|(r, w, b)| (rank, !whole, e) < (r, !w, b));
+        if better {
+            best = Some((rank, whole, e));
+        }
+    }
+    best.map(|(_, _, e)| e)
+}
+
 /// Methods added to `LuaActor`.
 pub(crate) fn add_actor_methods<M: UserDataMethods<LuaActor>>(methods: &mut M) {
     // `self:get_people(zone, id)`: a character with that prototype in
@@ -1166,5 +1229,80 @@ mod tests {
             )
             .expect_err("read-only actor has no set_skill");
         assert!(err.contains("lua error"), "{err}");
+    }
+
+    // ----- world.destroy(name) -----
+
+    #[test]
+    fn destroy_by_name_prefers_carried_then_room_and_never_players() {
+        let mut f = fixture();
+        let carried = f
+            .world
+            .spawn((
+                Item,
+                Named {
+                    name: "a rusty sword".into(),
+                },
+                Located(f.mob),
+            ))
+            .id();
+        let on_floor = f
+            .world
+            .spawn((
+                Item,
+                Named {
+                    name: "a rusty sword".into(),
+                },
+                Located(f.room),
+            ))
+            .id();
+        let elsewhere = f
+            .world
+            .spawn((
+                Item,
+                Named {
+                    name: "a rusty sword".into(),
+                },
+                Located(f.other_room),
+            ))
+            .id();
+        // Full short name (what `object.name` yields): the carried one goes.
+        f.ok("world.destroy('a rusty sword')");
+        assert!(f.world.get_entity(carried).is_err());
+        assert!(f.world.get_entity(on_floor).is_ok());
+        // Then the one on the floor of the script's room, by keyword.
+        f.ok("world.destroy('rusty')");
+        assert!(f.world.get_entity(on_floor).is_err());
+        // Never an item in another room, and never a player.
+        f.ok("world.destroy('rusty'); world.destroy('Hero')");
+        assert!(f.world.get_entity(elsewhere).is_ok());
+        assert!(f.world.get_entity(f.player).is_ok());
+        // A mob in the room can be purged by name; unknown / nil are no-ops.
+        let guard = f
+            .world
+            .spawn((
+                Mob,
+                Named {
+                    name: "a guard".into(),
+                },
+                Located(f.room),
+            ))
+            .id();
+        f.ok("world.destroy('nothing here'); world.destroy(nil); world.destroy('guard')");
+        assert!(f.world.get_entity(guard).is_err());
+        // The userdata form still works.
+        let coin = f
+            .world
+            .spawn((
+                Item,
+                Named {
+                    name: "a coin".into(),
+                },
+                WorldKey { zone: 43, id: 51 },
+                Located(f.room),
+            ))
+            .id();
+        f.ok("world.destroy(self:get_objects(43, 51))");
+        assert!(f.world.get_entity(coin).is_err());
     }
 }

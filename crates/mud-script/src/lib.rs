@@ -1271,9 +1271,33 @@ impl LuaHost {
         world_tbl.set(
             "destroy",
             self.lua
-                .create_function(|lua, target: AnyUserData| -> mlua::Result<()> {
-                    let entity = target.borrow::<LuaActor>()?.entity;
-                    world_mut_from_lua(lua, |world| script_destroy(world, entity))
+                .create_function(|lua, target: Value| -> mlua::Result<()> {
+                    match target {
+                        Value::UserData(ud) => {
+                            let entity = ud.borrow::<LuaActor>()?.entity;
+                            world_mut_from_lua(lua, |world| script_destroy(world, entity))
+                        }
+                        // `world.destroy(object.name)`: resolved in the
+                        // script's own context, legacy purge style.
+                        Value::String(name) => {
+                            let name = name.to_str()?.to_string();
+                            let from = lua.app_data_ref::<SelfEntity>().map(|s| s.0);
+                            world_mut_from_lua(lua, |world| {
+                                if let Some(from) = from
+                                    && let Some(e) =
+                                        api_extra::resolve_destroy_name(world, from, &name)
+                                {
+                                    script_destroy(world, e);
+                                }
+                            })
+                        }
+                        // Nothing to purge (e.g. a failed `find_actor`).
+                        Value::Nil => Ok(()),
+                        other => Err(mlua::Error::external(format!(
+                            "world.destroy expects an actor or a name, got {}",
+                            other.type_name()
+                        ))),
+                    }
                 })?,
         )?;
         globals.set("world", world_tbl)?;
