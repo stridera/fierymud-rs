@@ -701,3 +701,171 @@ fn a_settled_item_that_is_picked_up_and_dropped_again_falls_afresh() {
         "a fresh drop falls"
     );
 }
+
+// -- mobs, the weight sweep and invisible fliers ---------------------------
+
+/// A level-less mob with 100 HP floating in `room` on a fly spell.
+fn flying_mob(f: &mut Fx, room: Entity) -> Entity {
+    let m = f
+        .world
+        .spawn((
+            mud_world::Mob,
+            Named {
+                name: "a griffon".into(),
+            },
+            Located(room),
+            Health { hp: 100, max: 100 },
+            Flying,
+        ))
+        .id();
+    effect(&mut f.world, m, "fly", EffectSource::Spell);
+    m
+}
+
+#[test]
+fn a_mob_losing_flight_over_air_falls_and_is_hurt() {
+    let mut f = fx();
+    let sky1 = f.sky1;
+    let m = flying_mob(&mut f, sky1);
+    let mut q = f.world.query::<(Entity, &EffectInstance, &AppliedTo)>();
+    let fly: Vec<Entity> = q
+        .iter(&f.world)
+        .filter(|(_, _, a)| a.0 == m)
+        .map(|(e, _, _)| e)
+        .collect();
+    for e in fly {
+        f.world.despawn(e);
+    }
+    crate::effects::teardown_markers_after_removal(&mut f.world, m, "fly");
+    assert!(f.world.get::<Flying>(m).is_none());
+    assert!(is_falling(&mut f.world, m), "the mob starts to fall");
+    run_falls(&mut f.world);
+    assert_eq!(f.world.get::<Located>(m).unwrap().0, f.ground);
+    assert!(f.world.get::<Health>(m).unwrap().hp < 100);
+}
+
+#[test]
+fn the_weight_sweep_grounds_a_flier_whose_load_grew_without_a_command() {
+    // On the ground: lands, no fall.
+    let mut f = fx();
+    f.world.entity_mut(f.p).insert((Flying, Located(f.ground)));
+    effect(&mut f.world, f.p, "fly", EffectSource::Spell);
+    load(&mut f.world, f.p, 146.0);
+    // Off-beat ticks leave the flier alone.
+    f.world.resource_mut::<TickCount>().0 = 3;
+    gravity_tick(&mut f.world);
+    assert!(f.world.get::<Flying>(f.p).is_some());
+    f.world.resource_mut::<TickCount>().0 = 10;
+    gravity_tick(&mut f.world);
+    assert!(f.world.get::<Flying>(f.p).is_none());
+    assert!(!is_falling(&mut f.world, f.p));
+    assert!(drain(&mut f.rx).contains("You fall down!"));
+
+    // In the sky: falls instead.
+    let mut g = fx();
+    g.world.entity_mut(g.p).insert(Flying);
+    effect(&mut g.world, g.p, "fly", EffectSource::Spell);
+    load(&mut g.world, g.p, 146.0);
+    g.world.resource_mut::<TickCount>().0 = 10;
+    gravity_tick(&mut g.world);
+    assert!(g.world.get::<Flying>(g.p).is_none());
+    assert!(is_falling(&mut g.world, g.p));
+}
+
+#[test]
+fn a_light_flier_stays_up_through_the_sweep() {
+    let mut f = fx();
+    f.world.entity_mut(f.p).insert(Flying);
+    effect(&mut f.world, f.p, "fly", EffectSource::Spell);
+    load(&mut f.world, f.p, 100.0);
+    f.world.resource_mut::<TickCount>().0 = 10;
+    gravity_tick(&mut f.world);
+    assert!(f.world.get::<Flying>(f.p).is_some());
+}
+
+/// An invisible flier named Zephyr in `sky1`, plus a watcher who cannot see
+/// invisible things.
+fn invisible_flier(f: &mut Fx) -> (Entity, Rx) {
+    let (watcher, wrx) = player_in(&mut f.world, f.sky1);
+    f.world.entity_mut(f.p).insert((
+        Named {
+            name: "Zephyr".into(),
+        },
+        mud_world::Invisible,
+        Flying,
+    ));
+    let _ = watcher;
+    (watcher, wrx)
+}
+
+#[test]
+fn an_invisible_fliers_fall_names_no_one() {
+    let mut f = fx();
+    let (_watcher, mut up_rx) = invisible_flier(&mut f);
+    let (_below, mut down_rx) = player_in(&mut f.world, f.ground);
+    f.world.entity_mut(f.p).remove::<Flying>();
+    on_flight_lost(&mut f.world, f.p);
+    run_falls(&mut f.world);
+    let (up, down) = (drain(&mut up_rx), drain(&mut down_rx));
+    assert!(up.contains("Someone finds himself on thin air"), "{up}");
+    assert!(
+        down.contains("Someone falls screaming from above"),
+        "{down}"
+    );
+    assert!(down.contains("Someone lands with a resounding"), "{down}");
+    assert!(!up.contains("Zephyr") && !down.contains("Zephyr"));
+}
+
+#[test]
+fn an_invisible_flier_taking_off_and_landing_is_silent_to_others() {
+    let mut f = fx();
+    f.world.entity_mut(f.p).insert(Located(f.ground));
+    let (watcher, mut wrx) = player_in(&mut f.world, f.ground);
+    f.world.entity_mut(f.p).insert((
+        Named {
+            name: "Zephyr".into(),
+        },
+        mud_world::Invisible,
+    ));
+    effect(&mut f.world, f.p, "fly", EffectSource::Spell);
+    let _ = watcher;
+    info::cmd_fly(&mut f.world, f.p, "");
+    assert!(f.world.get::<Flying>(f.p).is_some());
+    info::cmd_walk(&mut f.world, f.p, "");
+    let out = drain(&mut wrx);
+    assert!(out.is_empty(), "{out:?}");
+}
+
+#[test]
+fn the_flying_marker_does_not_leak_through_look_or_gmcp_for_an_invisible_flier() {
+    let mut f = fx();
+    let (watcher, mut wrx) = invisible_flier(&mut f);
+    f.world
+        .entity_mut(f.sky1)
+        .insert(mud_world::Description("Clouds.".into()));
+    crate::commands::dispatch(&mut f.world, watcher, "look");
+    let look = drain(&mut wrx);
+    assert!(!look.contains("Zephyr"), "{look}");
+    assert!(
+        !look.contains("flying") && !look.contains("hovers"),
+        "{look}"
+    );
+    crate::commands::send_room_players_snapshot(&mut f.world, watcher);
+    let players = drain(&mut wrx);
+    assert!(
+        !players.contains("Zephyr") && !players.contains("flying"),
+        "{players}"
+    );
+    crate::commands::dispatch(&mut f.world, watcher, "scan");
+    let scan = drain(&mut wrx);
+    assert!(!scan.contains("Zephyr") && !scan.contains("fly"), "{scan}");
+
+    // Once the watcher can see invisible, the flier shows as flying.
+    f.world.entity_mut(watcher).insert(mud_world::DetectInvis);
+    crate::commands::send_room_players_snapshot(&mut f.world, watcher);
+    let players = drain(&mut wrx);
+    assert!(
+        players.contains("Zephyr") && players.contains("flying"),
+        "{players}"
+    );
+}

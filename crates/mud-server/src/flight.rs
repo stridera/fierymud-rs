@@ -26,9 +26,9 @@ use mud_world::{
 
 use crate::TickCount;
 use crate::commands::{
-    Prevent, apply_damage, broadcast_room_except_rendered, cap_sentence_start, carried_weight,
-    carry_capacity, direction_name, effect_prevents, has_effect_named, name_of, opposite, send_to,
-    try_insert, try_remove,
+    Prevent, apply_damage, broadcast_room_anonymised, broadcast_room_except_rendered,
+    cap_sentence_start, carried_weight, carry_capacity, direction_name, effect_prevents,
+    has_effect_named, name_of, opposite, send_to, try_insert, try_remove,
 };
 
 /// Legacy `LVL_IMMORT`: gods neither fall nor feel weight.
@@ -55,6 +55,14 @@ const DIRECTIONS: [Direction; 10] = [
     Direction::Southeast,
     Direction::Southwest,
 ];
+
+/// Tell `room` what `actor` is doing. Observers who cannot see the actor
+/// (invisible, hidden, wizinvis) read "Someone" in place of the name, so a
+/// fall never gives away an invisible flier.
+fn tell_room(world: &mut World, room: Entity, actor: Entity, msg: &str) {
+    let name = name_of(world, actor);
+    broadcast_room_anonymised(world, room, &[actor], &[(actor, name.as_str())], msg);
+}
 
 fn sector_of(world: &World, room: Entity) -> Option<Sector> {
     world.get::<RoomSector>(room).map(|s| s.0)
@@ -175,7 +183,7 @@ fn drop_to_ground(world: &mut World, e: Entity, room: Entity, overweight: bool) 
         )
     };
     send_to(world, e, to_char);
-    broadcast_room_except_rendered(world, room, &[e], &to_room);
+    tell_room(world, room, e, &to_room);
     if overweight
         && matches!(
             world.get::<Posture>(e).map(|p| p.0),
@@ -211,7 +219,13 @@ pub(crate) fn on_flight_lost(world: &mut World, e: Entity) {
 /// to fly is grounded (or starts falling over an air room). Cheap when
 /// `e` is not flying.
 pub(crate) fn check_overweight(world: &mut World, e: Entity) {
-    if world.get::<Flying>(e).is_none() || !too_heavy_to_fly(world, e) {
+    // A proto flier (a bird, a wyvern) is held up by its nature, not a spell.
+    if world.get::<Flying>(e).is_none()
+        || world
+            .get::<MovementModeTag>(e)
+            .is_some_and(|m| m.0 == mud_db::enums::MovementMode::Flying)
+        || !too_heavy_to_fly(world, e)
+    {
         return;
     }
     let spell_backed = {
@@ -237,6 +251,23 @@ pub(crate) fn check_overweight(world: &mut World, e: Entity) {
         mud_world::movement::begin_fall_if_unsupported(world, e);
     } else {
         drop_to_ground(world, e, room, true);
+    }
+}
+
+/// How often fliers are re-weighed (one effect period, a second). Weight
+/// also changes without a command: a Strength buff ending lowers the carry
+/// capacity, a quest reward or a looting mob adds load.
+const OVERWEIGHT_SWEEP_TICKS: u64 = 10;
+
+/// Re-check every flier's load. Only entities carrying [`Flying`] are
+/// visited, so this costs nothing while nobody flies.
+fn overweight_sweep(world: &mut World) {
+    let fliers: Vec<Entity> = {
+        let mut q = world.query_filtered::<Entity, With<Flying>>();
+        q.iter(world).collect()
+    };
+    for e in fliers {
+        check_overweight(world, e);
     }
 }
 
@@ -332,6 +363,9 @@ pub fn gravity_tick(world: &mut World) {
         fall_step(world, e, tick);
     }
     item_gravity_tick(world, tick);
+    if tick.is_multiple_of(OVERWEIGHT_SWEEP_TICKS) {
+        overweight_sweep(world);
+    }
 }
 
 /// An item (a corpse, a dropped weapon, a thrown pouch) dropping through air
@@ -512,10 +546,10 @@ fn announce_fall_start(world: &mut World, e: Entity, room: Entity, feather: bool
             e,
             "<b:red>You find yourself in midair and begin descending.</>\r\n\r\n",
         );
-        broadcast_room_except_rendered(
+        tell_room(
             world,
             room,
-            &[e],
+            e,
             &format!("<b:red>{who} finds {itself} in midair and begins descending.</>\r\n"),
         );
     } else {
@@ -524,10 +558,10 @@ fn announce_fall_start(world: &mut World, e: Entity, room: Entity, feather: bool
             e,
             "<b:red>You find yourself on thin air and fall</> <green>DOWN!</>\r\n\r\n",
         );
-        broadcast_room_except_rendered(
+        tell_room(
             world,
             room,
-            &[e],
+            e,
             &format!("<b:red>{who} finds {itself} on thin air and falls</> <green>DOWN!</>\r\n"),
         );
         falling_yell(world, e, room);
@@ -604,7 +638,7 @@ fn fall_step(world: &mut World, e: Entity, tick: u64) {
         )
     };
     send_to(world, e, to_char);
-    broadcast_room_except_rendered(world, to_room, &[e], &to_room_msg);
+    tell_room(world, to_room, e, &to_room_msg);
     if is_player {
         crate::commands::cmd_look(world, e, "");
     }
@@ -655,7 +689,7 @@ fn land(world: &mut World, e: Entity, room: Entity, distance: u32, feather: bool
             )
         };
         send_to(world, e, to_char);
-        broadcast_room_except_rendered(world, room, &[e], &to_room);
+        tell_room(world, room, e, &to_room);
         return;
     }
 
@@ -667,10 +701,10 @@ fn land(world: &mut World, e: Entity, room: Entity, distance: u32, feather: bool
             e,
             "\r\nYou land with a tremendous <blue>SPLASH</><green>!</>\r\n",
         );
-        broadcast_room_except_rendered(
+        tell_room(
             world,
             room,
-            &[e],
+            e,
             &format!("{who} lands with a tremendous <blue>SPLASH</><green>!</>\r\n"),
         );
     } else if safefall && distance <= 5 {
@@ -680,10 +714,10 @@ fn land(world: &mut World, e: Entity, room: Entity, distance: u32, feather: bool
             e,
             "\r\nYou tuck and roll, performing a beautiful landing!\r\n",
         );
-        broadcast_room_except_rendered(
+        tell_room(
             world,
             room,
-            &[e],
+            e,
             &format!("{who} tucks and rolls, performing a beautiful landing!\r\n"),
         );
     } else if safefall && distance < 15 {
@@ -692,10 +726,10 @@ fn land(world: &mut World, e: Entity, room: Entity, distance: u32, feather: bool
             e,
             "\r\nYou gracefully land without taking too much damage.\r\n",
         );
-        broadcast_room_except_rendered(
+        tell_room(
             world,
             room,
-            &[e],
+            e,
             &format!("{who} gracefully lands without taking too much damage.\r\n"),
         );
     } else {
@@ -705,10 +739,10 @@ fn land(world: &mut World, e: Entity, room: Entity, distance: u32, feather: bool
             e,
             format!("\r\nYou land with a resounding {splat}\r\n"),
         );
-        broadcast_room_except_rendered(
+        tell_room(
             world,
             room,
-            &[e],
+            e,
             &format!("{who} lands with a resounding {splat}\r\n"),
         );
     }

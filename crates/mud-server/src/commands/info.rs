@@ -12101,9 +12101,10 @@ pub(crate) fn cmd_fly(world: &mut World, player: Entity, _args: &str) {
         if let Some(located) = world.get::<Located>(player).copied() {
             let n = crate::commands::cap_sentence_start(&name_of(world, player));
             let his = crate::flight::possessive(world, player);
-            broadcast_room_except_players_rendered(
+            broadcast_room_visible(
                 world,
                 located.0,
+                player,
                 &[player],
                 &format!("{n} rises up on {his} toes, as if trying to fly.\r\n"),
             );
@@ -12118,9 +12119,10 @@ pub(crate) fn cmd_fly(world: &mut World, player: Entity, _args: &str) {
         "You spread your wings and take to the air.\r\n",
     );
     if let Some(located) = world.get::<Located>(player).copied() {
-        broadcast_room_except_players_rendered(
+        broadcast_room_visible(
             world,
             located.0,
+            player,
             &[player],
             &format!("{mover_name} takes to the air.\r\n"),
         );
@@ -12151,9 +12153,10 @@ pub(crate) fn cmd_walk(world: &mut World, player: Entity, _args: &str) {
     // Legacy `do_stand` -> `falling_check`: landing over thin air is a fall.
     mud_world::movement::begin_fall_if_unsupported(world, player);
     if let Some(located) = world.get::<Located>(player).copied() {
-        broadcast_room_except_players_rendered(
+        broadcast_room_visible(
             world,
             located.0,
+            player,
             &[player],
             &format!("{mover_name} lands and starts walking.\r\n"),
         );
