@@ -1260,7 +1260,7 @@ fn the_room_sees_the_freeze_break() {
     hit(&mut f, mob, 5);
     let out = drain(&mut orx);
     assert!(
-        out.contains("Caster's attack frees A jackal from magic which held them motionless."),
+        out.contains("Caster's attack frees a jackal from magic which held them motionless."),
         "{out}"
     );
 }

@@ -211,7 +211,9 @@ pub(crate) fn break_on_hit(world: &mut World, attacker: Entity, victim: Entity) 
     }
     sync_stunned(world, victim);
     let attacker_name = crate::commands::cap_sentence_start(&name_of(world, attacker));
-    let victim_name = crate::commands::cap_sentence_start(&name_of(world, victim));
+    // The victim only ever appears mid-sentence ("keeping a creeping vine
+    // frozen"), so its name keeps the case it was given in.
+    let victim_name = name_of(world, victim);
     let room = world.get::<Located>(victim).map(|l| l.0);
     for kind in [BreakKind::Frozen, BreakKind::Mesmerized] {
         if !breaking.iter().any(|(_, k)| *k == kind) {
@@ -1081,6 +1083,38 @@ mod tests {
             out.contains("Hitter's blow shatters the magic paralyzing you!"),
             "{out}"
         );
+    }
+
+    /// A mob victim's name leads with a lowercase article; mid-sentence it
+    /// must stay lowercase, and a leading attacker name still opens its
+    /// sentence capitalised (#104).
+    #[test]
+    fn a_break_message_keeps_the_victims_article_lowercase_mid_sentence() {
+        for (flag, to_room) in [
+            (
+                "webbed",
+                "Hitter's attack frees a creeping vine from magic which held them motionless.",
+            ),
+            (
+                "mesmerized",
+                "Hitter's attack distracts a creeping vine from whatever was fascinating them.",
+            ),
+        ] {
+            let mut h = hit_fixture(flag, Some(true));
+            h.world.entity_mut(h.victim).insert(mud_world::Named {
+                name: "a creeping vine".into(),
+            });
+            crate::commands::apply_attacker_damage(&mut h.world, h.victim, 5, h.attacker);
+            let out = drain(&mut h.arx);
+            assert!(
+                out.contains("keeping a creeping vine frozen.")
+                    || out.contains("You drew a creeping vine's attention"),
+                "{flag}: {out}"
+            );
+            assert!(!out.contains("A creeping vine"), "{flag}: {out}");
+            let out = drain(&mut h.wrx);
+            assert!(out.contains(to_room), "{flag}: {out}");
+        }
     }
 
     #[test]
