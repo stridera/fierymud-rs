@@ -1036,4 +1036,47 @@ mod tests {
         respawn_and_pulse(&mut world, 12000);
         assert_eq!(fighting_target(&world, pet), Some(player));
     }
+
+    /// Timing guard at prod scale: 5500 reset rows with a live mob and
+    /// 4000 gear items each, 40 rows whose mob just died. The steady pass
+    /// (nothing to refill) and the refill pass must both stay cheap.
+    /// Hard limit only enforced in release.
+    #[test]
+    fn respawn_tick_prod_scale_is_fast() {
+        let (mut world, _room) = base_world();
+        let rooms: Vec<Entity> = (0..10_000).map(|_| world.spawn_empty().id()).collect();
+        let gear = standard_gear();
+        let mut mobs = Vec::new();
+        for reset_id in 1..=5500_i32 {
+            let r = rooms[usize::try_from(reset_id).unwrap() * 7 % rooms.len()];
+            let rows: Vec<MobResetEquipment> = gear
+                .iter()
+                .map(|g| MobResetEquipment {
+                    reset_id,
+                    ..g.clone()
+                })
+                .collect();
+            add_mob_reset(
+                &mut world,
+                r,
+                reset_id,
+                &rows[..usize::from(reset_id % 3 == 0)],
+            );
+            mobs.push(boot_mob(&mut world, r, reset_id));
+        }
+        for &m in mobs.iter().take(40) {
+            world.despawn(m);
+        }
+        let start = std::time::Instant::now();
+        run_respawn(&mut world, 60_000);
+        let refill = start.elapsed();
+        let start = std::time::Instant::now();
+        run_respawn(&mut world, 60_060);
+        let steady = start.elapsed();
+        eprintln!("respawn_tick 5500 mobs: refill(40)={refill:?} steady={steady:?}");
+        if !cfg!(debug_assertions) {
+            assert!(refill.as_millis() < 20, "refill pass took {refill:?}");
+            assert!(steady.as_millis() < 20, "steady pass took {steady:?}");
+        }
+    }
 }
