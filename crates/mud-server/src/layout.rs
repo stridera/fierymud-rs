@@ -25,21 +25,33 @@ pub(crate) const MAX_COLS: usize = 250;
 /// First-line indent for room descriptions (legacy convention).
 pub(crate) const ROOM_DESC_INDENT: usize = 3;
 
-/// Effective wrap width for `player`: their persisted `columns`
-/// preference when set, else the NAWS-reported client width, else
-/// [`DEFAULT_COLS`]. Always within `MIN_COLS..=MAX_COLS`.
-pub(crate) fn wrap_width(world: &World, player: Entity) -> usize {
-    if let Some(n) = pref_columns(world, player) {
-        return n.clamp(MIN_COLS, MAX_COLS);
-    }
-    let reported = world
+/// The width the client reported via NAWS, if it reported a usable one.
+pub(crate) fn client_columns(world: &World, player: Entity) -> Option<usize> {
+    world
         .get::<ClientWidth>(player)
-        .map_or(0, |w| usize::from(w.0));
-    if reported == 0 {
-        DEFAULT_COLS
-    } else {
-        reported.clamp(MIN_COLS, MAX_COLS)
-    }
+        .map(|w| usize::from(w.0))
+        .filter(|w| *w > 0)
+}
+
+/// Effective wrap width for `player`, always within
+/// `MIN_COLS..=MAX_COLS`.
+///
+/// * NAWS only: the client's width.
+/// * A saved `columns` preference only (client never reported): the
+///   preference.
+/// * Both: the *narrower* of the two. A preference below the window is
+///   honoured (prose reads better narrower than a wide window), but one
+///   above it is not: wrapping wider than the client's viewport makes the
+///   client re-wrap every line and lose its indentation, so a stale
+///   `columns 250` can never override what the client reports (issue #2).
+/// * Neither: [`DEFAULT_COLS`].
+pub(crate) fn wrap_width(world: &World, player: Entity) -> usize {
+    let width = match (pref_columns(world, player), client_columns(world, player)) {
+        (Some(pref), Some(client)) => pref.min(client),
+        (Some(width), None) | (None, Some(width)) => width,
+        (None, None) => DEFAULT_COLS,
+    };
+    width.clamp(MIN_COLS, MAX_COLS)
 }
 
 /// The player's explicit `columns` preference, if any.

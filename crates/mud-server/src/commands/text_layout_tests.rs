@@ -162,6 +162,29 @@ fn explicit_columns_overrides_client_for_prose() {
     }
 }
 
+#[test]
+fn columns_wider_than_the_client_window_is_capped_to_it() {
+    let mut world = World::new();
+    let room = room_with(&mut world, "x");
+    let (player, mut rx) = player_in(&mut world, room);
+    // No NAWS: the saved preference is all there is.
+    super::info::cmd_columns(&mut world, player, "250");
+    assert_eq!(wrap_width(&world, player), 250);
+    // NAWS 212 arrives: the stale 250 no longer overrides the window.
+    world.entity_mut(player).insert(ClientWidth(212));
+    assert_eq!(wrap_width(&world, player), 212);
+    let _ = drain(&mut rx);
+    super::info::cmd_columns(&mut world, player, "");
+    let out = drain(&mut rx);
+    assert!(out.contains("wraps at 212 columns"), "{out:?}");
+    assert!(out.contains("capped to your client"), "{out:?}");
+    // A narrower setting is honoured, and `auto` follows the window.
+    super::info::cmd_columns(&mut world, player, "160");
+    assert_eq!(wrap_width(&world, player), 160);
+    super::info::cmd_columns(&mut world, player, "auto");
+    assert_eq!(wrap_width(&world, player), 212);
+}
+
 fn spells_world(names: &[(&str, &str)]) -> (World, Entity, super::test_support::Rx) {
     let mut world = World::new();
     let mut catalog = AbilityCatalog::default();

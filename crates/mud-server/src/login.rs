@@ -7591,6 +7591,34 @@ mod tests {
         }
     }
 
+    /// Issue #2: a NAWS report of 212 columns reaches the player and is the
+    /// width prose wraps at, with or without a stale `columns 250` saved.
+    #[test]
+    fn naws_212_sets_the_wrap_width_even_over_a_stale_columns_setting() {
+        let mut world = World::new();
+        let mut router = ConnRouter::new();
+        let entity = world.spawn(Player).id();
+        router.playing.insert(1, entity);
+        router.on_window_size(1, 212, 50, &mut world);
+        assert_eq!(world.get::<mud_world::ClientWidth>(entity).unwrap().0, 212);
+        assert_eq!(crate::layout::wrap_width(&world, entity), 212);
+
+        let mut vars = mud_world::ScriptVars::default();
+        vars.0
+            .insert(mud_world::PREF_COLUMNS_KEY.to_string(), "250".to_string());
+        world.entity_mut(entity).insert(vars);
+        assert_eq!(crate::layout::wrap_width(&world, entity), 212);
+        // A narrower saved preference still wins; a resize is followed.
+        world
+            .get_mut::<mud_world::ScriptVars>(entity)
+            .unwrap()
+            .0
+            .insert(mud_world::PREF_COLUMNS_KEY.to_string(), "160".to_string());
+        assert_eq!(crate::layout::wrap_width(&world, entity), 160);
+        router.on_window_size(1, 100, 50, &mut world);
+        assert_eq!(crate::layout::wrap_width(&world, entity), 100);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn second_login_of_same_character_takes_over_single_entity() {
         let mut world = World::new();

@@ -1937,8 +1937,9 @@ inventory::submit! {
             summary: "Set the width long text is word-wrapped to.",
             long: "The server wraps room descriptions, help and other prose \
                    to your client's reported window width (80 if it \
-                   doesn't report one). 'columns 100' pins a fixed width \
-                   instead, which reads better on very wide windows; \
+                   doesn't report one). 'columns 100' wraps narrower than \
+                   the window, which reads better on very wide windows (a \
+                   value wider than your window is capped to it); \
                    'columns auto' goes back to following the client. The \
                    setting is saved with your character. 'toggle columns \
                    <n>' works too.",
@@ -8763,9 +8764,12 @@ pub(crate) fn cmd_columns(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim().to_ascii_lowercase();
     if arg.is_empty() {
         let width = wrap_width(world, player);
-        let source = if pref_columns(world, player).is_some() {
-            "set by you"
-        } else if world.get::<mud_world::ClientWidth>(player).is_some() {
+        let source = if let Some(pref) = pref_columns(world, player) {
+            match crate::layout::client_columns(world, player) {
+                Some(client) if pref > client => "capped to your client's window",
+                _ => "set by you",
+            }
+        } else if crate::layout::client_columns(world, player).is_some() {
             "reported by your client"
         } else {
             "default; your client has not reported a width"
