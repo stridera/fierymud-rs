@@ -88,7 +88,14 @@ mod tests {
         let mut world = World::new();
         let player = world.spawn_empty().id();
         for head in [
-            "questlog", "storage", "vault", "check", "getmail", "receive",
+            "questlog",
+            "storage",
+            "vault",
+            "check",
+            "getmail",
+            "receive",
+            "adeposit",
+            "awithdraw",
         ] {
             let claimed = inventory::iter::<AsyncCommand>()
                 .any(|cmd| (cmd.dispatch)(&mut world, player, &pool, head, "").is_some());

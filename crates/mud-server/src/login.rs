@@ -4946,7 +4946,6 @@ pub(crate) struct PlayerSaveSnapshot {
     /// This save consumed a Lua `PendingSave` request; if the write fails
     /// the coordinator re-arms the marker so the request isn't lost.
     pub(crate) resume_pending_save: bool,
-    user_id: String,
     hp: i32,
     stamina: i32,
     zone_id: Option<i32>,
@@ -4977,7 +4976,6 @@ pub(crate) struct PlayerSaveSnapshot {
     entity_for_idx: Vec<Entity>,
     drunk: i32,
     bank: i64,
-    account_wealth: i64,
     script_vars_json: Option<serde_json::Value>,
     trophy_json: Option<serde_json::Value>,
     spell_cooldowns_json: Option<serde_json::Value>,
@@ -5239,16 +5237,11 @@ pub(crate) fn snapshot_player(
         .get::<mud_world::Drunkenness>(entity)
         .map_or(0, |d| d.0);
     let bank = world.get::<BankWealth>(entity).map_or(0, |b| b.0);
-    // Account-shared bank balance — keyed on the *user*, not the
-    // character. Whichever character on the account triggers the
-    // save persists the in-memory value back to `Users.account_wealth`.
-    // Cross-character sync happens at command time via
-    // `fanout_account_wealth`; the save path just snapshots what
-    // this character's component currently shows.
-    let account_wealth = world
-        .get::<mud_world::AccountWealth>(entity)
-        .map_or(0, |a| a.0);
-    let user_id = account.user_id.clone();
+    // The account-shared bank balance is NOT part of the snapshot: it belongs
+    // to the user, not this character, and every change goes through a
+    // guarded delta in the database (`account_bank`). Writing the in-memory
+    // value back here would let a stale sibling overwrite another
+    // character's transfer and duplicate the coin.
     let script_vars_json = script_vars_for_save(world, entity);
     let trophy_json = world
         .get::<mud_world::Trophy>(entity)
@@ -5446,7 +5439,6 @@ pub(crate) fn snapshot_player(
         entity,
         generation,
         resume_pending_save: false,
-        user_id,
         hp,
         stamina,
         zone_id,
@@ -5476,7 +5468,6 @@ pub(crate) fn snapshot_player(
         entity_for_idx,
         drunk,
         bank,
-        account_wealth,
         script_vars_json,
         trophy_json,
         spell_cooldowns_json,
@@ -5959,10 +5950,6 @@ pub(crate) async fn write_snapshot(
         snap.rest_tier,
     )
     .await?;
-    // Unlinked legacy characters have no `Users` row to carry the pool.
-    if !snap.user_id.is_empty() {
-        mud_db::users::save_account_wealth(&mut *tx, &snap.user_id, snap.account_wealth).await?;
-    }
     if let Some(t) = snap.new_time_played {
         mud_db::characters::save_time_played(&mut *tx, cid, t).await?;
     }

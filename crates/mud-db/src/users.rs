@@ -71,24 +71,48 @@ pub async fn find_by_id(pool: &PgPool, id: &str) -> sqlx::Result<Option<User>> {
     .await
 }
 
-/// Persist the account-shared bank balance. Used by the
-/// `account_deposit` / `account_withdraw` commands and the save-player
-/// path when one character on the account adjusted the shared pool
-/// in-memory. Mirrors `characters::save_bank_wealth` for the per-
-/// character balance.
-pub async fn save_account_wealth<'e, E: PgExecutor<'e>>(
-    executor: E,
+/// Move coin between a character's bank and the account-shared pool in one
+/// transaction, with the pool change expressed as a guarded delta so two
+/// characters can never both spend the same coin: a negative `pool_delta`
+/// (withdraw) only applies `WHERE account_wealth >= -pool_delta`.
+///
+/// The character's own `bank_wealth` is set to `new_bank`, the value the
+/// runtime computed from its authoritative in-memory balance (only that
+/// character ever changes it). Returns the new pool balance, or `None` when
+/// the pool could not cover a withdrawal (nothing is written).
+pub async fn transfer_with_bank(
+    pool: &PgPool,
     user_id: &str,
-    amount: i64,
-) -> sqlx::Result<()> {
-    sqlx::query!(
-        r#"UPDATE "Users" SET account_wealth = $1, updated_at = NOW() WHERE id = $2"#,
-        amount,
+    character_id: &str,
+    pool_delta: i64,
+    new_bank: i64,
+) -> sqlx::Result<Option<i64>> {
+    let mut tx = pool.begin().await?;
+    let new_pool = sqlx::query_scalar!(
+        r#"
+        UPDATE "Users"
+        SET account_wealth = account_wealth + $1, updated_at = NOW()
+        WHERE id = $2 AND account_wealth + $1 >= 0
+        RETURNING account_wealth
+        "#,
+        pool_delta,
         user_id,
     )
-    .execute(executor)
+    .fetch_optional(&mut *tx)
     .await?;
-    Ok(())
+    let Some(new_pool) = new_pool else {
+        tx.rollback().await?;
+        return Ok(None);
+    };
+    sqlx::query!(
+        r#"UPDATE "Characters" SET bank_wealth = $1 WHERE id = $2"#,
+        new_bank,
+        character_id,
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Some(new_pool))
 }
 
 /// Read the account-shared bank balance only. Cheaper than the full

@@ -2207,11 +2207,9 @@ pub struct BankWealth(pub i64);
 /// each transfer fans the new value out to all of them so the
 /// readout stays consistent without a DB roundtrip.
 ///
-/// Save path: `users::save_account_wealth` writes back when the
-/// in-memory value diverges from the schema default. The component
-/// is keyed on the *character*, but the DB column is keyed on the
-/// *user* — the runtime reconciles by iterating online characters
-/// and matching their `Account.user_id` after each transfer.
+/// Never written back by the character save: the column is changed only
+/// by guarded SQL deltas in the account-bank commands, and this component
+/// is refreshed from the result (and fanned out to online siblings).
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct AccountWealth(pub i64);
 
