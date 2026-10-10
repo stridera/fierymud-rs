@@ -285,6 +285,16 @@ impl Drop for TrackGuard {
     }
 }
 
+/// Poll `fut` once with a waker that does nothing. Used to join a lock's
+/// FIFO queue immediately; the real waker is installed by the next poll.
+fn poll_once<F: Future + Unpin>(fut: &mut F) -> Option<F::Output> {
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    match std::pin::Pin::new(fut).poll(&mut cx) {
+        std::task::Poll::Ready(v) => Some(v),
+        std::task::Poll::Pending => None,
+    }
+}
+
 impl SaveCoordinator {
     pub(crate) fn new(max_background_writers: usize) -> Self {
         Self(Arc::new(Shared {
@@ -316,6 +326,41 @@ impl SaveCoordinator {
             slot,
             last_committed,
         }
+    }
+
+    /// Queue a character's write turn NOW and run `work` once it is granted.
+    ///
+    /// Unlike spawning a task that calls [`Self::begin_ordered`] itself, the
+    /// turn is requested synchronously, in call order: a foreground save
+    /// issued after this call (a quit) queues behind `work` instead of
+    /// possibly winning the turn first. The task counts as an unfinished
+    /// write for [`Self::flush`] and the relog barrier, so shutdown and
+    /// relog wait for it. Must be called inside a tokio runtime.
+    pub(crate) fn spawn_ordered<W, Fut>(&self, character_id: &str, work: W)
+    where
+        W: FnOnce(OrderedSave) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let slot = self.slot(character_id);
+        let mut lock = Box::pin(Arc::clone(&slot.order).lock_owned());
+        // Joins the lock's FIFO queue now (or takes the turn outright).
+        let granted = poll_once(&mut lock);
+        let shared = Arc::clone(&self.0);
+        shared.pending.fetch_add(1, Ordering::SeqCst);
+        slot.outstanding.fetch_add(1, Ordering::SeqCst);
+        let guard = PendingGuard(shared, Arc::clone(&slot));
+        tokio::spawn(async move {
+            let _guard = guard;
+            let last_committed = match granted {
+                Some(g) => g,
+                None => lock.await,
+            };
+            work(OrderedSave {
+                slot,
+                last_committed,
+            })
+            .await;
+        });
     }
 
     /// Run a detached task that shutdown ([`Self::flush`]) waits for, for
@@ -650,6 +695,31 @@ mod tests {
         Fut: Future<Output = Result<HashMap<usize, i32>, String>> + Send + 'static,
     {
         c.request_background(cid, |g| snapshot_player(world, e, g), writer)
+    }
+
+    /// A turn queued with `spawn_ordered` is ahead of any turn requested
+    /// after the call returns, even before the spawned task first runs: a
+    /// quit save issued right after a house placement queues behind it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn spawn_ordered_turn_is_queued_before_the_call_returns() {
+        let c = SaveCoordinator::new(2);
+        let log = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        let holder = c.begin_ordered("char-q").await;
+        let log_w = Arc::clone(&log);
+        c.spawn_ordered("char-q", move |ordered| async move {
+            let _turn = ordered;
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            log_w.lock().unwrap().push("placement");
+        });
+        // Requested after, before the spawned task has been polled.
+        let mut quit = Box::pin(c.begin_ordered("char-q"));
+        assert!(poll_once(&mut quit).is_none());
+        drop(holder);
+        let _quit_turn = quit.await;
+        log.lock().unwrap().push("quit");
+        assert_eq!(*log.lock().unwrap(), vec!["placement", "quit"]);
+        let mut world = World::new();
+        assert!(c.flush(&mut world, Duration::from_secs(5)).await);
     }
 
     /// The tick-side call is a plain `fn`: it snapshots and returns even

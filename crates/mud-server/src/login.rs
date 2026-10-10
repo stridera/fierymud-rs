@@ -11038,6 +11038,128 @@ mod tests {
         temp_cleanup(&pool, &[], &[&c.id], &[]).await;
     }
 
+    /// A throwaway house (one foyer) for `cid`. Returns `(house_id,
+    /// foyer_row_id)`; `None` (test skipped) without a Rooms row to hang the
+    /// entrance on.
+    async fn temp_house(pool: &PgPool, cid: &str) -> Option<(i32, i32)> {
+        let (zone, id): (i32, i32) =
+            mud_db::sqlx::query_as("SELECT zone_id, id FROM \"Room\" LIMIT 1")
+                .fetch_optional(pool)
+                .await
+                .unwrap()?;
+        Some(
+            mud_db::housing::create_house(pool, cid, zone, id)
+                .await
+                .unwrap(),
+        )
+    }
+
+    async fn house_item_count(pool: &PgPool, foyer_row_id: i32) -> i64 {
+        mud_db::sqlx::query_scalar("SELECT COUNT(*) FROM player_house_items WHERE room_id = $1")
+            .bind(foyer_row_id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// What `house place` does to the world before it hands the write off.
+    fn place_in_world(
+        world: &mut World,
+        item: Entity,
+        house_room: Entity,
+        character_id: &str,
+        foyer_row_id: i32,
+        key: (i32, i32),
+    ) {
+        let inventory_row_id = world.get::<mud_world::PersistedItemId>(item).map(|p| p.0);
+        let placement = mud_world::HousePlacement::pending();
+        world
+            .entity_mut(item)
+            .insert(Located(house_room))
+            .remove::<mud_world::PersistedItemId>()
+            .insert(placement.clone());
+        crate::house_items::persist_placement(
+            world,
+            crate::house_items::PlacementWrite {
+                character_id: character_id.to_string(),
+                room_row_id: foyer_row_id,
+                object_zone_id: key.0,
+                object_id: key.1,
+                custom: mud_db::housing::HouseItemCustom::default(),
+                inventory_row_id,
+                placement,
+            },
+        );
+    }
+
+    /// `house place` followed at once by `quit` (and a shutdown right
+    /// after): the placement's turn was queued before the quit save asked
+    /// for its own, so the quit waits for the house row instead of dropping
+    /// the pack row first and leaving the item in neither place. A `get` in
+    /// between ends with one pack row and no house row.
+    #[tokio::test(flavor = "current_thread")]
+    async fn place_then_quit_never_loses_the_item() {
+        let Some((pool, _db_lock)) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let Some(key) = first_object(&pool).await else {
+            return;
+        };
+        for take_back in [false, true] {
+            let (_user, c) = temp_unlinked_char(&pool, "plq").await;
+            let Some((house_id, foyer)) = temp_house(&pool, &c.id).await else {
+                temp_cleanup(&pool, &[], &[&c.id], &[]).await;
+                return;
+            };
+            let mut world = World::new();
+            world.insert_resource(SaveCoordinator::default());
+            world.insert_resource(commands::DbPool(pool.clone()));
+            crate::house_items::register_observers(&mut world);
+            let room = world.spawn_empty().id();
+            let house_room = world
+                .spawn(mud_world::HouseRoom {
+                    house_id,
+                    local_index: 0,
+                })
+                .id();
+            let me = spawn_player_for(&mut world, &c.id, room);
+            let item = world
+                .spawn((
+                    Item,
+                    WorldKey {
+                        zone: key.0,
+                        id: key.1,
+                    },
+                    Located(me),
+                ))
+                .id();
+            assert!(save_player(&mut world, me, &pool).await.committed);
+
+            place_in_world(&mut world, item, house_room, &c.id, foyer, key);
+            if take_back {
+                world.entity_mut(item).insert(Located(me));
+            }
+            let out = save_player_final(&mut world, me, &pool).await;
+            assert!(out.committed, "{:?}", out.error);
+            // Shutdown right behind the quit.
+            let coordinator = world.resource::<SaveCoordinator>().clone();
+            assert!(coordinator.flush(&mut world, Duration::from_secs(10)).await);
+
+            let pack = item_rows(&pool, &[&c.id]).await.len();
+            let house = house_item_count(&pool, foyer).await;
+            if take_back {
+                assert_eq!((pack, house), (1, 0), "taken back: one pack row only");
+            } else {
+                assert_eq!((pack, house), (0, 1), "placed: the house row only");
+            }
+            mud_db::housing::delete_house(&pool, house_id)
+                .await
+                .unwrap();
+            drop_item_rows(&pool, &[&c.id]).await;
+        }
+    }
+
     static RELOG_RETRY: &[Duration] = &[Duration::from_millis(150)];
     static RELOG_NEVER: &[Duration] = &[Duration::from_secs(30)];
 

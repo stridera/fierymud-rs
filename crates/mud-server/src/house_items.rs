@@ -106,10 +106,15 @@ pub(crate) struct PlacementWrite {
     pub placement: HousePlacement,
 }
 
-/// Background-write a placement. Takes the character's save-order turn first
-/// (like the account chest) so no in-flight save can re-insert the pack row
-/// afterwards, then inserts the house row and deletes the pack row in one
-/// transaction. No-op without a database (unit tests).
+/// Background-write a placement. The character's save-order turn is queued
+/// BEFORE this returns ([`SaveCoordinator::spawn_ordered`]), so a quit save
+/// issued right after `house place` (or after `get` took the item back)
+/// waits for the insert instead of snapshotting first: it can neither drop
+/// the pack row while the house row does not exist yet, nor race the
+/// placement's cleanup. Like the account chest, no in-flight save can
+/// re-insert the pack row afterwards, and the house row insert and the pack
+/// row delete share one transaction. The task counts as an unfinished write,
+/// so shutdown waits for it. No-op without a database (unit tests).
 pub(crate) fn persist_placement(world: &World, w: PlacementWrite) {
     let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
         return;
@@ -118,8 +123,8 @@ pub(crate) fn persist_placement(world: &World, w: PlacementWrite) {
         .get_resource::<SaveCoordinator>()
         .cloned()
         .unwrap_or_default();
-    tokio::spawn(async move {
-        let mut ordered = coordinator.begin_ordered(&w.character_id).await;
+    let character_id = w.character_id.clone();
+    coordinator.spawn_ordered(&character_id, move |mut ordered| async move {
         let result = mud_db::housing::place_item(
             &pool,
             w.room_row_id,
