@@ -644,6 +644,11 @@ pub(crate) fn mob_attempt_equip(world: &mut World, mob: Entity) {
 /// Rules a mob may consider per combat round (legacy tries "best 2-3"). Only
 /// rules that passed their roll count: a rare rule that fails its roll is free.
 const MAX_RULE_EVALS: u32 = 3;
+/// Rules one mob may put through the roll-and-conditions step per round, taken
+/// in priority order. Rules skipped by the walk, level gate or a running
+/// cooldown cost nothing and do not count. A hard bound so a mob with a long
+/// custom list cannot make the combat tick pay for all of it every round.
+const MAX_RULES_CHECKED: u32 = 16;
 /// Rule cooldowns are written in seconds; the server ticks at 10 Hz.
 const TICKS_PER_SECOND: u64 = 10;
 /// A rule whose last attempt did not take effect (no slot, resisted, refused)
@@ -1089,6 +1094,7 @@ fn condition_holds(
     match cond {
         // Roll-style conditions were settled before the rule was evaluated.
         AiCondition::Telegraph
+        | AiCondition::CooldownGroup(_)
         | AiCondition::LevelScaledChance(_)
         | AiCondition::LevelRoll { .. } => true,
         AiCondition::InCombat => scene.in_combat,
@@ -1308,8 +1314,9 @@ fn run_mob_rules(
     let in_combat = walk == Walk::Combat;
     let mut foes: Option<Vec<Entity>> = None;
     let mut evals = 0;
+    let mut checked = 0;
     for (idx, rule) in rules.iter().enumerate() {
-        if evals >= MAX_RULE_EVALS {
+        if evals >= MAX_RULE_EVALS || checked >= MAX_RULES_CHECKED {
             break;
         }
         // Each walk runs its own rules: a fight does not buff or cure, and
@@ -1329,7 +1336,7 @@ fn run_mob_rules(
             continue;
         }
         let (last, warned_at, failed) = world.get::<MobAi>(mob).map_or((None, None, None), |a| {
-            (a.last_used(idx), a.warned_at(idx), a.failed_at(idx))
+            (a.cooldown_started(idx), a.warned_at(idx), a.failed_at(idx))
         });
         if last
             .is_some_and(|t| tick.saturating_sub(t) < u64::from(rule.cooldown_s) * TICKS_PER_SECOND)
@@ -1341,6 +1348,7 @@ fn run_mob_rules(
         if verbal && no_magic {
             continue;
         }
+        checked += 1;
         let telegraphed = rule.when.contains(&AiCondition::Telegraph);
         // A telegraphed rule that warned last round follows through now,
         // without a fresh roll.

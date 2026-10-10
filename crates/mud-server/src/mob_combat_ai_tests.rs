@@ -303,6 +303,71 @@ fn a_rule_cooldown_is_respected() {
     assert_eq!(casts, vec![1, 4, 7]);
 }
 
+/// Rounds (1-based) in which the player took damage.
+fn cast_rounds(f: &mut Fixture, rounds: u64) -> Vec<u64> {
+    let mut casts = Vec::new();
+    for n in 1..=rounds {
+        let before = hp(&f.world, f.player);
+        round(&mut f.world, n);
+        if hp(&f.world, f.player) < before {
+            casts.push(n);
+        }
+    }
+    casts
+}
+
+fn grouped_fireball(group: Option<&str>) -> AiRule {
+    let mut r = fireball(AiTarget::Auto);
+    r.cooldown_s = 12; // three combat rounds
+    if let Some(g) = group {
+        r.when
+            .push(mud_world::AiCondition::CooldownGroup(g.to_string()));
+    }
+    r
+}
+
+#[test]
+fn rules_in_one_cooldown_group_share_a_clock() {
+    // Two rules, same group: one use holds both back for the full cooldown.
+    let mut f = fixture(vec![
+        grouped_fireball(Some("self_heal")),
+        grouped_fireball(Some("self_heal")),
+    ]);
+    assert_eq!(cast_rounds(&mut f, 7), vec![1, 4, 7]);
+}
+
+#[test]
+fn rules_without_a_group_or_in_different_groups_cool_down_separately() {
+    // Ungrouped: each rule has its own clock, so they alternate (the old
+    // heal-rotation bug).
+    let mut f = fixture(vec![grouped_fireball(None), grouped_fireball(None)]);
+    assert_eq!(cast_rounds(&mut f, 5), vec![1, 2, 4, 5]);
+    let mut g = fixture(vec![
+        grouped_fireball(Some("a")),
+        grouped_fireball(Some("b")),
+    ]);
+    assert_eq!(cast_rounds(&mut g, 5), vec![1, 2, 4, 5]);
+}
+
+#[test]
+fn only_the_first_sixteen_rules_are_checked_each_round() {
+    let dud = || {
+        let mut r = fireball(AiTarget::Auto);
+        r.chance_pct = 0;
+        r
+    };
+    // The real rule is the 17th: out of reach.
+    let mut rules: Vec<AiRule> = (0..16).map(|_| dud()).collect();
+    rules.push(fireball(AiTarget::Auto));
+    let mut f = fixture(rules);
+    assert!(cast_rounds(&mut f, 4).is_empty());
+    // The 16th: still checked.
+    let mut rules: Vec<AiRule> = (0..15).map(|_| dud()).collect();
+    rules.push(fireball(AiTarget::Auto));
+    let mut g = fixture(rules);
+    assert_eq!(cast_rounds(&mut g, 1), vec![1]);
+}
+
 #[test]
 fn chance_and_scale_gate_the_roll() {
     let mut never = fireball(AiTarget::Auto);

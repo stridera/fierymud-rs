@@ -36,6 +36,7 @@
 //! | `requires_weapon_type` | damage type, or `piercing` / `slashing` / `bludgeoning` | `RequiresWeaponType` |
 //! | `outdoors`         | `true`                 | `Outdoors`                    |
 //! | `telegraph`        | `true`                 | `Telegraph`                   |
+//! | `cooldown_group`   | non-empty string       | `CooldownGroup` (not a test)  |
 //!
 //! Target-side conditions (`target_*`, `align`, `not_align`, `*_lifeforce`)
 //! describe the rule's chosen target; for a rule that targets the mob itself
@@ -58,6 +59,11 @@
 //! `telegraph` is a flag, not a test: the engine warns the room one combat
 //! round before the rule's cast and fires it the round after (breath, area
 //! attacks). Off unless the rule sets it.
+//!
+//! `cooldown_group` is also not a test: rules of one mob that name the same
+//! group share a single last-use time, so a cooldown started by any of them
+//! holds back all of them (five heal spells with `cooldown_s: 12` heal once
+//! per 12 s, not once per spell). Rules with no group keep their own clock.
 //!
 //! A `false` value on the `true`-only keys means "no constraint". An unknown
 //! key is ignored (and logged once per load); a known key with an unusable
@@ -239,6 +245,9 @@ pub enum AiCondition {
     /// The rule warns the room one round before it fires (not a test the
     /// engine evaluates; it changes how the rule is carried out).
     Telegraph,
+    /// The rule shares its cooldown with every other rule of the same group
+    /// (not a test; the engine reads it when it checks the cooldown).
+    CooldownGroup(String),
 }
 
 /// One mob AI rule, parsed and validated. Lists are kept in priority order
@@ -256,6 +265,17 @@ pub struct AiRule {
     pub target: AiTarget,
     /// Mob level gate (`ClassAiRules.min_level`); `None` = any level.
     pub min_level: Option<i32>,
+}
+
+impl AiRule {
+    /// The cooldown group this rule belongs to, if any.
+    #[must_use]
+    pub fn cooldown_group(&self) -> Option<&str> {
+        self.when.iter().find_map(|c| match c {
+            AiCondition::CooldownGroup(g) => Some(g.as_str()),
+            _ => None,
+        })
+    }
 }
 
 /// A mob's live AI state: its (shared) rule list and when it last used each
@@ -338,6 +358,27 @@ impl MobAi {
             .iter()
             .find(|(i, _)| *i == idx)
             .map(|(_, t)| *t)
+    }
+
+    /// Tick at which rule `idx`, or any rule sharing its `cooldown_group`,
+    /// last fired. This is the clock the cooldown runs against.
+    #[must_use]
+    pub fn cooldown_started(&self, idx: usize) -> Option<u64> {
+        let own = self.last_used(idx);
+        let Some(group) = self.rules.get(idx).and_then(AiRule::cooldown_group) else {
+            return own;
+        };
+        self.last_use
+            .iter()
+            .filter(|(i, _)| {
+                self.rules
+                    .get(usize::from(*i))
+                    .and_then(AiRule::cooldown_group)
+                    == Some(group)
+            })
+            .map(|(_, t)| *t)
+            .chain(own)
+            .max()
     }
 
     /// Record that rule `idx` fired at `tick`.
@@ -532,6 +573,12 @@ pub fn parse_conditions(value: Option<&serde_json::Value>) -> ParsedConditions {
                     None => bad("expected true or false"),
                 }
             }
+            "cooldown_group" => match v.as_str().map(str::trim) {
+                Some(g) if !g.is_empty() => {
+                    out.when.push(AiCondition::CooldownGroup(g.to_string()));
+                }
+                _ => bad("expected a non-empty group name"),
+            },
             "self_has_debuff" => match (flag, string_list(v)) {
                 (Some(true), _) => out.when.push(AiCondition::SelfHasDebuff),
                 (Some(false), _) => {}
@@ -789,6 +836,35 @@ mod tests {
             assert!(p.when.contains(&c), "missing {c:?}");
         }
         assert_eq!(p.when.len(), 11);
+    }
+
+    #[test]
+    fn cooldown_group_parses_and_links_rules() {
+        let p = parse_conditions(Some(
+            &json!({"cooldown_group": " self_heal ", "in_combat": true}),
+        ));
+        assert!(p.bad_values.is_empty() && p.unknown_keys.is_empty());
+        assert!(
+            p.when
+                .contains(&AiCondition::CooldownGroup("self_heal".into()))
+        );
+        for bad in [json!({"cooldown_group": ""}), json!({"cooldown_group": 3})] {
+            assert_eq!(parse_conditions(Some(&bad)).bad_values.len(), 1, "{bad}");
+        }
+        let grouped = json!({"cooldown_group": "self_heal"});
+        let mut diag = RuleDiagnostics::default();
+        let a = build_rule(&raw(Some(&grouped), None), &mut diag).unwrap();
+        let b = build_rule(&raw(Some(&grouped), None), &mut diag).unwrap();
+        let c = build_rule(&raw(None, None), &mut diag).unwrap();
+        assert_eq!(a.cooldown_group(), Some("self_heal"));
+        assert_eq!(c.cooldown_group(), None);
+        // A use of rule 0 starts rule 1's cooldown, but not the ungrouped rule's.
+        let mut ai = MobAi::new(Arc::from(vec![a, b, c]));
+        ai.mark_used(0, 40);
+        assert_eq!(ai.cooldown_started(1), Some(40));
+        assert_eq!(ai.cooldown_started(2), None);
+        ai.mark_used(1, 80);
+        assert_eq!(ai.cooldown_started(0), Some(80));
     }
 
     #[test]
