@@ -452,6 +452,9 @@ mod conjuration;
 #[path = "commands/conjuration_tests.rs"]
 mod conjuration_tests;
 #[cfg(test)]
+#[path = "commands/violent_cast_tests.rs"]
+mod violent_cast_tests;
+#[cfg(test)]
 pub(crate) use combat_commands::cmd_flee;
 pub(crate) use combat_commands::flee_through_exit;
 #[path = "commands/enter.rs"]
@@ -15688,7 +15691,8 @@ pub(crate) fn invoke_ability_with(
             );
         }
         // The spell was cast and the target shrugged it off: legacy
-        // still charges the slot.
+        // still charges the slot, and a violent spell still starts the fight.
+        engage_after_violent_cast(world, player, &def, target_entity);
         settle_slot(world, player, slot_hold, true);
         return;
     }
@@ -19045,6 +19049,9 @@ pub(crate) fn invoke_ability_with(
             );
         }
     }
+    // Legacy `call_magic`: "Violent spells cause fights" whether or not the
+    // spell did damage (curses, dispels, holds).
+    engage_after_violent_cast(world, player, &def, target_entity);
     // Reagent consumption: only when the cast actually applied at
     // least one effect (mirrors the cooldown gate below). Despawn
     // every entity in `to_consume` collected during the pre-flight
@@ -19087,6 +19094,53 @@ pub(crate) fn invoke_ability_with(
     bump_use_skill_quest_progress(world, player, def.id);
     let _ = spawn_count;
     settle_slot(world, player, slot_hold, true);
+}
+
+/// A violent spell that landed (or was resisted) on somebody else starts the
+/// fight, damaging or not (legacy `call_magic`: "Violent spells cause
+/// fights"; non-damaging curses, dispels and holds used to leave the victim
+/// calm). Damage spells engage inside the damage arm already; this covers the
+/// rest. Judged on the state after the effects ran, so a victim who is still
+/// held (paralysis, sleep), has been charmed, is dead or gone, or is already
+/// fighting is left alone, while one freed by the spell itself (Dispel Magic
+/// lifting a paralysis) turns on the caster at once. A caster already in a
+/// fight keeps their current opponent; the victim just joins in.
+fn engage_after_violent_cast(
+    world: &mut World,
+    caster: Entity,
+    def: &mud_world::AbilityDef,
+    target: Entity,
+) {
+    if !def.violent || target == caster || world.get_entity(target).is_err() {
+        return;
+    }
+    if world.get::<Mob>(target).is_none() && world.get::<Player>(target).is_none() {
+        return;
+    }
+    if world.get::<Health>(target).is_none_or(|h| h.hp <= 0)
+        || world.get::<Fighting>(target).is_some()
+        || world.get::<Stunned>(target).is_some()
+        || world.get::<Posture>(target).map(|p| p.0) == Some(mud_world::PostureKind::Sleeping)
+        || attack_ok::is_charmed(world, target)
+    {
+        return;
+    }
+    let (Some(caster_room), Some(target_room)) = (
+        world.get::<Located>(caster).map(|l| l.0),
+        world.get::<Located>(target).map(|l| l.0),
+    ) else {
+        return;
+    };
+    if caster_room != target_room {
+        return;
+    }
+    if world.get::<Fighting>(caster).is_some() {
+        if world.get::<mud_world::PeacefulRoom>(target_room).is_none() {
+            try_insert(world, target, Fighting(caster));
+        }
+    } else {
+        engage_combat(world, caster, target, target_room);
+    }
 }
 
 /// Validate that `target` matches at least one entry in
