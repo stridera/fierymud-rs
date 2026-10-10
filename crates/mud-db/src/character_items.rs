@@ -590,3 +590,31 @@ pub(crate) fn custom_values_patch(
     }
     serde_json::Value::Object(patch)
 }
+
+/// Give an offline character `quantity` fresh copies of an object, straight
+/// into their pack (`CharacterItems` rows with default state). Used for quest
+/// item rewards whose recipient left the game before the world thread could
+/// spawn them: the rows are the only copy, and the character's final save has
+/// already run, so nothing can delete them.
+pub async fn grant_items(
+    pool: &PgPool,
+    character_id: &str,
+    object_zone_id: i32,
+    object_id: i32,
+    quantity: i32,
+) -> sqlx::Result<u64> {
+    let res = sqlx::query!(
+        r#"
+        INSERT INTO "CharacterItems" (character_id, object_zone_id, object_id, updated_at)
+        SELECT $1, $2, $3, NOW() + n * INTERVAL '1 millisecond'
+        FROM generate_series(0, GREATEST($4::int, 1) - 1) AS n
+        "#,
+        character_id,
+        object_zone_id,
+        object_id,
+        quantity,
+    )
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
+}

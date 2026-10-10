@@ -162,6 +162,36 @@ impl PendingPlayerUpdate {
     }
 }
 
+/// Insert a reward item for a character who is no longer in the world.
+/// Background write; a failure is logged with enough detail to restore it.
+fn grant_item_to_offline(
+    world: &World,
+    character_id: String,
+    object_zone: i32,
+    object_id: i32,
+    quantity: i32,
+) {
+    let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) else {
+        return;
+    };
+    tokio::spawn(async move {
+        if let Err(e) = mud_db::character_items::grant_items(
+            &pool,
+            &character_id,
+            object_zone,
+            object_id,
+            quantity,
+        )
+        .await
+        {
+            tracing::error!(
+                error = %e, %character_id, object_zone, object_id, quantity,
+                "quest reward item for an offline character was lost"
+            );
+        }
+    });
+}
+
 /// Sender side of the async-to-world channel for player ECS
 /// updates. Cloned by command handlers before `tokio::spawn`.
 #[derive(Resource, Clone)]
@@ -210,6 +240,18 @@ pub fn drain_player_updates(world: &mut World) {
             // COLLECT claim made for them must not be left dangling.
             if let PendingPlayerUpdate::CollectClaimed { obj, .. } = &msg {
                 crate::quest_progress::release_claim(world, obj);
+            }
+            // A reward item has no database row yet (only the numeric
+            // rewards were written at grant time), so it would be lost for
+            // good: put it in the character's pack rows directly.
+            if let PendingPlayerUpdate::SpawnItem {
+                character_id,
+                object_zone,
+                object_id,
+                quantity,
+            } = msg
+            {
+                grant_item_to_offline(world, character_id, object_zone, object_id, quantity);
             }
             continue;
         };
@@ -353,6 +395,9 @@ pub fn drain_player_updates(world: &mut World) {
                     entity,
                     format!("You receive {} of {}.\r\n", quantity.max(1), proto.name),
                 );
+                // The reward exists only in memory until the next save;
+                // write it out now rather than waiting for the autosave.
+                crate::quest_progress::save_player_soon(world, entity);
             }
         }
     }

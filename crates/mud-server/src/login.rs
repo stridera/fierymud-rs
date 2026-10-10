@@ -6106,6 +6106,13 @@ pub(crate) async fn save_player_final(
     entity: Entity,
     pool: &PgPool,
 ) -> SaveOutcome {
+    // Quest rewards already written to the database (gold, experience,
+    // skill points) reach the in-memory character through the update inbox.
+    // Apply whatever is waiting first, or this save would write the
+    // pre-reward values over them and the player would quit poorer.
+    if world.contains_resource::<commands::PlayerUpdateInbox>() {
+        commands::drain_player_updates(world);
+    }
     save_player_inner(world, entity, pool, true).await
 }
 
@@ -10232,6 +10239,114 @@ mod tests {
             .fetch_optional(pool)
             .await
             .unwrap()
+    }
+
+    /// Quest rewards queued for a character reach the database even when the
+    /// character quits before the tick drains them: the gold the grant
+    /// already wrote must not be overwritten by the quit save, and the reward
+    /// item (which has no row yet) must be saved with the pack.
+    #[tokio::test(flavor = "current_thread")]
+    async fn queued_quest_rewards_survive_the_quit_save() {
+        let Some((pool, _db_lock)) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let Some((oz, oid)) = first_object(&pool).await else {
+            return;
+        };
+        let (_user, c) = temp_unlinked_char(&pool, "qrq").await;
+        let mut world = World::new();
+        world.insert_resource(SaveCoordinator::default());
+        world.insert_resource(commands::DbPool(pool.clone()));
+        let mut protos = mud_world::ObjectPrototypes::default();
+        protos.by_key.insert(
+            (oz, oid),
+            crate::commands::test_support::object_proto(oz, oid, mud_db::enums::ObjectType::Other),
+        );
+        world.insert_resource(protos);
+        let (tx, inbox_rx) = tokio::sync::mpsc::channel(8);
+        world.insert_resource(commands::PlayerUpdateInbox(std::sync::Mutex::new(inbox_rx)));
+        let room = world.spawn_empty().id();
+        let player = spawn_player_for(&mut world, &c.id, room);
+        world.entity_mut(player).insert(mud_world::Wealth(100));
+        mud_db::sqlx::query("UPDATE \"Characters\" SET wealth = 100 WHERE id = $1")
+            .bind(&c.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // grant_simple_rewards wrote +50 gold to the row; the in-memory half
+        // and the reward item are still waiting in the inbox when the player
+        // quits.
+        mud_db::sqlx::query("UPDATE \"Characters\" SET wealth = wealth + 50 WHERE id = $1")
+            .bind(&c.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        tx.try_send(commands::PendingPlayerUpdate::WealthDelta {
+            character_id: c.id.clone(),
+            amount: 50,
+        })
+        .unwrap();
+        tx.try_send(commands::PendingPlayerUpdate::SpawnItem {
+            character_id: c.id.clone(),
+            object_zone: oz,
+            object_id: oid,
+            quantity: 1,
+        })
+        .unwrap();
+        let out = save_player_final(&mut world, player, &pool).await;
+        assert!(out.committed, "{:?}", out.error);
+        let coordinator = world.resource::<SaveCoordinator>().clone();
+        assert!(coordinator.flush(&mut world, Duration::from_secs(10)).await);
+
+        let wealth: i64 =
+            mud_db::sqlx::query_scalar("SELECT wealth FROM \"Characters\" WHERE id = $1")
+                .bind(&c.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(wealth, 150, "the quit save overwrote the quest gold");
+        assert_eq!(item_rows(&pool, &[&c.id]).await.len(), 1, "reward item");
+        drop_item_rows(&pool, &[&c.id]).await;
+        temp_cleanup(&pool, &[], &[&c.id], &[]).await;
+    }
+
+    /// A reward item whose recipient is already gone when the inbox drains is
+    /// written to their pack rows instead of being dropped.
+    #[tokio::test(flavor = "current_thread")]
+    async fn reward_item_for_a_departed_character_is_not_dropped() {
+        let Some((pool, _db_lock)) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let Some((oz, oid)) = first_object(&pool).await else {
+            return;
+        };
+        let (_user, c) = temp_unlinked_char(&pool, "qrg").await;
+        let mut world = World::new();
+        world.insert_resource(commands::DbPool(pool.clone()));
+        let (tx, inbox_rx) = tokio::sync::mpsc::channel(8);
+        world.insert_resource(commands::PlayerUpdateInbox(std::sync::Mutex::new(inbox_rx)));
+        tx.try_send(commands::PendingPlayerUpdate::SpawnItem {
+            character_id: c.id.clone(),
+            object_zone: oz,
+            object_id: oid,
+            quantity: 2,
+        })
+        .unwrap();
+        commands::drain_player_updates(&mut world);
+        let mut rows = 0;
+        for _ in 0..60 {
+            rows = item_rows(&pool, &[&c.id]).await.len();
+            if rows == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(rows, 2, "reward items were dropped with the player");
+        drop_item_rows(&pool, &[&c.id]).await;
+        temp_cleanup(&pool, &[], &[&c.id], &[]).await;
     }
 
     async fn drop_item_rows(pool: &PgPool, cids: &[&str]) {
