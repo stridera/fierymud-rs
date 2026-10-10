@@ -11225,6 +11225,17 @@ fn put_plain(world: &mut World, player: Entity, args: &str) {
         return;
     }
 
+    // Only containers hold things: `put x coins` used to move the item
+    // inside any carried object (a coin pile, a sword, ...).
+    if !is_container_entity(world, container) {
+        send_rendered(
+            world,
+            player,
+            &format!("{container_name} isn't a container.\r\n"),
+        );
+        return;
+    }
+
     // A placed house item is stored as a single row: whatever went inside
     // would be gone after the next reboot (and a pickup would not take it).
     if world.get::<mud_world::HouseItem>(container).is_some()
@@ -11259,6 +11270,7 @@ fn put_plain(world: &mut World, player: Entity, args: &str) {
                     l.0 == player
                         && eq.is_none()
                         && *e != container
+                        && !item_drop_blocked(world, *e)
                         && (filter.is_empty() || matches(&filter, n, *kw))
                 })
                 .map(|(e, _, n, _, _)| (e, n.name.clone()))
@@ -11319,6 +11331,9 @@ fn put_plain(world: &mut World, player: Entity, args: &str) {
         return;
     }
     let item_name = name_of(world, item);
+    if refuse_drop_blocked(world, player, item, &item_name) {
+        return;
+    }
     if world.get::<Located>(item).is_some() {
         world.entity_mut(item).insert(Located(container));
     }
@@ -11397,6 +11412,9 @@ pub(crate) fn cmd_donate(world: &mut World, player: Entity, args: &str) {
     let room = located.0;
     let item_name = name_of(world, item);
     let player_name = name_of(world, player);
+    if refuse_drop_blocked(world, player, item, &item_name) {
+        return;
+    }
     if world.get::<Located>(item).is_some() {
         world.entity_mut(item).insert(Located(room));
     }
@@ -11465,6 +11483,35 @@ pub(crate) fn refuse_nonempty_container(
         &format!("{item_name} still has things in it. Empty it first.\r\n"),
     );
     true
+}
+
+/// Refuse (and say why) when `item` is NO_DROP or SOULBOUND: it may not
+/// leave its owner's hands by any route (drop, donate, put in a container,
+/// place in a house). Two messages so the player can tell a curse from a
+/// permanent bond.
+pub(crate) fn refuse_drop_blocked(
+    world: &mut World,
+    player: Entity,
+    item: Entity,
+    item_name: &str,
+) -> bool {
+    if has_restriction(world, item, mud_db::enums::ObjectRestriction::NoDrop) {
+        send_rendered(
+            world,
+            player,
+            &format!("You can't seem to let go of {item_name}.\r\n"),
+        );
+        return true;
+    }
+    if has_object_flag(world, item, mud_db::enums::ObjectFlag::Soulbound) {
+        send_rendered(
+            world,
+            player,
+            &format!("{item_name} is soulbound — it stays with you.\r\n"),
+        );
+        return true;
+    }
+    false
 }
 
 /// True when dropping this item should be refused — either it
@@ -15353,6 +15400,10 @@ pub(crate) fn cmd_house_place(
     if refuse_nonempty_container(world, player, item, &item_name) {
         return;
     }
+    // A cursed or bound item can't be shed into the house either.
+    if refuse_drop_blocked(world, player, item, &item_name) {
+        return;
+    }
     // Captured before the item leaves the player's hands: the label and any
     // enchantment / curse are stored with the row.
     let custom = house_item_custom(world, item);
@@ -16280,6 +16331,14 @@ mod tests {
 
     fn make_bag_world() -> (World, Entity, Entity, Entity) {
         let (mut world, room, player, _sword) = make_inventory_world();
+        world.resource_mut::<ObjectPrototypes>().by_key.insert(
+            (1, 90),
+            crate::commands::test_support::object_proto(
+                1,
+                90,
+                mud_db::enums::ObjectType::Container,
+            ),
+        );
         let bag = world
             .spawn((
                 Item,
@@ -16287,6 +16346,7 @@ mod tests {
                     name: "a leather bag".to_string(),
                 },
                 Keywords(vec!["bag".to_string()]),
+                WorldKey { zone: 1, id: 90 },
                 Located(room),
             ))
             .id();

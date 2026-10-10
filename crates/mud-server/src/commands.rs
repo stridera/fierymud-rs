@@ -585,6 +585,9 @@ mod invisibility_tests;
 #[path = "commands/item_aura_tests.rs"]
 mod item_aura_tests;
 #[cfg(test)]
+#[path = "commands/item_bind_tests.rs"]
+mod item_bind_tests;
+#[cfg(test)]
 #[path = "commands/item_color_tests.rs"]
 mod item_color_tests;
 #[path = "commands/item_edit.rs"]

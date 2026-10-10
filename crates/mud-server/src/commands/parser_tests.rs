@@ -548,6 +548,7 @@ fn articles_are_skipped_like_legacy_fill_words() {
     dispatch(&mut g.world, g.player, "get the sword");
     assert_eq!(loc(&g.world, sword), g.player);
     let bag = item(&mut g.world, "a leather bag", &["bag"], g.room);
+    g.world.entity_mut(bag).insert(WorldKey { zone: 30, id: 1 });
     dispatch(&mut g.world, g.player, "put the sword in the bag");
     assert_eq!(loc(&g.world, sword), bag);
     dispatch(&mut g.world, g.player, "get the sword from the bag");
@@ -577,6 +578,7 @@ fn give_skips_articles_and_accepts_indexes() {
 fn index_and_all_prefixes_work_across_item_verbs() {
     let mut g = gear();
     let bag = item(&mut g.world, "a leather bag", &["bag"], g.room);
+    g.world.entity_mut(bag).insert(WorldKey { zone: 30, id: 1 });
     let swords: Vec<Entity> = ["rusty", "bent", "dull"]
         .iter()
         .map(|adj| {
