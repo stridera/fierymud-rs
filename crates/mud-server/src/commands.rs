@@ -16103,6 +16103,9 @@ pub(crate) fn invoke_ability_core(
         settle_slot(world, player, slot_hold, false);
         return;
     };
+    // CAST triggers (legacy `call_magic`): the caster's room, then the
+    // targeted object or mob, before the spell does anything.
+    crate::triggers::fire_cast(world, player, target_entity, &def.name);
     // Spells on objects (Curse, Remove Curse; legacy `mag_alter_obj`)
     // carry `alter_object` effects and skip the actor-only machinery
     // (saves, damage, effect instances) below.
@@ -24239,6 +24242,12 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         }
     }
 
+    // LEAVE triggers in the source room (legacy `leave_mtrigger`,
+    // `leave_wtrigger`, `leave_otrigger`), one pass per mover.
+    for &mover in &movers {
+        crate::triggers::fire_leave(world, mover, from_room, dir_name);
+    }
+
     // Notify the source room of each mover departing (in chain order).
     // Use the sender-aware broadcast so wiz-invised admins stay
     // hidden to lower-level observers. Per-mover verb overrides
@@ -24263,6 +24272,11 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
     // the entering player and emit flavor / gating text.
     for &mover in &movers {
         crate::triggers::fire_room_entry(world, target, mover, mud_world::TriggerEvent::Preentry);
+    }
+    // ENTRY triggers on mob movers (a leader's NPC followers); a no-op for
+    // players.
+    for &mover in &movers {
+        crate::triggers::fire_entry(world, mover, target);
     }
 
     // Move everyone — and any mounts they're riding go with them.

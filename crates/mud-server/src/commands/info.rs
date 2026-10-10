@@ -3460,6 +3460,9 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
         return;
     };
 
+    // LOOK triggers (legacy `look_mtrigger` / `look_otrigger`) on the mob
+    // or object being looked at.
+    crate::triggers::fire_look(world, target, player, &needle);
     let name = name_of(world, target);
     // Prefer the long-form ExamineText (mob `examine_description`)
     // over the short room-list Description. Falls back to
@@ -11749,6 +11752,12 @@ fn give_plain(world: &mut World, player: Entity, args: &str) {
         return;
     }
 
+    // GIVE triggers on the item (legacy `give_otrigger`, before the item
+    // changes hands). A script that takes the item away ends the give.
+    crate::triggers::fire_give(world, item, player, target);
+    if world.get::<Located>(item).map(|l| l.0) != Some(player) {
+        return;
+    }
     if world.get::<Located>(item).is_some() {
         world.entity_mut(item).insert(Located(target));
     }

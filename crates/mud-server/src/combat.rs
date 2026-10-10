@@ -1027,7 +1027,7 @@ pub fn combat_tick(world: &mut World) {
     };
 
     for s in &swings {
-        apply_swing(world, s);
+        swing_with_triggers(world, s);
     }
     // Haste / Blur passes: every attacker with the `Haste` marker gets
     // a second swing this round, and one with `Blur` another (legacy
@@ -1061,7 +1061,7 @@ pub fn combat_tick(world: &mut World) {
             if target_dead {
                 continue;
             }
-            apply_swing(world, s);
+            swing_with_triggers(world, s);
         }
     }
     // Fire FIGHT triggers once per round per fighting mob (legacy
@@ -1099,6 +1099,24 @@ pub fn combat_tick(world: &mut World) {
     // Prompts for combatants and bystanders are handled centrally by
     // commands::flush_prompts after schedule.run — every send_to here
     // already registers the recipient.
+}
+
+/// [`apply_swing`] plus the per-hit script triggers legacy runs after
+/// `damage()`: ATTACK on the attacker's worn objects, DEFEND on the
+/// victim's, and `HIT_PERCENT` on a mob victim still standing. Nothing fires
+/// when the swing killed the victim (their DEATH trigger ran instead).
+fn swing_with_triggers(world: &mut World, s: &Swing) {
+    let hp_before = world.get::<mud_world::Health>(s.target).map(|h| h.hp);
+    apply_swing(world, s);
+    let Some(hp_now) = world.get::<mud_world::Health>(s.target).map(|h| h.hp) else {
+        return;
+    };
+    if hp_now <= 0 || world.get_entity(s.attacker).is_err() {
+        return;
+    }
+    let dealt = hp_before.map_or(s.damage, |before| (before - hp_now).max(0));
+    crate::triggers::fire_weapon_triggers(world, s.attacker, s.target, dealt);
+    crate::triggers::fire_hit_percent(world, s.target, s.attacker);
 }
 
 struct Swing {

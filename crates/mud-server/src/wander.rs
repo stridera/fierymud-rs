@@ -205,6 +205,12 @@ pub fn wander_tick(world: &mut World) {
             );
             crate::commands::senses::sense_departure(world, from_room, mob, &[mob]);
         }
+        // ENTRY triggers on the mover; LEAVE triggers only matter where a
+        // player is there to be reacted to (their `actor` is the mob).
+        crate::triggers::fire_entry(world, mob, target_room);
+        if player_rooms.contains(&from_room) {
+            crate::triggers::fire_leave(world, mob, from_room, direction_name(dir));
+        }
         crate::combat::relocate(world, mob, target_room);
         if player_rooms.contains(&target_room) {
             let arrival_dir = arrival_from(dir);

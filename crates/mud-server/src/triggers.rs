@@ -5,9 +5,17 @@
 //! After each fire, drains the `LuaOutbox` so any `room.send` calls
 //! reach players in the room.
 //!
-//! v1 only fires `LOAD` (at mob spawn). Other events (GREET / SPEECH /
-//! DEATH / FIGHT / etc.) hook in incrementally as the relevant systems
-//! gain dispatch points.
+//! Dispatched events: `LOAD`, `SPEECH` / `SPEECH_TO`, `GREET`, `PREENTRY` /
+//! `POSTENTRY`, `RECEIVE`, `GET` / `DROP` / `WEAR` / `REMOVE` / `USE` /
+//! `CONSUME`, `DEATH`, `FIGHT`, `ATTACK`, `COMMAND` (room, mobs, worn /
+//! carried / floor objects), `RANDOM` (13 s pulse; `GLOBAL` lifts the
+//! "zone has players" gate), `LOOK`, `GIVE`, `CAST`, `LEAVE`, `ENTRY`,
+//! `HIT_PERCENT` and object `ATTACK` / `DEFEND`.
+//! Not dispatched because legacy never dispatches them either: ACT
+//! (`act_mtrigger` is commented out in `comm.cpp`) and RESET
+//! (`reset_wtrigger` has no caller). GLOBAL is a modifier, not an event.
+//!
+//! Only COMMAND reads a body's return value (see [`fire_command_in_room`]).
 
 use std::collections::HashMap;
 
@@ -204,7 +212,7 @@ pub fn fire_event(world: &mut World, entity: Entity, event: TriggerEvent) {
 /// `speech` (lowercased) carries the spoken text.
 ///
 /// Legacy `speech_mtrigger` / `speech_to_mtrigger` test both
-/// `MTRIG_SPEECH` and `MTRIG_SPEECHTO` on the listener, so a SPEECH_TO
+/// `MTRIG_SPEECH` and `MTRIG_SPEECHTO` on the listener, so a `SPEECH_TO`
 /// script also answers plain `say`. The keyword filter lives in the
 /// converted body, so every matching trigger is fired and the body
 /// decides whether to react.
@@ -673,6 +681,292 @@ fn triggers_with(
         .collect()
 }
 
+/// Run `pending` trigger bodies as `listener` (`self`) with `acting`
+/// (`actor`), optionally with typed `bindings` (`victim`, `damage`,
+/// `destination`) and string `extras` (`arg`, `spell`, `direction`).
+/// Records each fire and any failure, and drains the Lua outbox. The mob
+/// sleep / casting gate applies (death is exempt, see [`gated`]).
+///
+/// The return value of these bodies is not consulted: the converter maps
+/// DG `return 0` and the unset default to the same Lua value for every
+/// type but COMMAND, so there is no reliable "refuse" signal to read.
+fn run_flagged(
+    world: &mut World,
+    listener: Entity,
+    acting: Entity,
+    pending: Vec<(i32, i32, String, String)>,
+    event: TriggerEvent,
+    bindings: &[(&'static str, mud_script::Binding)],
+    extras: &[(&str, &str)],
+) {
+    for (zone, id, name, body) in pending {
+        let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
+            gated(&mut host, event, |h| {
+                h.set_bindings(bindings.to_vec());
+                let out = h.exec_for_listener_with_extras(world, listener, acting, &body, extras);
+                // An aborted run (asleep mob) never consumed them.
+                h.set_bindings(Vec::new());
+                out
+            })
+        });
+        drain_lua_outbox(world);
+        record_fire(world, listener, zone, id, event, result.is_ok());
+        if let Err(e) = result {
+            record_failure(world, zone, id, &name, &format!("{event:?}"), &e);
+        }
+    }
+}
+
+/// Fire `events` triggers attached to `listener` (see [`run_flagged`]).
+fn fire_flagged(
+    world: &mut World,
+    listener: Entity,
+    acting: Entity,
+    events: &[TriggerEvent],
+    bindings: &[(&'static str, mud_script::Binding)],
+    extras: &[(&str, &str)],
+) {
+    let pending = triggers_with(world, listener, events);
+    if pending.is_empty() {
+        return;
+    }
+    run_flagged(
+        world, listener, acting, pending, events[0], bindings, extras,
+    );
+}
+
+/// LOOK: `looker` looked at `target` (a mob or an object). Legacy
+/// `look_mtrigger` / `look_otrigger`: `self` = the thing looked at,
+/// `actor` = the looker, `arg` = the word typed. The converted body does
+/// its own keyword test on `arg`. (Whether the normal description is
+/// suppressed cannot be read from the body, so the look always proceeds.)
+pub fn fire_look(world: &mut World, target: Entity, looker: Entity, arg: &str) {
+    if crate::deferred_triggers::lua_busy(world) {
+        let arg = arg.to_string();
+        crate::deferred_triggers::defer(world, move |w| fire_look(w, target, looker, &arg));
+        return;
+    }
+    if target == looker {
+        return;
+    }
+    fire_flagged(
+        world,
+        target,
+        looker,
+        &[TriggerEvent::Look],
+        &[],
+        &[("arg", arg)],
+    );
+}
+
+/// GIVE: `giver` is handing `item` to `receiver`. Legacy
+/// `give_otrigger`: `self` = the item, `actor` = the giver, `victim` =
+/// the receiver. Fired before the item changes hands.
+pub fn fire_give(world: &mut World, item: Entity, giver: Entity, receiver: Entity) {
+    if crate::deferred_triggers::lua_busy(world) {
+        crate::deferred_triggers::defer(world, move |w| fire_give(w, item, giver, receiver));
+        return;
+    }
+    fire_flagged(
+        world,
+        item,
+        giver,
+        &[TriggerEvent::Give],
+        &[("victim", mud_script::Binding::Actor(receiver))],
+        &[],
+    );
+}
+
+/// CAST: `caster` is casting `spell` at `target`. Legacy `call_magic`
+/// runs `cast_wtrigger`, `cast_otrigger`, `cast_mtrigger` in that order:
+/// the caster's room, then the targeted object or mob. `actor` = the
+/// caster, `spell` = the lowercased spell name, `victim` = the target on
+/// the room trigger.
+pub fn fire_cast(world: &mut World, caster: Entity, target: Entity, spell: &str) {
+    if crate::deferred_triggers::lua_busy(world) {
+        let spell = spell.to_string();
+        crate::deferred_triggers::defer(world, move |w| fire_cast(w, caster, target, &spell));
+        return;
+    }
+    let spell = spell.to_ascii_lowercase();
+    if let Some(room) = world.get::<mud_world::Located>(caster).map(|l| l.0) {
+        fire_flagged(
+            world,
+            room,
+            caster,
+            &[TriggerEvent::Cast],
+            &[("victim", mud_script::Binding::Actor(target))],
+            &[("spell", &spell)],
+        );
+    }
+    let is_object = world.get::<mud_world::Item>(target).is_some();
+    if is_object || world.get::<Mob>(target).is_some() {
+        fire_flagged(
+            world,
+            target,
+            caster,
+            &[TriggerEvent::Cast],
+            &[],
+            &[("spell", &spell)],
+        );
+    }
+}
+
+/// LEAVE: `leaver` is walking out of `room` towards `direction`. Legacy
+/// order (`leave_mtrigger`, `leave_wtrigger`, `leave_otrigger`): awake,
+/// non-fighting mobs in the room, the room itself, then objects on the
+/// floor; `actor` = the leaver, `direction` = the exit's name.
+pub fn fire_leave(world: &mut World, leaver: Entity, room: Entity, direction: &str) {
+    if crate::deferred_triggers::lua_busy(world) {
+        let direction = direction.to_string();
+        crate::deferred_triggers::defer(world, move |w| fire_leave(w, leaver, room, &direction));
+        return;
+    }
+    let direction = direction.to_ascii_lowercase();
+    let in_room: Vec<Entity> = crate::room_index::contents_of(world, room).collect();
+    let scripted = |world: &World, e: Entity| world.get::<AttachedTriggers>(e).is_some();
+    for &e in &in_room {
+        if e != leaver
+            && world.get::<Mob>(e).is_some()
+            && world.get::<mud_world::Fighting>(e).is_none()
+            && scripted(world, e)
+        {
+            fire_flagged(
+                world,
+                e,
+                leaver,
+                &[TriggerEvent::Leave],
+                &[],
+                &[("direction", &direction)],
+            );
+        }
+    }
+    if scripted(world, room) {
+        fire_flagged(
+            world,
+            room,
+            leaver,
+            &[TriggerEvent::Leave],
+            &[],
+            &[("direction", &direction)],
+        );
+    }
+    for &e in &in_room {
+        if world.get::<mud_world::Item>(e).is_some() && scripted(world, e) {
+            fire_flagged(
+                world,
+                e,
+                leaver,
+                &[TriggerEvent::Leave],
+                &[],
+                &[("direction", &direction)],
+            );
+        }
+    }
+}
+
+/// ENTRY: mob `mover` is about to enter `destination`. Legacy
+/// `entry_mtrigger`: `self` = the mover, `destination` = the room's
+/// legacy number (`zone * 100 + id`, zone 1000 being legacy zone 0).
+pub fn fire_entry(world: &mut World, mover: Entity, destination: Entity) {
+    if crate::deferred_triggers::lua_busy(world) {
+        crate::deferred_triggers::defer(world, move |w| fire_entry(w, mover, destination));
+        return;
+    }
+    if world.get::<Mob>(mover).is_none() || world.get::<AttachedTriggers>(mover).is_none() {
+        return;
+    }
+    let Some(key) = world.get::<WorldKey>(destination).copied() else {
+        return;
+    };
+    let vnum = i64::from(key.zone % 1000) * 100 + i64::from(key.id);
+    fire_flagged(
+        world,
+        mover,
+        mover,
+        &[TriggerEvent::Entry],
+        &[("destination", mud_script::Binding::Int(vnum))],
+        &[],
+    );
+}
+
+/// `HIT_PERCENT`: `victim` (a mob) just took a hit from `opponent`. Legacy
+/// `hitprcnt_mtrigger` fires the first HITPRCNT trigger whose threshold
+/// (the DG numeric argument, an HP percentage) is at or above the mob's
+/// current HP percentage, on every such hit. The converter folded the
+/// threshold into the body's leading `percent_chance(N)` gate; it is read
+/// back out here and the body runs without it, so the gate is a
+/// threshold, not a coin flip.
+pub fn fire_hit_percent(world: &mut World, victim: Entity, opponent: Entity) {
+    if crate::deferred_triggers::lua_busy(world) {
+        crate::deferred_triggers::defer(world, move |w| fire_hit_percent(w, victim, opponent));
+        return;
+    }
+    if world.get::<Mob>(victim).is_none() {
+        return;
+    }
+    let Some(hp) = world.get::<mud_world::Health>(victim).copied() else {
+        return;
+    };
+    if hp.max <= 0 || hp.hp <= 0 {
+        return;
+    }
+    let pct = i64::from(hp.hp) * 100 / i64::from(hp.max);
+    for (zone, id, name, body) in triggers_with(world, victim, &[TriggerEvent::HitPercent]) {
+        let (threshold, rest) = split_leading_gate(&body);
+        if pct > threshold.unwrap_or(100) {
+            continue;
+        }
+        run_flagged(
+            world,
+            victim,
+            opponent,
+            vec![(zone, id, name, rest.to_string())],
+            TriggerEvent::HitPercent,
+            &[],
+            &[],
+        );
+        break;
+    }
+}
+
+/// ATTACK / DEFEND on worn objects: `attacker` just hit `victim` for
+/// `damage`. Legacy `attack_otrigger` fires ATTACK triggers on what the
+/// attacker wears and DEFEND triggers on what the victim wears; `actor` =
+/// the attacker, `victim` = the victim, `damage` = the hit's damage.
+pub fn fire_weapon_triggers(world: &mut World, attacker: Entity, victim: Entity, damage: i32) {
+    if crate::deferred_triggers::lua_busy(world) {
+        crate::deferred_triggers::defer(world, move |w| {
+            fire_weapon_triggers(w, attacker, victim, damage);
+        });
+        return;
+    }
+    for (wearer, event) in [
+        (attacker, TriggerEvent::Attack),
+        (victim, TriggerEvent::Defend),
+    ] {
+        let worn: Vec<Entity> = crate::room_index::contents_of(world, wearer)
+            .filter(|&e| {
+                world.get::<mud_world::EquippedSlot>(e).is_some()
+                    && world.get::<AttachedTriggers>(e).is_some()
+            })
+            .collect();
+        for item in worn {
+            fire_flagged(
+                world,
+                item,
+                attacker,
+                &[event],
+                &[
+                    ("victim", mud_script::Binding::Actor(victim)),
+                    ("damage", mud_script::Binding::Int(i64::from(damage))),
+                ],
+                &[],
+            );
+        }
+    }
+}
+
 /// Bulk-fire `LOAD` triggers for every Mob in the world that carries
 /// `AttachedTriggers`. Used once at boot after `load_from_db` so
 /// proto-attached mob triggers (e.g. `skills.set_level`) run before
@@ -882,7 +1176,7 @@ const RANDOM_PULSE_TICKS: u64 = 13 * crate::TICK_HZ;
 /// and the untouched body when it does not start with one (comment and
 /// blank lines before it are fine). The converter folds the DG numeric
 /// argument into this gate, but for several event types the argument is
-/// not a chance to run: for HIT_PERCENT it is the HP% threshold. The
+/// not a chance to run: for `HIT_PERCENT` it is the HP% threshold. The
 /// dispatcher reads it back out so it can apply the legacy meaning and,
 /// for RANDOM, roll in Rust (sparing a Lua environment for the rolls
 /// that fail).
@@ -1630,7 +1924,7 @@ return _return_value"#;
 
     // ----- RANDOM -----
 
-    /// A room at `zone` (WorldKey) that is not the default zone-99 room.
+    /// A room at `zone` (`WorldKey`) that is not the default zone-99 room.
     fn spawn_room_in(world: &mut World, zone: i32, id: i32) -> Entity {
         world.spawn((mud_world::Room, WorldKey { zone, id })).id()
     }
@@ -1789,19 +2083,21 @@ return _return_value"#;
             let room = rooms[(p * 19) % (20 * ROOMS_PER_ZONE as usize)];
             spawn_player(&mut world, room, &format!("p{p}"));
         }
-        for i in 0..5500usize {
+        for id in 0..5500i32 {
+            let i = usize::try_from(id).unwrap();
             let room = rooms[(i * 7) % rooms.len()];
-            let triggers = match i {
-                _ if i % 11 == 0 && i % 7 == 0 => vec![(99, 2)],
-                _ if i % 3 == 0 => vec![(99, 1)],
+            let triggers = match id {
+                _ if id % 11 == 0 && id % 7 == 0 => vec![(99, 2)],
+                _ if id % 3 == 0 => vec![(99, 1)],
                 _ => vec![],
             };
-            spawn_mob(&mut world, room, i as i32, triggers);
+            spawn_mob(&mut world, room, id, triggers);
         }
-        for i in 0..4000usize {
+        for id in 0..4000i32 {
+            let i = usize::try_from(id).unwrap();
             let holder = rooms[(i * 13) % rooms.len()];
-            let triggers = if i % 27 == 0 { vec![(99, 1)] } else { vec![] };
-            spawn_item(&mut world, holder, i as i32, triggers);
+            let triggers = if id % 27 == 0 { vec![(99, 1)] } else { vec![] };
+            spawn_item(&mut world, holder, id, triggers);
         }
         for i in 0..60usize {
             world
@@ -1821,5 +2117,245 @@ return _return_value"#;
         if !cfg!(debug_assertions) {
             assert!(elapsed.as_millis() < 50, "random pulse took {elapsed:?}");
         }
+    }
+
+    // ----- LOOK / GIVE / CAST / LEAVE / ENTRY / HIT_PERCENT / ATTACK / DEFEND -----
+
+    fn obj_var(world: &World, id: i32, key: &str) -> Option<serde_json::Value> {
+        ran(world, id, EntityType::Object, key)
+    }
+
+    #[test]
+    fn look_trigger_fires_on_the_thing_looked_at() {
+        let (mut world, room) = base_world();
+        add_trigger(
+            &mut world,
+            1,
+            vec![TriggerEvent::Look],
+            "self:setvar('who', actor.name)\nself:setvar('arg', arg)",
+        );
+        let notice = spawn_item(&mut world, room, 3, vec![(99, 1)]);
+        let mob = spawn_mob(&mut world, room, 4, vec![(99, 1)]);
+        let player = spawn_player(&mut world, room, "Lena");
+        fire_look(&mut world, notice, player, "notice");
+        fire_look(&mut world, mob, player, "mob4");
+        assert_eq!(obj_var(&world, 3, "who"), Some("Lena".into()));
+        assert_eq!(obj_var(&world, 3, "arg"), Some("notice".into()));
+        assert_eq!(var(&world, 4, "who"), Some("Lena".into()));
+        // Looking at yourself runs nothing.
+        world.insert_resource(EntityVariableCache::default());
+        world
+            .entity_mut(player)
+            .insert(AttachedTriggers(vec![(99, 1)]));
+        fire_look(&mut world, player, player, "me");
+        assert!(
+            world
+                .resource::<EntityVariableCache>()
+                .get(EntityType::Mob, 99, 4, "who")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn give_trigger_binds_giver_and_receiver() {
+        let (mut world, room) = base_world();
+        add_trigger(
+            &mut world,
+            1,
+            vec![TriggerEvent::Give],
+            "self:setvar('by', actor.name)\nself:setvar('to', victim.name)",
+        );
+        let giver = spawn_player(&mut world, room, "Gia");
+        let receiver = spawn_mob(&mut world, room, 8, vec![]);
+        let item = spawn_item(&mut world, giver, 5, vec![(99, 1)]);
+        fire_give(&mut world, item, giver, receiver);
+        assert_eq!(obj_var(&world, 5, "by"), Some("Gia".into()));
+        assert_eq!(obj_var(&world, 5, "to"), Some("mob8".into()));
+    }
+
+    #[test]
+    fn cast_triggers_fire_on_the_room_and_the_target() {
+        let (mut world, room) = base_world();
+        add_trigger(
+            &mut world,
+            1,
+            vec![TriggerEvent::Cast],
+            "self:setvar('spell', spell)\nself:setvar('by', actor.name)",
+        );
+        world
+            .entity_mut(room)
+            .insert(AttachedTriggers(vec![(99, 1)]));
+        let caster = spawn_player(&mut world, room, "Cass");
+        let mob = spawn_mob(&mut world, room, 6, vec![(99, 1)]);
+        fire_cast(&mut world, caster, mob, "Cure Light");
+        assert_eq!(var(&world, 6, "spell"), Some("cure light".into()));
+        assert_eq!(var(&world, 6, "by"), Some("Cass".into()));
+        let cache = world.resource::<EntityVariableCache>();
+        assert_eq!(
+            cache.get(EntityType::Room, 99, 0, "spell").cloned(),
+            Some("cure light".into()),
+            "the caster's room hears it too"
+        );
+    }
+
+    #[test]
+    fn leave_triggers_skip_fighting_and_sleeping_mobs() {
+        let (mut world, room) = base_world();
+        add_trigger(
+            &mut world,
+            1,
+            vec![TriggerEvent::Leave],
+            "self:setvar('dir', direction)\nself:setvar('who', actor.name)",
+        );
+        let watcher = spawn_mob(&mut world, room, 1, vec![(99, 1)]);
+        let busy = spawn_mob(&mut world, room, 2, vec![(99, 1)]);
+        world.entity_mut(busy).insert(mud_world::Fighting(watcher));
+        let asleep = spawn_mob(&mut world, room, 3, vec![(99, 1)]);
+        world
+            .entity_mut(asleep)
+            .insert(Posture(PostureKind::Sleeping));
+        let bells = spawn_item(&mut world, room, 4, vec![(99, 1)]);
+        let leaver = spawn_player(&mut world, room, "Lee");
+        fire_leave(&mut world, leaver, room, "North");
+        assert_eq!(var(&world, 1, "dir"), Some("north".into()));
+        assert_eq!(var(&world, 1, "who"), Some("Lee".into()));
+        assert!(var(&world, 2, "dir").is_none(), "fighting mob");
+        assert!(var(&world, 3, "dir").is_none(), "sleeping mob");
+        assert_eq!(
+            obj_var(&world, bells_id(&world, bells), "dir"),
+            Some("north".into())
+        );
+    }
+
+    fn bells_id(world: &World, e: Entity) -> i32 {
+        world.get::<WorldKey>(e).unwrap().id
+    }
+
+    #[test]
+    fn entry_trigger_gets_the_destination_room_number() {
+        let (mut world, room) = base_world();
+        add_trigger(
+            &mut world,
+            1,
+            vec![TriggerEvent::Entry],
+            "if destination == 4605 then self:setvar('arrived', 1) end",
+        );
+        let mob = spawn_mob(&mut world, room, 1, vec![(99, 1)]);
+        let other = spawn_room_in(&mut world, 46, 5);
+        fire_entry(&mut world, mob, other);
+        assert_eq!(var(&world, 1, "arrived"), Some(1.into()));
+        // Players never run ENTRY.
+        let player = spawn_player(&mut world, room, "Pia");
+        world
+            .entity_mut(player)
+            .insert(AttachedTriggers(vec![(99, 1)]));
+        fire_entry(&mut world, player, other);
+    }
+
+    #[test]
+    fn hit_percent_fires_below_its_threshold_without_a_second_roll() {
+        let (mut world, room) = base_world();
+        let body = |pct: u32, tag: &str| {
+            format!(
+                "-- {pct}% chance to trigger\nif not percent_chance({pct}) then\n    return true\nend\nself:setvar('{tag}', actor.name)\n"
+            )
+        };
+        add_trigger(
+            &mut world,
+            1,
+            vec![TriggerEvent::HitPercent],
+            &body(5, "low"),
+        );
+        add_trigger(
+            &mut world,
+            2,
+            vec![TriggerEvent::HitPercent],
+            &body(50, "half"),
+        );
+        let mob = spawn_mob(&mut world, room, 1, vec![(99, 1), (99, 2)]);
+        let foe = spawn_player(&mut world, room, "Fay");
+        world.entity_mut(mob).insert(Health { hp: 40, max: 100 });
+        // 40% HP: the 5% trigger is skipped, the 50% one fires every time.
+        for _ in 0..30 {
+            world.insert_resource(EntityVariableCache::default());
+            fire_hit_percent(&mut world, mob, foe);
+            assert_eq!(var(&world, 1, "half"), Some("Fay".into()));
+            assert!(var(&world, 1, "low").is_none());
+        }
+        world.entity_mut(mob).insert(Health { hp: 4, max: 100 });
+        world.insert_resource(EntityVariableCache::default());
+        fire_hit_percent(&mut world, mob, foe);
+        assert!(
+            var(&world, 1, "low").is_some(),
+            "4% HP is under both thresholds"
+        );
+        // Healthy mobs run nothing.
+        world.entity_mut(mob).insert(Health { hp: 100, max: 100 });
+        world.insert_resource(EntityVariableCache::default());
+        fire_hit_percent(&mut world, mob, foe);
+        assert!(var(&world, 1, "half").is_none());
+    }
+
+    #[test]
+    fn worn_objects_react_to_attacks_and_defences() {
+        let (mut world, room) = base_world();
+        add_trigger(
+            &mut world,
+            1,
+            vec![TriggerEvent::Attack],
+            "self:setvar('hit', damage)\nself:setvar('foe', victim.name)",
+        );
+        add_trigger(
+            &mut world,
+            2,
+            vec![TriggerEvent::Defend],
+            "self:setvar('hurt', damage)\nself:setvar('by', actor.name)",
+        );
+        let attacker = spawn_player(&mut world, room, "Atta");
+        let victim = spawn_player(&mut world, room, "Vic");
+        let blade = spawn_item(&mut world, attacker, 1, vec![(99, 1)]);
+        let shield = spawn_item(&mut world, victim, 2, vec![(99, 2)]);
+        let bag = spawn_item(&mut world, attacker, 3, vec![(99, 1)]);
+        for e in [blade, shield] {
+            world
+                .entity_mut(e)
+                .insert(mud_world::EquippedSlot(mud_world::Slot::Wield));
+        }
+        fire_weapon_triggers(&mut world, attacker, victim, 7);
+        assert_eq!(obj_var(&world, 1, "hit"), Some(7.into()));
+        assert_eq!(obj_var(&world, 1, "foe"), Some("Vic".into()));
+        assert_eq!(obj_var(&world, 2, "hurt"), Some(7.into()));
+        assert_eq!(obj_var(&world, 2, "by"), Some("Atta".into()));
+        assert!(obj_var(&world, 3, "hit").is_none(), "carried, not worn");
+        let _ = bag;
+    }
+
+    #[test]
+    fn catalog_reload_reindexes_random_triggers() {
+        let (mut world, room) = base_world();
+        add_trigger(&mut world, 1, vec![TriggerEvent::Greet], "");
+        let mob = spawn_mob(&mut world, room, 1, vec![(99, 1)]);
+        assert!(world.get::<mud_world::RandomTriggers>(mob).is_none());
+        let mut fresh = TriggerCatalog::default();
+        fresh.by_key.insert(
+            (99, 1),
+            TriggerDef {
+                zone_id: 99,
+                id: 1,
+                name: "t1".into(),
+                attach_type: TriggerAttach::Mob,
+                commands: String::new(),
+                flags: vec![TriggerEvent::Random],
+                arg_list: vec![],
+                num_args: 0,
+            },
+        );
+        apply_reloaded_catalog(&mut world, fresh);
+        assert!(
+            world.get::<mud_world::RandomTriggers>(mob).is_some(),
+            "an edited trigger that gained RANDOM is picked up"
+        );
+        apply_reloaded_catalog(&mut world, TriggerCatalog::default());
+        assert!(world.get::<mud_world::RandomTriggers>(mob).is_none());
     }
 }

@@ -71,6 +71,17 @@ pub enum ScriptGate {
 /// (one second at 10 Hz).
 const CAST_PAUSE_TICKS: u64 = TICK_HZ;
 
+/// A typed global for [`LuaHost::set_bindings`].
+#[derive(Debug, Clone)]
+pub enum Binding {
+    /// A Lua integer (legacy numeric trigger variables such as `damage`).
+    Int(i64),
+    /// A Lua string.
+    Str(String),
+    /// An entity, exposed like `actor` / `self` (e.g. `victim`).
+    Actor(Entity),
+}
+
 /// Why a mob's script is currently blocked, per legacy `AWAKE` /
 /// `CASTING`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +131,9 @@ pub struct LuaHost {
     yielded: Vec<YieldedThread>,
     /// Gate applied to the next exec calls; see [`ScriptGate`].
     gate: ScriptGate,
+    /// Extra typed globals for the next exec call only; see
+    /// [`LuaHost::set_bindings`].
+    bindings: Vec<(&'static str, Binding)>,
     /// Shared metatables used to build each trigger's private
     /// environment; see [`EnvKit`].
     env_kit: EnvKit,
@@ -662,6 +676,7 @@ impl LuaHost {
             current_tick: 0,
             yielded: Vec::new(),
             gate: ScriptGate::Off,
+            bindings: Vec::new(),
             env_kit,
         }
     }
@@ -685,6 +700,15 @@ impl LuaHost {
     /// compute their resume time relative to a fresh value.
     pub fn set_current_tick(&mut self, tick: u64) {
         self.current_tick = tick;
+    }
+
+    /// Bind extra typed globals (a `victim` entity, a numeric `damage`, a
+    /// `destination` room number) in the environment of the NEXT exec
+    /// call. Consumed by that call, so a stale binding can never leak
+    /// into an unrelated trigger. Plain strings still go through the
+    /// `extras` argument of the exec methods.
+    pub fn set_bindings(&mut self, bindings: Vec<(&'static str, Binding)>) {
+        self.bindings = bindings;
     }
 
     /// Select the sleep / casting gate for subsequent exec calls.
@@ -1019,6 +1043,8 @@ impl LuaHost {
         // increments by 10_000 per fire and aborts when the running
         // total crosses LUA_MAX_INSTRUCTIONS.
         reset_budget(&self.lua);
+        // Typed extras set for this call only (see `set_bindings`).
+        let bindings = std::mem::take(&mut self.bindings);
 
         // Result is one of:
         //   - Ok(None): body finished normally (with optional bool return)
@@ -1037,6 +1063,13 @@ impl LuaHost {
                 object_entity,
                 extras,
             )?;
+            for (name, value) in &bindings {
+                match value {
+                    Binding::Int(n) => globals.set(*name, *n)?,
+                    Binding::Str(text) => globals.set(*name, text.as_str())?,
+                    Binding::Actor(entity) => globals.set(*name, LuaActor { entity: *entity })?,
+                }
+            }
 
             // Wrap the body in a coroutine thread instead of a
             // straight `eval`. `wait(N)` (= coroutine.yield) parks
