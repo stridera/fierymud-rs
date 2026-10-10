@@ -2089,6 +2089,9 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
         if let Some(mut hp) = world.get_mut::<Health>(victim) {
             hp.hp = 0;
         }
+        // Lines queued behind a cast (an alias chain) must not run after the
+        // respawn: the dead player's plans died with them.
+        crate::commands::input_queue::clear(world, victim);
 
         // Legacy `perform_die` (fight.cpp:839) strips every effect before
         // the corpse is made. Gear is already released above, so worn-item

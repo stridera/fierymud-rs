@@ -15,7 +15,9 @@
 //!   `north` typed after a buff alias cannot overtake the buffs. The
 //!   exceptions are the commands allowed mid-cast (`score`, `tell`, ...),
 //!   which still run at once, and `abort` / `flee` / `disengage`, which also
-//!   throw the pending lines away.
+//!   throw the pending lines away. Death, a dropped link, a reconnect or
+//!   takeover, `quit` and a completed `camp` throw them away too, so a chain
+//!   never runs on after the respawn or into the next session.
 //! * [`run_queued_input`] (driven once per tick by the router) releases at
 //!   most one line per player per tick, and only when it is no longer held by
 //!   the cast lock. Released lines were already alias-expanded and are never
@@ -50,7 +52,12 @@ const LAG_HELD_VERBS: &[&str] = &[
 
 /// Lines waiting for the player's cast lock to lift, oldest first.
 #[derive(Component, Debug, Default)]
-pub(crate) struct InputQueue(VecDeque<String>);
+pub(crate) struct InputQueue {
+    lines: VecDeque<String>,
+    /// The "queue is full" notice already went out for the current overflow
+    /// streak; reset once the queue has room again.
+    overflow_told: bool,
+}
 
 /// What a typed line resolves to, as far as the cast lock cares.
 enum Resolved {
@@ -111,7 +118,7 @@ fn is_flush_command(world: &World, player: Entity, line: &str) -> bool {
 fn pending(world: &World, player: Entity) -> bool {
     world
         .get::<InputQueue>(player)
-        .is_some_and(|q| !q.0.is_empty())
+        .is_some_and(|q| !q.lines.is_empty())
 }
 
 /// Whether `player` has lines waiting.
@@ -127,22 +134,42 @@ fn push(world: &mut World, player: Entity, line: &str) {
     let Some(mut q) = world.get_mut::<InputQueue>(player) else {
         return;
     };
-    if q.0.len() >= MAX_QUEUED_LINES {
-        send_to(
-            world,
-            player,
-            "Your command queue is full; the extra commands were dropped.\r\n",
-        );
+    if q.lines.len() >= MAX_QUEUED_LINES {
+        // One notice per overflow streak, not one per dropped line.
+        let first = !std::mem::replace(&mut q.overflow_told, true);
+        if first {
+            send_to(
+                world,
+                player,
+                "Your command queue is full; the extra commands were dropped.\r\n",
+            );
+        }
         return;
     }
-    q.0.push_back(line.to_string());
+    q.lines.push_back(line.to_string());
+}
+
+/// Put `lines` straight into the queue (tests that need a backlog without
+/// a cast to hold it).
+#[cfg(test)]
+pub(crate) fn seed_for_test(world: &mut World, player: Entity, lines: &[&str]) {
+    for l in lines {
+        push(world, player, l);
+    }
+}
+
+/// How many lines are waiting.
+#[cfg(test)]
+pub(crate) fn queued_len(world: &World, player: Entity) -> usize {
+    world.get::<InputQueue>(player).map_or(0, |q| q.lines.len())
 }
 
 /// Drop everything waiting; returns how many lines went.
 pub(crate) fn clear(world: &mut World, player: Entity) -> usize {
-    world
-        .get_mut::<InputQueue>(player)
-        .map_or(0, |mut q| std::mem::take(&mut q.0).len())
+    world.get_mut::<InputQueue>(player).map_or(0, |mut q| {
+        q.overflow_told = false;
+        std::mem::take(&mut q.lines).len()
+    })
 }
 
 /// Called with a fully alias-expanded `line` just before it would be
@@ -193,11 +220,14 @@ fn take_ready(world: &mut World, player: Entity) -> Option<String> {
     if world.get::<MailDraft>(player).is_some() || world.get::<BoardDraft>(player).is_some() {
         return None;
     }
-    let front = world.get::<InputQueue>(player)?.0.front()?.clone();
+    let front = world.get::<InputQueue>(player)?.lines.front()?.clone();
     if must_wait(world, player, &front) {
         return None;
     }
-    world.get_mut::<InputQueue>(player)?.0.pop_front()
+    let mut q = world.get_mut::<InputQueue>(player)?;
+    // Room again: the next overflow is a new streak.
+    q.overflow_told = false;
+    q.lines.pop_front()
 }
 
 /// Run the player's oldest waiting line, if the cast lock allows. At most
@@ -325,7 +355,7 @@ mod tests {
         assert!(started(&out, "armor"), "{out}");
         assert!(!out.contains("busy spellcasting"), "{out}");
         assert!(world.get::<Casting>(caster).is_some());
-        assert_eq!(world.get::<InputQueue>(caster).unwrap().0.len(), 1);
+        assert_eq!(world.get::<InputQueue>(caster).unwrap().lines.len(), 1);
         // Nothing is released while the first cast is still going.
         assert!(!run_queued_input(&mut world, caster, &pool).await);
 
@@ -356,7 +386,7 @@ mod tests {
         let q: Vec<&str> = world
             .get::<InputQueue>(caster)
             .unwrap()
-            .0
+            .lines
             .iter()
             .map(String::as_str)
             .collect();
@@ -396,9 +426,52 @@ mod tests {
             dispatch_with_async(&mut world, caster, &pool, "north").await;
         }
         assert_eq!(
-            world.get::<InputQueue>(caster).unwrap().0.len(),
+            world.get::<InputQueue>(caster).unwrap().lines.len(),
             MAX_QUEUED_LINES
         );
-        assert!(drain(&mut rx).contains("queue is full"));
+        let out = drain(&mut rx);
+        assert_eq!(
+            out.matches("queue is full").count(),
+            1,
+            "one notice per overflow streak: {out}"
+        );
+        // Room again, then a second overflow: a new streak, a new notice.
+        world
+            .get_mut::<InputQueue>(caster)
+            .unwrap()
+            .lines
+            .pop_front();
+        world.get_mut::<InputQueue>(caster).unwrap().overflow_told = false;
+        dispatch_with_async(&mut world, caster, &pool, "north").await;
+        dispatch_with_async(&mut world, caster, &pool, "north").await;
+        dispatch_with_async(&mut world, caster, &pool, "north").await;
+        let out = drain(&mut rx);
+        assert_eq!(out.matches("queue is full").count(), 1, "{out}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn death_clears_the_pending_chain() {
+        let (mut world, caster, mut rx) = buffer();
+        let pool = lazy_pool();
+        world.insert_resource(crate::TickCount(0));
+        dispatch_with_async(&mut world, caster, &pool, "buff").await;
+        let _ = drain(&mut rx);
+        assert!(has_queued_input(&world, caster));
+        let room = world.get::<mud_world::Located>(caster).unwrap().0;
+        world.get_mut::<Health>(caster).unwrap().hp = 0;
+        crate::combat::handle_death(&mut world, caster, "Caster", room);
+        assert!(world.get::<mud_world::Ghost>(caster).is_some());
+        assert!(!has_queued_input(&world, caster));
+    }
+
+    #[test]
+    fn quit_clears_the_pending_chain() {
+        let (mut world, caster, _rx) = buffer();
+        seed_for_test(&mut world, caster, &["cast 'bless'", "north"]);
+        assert_eq!(queued_len(&world, caster), 2);
+        assert!(crate::commands::info::begin_quit(
+            &mut world, caster, "Bye.\r\n"
+        ));
+        assert_eq!(queued_len(&world, caster), 0);
     }
 }

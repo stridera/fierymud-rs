@@ -8134,6 +8134,7 @@ pub(crate) fn begin_quit(world: &mut World, player: Entity, farewell: &str) -> b
         return false;
     }
     send_rendered(world, player, farewell);
+    crate::commands::input_queue::clear(world, player);
     if let Ok(mut e) = world.get_entity_mut(player) {
         e.insert(crate::commands::Quitting);
     }

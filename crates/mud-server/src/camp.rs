@@ -150,6 +150,7 @@ fn complete(world: &mut World, entity: Entity, camp: Camping) {
     // source + tier per the design doc ("Pool is NEVER cleared by
     // acquisition — only by XP-gain consumption.").
     let existing_repose = world.get::<RestState>(entity).map_or(0, |r| r.repose);
+    crate::commands::input_queue::clear(world, entity);
     if let Ok(mut em) = world.get_entity_mut(entity) {
         em.remove::<Camping>();
         em.insert(Quitting);
@@ -277,10 +278,12 @@ mod tests {
         assert!(world.get::<Camping>(camper).is_some());
         assert!(world.get::<Quitting>(camper).is_none());
 
+        crate::commands::input_queue::seed_for_test(&mut world, camper, &["north"]);
         world.insert_resource(TickCount(CAMP_DURATION_TICKS));
         camp_tick(&mut world);
         assert!(world.get::<Camping>(camper).is_none());
         assert!(world.get::<Quitting>(camper).is_some());
+        assert_eq!(crate::commands::input_queue::queued_len(&world, camper), 0);
         assert!(world.get::<Camped>(camper).is_some());
         assert_eq!(
             world.get::<RestState>(camper).unwrap().source,

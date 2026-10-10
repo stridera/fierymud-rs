@@ -1279,6 +1279,8 @@ fn goes_linkdead(world: &mut World, entity: Entity) -> bool {
 /// Detach a character from its (already gone) connection but keep it in the
 /// world: combat, autosave, and everything else carry on without output.
 fn go_linkdead(world: &mut World, entity: Entity) {
+    // A queued alias chain must not keep running for a player who is gone.
+    commands::input_queue::clear(world, entity);
     let since_tick = world.get_resource::<crate::TickCount>().map_or(0, |t| t.0);
     if let Ok(mut e) = world.get_entity_mut(entity) {
         e.remove::<Connection>();
@@ -3847,6 +3849,8 @@ impl ConnRouter {
         if let Some(old_conn) = old_conn {
             (self.close_conn)(old_conn);
         }
+        // Lines queued by the previous connection are not the new one's.
+        commands::input_queue::clear(world, entity);
         let was_linkdead = world.get::<commands::Linkdead>(entity).is_some();
         let _ = outbound.try_send(if was_linkdead {
             b"Reconnecting.\r\n".to_vec()
@@ -8014,6 +8018,37 @@ mod tests {
         commands::send_to(&world, fighter, "nobody hears this\r\n");
         // The autosave / shutdown save still covers it.
         assert!(router.online_entities(&mut world).contains(&fighter));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn linkdeath_and_reconnect_drop_the_queued_input() {
+        let mut world = World::new();
+        world.insert_resource(mud_world::SocialRegistry::default());
+        world.insert_resource(SaveCoordinator::default());
+        world.insert_resource(crate::TickCount(7));
+        let pool = failing_pool();
+        let mut router = ConnRouter::new();
+        router.close_conn = |_| true;
+        let room = world.spawn(mud_world::Room).id();
+        let (fighter, _foe, _rx) = fighter_in(&mut router, &mut world, room, 1);
+        world.entity_mut(fighter).insert(Account {
+            user_id: "u".into(),
+            character_id: "c-Fighter".into(),
+            role: mud_db::enums::UserRole::Player,
+            account_role: mud_db::enums::UserRole::Player,
+            perms: vec![],
+        });
+        commands::input_queue::seed_for_test(&mut world, fighter, &["cast 'fireball' orc"]);
+        router.on_disconnect(&mut world, 1, &pool).await;
+        assert!(world.get::<commands::Linkdead>(fighter).is_some());
+        assert_eq!(commands::input_queue::queued_len(&world, fighter), 0);
+
+        // Lines that slipped in while linkdead are gone on reconnect too.
+        commands::input_queue::seed_for_test(&mut world, fighter, &["get all corpse"]);
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+        router.on_connect(2, tx, None, &world);
+        assert!(router.try_takeover(&mut world, 2, "c-Fighter"));
+        assert_eq!(commands::input_queue::queued_len(&world, fighter), 0);
     }
 
     #[tokio::test(flavor = "current_thread")]
