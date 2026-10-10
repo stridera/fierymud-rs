@@ -1001,9 +1001,9 @@ impl LuaHost {
     /// Bodies that hit `wait(N)` yield via Lua coroutines. The thread
     /// is parked on `self.yielded` and `tick_yielded` resumes it once
     /// `current_tick` advances past `resume_at_tick`. Callers see the
-    /// pre-yield captured output and `return_bool: None`; the body's
-    /// final return value is dropped (current callers use it only for
-    /// COMMAND-trigger gating, which doesn't yield in practice).
+    /// pre-yield captured output and `return_bool: None`, or `Some(true)`
+    /// when the body called `allow_command()` first (legacy `return 0`
+    /// before a `wait`); the body's final return value is dropped.
     #[allow(clippy::too_many_lines)]
     pub fn exec_for_event_with_value(
         &mut self,
@@ -1089,6 +1089,10 @@ impl LuaHost {
                 return Ok((None, Some((thread, 1, globals.clone()))));
             }
             let values: MultiValue = thread.resume(())?;
+            let allowed = self
+                .lua
+                .app_data_ref::<LuaCapture>()
+                .is_some_and(|c| c.allow_command);
             if matches!(thread.status(), ThreadStatus::Resumable) {
                 let wait_secs = values
                     .into_iter()
@@ -1105,17 +1109,21 @@ impl LuaHost {
                     .unwrap_or(1)
                     .max(1);
                 Ok::<(Option<bool>, Option<(Thread, i64, Table)>), mlua::Error>((
-                    None,
+                    allowed.then_some(true),
                     Some((thread, wait_secs, globals.clone())),
                 ))
             } else {
-                let return_bool = values.into_iter().next().and_then(|v| {
-                    if let Value::Boolean(b) = v {
-                        Some(b)
-                    } else {
-                        None
-                    }
-                });
+                let return_bool = values
+                    .into_iter()
+                    .next()
+                    .and_then(|v| {
+                        if let Value::Boolean(b) = v {
+                            Some(b)
+                        } else {
+                            None
+                        }
+                    })
+                    .or_else(|| allowed.then_some(true));
                 Ok((return_bool, None))
             }
         })(
@@ -1492,6 +1500,22 @@ impl LuaHost {
                 .eval::<Function>()?,
         )?;
 
+        // `allow_command()` is the legacy DG `return 0` in a COMMAND
+        // trigger: the typed command goes ahead, and the script keeps
+        // running (a Lua `return true` would end it). Without it, a
+        // COMMAND script that reaches `wait` has returned the legacy
+        // default (block) and the command is consumed. Only the first
+        // run of a script (the one inside the dispatcher) reads it.
+        globals.set(
+            "allow_command",
+            self.lua.create_function(|lua, ()| -> mlua::Result<()> {
+                if let Some(mut cap) = lua.app_data_mut::<LuaCapture>() {
+                    cap.allow_command = true;
+                }
+                Ok(())
+            })?,
+        )?;
+
         // `mobiles.template(zone, id)` and `objects.template(zone,
         // id)` return a read-only LuaProto userdata wrapping the
         // catalog entry. The corpus uses these as
@@ -1636,6 +1660,8 @@ impl LuaHost {
 #[derive(Default)]
 struct LuaCapture {
     lines: Vec<String>,
+    /// Set by `allow_command()`: the verdict is "let the command through".
+    allow_command: bool,
 }
 
 /// Stash of the active trigger's `self` entity, accessible to
@@ -5346,6 +5372,27 @@ mod tests {
         host.set_current_tick(10);
         assert_eq!(host.tick_yielded(&mut world), 1);
         assert_eq!(host.yielded_count(), 0);
+    }
+
+    #[test]
+    fn allow_command_sets_the_command_verdict_before_a_wait() {
+        let (mut world, actor) = make_world_with_actor();
+        let mut host = LuaHost::new();
+        let mut verdict = |body: &str| {
+            host.exec_for_event_with_value(&mut world, actor, actor, None, body, &[])
+                .unwrap()
+                .1
+        };
+        // A wait without it has returned the legacy default (no verdict).
+        assert_eq!(verdict("wait(1)\nreturn true"), None);
+        // With it, the verdict survives the yield.
+        assert_eq!(verdict("allow_command()\nwait(1)"), Some(true));
+        // A script that finishes without a boolean return also allows.
+        assert_eq!(verdict("allow_command()"), Some(true));
+        // An explicit return wins.
+        assert_eq!(verdict("allow_command()\nreturn false"), Some(false));
+        // The flag does not leak into the next run.
+        assert_eq!(verdict("wait(1)"), None);
     }
 
     #[test]

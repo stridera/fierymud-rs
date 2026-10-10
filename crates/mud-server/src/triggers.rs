@@ -580,7 +580,9 @@ fn command_triggers_exempt(world: &World, actor: Entity) -> bool {
 /// that default. So a run that ends `return true` (the Lua spelling of
 /// `return 0`, and of "not my command") lets the command continue, and
 /// anything else (`return false`, no return, a thread parked on
-/// `wait`) consumes it.
+/// `wait`) consumes it. A script that must pass the command and then
+/// keep running (legacy `return 0` followed by a `wait`) calls
+/// `allow_command()` before the `wait`.
 pub fn fire_command_in_room(
     world: &mut World,
     player: Entity,
@@ -1877,6 +1879,26 @@ return _return_value"#;
         assert!(fire_command_in_room(
             &mut world, player, room, "deposit", "x"
         ));
+    }
+
+    #[test]
+    fn command_trigger_that_allows_before_a_wait_lets_the_command_through() {
+        // Shape of 15/3 (wear, then wait): legacy `return 0` before the
+        // `wait` passes the typed command and the script carries on.
+        let (mut world, room) = base_world();
+        let body = "if cmd ~= 'wear' then return true end\nallow_command()\nwait(2)\nself:setvar('after', 1)";
+        add_trigger(&mut world, 1, vec![TriggerEvent::Command], body);
+        world
+            .entity_mut(room)
+            .insert(AttachedTriggers(vec![(99, 1)]));
+        let player = spawn_player(&mut world, room, "Pat");
+        assert!(!fire_command_in_room(
+            &mut world, player, room, "wear", "ring"
+        ));
+        assert!(
+            ran(&world, 0, EntityType::Room, "after").is_none(),
+            "the script is parked on its wait"
+        );
     }
 
     #[test]
