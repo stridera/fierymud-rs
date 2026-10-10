@@ -331,6 +331,129 @@ pub fn gravity_tick(world: &mut World) {
     for e in due {
         fall_step(world, e, tick);
     }
+    item_gravity_tick(world, tick);
+}
+
+/// An item (a corpse, a dropped weapon, a thrown pouch) dropping through air
+/// rooms: legacy `start_obj_falling` / `gravity_event` for objects.
+#[derive(Component, Debug, Clone, Copy)]
+pub(crate) struct ItemFalling {
+    start_room: Entity,
+    distance: u32,
+    due_tick: u64,
+}
+
+/// How often the world is scanned for items lying in air rooms. Legacy hooked
+/// `obj_to_room`; here the scan only touches items when an air room exists,
+/// and a drop waits at most this many ticks before it plummets.
+const ITEM_SCAN_TICKS: u64 = 5;
+
+fn item_can_fall(world: &World, item: Entity) -> bool {
+    !world
+        .get::<mud_world::ObjectFlags>(item)
+        .is_some_and(|f| f.has(mud_db::enums::ObjectFlag::NoFall))
+}
+
+/// Start and advance item falls. Items lying loose in an air room with a
+/// way down start to fall (unless flagged `NoFall`); every item already
+/// falling steps once its delay has passed.
+fn item_gravity_tick(world: &mut World, tick: u64) {
+    if tick.is_multiple_of(ITEM_SCAN_TICKS) {
+        let air_rooms: Vec<Entity> = {
+            let mut q = world.query_filtered::<(Entity, &RoomSector), With<mud_world::Room>>();
+            q.iter(world)
+                .filter(|(_, s)| s.0 == Sector::Air)
+                .map(|(e, _)| e)
+                .collect()
+        };
+        if !air_rooms.is_empty() {
+            let starters: Vec<(Entity, Entity)> = {
+                let mut q = world
+                    .query_filtered::<(Entity, &Located), (With<mud_world::Item>, Without<ItemFalling>)>();
+                q.iter(world)
+                    .filter(|(_, l)| air_rooms.contains(&l.0))
+                    .map(|(e, l)| (e, l.0))
+                    .collect()
+            };
+            for (item, room) in starters {
+                if item_can_fall(world, item) && room_below(world, room).is_some() {
+                    try_insert(
+                        world,
+                        item,
+                        ItemFalling {
+                            start_room: room,
+                            distance: 0,
+                            due_tick: 0,
+                        },
+                    );
+                }
+            }
+        }
+    }
+    let due: Vec<Entity> = {
+        let mut q = world.query::<(Entity, &ItemFalling)>();
+        q.iter(world)
+            .filter(|(_, f)| f.due_tick <= tick)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for item in due {
+        item_fall_step(world, item, tick);
+    }
+}
+
+/// One step of legacy `gravity_event` for an object.
+fn item_fall_step(world: &mut World, item: Entity, tick: u64) {
+    let Some(mut fall) = world.get::<ItemFalling>(item).copied() else {
+        return;
+    };
+    let stop = |world: &mut World| try_remove::<ItemFalling>(world, item);
+    let Some(room) = world.get::<Located>(item).map(|l| l.0) else {
+        return stop(world);
+    };
+    // Picked up (the holder is not an air room) or no longer over thin air.
+    if !is_air(world, room) || !item_can_fall(world, item) {
+        return stop(world);
+    }
+    let Some(to_room) = room_below(world, room) else {
+        return stop(world);
+    };
+    let what = cap_sentence_start(&name_of(world, item));
+    if fall.distance == 0 {
+        broadcast_room_except_rendered(
+            world,
+            room,
+            &[],
+            &format!("{what} <red>plummets</> <green>downward!</>\r\n"),
+        );
+    }
+    mud_world::movement::move_to_room(world, item, to_room);
+    broadcast_room_except_rendered(
+        world,
+        to_room,
+        &[],
+        &format!("{what} <red>falls from above.</>\r\n"),
+    );
+    if to_room == fall.start_room {
+        return stop(world);
+    }
+    fall.distance += 1;
+    if fall.distance < MAX_FALL_ROOMS
+        && is_air(world, to_room)
+        && room_below(world, to_room).is_some()
+    {
+        fall.due_tick = tick + FALL_STEP_TICKS;
+        try_insert(world, item, fall);
+        return;
+    }
+    // The bottom.
+    stop(world);
+    let landing = if is_splashy(world, to_room) {
+        "<red>lands with a loud</> <red>SPLASH</><green>!</>"
+    } else {
+        "<red>lands with a dull</> <red>THUD</><green>!</>"
+    };
+    broadcast_room_except_rendered(world, to_room, &[], &format!("{what} {landing}\r\n"));
 }
 
 /// The room below `room`, if the down exit is passable (legacy `CAN_GO`).

@@ -538,3 +538,70 @@ fn falling_yell_is_silenced_by_the_silence_status() {
     super::falling_yell(&mut world, p, west);
     assert_eq!(drain(&mut rx), "");
 }
+
+fn tick_until_still(world: &mut World) {
+    for t in 1..400 {
+        world.resource_mut::<TickCount>().0 = t;
+        gravity_tick(world);
+    }
+}
+
+fn loose_item(world: &mut World, name: &str, room: Entity) -> Entity {
+    world
+        .spawn((Item, Named { name: name.into() }, Located(room)))
+        .id()
+}
+
+#[test]
+fn an_item_left_in_an_air_room_falls_to_the_ground_with_a_thud() {
+    let mut f = fx();
+    // The player stays on the ground so only the item is being watched.
+    f.world.entity_mut(f.p).insert(Located(f.ground));
+    let corpse = loose_item(&mut f.world, "the corpse of a rabbit", f.sky1);
+    tick_until_still(&mut f.world);
+    assert_eq!(f.world.get::<Located>(corpse).unwrap().0, f.ground);
+    assert!(f.world.get::<super::ItemFalling>(corpse).is_none());
+    let out = drain(&mut f.rx);
+    assert!(out.contains("falls from above"), "{out}");
+    assert!(out.contains("THUD"), "{out}");
+}
+
+#[test]
+fn a_nofall_item_hangs_in_the_air_and_a_carried_one_goes_with_its_owner() {
+    let mut f = fx();
+    f.world.entity_mut(f.p).insert(Flying);
+    let spark = loose_item(&mut f.world, "a drifting spark", f.sky1);
+    f.world
+        .entity_mut(spark)
+        .insert(mud_world::ObjectFlags(vec![
+            mud_db::enums::ObjectFlag::NoFall,
+        ]));
+    let held = loose_item(&mut f.world, "a pebble", f.sky1);
+    f.world.entity_mut(held).insert(Located(f.p));
+    tick_until_still(&mut f.world);
+    assert_eq!(f.world.get::<Located>(spark).unwrap().0, f.sky1);
+    assert_eq!(f.world.get::<Located>(held).unwrap().0, f.p);
+    assert_eq!(
+        f.world.get::<Located>(f.p).unwrap().0,
+        f.sky1,
+        "flier hovers"
+    );
+}
+
+#[test]
+fn an_item_picked_up_mid_fall_stops_falling() {
+    let mut f = fx();
+    f.world.entity_mut(f.p).insert(Flying);
+    let coin = loose_item(&mut f.world, "a coin", f.sky1);
+    f.world.resource_mut::<TickCount>().0 = 5;
+    gravity_tick(&mut f.world);
+    assert_eq!(
+        f.world.get::<Located>(coin).unwrap().0,
+        f.sky2,
+        "first step"
+    );
+    f.world.entity_mut(coin).insert(Located(f.p));
+    tick_until_still(&mut f.world);
+    assert_eq!(f.world.get::<Located>(coin).unwrap().0, f.p);
+    assert!(f.world.get::<super::ItemFalling>(coin).is_none());
+}

@@ -704,10 +704,14 @@ inventory::submit! {
         help: Help {
             usage: "fly",
             summary: "Take to the air (sets the Flying marker).",
-            long: "Movement charges a flat 2 stamina per move while \
-                   flying — great savings over water/swamp (4-6 \
-                   normally), slightly pricier on roads (1). Use \
-                   'walk' or 'land' to come back down.",
+            long: "Needs a source of flight (the fly spell, a winged \
+                   form or a worn item). Movement charges a flat 2 \
+                   stamina per move while flying — great savings over \
+                   water/swamp (4-6 normally), slightly pricier on \
+                   roads (1). Air rooms have no floor: anyone who is \
+                   not flying falls through them, and so do loose items \
+                   and corpses. Use 'land' (or 'walk') to come back \
+                   down.",
         },
         run: cmd_fly,
     }
@@ -720,10 +724,20 @@ inventory::submit! {
         required_perm: None,
         category: Category::Movement,
         help: Help {
-            usage: "walk",
-            summary: "Stop flying and walk again.",
-            long: "Clears the Flying marker. No-op when already \
-                   walking.",
+            usage: "land",
+            summary: "Come down to the ground (stop flying).",
+            long: "Ends flight (also available as 'walk'). On solid \
+                   ground you simply touch down. In an air room you \
+                   have nothing to stand on, so landing there means \
+                   falling through the down exits until you hit \
+                   something solid, and the landing hurts (a long drop \
+                   hurts more; Feather Fall and the Safefall skill \
+                   soften it). Flight also ends on its own when the \
+                   fly spell or item that grants it runs out, or when \
+                   you pick up more than about 95% of what you can \
+                   carry. You need a source of flight (the fly spell, \
+                   a winged form or a worn item) to 'fly' in the first \
+                   place. No-op when you are already on foot.",
         },
         run: cmd_walk,
     }
@@ -12016,7 +12030,19 @@ pub(crate) fn cmd_walk(world: &mut World, player: Entity, _args: &str) {
     }
     try_remove::<mud_world::Flying>(world, player);
     let mover_name = name_of(world, player);
-    send_to(world, player, "You touch down and start walking again.\r\n");
+    let over_air = world
+        .get::<Located>(player)
+        .and_then(|l| world.get::<mud_world::RoomSector>(l.0))
+        .is_some_and(|s| s.0 == mud_db::enums::Sector::Air);
+    if over_air {
+        send_to(
+            world,
+            player,
+            "You stop flying with nothing below you but thin air.\r\n",
+        );
+    } else {
+        send_to(world, player, "You touch down and start walking again.\r\n");
+    }
     // Legacy `do_stand` -> `falling_check`: landing over thin air is a fall.
     mud_world::movement::begin_fall_if_unsupported(world, player);
     if let Some(located) = world.get::<Located>(player).copied() {
