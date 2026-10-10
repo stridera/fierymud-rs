@@ -4941,13 +4941,13 @@ pub(crate) fn cmd_hire(world: &mut World, player: Entity, args: &str) {
         off.amount = (off.amount - 1).max(0);
     }
     // Spawn the pet as a fresh mob attached as a Follower(player).
-    // Name is renamed to "<player>'s <mob_name>" so room listings
-    // disambiguate from wild mobs of the same proto. The
+    // Name is renamed to "<player>'s <mob_name>" (minus the mob name's
+    // leading article) so room listings disambiguate from wild mobs of the same proto. The
     // `PersistentPet` marker tags this as a paid follower so the
     // disconnect-save snapshots it (gold spent → durable across
     // reconnect under the 1h cap).
     let player_name = name_of(world, player);
-    let pet_name = format!("{player_name}'s {}", proto.name);
+    let pet_name = crate::commands::possessive_name(&player_name, &proto.name);
     let pet_entity = mud_world::spawn_mob_from_proto(world, &proto, located.0, None);
     if let Ok(mut em) = world.get_entity_mut(pet_entity) {
         em.insert((

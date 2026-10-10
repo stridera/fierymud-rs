@@ -21541,6 +21541,37 @@ impl FormulaParser<'_> {
     }
 }
 
+/// `s` without a leading article, as legacy `without_article` does (`a`,
+/// `an`, `some`, `the`; legacy's `a pair` entry is left out because it
+/// turns "a pair of boots" into "of boots"). A name that follows a
+/// possessive drops it: "Mukashi's stout mare", not "Mukashi's a stout
+/// mare".
+pub(crate) fn without_article(s: &str) -> &str {
+    for article in ["a ", "an ", "some ", "the "] {
+        if let Some(head) = s.get(..article.len())
+            && head.eq_ignore_ascii_case(article)
+        {
+            return &s[article.len()..];
+        }
+    }
+    s
+}
+
+/// `name` made the possession of `owner`: "Mukashi's stout mare" for a
+/// mob called "a stout mare".
+pub(crate) fn possessive_name(owner: &str, name: &str) -> String {
+    format!("{owner}'s {}", without_article(name))
+}
+
+/// Repair a stored possessive that kept its article ("Mukashi's a stout
+/// mare", saved by an older build); any other name is returned unchanged.
+pub(crate) fn fix_possessive_article(name: &str) -> String {
+    match name.split_once("'s ") {
+        Some((owner, rest)) if !owner.is_empty() => possessive_name(owner, rest),
+        _ => name.to_string(),
+    }
+}
+
 /// Uppercase the first alphabetic character, leaving the rest of the
 /// string unchanged. Skips past leading XML-Lite color tags
 /// (e.g. `<b:cyan>Dragon</>`) so the first *visible* letter gets

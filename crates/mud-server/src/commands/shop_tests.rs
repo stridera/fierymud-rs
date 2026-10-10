@@ -148,6 +148,11 @@ fn mount_shop_lists_its_stable_and_buy_hires_a_mountable_steed() {
         world.get::<Mountable>(followers[0]).is_some(),
         "a bought mount must be rideable"
     );
+    // The hired pet is the player's, without the proto name's article (#98).
+    assert_eq!(
+        world.get::<mud_world::Named>(followers[0]).unwrap().name,
+        "Tester's stout mare"
+    );
 
     // Numeric index also works when the shop has no item stock.
     cmd_buy(&mut world, player, "2");
@@ -310,9 +315,10 @@ fn restored_pet_gets_its_protos_default_effects_and_keeps_following() {
     assert!(world.get::<mud_world::PersistentPet>(pet).is_some());
     let health = world.get::<mud_world::Health>(pet).unwrap();
     assert_eq!((health.hp, health.max), (4, 10));
+    // Saved by an older build with the article kept (#98): repaired on load.
     assert_eq!(
         world.get::<mud_world::Named>(pet).unwrap().name,
-        "Tester's a stout mare"
+        "Tester's stout mare"
     );
     assert!(matches!(
         world.get::<mud_world::Posture>(pet),
@@ -447,4 +453,42 @@ fn hired_pet_gets_its_protos_default_effects() {
         world.get::<mud_world::Haste>(followers[0]).is_some(),
         "a hired pet is a normal mob loaded from its prototype"
     );
+}
+
+#[test]
+fn possessives_drop_the_leading_article() {
+    use crate::commands::{fix_possessive_article, possessive_name, without_article};
+    assert_eq!(
+        possessive_name("Mukashi", "a stout mare"),
+        "Mukashi's stout mare"
+    );
+    assert_eq!(
+        possessive_name("Mukashi", "An Old Mare"),
+        "Mukashi's Old Mare"
+    );
+    assert_eq!(
+        possessive_name("Mukashi", "the grey mare"),
+        "Mukashi's grey mare"
+    );
+    assert_eq!(
+        possessive_name("Mukashi", "some stray dogs"),
+        "Mukashi's stray dogs"
+    );
+    assert_eq!(
+        possessive_name("Mukashi", "a pair of boars"),
+        "Mukashi's pair of boars"
+    );
+    // Only a whole leading word is an article.
+    assert_eq!(without_article("Athena"), "Athena");
+    assert_eq!(without_article("antelope"), "antelope");
+    assert_eq!(without_article("theodore"), "theodore");
+    assert_eq!(
+        fix_possessive_article("Mukashi's a stout mare"),
+        "Mukashi's stout mare"
+    );
+    assert_eq!(
+        fix_possessive_article("Mukashi's stout mare"),
+        "Mukashi's stout mare"
+    );
+    assert_eq!(fix_possessive_article("a goblin"), "a goblin");
 }

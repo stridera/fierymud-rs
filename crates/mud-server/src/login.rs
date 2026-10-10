@@ -747,8 +747,10 @@ pub(crate) fn restore_persisted_pets(world: &mut World, player: Entity, persiste
             // Persisted state goes on top; the proto's rolled HP is
             // replaced so a wounded pet stays wounded.
             em.insert((
+                // Pets saved before possessives dropped the article still
+                // read "Owner's a stout mare".
                 Named {
-                    name: pet.name.clone(),
+                    name: crate::commands::fix_possessive_article(&pet.name),
                 },
                 Health {
                     hp: pet.hp,
