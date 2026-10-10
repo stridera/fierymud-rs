@@ -39,9 +39,9 @@ pub use components::{
     RoomBurningEffect, RoomCapacity, RoomExtras, RoomLayout, RoomMagicalDarkness, RoomMagicalLight,
     RoomSector, Sanctuary, SavingThrows, ScriptVars, SenseLife, Shopkeeper, SizeShift, Sized,
     SkillPoints, Slot, SlotHold, SlotReservation, Sneaking, SnoopedBy, Snooping, SoundproofRoom,
-    SpellCooldown, SpellResistanceDelta, SpellSlots, Stamina, Stealth, Stunned, SwitchedFrom,
-    SwitchedInto, SyslogMinLevel, TellLog, Thirst, TimePlayed, Title, Trophy, TrophyEntry,
-    TrophyKind, UiStyle, WallTraversal, WatchingSyslog, WaterWalk, Wealth, WearableIn,
+    SpellCooldown, SpellResistanceDelta, SpellSlots, Stamina, StatOverflow, Stealth, Stunned,
+    SwitchedFrom, SwitchedInto, SyslogMinLevel, TellLog, Thirst, TimePlayed, Title, Trophy,
+    TrophyEntry, TrophyKind, UiStyle, WallTraversal, WatchingSyslog, WaterWalk, Wealth, WearableIn,
     WimpyThreshold, WizInvis, WorldKey, Zone, ZoneClimate, ZoneVisits, group_members, group_root,
     innate_cooldown_key, is_lit, room_in_god_zone, wear_keyword_slot, zone_is_god,
 };

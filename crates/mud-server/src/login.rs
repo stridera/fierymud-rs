@@ -899,15 +899,12 @@ pub(crate) fn restore_persisted_effects(
             }
             i32::try_from(after).unwrap_or(eff.remaining_secs)
         };
-        // Record the delta that actually landed: a clamped stat (max hp
-        // floored at 1, armor capped at 100) takes less than the saved
-        // amount, and expiry must give back exactly that.
-        let mut modify_delta = eff.modify_delta.clone();
-        if let Some(d) = modify_delta.as_mut().filter(|d| !baked(d))
-            && let Some(landed) =
-                crate::commands::apply_modify_delta_actual(world, entity, &d.0, d.1)
-        {
-            d.1 = landed;
+        // The nominal delta is re-applied and recorded as saved: a clamp
+        // that cuts it short lives in the `StatOverflow` ledger, so expiry
+        // reverses it exactly.
+        let modify_delta = eff.modify_delta.clone();
+        if let Some(d) = modify_delta.as_ref().filter(|d| !baked(d)) {
+            crate::commands::apply_modify_delta(world, entity, &d.0, d.1);
         }
         let flag = restored_flag(world, eff.kind, &eff.name);
         let mut effect_entity = world.spawn((

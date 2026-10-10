@@ -395,6 +395,88 @@ fn saved_current_points_are_capped_at_the_gearless_max() {
     assert_eq!(base_current(0, 125, 25), 0);
 }
 
+/// A player wearing a +50 max-hp ring and a -500 cursed one, so the second
+/// bottoms max hp out at 1 (the clamp swallows most of the curse).
+fn clamped_pair() -> (World, Entity, Rx) {
+    let (mut world, p, mut rx) = setup();
+    ring(&mut world, p, 20, "vital", vec![modify("max_hp", 50)]);
+    ring(&mut world, p, 21, "cursed", vec![modify("max_hp", -500)]);
+    wear(&mut world, p, &mut rx, "vital");
+    wear(&mut world, p, &mut rx, "cursed");
+    (world, p, rx)
+}
+
+#[test]
+fn clamped_gear_comes_off_in_any_order_back_to_base() {
+    for order in [["vital", "cursed"], ["cursed", "vital"]] {
+        // Repeat to catch drift that builds up cycle over cycle.
+        let (mut world, p, mut rx) = clamped_pair();
+        for cycle in 0..3 {
+            assert_eq!(world.get::<Health>(p).unwrap().max, 1, "floored");
+            for kw in order {
+                remove(&mut world, p, &mut rx, kw);
+            }
+            let h = world.get::<Health>(p).unwrap();
+            assert_eq!(h.max, 100, "{order:?} cycle {cycle}: base max restored");
+            assert!(h.hp <= h.max);
+            wear(&mut world, p, &mut rx, "vital");
+            wear(&mut world, p, &mut rx, "cursed");
+        }
+    }
+}
+
+#[test]
+fn clamped_armor_gear_comes_off_in_any_order_back_to_base() {
+    let (mut world, p, mut rx) = setup();
+    world
+        .entity_mut(p)
+        .insert(mud_world::CombatStats::default());
+    ring(&mut world, p, 22, "plated", vec![modify("armor_pct", 70)]);
+    ring(&mut world, p, 23, "rotten", vec![modify("armor_pct", -90)]);
+    let armor = |w: &World| w.get::<mud_world::CombatStats>(p).unwrap().armor_pct;
+    for order in [["plated", "rotten"], ["rotten", "plated"]] {
+        wear(&mut world, p, &mut rx, "plated");
+        wear(&mut world, p, &mut rx, "rotten");
+        assert_eq!(armor(&world), 0, "floored at 0");
+        for kw in order {
+            remove(&mut world, p, &mut rx, kw);
+        }
+        assert_eq!(armor(&world), 0, "{order:?}: back to base");
+    }
+}
+
+#[test]
+fn clamped_gear_saves_and_relogs_to_the_same_state() {
+    let (mut world, p, _rx) = clamped_pair();
+    world.get_mut::<Health>(p).unwrap().hp = 1;
+    // What the save writes: current points capped at the gear-less max.
+    let off = gear_offsets(&world, p);
+    assert_eq!(off.max_hp, -99, "the offset that really landed, not -450");
+    let max = world.get::<Health>(p).unwrap().max;
+    let saved = base_current(1, max, off.max_hp);
+    assert_eq!(saved, 1);
+
+    // Fresh login: the worn rings respawn and re-apply on the base row.
+    let (mut world2, p2, mut rx2) = setup();
+    *world2.get_mut::<Health>(p2).unwrap() = Health {
+        hp: saved,
+        max: 100,
+    };
+    for (id, kw, amount) in [(20, "vital", 50), (21, "cursed", -500)] {
+        let r = ring(&mut world2, p2, id, kw, vec![modify("max_hp", amount)]);
+        world2
+            .entity_mut(r)
+            .insert(EquippedSlot(mud_world::Slot::LeftFinger));
+    }
+    recompute_equipped_keeping_vitals(&mut world2, p2);
+    let h = world2.get::<Health>(p2).unwrap();
+    assert_eq!((h.hp, h.max), (1, 1), "same as before the save");
+    // And the relogged wearer still unwinds to base in either order.
+    remove(&mut world2, p2, &mut rx2, "vital");
+    remove(&mut world2, p2, &mut rx2, "cursed");
+    assert_eq!(world2.get::<Health>(p2).unwrap().max, 100);
+}
+
 #[test]
 fn a_timed_worn_item_that_decays_takes_its_bonus_with_it() {
     let (mut world, p, mut rx) = setup();

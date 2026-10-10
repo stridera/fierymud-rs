@@ -3015,6 +3015,15 @@ pub struct ModifyDelta {
     pub amount: i32,
 }
 
+/// Per-stat amount a clamped stat is currently "past" its bound: the
+/// unclamped running total (base plus every live modifier) minus the stored
+/// value. `ModifyDelta` and gear grants record the NOMINAL amount; this
+/// ledger lets a later reversal be exact whatever order modifiers come off
+/// in, instead of a clamp swallowing part of the reversal and handing it
+/// back as a permanent gain or loss. Absent when nothing is clamped.
+#[derive(Component, Debug, Clone, Default)]
+pub struct StatOverflow(pub std::collections::HashMap<&'static str, i32>);
+
 /// Composite (zone, id) identity for entities loaded from the schema.
 /// Lets the runtime round-trip an entity back to its DB row.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -16,7 +16,7 @@ use mud_world::{
 
 use super::combat_commands::*;
 use crate::commands::test_support::{Rx, ability_def, drain, player_in};
-use crate::commands::{apply_modify_delta_actual, invoke_ability_with, reverse_modify_delta};
+use crate::commands::{apply_modify_delta_recorded, invoke_ability_with, reverse_modify_delta};
 
 /// A room, a standing player with stamina and `CombatStats`, and its receiver.
 fn arena() -> (World, Entity, Entity, Rx) {
@@ -615,8 +615,17 @@ fn camp_kit_given_away_gives_no_bonus_and_is_not_despawned() {
 fn a_clamped_max_hp_debuff_reverses_exactly() {
     let (mut world, _room, p, _rx) = arena();
     world.entity_mut(p).insert(Health { hp: 5, max: 5 });
-    let landed = apply_modify_delta_actual(&mut world, p, "max_hp", -20);
-    assert_eq!(landed, Some(-4), "max HP bottoms out at 1");
+    let landed = apply_modify_delta_recorded(&mut world, p, "max_hp", -20);
+    assert_eq!(
+        landed,
+        Some(-20),
+        "the nominal amount is what gets recorded"
+    );
+    assert_eq!(
+        world.get::<Health>(p).unwrap().max,
+        1,
+        "max HP bottoms out at 1"
+    );
     assert_eq!(world.get::<Health>(p).unwrap().max, 1);
     reverse_modify_delta(&mut world, p, "max_hp", landed.unwrap());
     assert_eq!(
@@ -627,25 +636,109 @@ fn a_clamped_max_hp_debuff_reverses_exactly() {
 }
 
 #[test]
-fn other_clamped_stats_report_what_landed() {
+fn other_clamped_stats_record_the_nominal_amount() {
     let (mut world, _room, p, _rx) = arena();
     world.entity_mut(p).insert(Stamina { current: 2, max: 3 });
     assert_eq!(
-        apply_modify_delta_actual(&mut world, p, "max_stamina", -10),
-        Some(-3)
+        apply_modify_delta_recorded(&mut world, p, "max_stamina", -10),
+        Some(-10)
     );
+    assert_eq!(world.get::<Stamina>(p).unwrap().max, 0);
     world.get_mut::<CombatStats>(p).unwrap().armor_pct = 95;
     assert_eq!(
-        apply_modify_delta_actual(&mut world, p, "armor_pct", 20),
-        Some(5),
-        "capped at 100"
+        apply_modify_delta_recorded(&mut world, p, "armor_pct", 20),
+        Some(20),
+        "recorded in full, capped at 100"
     );
+    assert_eq!(armor_pct(&world, p), 100);
     assert_eq!(
-        apply_modify_delta_actual(&mut world, p, "strength", 3),
+        apply_modify_delta_recorded(&mut world, p, "strength", 3),
         Some(3),
         "unclamped stats land in full"
     );
-    assert_eq!(apply_modify_delta_actual(&mut world, p, "bogus", 3), None);
+    assert_eq!(apply_modify_delta_recorded(&mut world, p, "bogus", 3), None);
+}
+
+/// A timed spell buff on `p`, recorded the way a cast records it.
+fn spell_buff(world: &mut World, p: Entity, stat: &str, amount: i32) -> Entity {
+    let landed = apply_modify_delta_recorded(world, p, stat, amount).expect("supported stat");
+    world
+        .spawn((
+            mud_world::EffectInstance {
+                kind: 1,
+                name: stat.into(),
+                strength: 0,
+                remaining_secs: 30,
+                source: mud_world::EffectSource::Spell,
+                ability_id: None,
+            },
+            AppliedTo(p),
+            mud_world::ModifyDelta {
+                target: stat.into(),
+                amount: landed,
+            },
+        ))
+        .id()
+}
+
+fn armor_pct(world: &World, e: Entity) -> i32 {
+    world.get::<CombatStats>(e).unwrap().armor_pct
+}
+
+#[test]
+fn clamped_buffs_that_expire_out_of_order_leave_the_stat_where_it_started() {
+    // +50 armor, then a -80 curse that bottoms the stat out at 0. The buff
+    // goes first: its reversal clamps at the floor too, and the curse must
+    // not hand that lost part back as a permanent gain.
+    for cycle in 0..5 {
+        let (mut world, _room, p, _rx) = arena();
+        let buff = spell_buff(&mut world, p, "armor_pct", 50);
+        let curse = spell_buff(&mut world, p, "armor_pct", -80);
+        assert_eq!(armor_pct(&world, p), 0, "cycle {cycle}: floored");
+        crate::effects::remove_effect_instance(&mut world, p, buff);
+        assert_eq!(armor_pct(&world, p), 0, "cycle {cycle}: curse still holds");
+        crate::effects::remove_effect_instance(&mut world, p, curse);
+        assert_eq!(armor_pct(&world, p), 0, "cycle {cycle}: back to base");
+    }
+}
+
+#[test]
+fn clamped_max_hp_buffs_expire_in_any_order_back_to_base() {
+    for buff_first in [true, false] {
+        let (mut world, _room, p, _rx) = arena();
+        let buff = spell_buff(&mut world, p, "max_hp", 10);
+        let curse = spell_buff(&mut world, p, "max_hp", -500);
+        assert_eq!(world.get::<Health>(p).unwrap().max, 1, "floored at 1");
+        let order = if buff_first {
+            [buff, curse]
+        } else {
+            [curse, buff]
+        };
+        for e in order {
+            crate::effects::remove_effect_instance(&mut world, p, e);
+        }
+        let h = world.get::<Health>(p).unwrap();
+        assert_eq!(h.max, 100, "buff_first={buff_first}: base max restored");
+        assert!(h.hp <= h.max);
+    }
+}
+
+#[test]
+fn a_buff_capped_at_the_ceiling_expires_back_to_base_in_any_order() {
+    // Two armor buffs overflow the 100 cap; whichever expires first, the
+    // stat ends at the base the wearer began with.
+    for first_goes_first in [true, false] {
+        let (mut world, _room, p, _rx) = arena();
+        world.get_mut::<CombatStats>(p).unwrap().armor_pct = 40;
+        let a = spell_buff(&mut world, p, "armor_pct", 50);
+        let b = spell_buff(&mut world, p, "armor_pct", 50);
+        assert_eq!(armor_pct(&world, p), 100);
+        let order = if first_goes_first { [a, b] } else { [b, a] };
+        crate::effects::remove_effect_instance(&mut world, p, order[0]);
+        assert_eq!(armor_pct(&world, p), 90, "one 50 buff still holds");
+        crate::effects::remove_effect_instance(&mut world, p, order[1]);
+        assert_eq!(armor_pct(&world, p), 40);
+    }
 }
 
 // -- release -------------------------------------------------------------------------
@@ -758,8 +851,8 @@ fn a_clamped_buff_restored_at_login_reverses_exactly_on_expiry() {
         .collect();
     assert_eq!(
         recorded,
-        vec![-4],
-        "the delta that landed, not the saved one"
+        vec![-20],
+        "recorded as saved; the ledger holds the clamp"
     );
     {
         let mut q = world.query::<&mut mud_world::EffectInstance>();
@@ -774,6 +867,42 @@ fn a_clamped_buff_restored_at_login_reverses_exactly_on_expiry() {
         5,
         "expiry gives back exactly what was taken"
     );
+}
+
+#[test]
+fn clamped_buffs_restored_at_login_expire_back_to_base_in_either_order() {
+    // A saved +10 buff and -500 curse on max hp: relog replays both, and the
+    // buff running out first must not leave the wearer with a permanent gain.
+    let (mut world, _room, p, _rx) = arena();
+    world.insert_resource(crate::TickCount(0));
+    let effect = |name: &str, amount: i32, secs: i32| {
+        serde_json::json!({
+            "kind": 1, "name": name, "strength": 1, "remaining_secs": secs,
+            "source": "Spell", "ability_id": null, "modify_delta": ["max_hp", amount],
+        })
+    };
+    let persisted: crate::login::PersistedEffects = serde_json::from_value(serde_json::json!({
+        "saved_at_unix": i64::MAX / 2,
+        "effects": [effect("vigor", 10, 5), effect("wither", -500, 60)],
+    }))
+    .expect("persisted effects shape");
+    crate::login::restore_persisted_effects(&mut world, p, persisted);
+    assert_eq!(world.get::<Health>(p).unwrap().max, 1);
+    // The short buff expires first, then the curse.
+    let expire = |world: &mut World, only: Option<&str>| {
+        let mut q = world.query::<&mut mud_world::EffectInstance>();
+        for mut i in q.iter_mut(world) {
+            if only.is_none_or(|n| i.name == n) {
+                i.remaining_secs = 1;
+            }
+        }
+        world.insert_resource(crate::TickCount(10));
+        crate::effects::effects_tick(world);
+    };
+    expire(&mut world, Some("vigor"));
+    assert_eq!(world.get::<Health>(p).unwrap().max, 1, "curse still holds");
+    expire(&mut world, None);
+    assert_eq!(world.get::<Health>(p).unwrap().max, 100, "back to base");
 }
 
 // -- stale pet markers ---------------------------------------------------------------

@@ -17796,7 +17796,7 @@ pub(crate) fn invoke_ability_core(
                 }
                 let applied_amount = match (target_stat.as_deref(), amount) {
                     (Some(t), Some(a)) if a != 0 => {
-                        apply_modify_delta_actual(world, target_entity, t, a)
+                        apply_modify_delta_recorded(world, target_entity, t, a)
                     }
                     _ => None,
                 };
@@ -21089,14 +21089,20 @@ pub(crate) fn apply_modify_delta(
             true
         }
         "armor_flat" => {
-            if let Some(mut cs) = world.get_mut::<CombatStats>(target) {
-                cs.armor_flat = cs.armor_flat.saturating_add(amount).max(0);
+            if let Some(cur) = world.get::<CombatStats>(target).map(|c| c.armor_flat) {
+                let new = clamped_add(world, target, "armor_flat", cur, amount, 0, i32::MAX);
+                if let Some(mut cs) = world.get_mut::<CombatStats>(target) {
+                    cs.armor_flat = new;
+                }
             }
             true
         }
         "hardness" => {
-            if let Some(mut cs) = world.get_mut::<CombatStats>(target) {
-                cs.hardness = cs.hardness.saturating_add(amount).max(0);
+            if let Some(cur) = world.get::<CombatStats>(target).map(|c| c.hardness) {
+                let new = clamped_add(world, target, "hardness", cur, amount, 0, i32::MAX);
+                if let Some(mut cs) = world.get_mut::<CombatStats>(target) {
+                    cs.hardness = new;
+                }
             }
             true
         }
@@ -21115,16 +21121,23 @@ pub(crate) fn apply_modify_delta(
         // Ward stays its own stat (combat pipeline step 5, gated
         // by `Ability.is_magical`).
         "ward" | "ward_pct" => {
-            if let Some(mut cs) = world.get_mut::<CombatStats>(target) {
-                cs.ward_pct = cs.ward_pct.saturating_add(amount).clamp(0, 100);
+            if let Some(cur) = world.get::<CombatStats>(target).map(|c| c.ward_pct) {
+                let new = clamped_add(world, target, "ward_pct", cur, amount, 0, 100);
+                if let Some(mut cs) = world.get_mut::<CombatStats>(target) {
+                    cs.ward_pct = new;
+                }
             }
             true
         }
         "max_hp" => {
-            if let Some(mut h) = world.get_mut::<Health>(target) {
-                h.max = h.max.saturating_add(amount).max(1);
-                if amount > 0 {
-                    h.hp = h.hp.saturating_add(amount);
+            if let Some(cur) = world.get::<Health>(target).map(|h| h.max) {
+                let new = clamped_add(world, target, "max_hp", cur, amount, 1, i32::MAX);
+                let Some(mut h) = world.get_mut::<Health>(target) else {
+                    return true;
+                };
+                h.max = new;
+                if new > cur {
+                    h.hp = h.hp.saturating_add(new - cur);
                 } else if h.hp > h.max {
                     // Removing a +HP buff/item: clamp current HP
                     // to the new (smaller) max so a wearer doesn't
@@ -21135,10 +21148,14 @@ pub(crate) fn apply_modify_delta(
             true
         }
         "max_move" | "max_stamina" | "stamina_max" => {
-            if let Some(mut s) = world.get_mut::<Stamina>(target) {
-                s.max = s.max.saturating_add(amount).max(0);
-                if amount > 0 {
-                    s.current = s.current.saturating_add(amount);
+            if let Some(cur) = world.get::<Stamina>(target).map(|s| s.max) {
+                let new = clamped_add(world, target, "max_stamina", cur, amount, 0, i32::MAX);
+                let Some(mut s) = world.get_mut::<Stamina>(target) else {
+                    return true;
+                };
+                s.max = new;
+                if new > cur {
+                    s.current = s.current.saturating_add(new - cur);
                 } else if s.current > s.max {
                     s.current = s.max;
                 }
@@ -21146,8 +21163,11 @@ pub(crate) fn apply_modify_delta(
             true
         }
         "armor_pct" => {
-            if let Some(mut cs) = world.get_mut::<CombatStats>(target) {
-                cs.armor_pct = cs.armor_pct.saturating_add(amount).clamp(0, 100);
+            if let Some(cur) = world.get::<CombatStats>(target).map(|c| c.armor_pct) {
+                let new = clamped_add(world, target, "armor_pct", cur, amount, 0, 100);
+                if let Some(mut cs) = world.get_mut::<CombatStats>(target) {
+                    cs.armor_pct = new;
+                }
             }
             true
         }
@@ -21252,40 +21272,53 @@ fn apply_size_shift(world: &mut World, target: Entity, amount: i32) {
     }
 }
 
-/// Current value of a stat whose `apply_modify_delta` arm clamps (floor at
-/// 0 or 1, cap at 100), so the delta that really landed can be measured.
-/// `None` for the stats that add without clamping.
-fn clamped_stat_value(world: &World, target: Entity, stat: &str) -> Option<i32> {
-    match stat {
-        "max_hp" => world.get::<Health>(target).map(|h| h.max),
-        "max_move" | "max_stamina" | "stamina_max" => world.get::<Stamina>(target).map(|s| s.max),
-        "armor_flat" => world.get::<CombatStats>(target).map(|c| c.armor_flat),
-        "hardness" => world.get::<CombatStats>(target).map(|c| c.hardness),
-        "ward" | "ward_pct" => world.get::<CombatStats>(target).map(|c| c.ward_pct),
-        "armor_pct" => world.get::<CombatStats>(target).map(|c| c.armor_pct),
-        _ => None,
+/// Add `amount` to a clamped stat currently at `cur` and return the stored
+/// value. The unclamped running total (`cur` plus the `StatOverflow` ledger
+/// entry for `key`) is what gets clamped to `lo..=hi`; whatever the clamp
+/// cuts off goes back into the ledger, so reversing the same nominal amount
+/// later is exact whatever order modifiers expire in.
+fn clamped_add(
+    world: &mut World,
+    target: Entity,
+    key: &'static str,
+    cur: i32,
+    amount: i32,
+    lo: i32,
+    hi: i32,
+) -> i32 {
+    let overflow = world
+        .get::<mud_world::StatOverflow>(target)
+        .and_then(|o| o.0.get(key).copied())
+        .unwrap_or(0);
+    let unclamped = cur.saturating_add(overflow).saturating_add(amount);
+    let new = unclamped.clamp(lo, hi);
+    let overflow = unclamped.saturating_sub(new);
+    if world.get::<mud_world::StatOverflow>(target).is_none() && overflow != 0 {
+        try_insert(world, target, mud_world::StatOverflow::default());
     }
+    if let Some(mut o) = world.get_mut::<mud_world::StatOverflow>(target) {
+        if overflow == 0 {
+            o.0.remove(key);
+        } else {
+            o.0.insert(key, overflow);
+        }
+    }
+    new
 }
 
-/// [`apply_modify_delta`], returning the delta that actually landed (`None`
-/// for an unsupported stat). A clamped stat (max HP floored at 1, armor
-/// capped at 100, ...) can take less than `amount`; whoever records the
-/// delta for a later [`reverse_modify_delta`] must record this value, or the
-/// reversal hands out the clamped part as a permanent gain.
-pub(crate) fn apply_modify_delta_actual(
+/// [`apply_modify_delta`], returning the amount to record for the later
+/// [`reverse_modify_delta`] (`None` for an unsupported stat). That is always
+/// the NOMINAL `amount`: a clamp that cuts the change short is tracked in the
+/// target's `StatOverflow` ledger, so the reversal is exact even when other
+/// modifiers on the same stat expire first. Recording what "landed" instead
+/// loses the clamped part whenever removal order differs from apply order.
+pub(crate) fn apply_modify_delta_recorded(
     world: &mut World,
     target: Entity,
     stat: &str,
     amount: i32,
 ) -> Option<i32> {
-    let before = clamped_stat_value(world, target, stat);
-    if !apply_modify_delta(world, target, stat, amount) {
-        return None;
-    }
-    match (before, clamped_stat_value(world, target, stat)) {
-        (Some(b), Some(a)) => Some(a.saturating_sub(b)),
-        _ => Some(amount),
-    }
+    apply_modify_delta(world, target, stat, amount).then_some(amount)
 }
 
 /// Inverse of `apply_modify_delta` — subtracts the recorded delta

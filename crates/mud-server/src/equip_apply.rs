@@ -37,7 +37,7 @@ use mud_world::{
     ObjectGrantedEffect, ObjectPrototypes, Resistances, Stamina, WorldKey,
 };
 
-use crate::commands::{apply_modify_delta_actual, reverse_modify_delta, try_insert};
+use crate::commands::{apply_modify_delta_recorded, reverse_modify_delta, try_insert};
 
 /// Per-item bookkeeping: the `(stat_key, applied_delta)` pairs we
 /// pushed onto the wearer when the item was equipped. Stored on the
@@ -145,7 +145,8 @@ pub fn apply_object_to_wearer(world: &mut World, item: Entity, wearer: Entity) {
     // time. Recorded in `applied_deltas` so unequip reverses it
     // through the same path apply-block deltas use.
     if proto.armor_pct != 0
-        && let Some(landed) = apply_modify_delta_actual(world, wearer, "armor_pct", proto.armor_pct)
+        && let Some(landed) =
+            apply_modify_delta_recorded(world, wearer, "armor_pct", proto.armor_pct)
     {
         applied_deltas.push(("armor_pct".to_string(), landed));
     }
@@ -181,7 +182,7 @@ pub fn apply_object_to_wearer(world: &mut World, item: Entity, wearer: Entity) {
                 .map(|n| n as i32);
             match (target, amount) {
                 (Some(t), Some(a)) if a != 0 => {
-                    if let Some(landed) = apply_modify_delta_actual(world, wearer, &t, a) {
+                    if let Some(landed) = apply_modify_delta_recorded(world, wearer, &t, a) {
                         applied_deltas.push((t, landed));
                     } else {
                         tracing::warn!(
@@ -302,7 +303,7 @@ pub fn apply_object_to_wearer(world: &mut World, item: Entity, wearer: Entity) {
         .unwrap_or_default();
     for (target, amount) in instance_applies {
         if amount != 0
-            && let Some(landed) = apply_modify_delta_actual(world, wearer, &target, amount)
+            && let Some(landed) = apply_modify_delta_recorded(world, wearer, &target, amount)
         {
             applied_deltas.push((target, landed));
         }
@@ -336,7 +337,7 @@ pub(crate) fn grant_applies_to_worn(world: &mut World, item: Entity, applies: &[
         .iter()
         .filter(|(_, amount)| *amount != 0)
         .filter_map(|(target, amount)| {
-            apply_modify_delta_actual(world, wearer, target, *amount)
+            apply_modify_delta_recorded(world, wearer, target, *amount)
                 .map(|landed| (target.clone(), landed))
         })
         .collect();
@@ -647,6 +648,16 @@ pub fn gear_offsets(world: &World, wearer: Entity) -> GearOffsets {
             };
             *slot = slot.saturating_add(*amount);
         }
+    }
+    // A clamped maximum (max hp floored at 1) moved by less than the
+    // nominal grants say; the ledger holds the part that did not land.
+    if let Some(o) = world.get::<mud_world::StatOverflow>(wearer) {
+        off.max_hp = off
+            .max_hp
+            .saturating_sub(o.0.get("max_hp").copied().unwrap_or(0));
+        off.max_stamina = off
+            .max_stamina
+            .saturating_sub(o.0.get("max_stamina").copied().unwrap_or(0));
     }
     off
 }
