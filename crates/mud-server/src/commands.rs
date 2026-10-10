@@ -14275,25 +14275,52 @@ fn reserve_spell_slot(
     let Some(class_id) = world.get::<Profile>(player).and_then(|p| p.class_id) else {
         return Ok(None);
     };
-    let data = world.resource::<mud_world::SpellSlotData>();
-    let Some(circle) = data.ability_circle.get(&(class_id, def.id)).copied() else {
+    let Some(circle) = world
+        .resource::<mud_world::SpellSlotData>()
+        .ability_circle
+        .get(&(class_id, def.id))
+        .copied()
+    else {
         return Ok(None);
     };
     let level = world.get::<Profile>(player).map_or(0, |p| p.level);
-    let max = data.progression.get(&(level, circle)).copied().unwrap_or(0);
-    let used = world
-        .get::<mud_world::SpellSlots>(player)
-        .map_or(0, |s| s.used_in_circle(circle));
-    if used >= max {
+    let native = circle;
+    let max_circle = i32::try_from(mud_world::CIRCLE_RECOVER_TIME.len()).unwrap_or(1) - 1;
+    // Legacy upcasting: when the native circle is spent, use the lowest
+    // higher circle that still has an open slot.
+    let slot_state = |circle: i32| {
+        let max = world
+            .resource::<mud_world::SpellSlotData>()
+            .progression
+            .get(&(level, circle))
+            .copied()
+            .unwrap_or(0);
+        let used = world
+            .get::<mud_world::SpellSlots>(player)
+            .map_or(0, |s| s.used_in_circle(circle));
+        (used, max)
+    };
+    let Some(circle) = (native..=max_circle).find(|&c| {
+        let (used, max) = slot_state(c);
+        used < max
+    }) else {
+        let (used, max) = slot_state(native);
         send_to(
             world,
             player,
             format!(
-                "Your circle {circle} slots are spent ({used}/{max}). \
+                "Your circle {native} slots are spent ({used}/{max}). \
                  Wait for one to recover.\r\n"
             ),
         );
         return Err(());
+    };
+    if circle != native {
+        send_to(
+            world,
+            player,
+            format!("Upcasting a circle {native} spell into circle {circle}.\r\n"),
+        );
     }
     let recover = mud_world::CIRCLE_RECOVER_TIME
         .get(usize::try_from(circle).unwrap_or(0))

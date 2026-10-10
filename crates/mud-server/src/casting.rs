@@ -1359,6 +1359,43 @@ mod tests {
     }
 
     #[test]
+    fn spent_native_circle_upcasts_into_the_next_open_circle() {
+        let (mut world, room, _) = slot_world(1);
+        world
+            .resource_mut::<SpellSlotData>()
+            .progression
+            .insert((10, 3), 1);
+        let (caster, mut rx) = slot_caster(&mut world, room, 1);
+        let (bob, _b) = bob_in(&mut world, room);
+        // Fill both circle-1 slots and the only circle-2 slot is absent
+        // (max 0), so the spell must skip to circle 3.
+        {
+            let mut s = SpellSlots::default();
+            s.reserve(1, 30);
+            s.reserve(1, 30);
+            world.entity_mut(caster).insert(s);
+        }
+        drain(&mut rx);
+        start_mend(&mut world, caster);
+        let out = drain(&mut rx);
+        assert!(
+            out.contains("Upcasting a circle 1 spell into circle 3"),
+            "{out}"
+        );
+        assert!(world.get::<Casting>(caster).is_some());
+        assert_eq!(slots(&world, caster).used_in_circle(3), 1);
+        run_ticks(&mut world, handler_ticks(4));
+        assert!(hp(&world, bob) > 5, "the spell landed");
+        let s = slots(&world, caster);
+        let cd = s
+            .in_flight
+            .iter()
+            .find(|c| c.circle == 3)
+            .expect("circle 3 cooldown");
+        assert_eq!(cd.secs_remaining, mud_world::CIRCLE_RECOVER_TIME[3]);
+    }
+
+    #[test]
     fn refusal_at_completion_releases_the_reservation() {
         let (mut world, room, _) = slot_world(1);
         let (caster, mut rx) = slot_caster(&mut world, room, 1);
