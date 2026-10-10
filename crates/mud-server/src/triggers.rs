@@ -196,25 +196,27 @@ pub fn fire_event(world: &mut World, entity: Entity, event: TriggerEvent) {
     }
 }
 
-/// Fire SPEECH-flagged triggers for every entity in `room` (other
-/// than the speaker themselves) that carries `AttachedTriggers`.
-/// Each fire binds `speech` (the spoken text, lowercased) as a Lua
-/// global so trigger bodies can keyword-match against it.
+/// Fire SPEECH-flagged triggers on a single `listener`. Used by
+/// `ask <mob> <topic>` / `tell` to address one NPC without inviting
+/// every adjacent mob to chime in, and per listener by
+/// [`fire_speech_in_room`]. `self` binds to the listener and `actor`
+/// to the speaker (legacy `speech_mtrigger`: `ADD_UID_VAR(.., actor)`);
+/// `speech` (lowercased) carries the spoken text.
 ///
-/// SPEECH bodies do their own keyword filtering — the dispatcher
-/// fires every SPEECH trigger and lets the body decide whether to
-/// react. ~6900 corpus refs across `SPEECH`/`SPEECH_TO` triggers.
-/// Fire SPEECH-flagged triggers on a single `listener` (vs the
-/// whole room). Used by `ask <mob> <topic>` to address one NPC
-/// without inviting every adjacent mob to chime in. `actor`
-/// binds to the speaker; `speech` (lowercased) carries the
-/// keyword.
+/// Legacy `speech_mtrigger` / `speech_to_mtrigger` test both
+/// `MTRIG_SPEECH` and `MTRIG_SPEECHTO` on the listener, so a SPEECH_TO
+/// script also answers plain `say`. The keyword filter lives in the
+/// converted body, so every matching trigger is fired and the body
+/// decides whether to react.
 pub fn fire_speech_at(world: &mut World, listener: Entity, speaker: Entity, text: &str) {
     if crate::deferred_triggers::lua_busy(world) {
         let text = text.to_string();
         crate::deferred_triggers::defer(world, move |w| {
             fire_speech_at(w, listener, speaker, &text);
         });
+        return;
+    }
+    if listener == speaker {
         return;
     }
     let to_fire: Vec<(i32, i32, String, String)> = {
@@ -226,7 +228,9 @@ pub fn fire_speech_at(world: &mut World, listener: Entity, speaker: Entity, text
         keys.into_iter()
             .filter_map(|(zone, id)| {
                 let def = catalog.by_key.get(&(zone, id))?;
-                if def.flags.contains(&TriggerEvent::Speech) {
+                if def.flags.contains(&TriggerEvent::Speech)
+                    || def.flags.contains(&TriggerEvent::SpeechTo)
+                {
                     Some((zone, id, def.name.clone(), def.commands.clone()))
                 } else {
                     None
@@ -265,6 +269,10 @@ pub fn fire_speech_at(world: &mut World, listener: Entity, speaker: Entity, text
     }
 }
 
+/// Fire SPEECH-flagged triggers for every entity in `room` (other
+/// than the speaker) that carries `AttachedTriggers`. Each listener
+/// runs as `self` with `actor` bound to the speaker, so the 681 corpus
+/// scripts that answer `actor` reply to whoever spoke.
 pub fn fire_speech_in_room(world: &mut World, speaker: Entity, room: Entity, text: &str) {
     if crate::deferred_triggers::lua_busy(world) {
         let text = text.to_string();
@@ -276,47 +284,8 @@ pub fn fire_speech_in_room(world: &mut World, speaker: Entity, room: Entity, tex
     let listeners: Vec<Entity> = crate::room_index::contents_of(world, room)
         .filter(|&e| e != speaker && world.get::<AttachedTriggers>(e).is_some())
         .collect();
-    if listeners.is_empty() {
-        return;
-    }
-    let lowered = text.to_ascii_lowercase();
     for listener in listeners {
-        let to_fire: Vec<(i32, i32, String, String)> = {
-            let Some(at) = world.get::<AttachedTriggers>(listener) else {
-                continue;
-            };
-            let keys = at.0.clone();
-            let catalog = world.resource::<TriggerCatalog>();
-            keys.into_iter()
-                .filter_map(|(zone, id)| {
-                    let def = catalog.by_key.get(&(zone, id))?;
-                    if def.flags.contains(&TriggerEvent::Speech) {
-                        Some((zone, id, def.name.clone(), def.commands.clone()))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        };
-        for (zone, id, name, body) in to_fire {
-            let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
-                gated(&mut host, TriggerEvent::Speech, |h| {
-                    h.exec_for_actor_with_extras(world, listener, &body, &[("speech", &lowered)])
-                })
-            });
-            drain_lua_outbox(world);
-            record_fire(
-                world,
-                listener,
-                zone,
-                id,
-                TriggerEvent::Speech,
-                result.is_ok(),
-            );
-            if let Err(e) = result {
-                record_failure(world, zone, id, &name, "SPEECH", &e);
-            }
-        }
+        fire_speech_at(world, listener, speaker, text);
     }
 }
 
@@ -1054,5 +1023,112 @@ mod sleep_gate_tests {
                 host.exec_for_actor(world, f.mob, BODY).unwrap();
             });
         assert!(ran(&mut f.world));
+    }
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+    use mud_db::enums::EntityType;
+    use mud_world::{
+        EntityVariableCache, Health, Located, Mob, Named, Posture, PostureKind, TriggerAttach,
+        TriggerDef, WorldKey,
+    };
+
+    /// Register trigger `(99, id)` with the given flags and body.
+    fn add_trigger(world: &mut World, id: i32, flags: Vec<TriggerEvent>, body: &str) {
+        let mut catalog = world
+            .remove_resource::<TriggerCatalog>()
+            .unwrap_or_default();
+        catalog.by_key.insert(
+            (99, id),
+            TriggerDef {
+                zone_id: 99,
+                id,
+                name: format!("t{id}"),
+                attach_type: TriggerAttach::Mob,
+                commands: body.to_string(),
+                flags,
+                arg_list: vec![],
+                num_args: 0,
+            },
+        );
+        world.insert_resource(catalog);
+    }
+
+    fn base_world() -> (World, Entity) {
+        let mut world = World::new();
+        world.insert_resource(TriggerCatalog::default());
+        world.insert_resource(mud_script::LuaHost::new());
+        let room = world.spawn_empty().id();
+        (world, room)
+    }
+
+    fn spawn_mob(world: &mut World, room: Entity, id: i32, triggers: Vec<(i32, i32)>) -> Entity {
+        world
+            .spawn((
+                Mob,
+                Named {
+                    name: format!("mob{id}"),
+                },
+                Health { hp: 10, max: 10 },
+                WorldKey { zone: 99, id },
+                Located(room),
+                Posture(PostureKind::Standing),
+                AttachedTriggers(triggers),
+            ))
+            .id()
+    }
+
+    fn spawn_player(world: &mut World, room: Entity, name: &str) -> Entity {
+        world
+            .spawn((
+                Named {
+                    name: name.to_string(),
+                },
+                Located(room),
+            ))
+            .id()
+    }
+
+    fn var(world: &World, mob_id: i32, key: &str) -> Option<serde_json::Value> {
+        world
+            .get_resource::<EntityVariableCache>()
+            .and_then(|c| c.get(EntityType::Mob, 99, mob_id, key).cloned())
+    }
+
+    #[test]
+    fn speech_binds_actor_to_the_speaker_not_the_listener() {
+        let (mut world, room) = base_world();
+        add_trigger(
+            &mut world,
+            1,
+            vec![TriggerEvent::Speech],
+            "self:setvar('who', actor.name)\nself:setvar('heard', speech)",
+        );
+        let mob = spawn_mob(&mut world, room, 1, vec![(99, 1)]);
+        let speaker = spawn_player(&mut world, room, "Alice");
+        fire_speech_in_room(&mut world, speaker, room, "Hello There");
+        assert_eq!(var(&world, 1, "who"), Some("Alice".into()));
+        assert_eq!(var(&world, 1, "heard"), Some("hello there".into()));
+        // `ask`/`tell` reach the same binding through `fire_speech_at`.
+        world.insert_resource(EntityVariableCache::default());
+        fire_speech_at(&mut world, mob, speaker, "topic");
+        assert_eq!(var(&world, 1, "who"), Some("Alice".into()));
+    }
+
+    #[test]
+    fn speech_to_scripts_answer_speech_too() {
+        let (mut world, room) = base_world();
+        add_trigger(
+            &mut world,
+            1,
+            vec![TriggerEvent::SpeechTo],
+            "self:setvar('who', actor.name)",
+        );
+        spawn_mob(&mut world, room, 1, vec![(99, 1)]);
+        let speaker = spawn_player(&mut world, room, "Bob");
+        fire_speech_in_room(&mut world, speaker, room, "hi");
+        assert_eq!(var(&world, 1, "who"), Some("Bob".into()));
     }
 }
