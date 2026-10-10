@@ -17,7 +17,7 @@ use mud_world::{
     innate_cooldown_key,
 };
 
-use crate::commands::{invoke_ability, send_to};
+use crate::commands::{invoke_ability_innate, send_to};
 
 /// The active (non-passive) abilities the caller's race grants, sorted by
 /// name. Empty without a race or without loaded race data.
@@ -95,6 +95,32 @@ fn cooldown_secs(world: &World, player: Entity, def: &AbilityDef) -> Option<u64>
     (hours > 0).then(|| hours * SECS_PER_MUD_HOUR)
 }
 
+/// Whether the racial cooldown governs this invocation of `def`: always for
+/// `innate <name>`, and for plain `cast` / `chant` / `perform` only when the
+/// caster's class does not grant the ability (a race-only grant). Legacy
+/// checks `CD_INNATE` only in `do_innate`, so a class spell slot is never
+/// locked out by a racial row for the same spell.
+pub(crate) fn cooldown_applies(
+    world: &World,
+    player: Entity,
+    def: &AbilityDef,
+    via_innate: bool,
+) -> bool {
+    if via_innate {
+        return true;
+    }
+    let Some(class_id) = world.get::<Profile>(player).and_then(|p| p.class_id) else {
+        return true;
+    };
+    let in_slots = world
+        .get_resource::<mud_world::SpellSlotData>()
+        .is_some_and(|d| d.ability_circle.contains_key(&(class_id, def.id)));
+    let in_skills = world
+        .get_resource::<mud_world::ClassSkillsData>()
+        .is_some_and(|d| d.min_level_for(class_id, def.id).is_some());
+    !(in_slots || in_skills)
+}
+
 /// The refusal while `def` is still on cooldown for the caller (legacy
 /// `do_innate`), or `None` when it is ready.
 pub(crate) fn cooldown_refusal(world: &World, player: Entity, def: &AbilityDef) -> Option<String> {
@@ -106,8 +132,8 @@ pub(crate) fn cooldown_refusal(world: &World, player: Entity, def: &AbilityDef) 
         .ready_at
         .get(&innate_cooldown_key(def.id))?;
     let left = ready_at.checked_duration_since(std::time::Instant::now())?;
-    // Round up: a cooldown still running never reads "0 seconds".
-    let secs = left.as_secs() + u64::from(left.subsec_nanos() > 0);
+    // Legacy truncates; a cooldown still running never reads "0 seconds".
+    let secs = left.as_secs().max(1);
     let unit = if secs == 1 { "second" } else { "seconds" };
     let phrase = world
         .get_resource::<RaceAbilitiesData>()
@@ -227,12 +253,13 @@ pub(crate) fn use_innate(world: &mut World, player: Entity, args: &str) {
     } else {
         format!("'{name}' {target}")
     };
-    invoke_ability(world, player, &line, def.kind, verb);
+    invoke_ability_innate(world, player, &line, def.kind, verb);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::invoke_ability;
     use crate::commands::test_support::{Rx, ability_def, drain, player_in};
     use mud_world::CoreStats;
     use mud_world::{Profile, Room};
@@ -417,7 +444,8 @@ mod tests {
         let mut cd = cd.take().unwrap_or_default();
         cd.ready_at.insert(
             innate_cooldown_key(ability),
-            std::time::Instant::now() + std::time::Duration::from_secs(secs),
+            // Half a second over, so the truncated readout is exactly `secs`.
+            std::time::Instant::now() + std::time::Duration::from_millis(secs * 1000 + 500),
         );
         world.entity_mut(e).insert(cd);
     }
@@ -573,5 +601,151 @@ mod tests {
         assert_eq!(skill_small_bonus(80), 3);
         assert_eq!(skill_small_bonus(100), 5);
         assert_eq!(skill_small_bonus(250), 5, "clamped");
+    }
+
+    const INVIS: i32 = 7;
+    const INVIS_EFFECT: i32 = 70;
+    const SORCERER: i32 = 11;
+    const WARRIOR: i32 = 12;
+
+    /// `Invisible` (a no-wind-up status self spell) that DUERGAR grants as
+    /// a racial with a 9 MUD hour cooldown, and that the sorcerer class
+    /// also has in its own spell slots.
+    fn invisible_fixture(world: &mut World) {
+        let mut def = ability_def(INVIS, "Invisible", AbilityKind::Spell);
+        def.cast_time_rounds = 0;
+        let mut catalog = world.resource_mut::<AbilityCatalog>();
+        catalog.by_name.insert("invisible".into(), def);
+        catalog.effects_for.insert(
+            INVIS,
+            vec![(
+                INVIS_EFFECT,
+                Some(serde_json::json!({"flag": "invisible", "duration": "60"})),
+            )],
+        );
+        world
+            .resource_mut::<mud_world::EffectCatalog>()
+            .by_id
+            .insert(
+                INVIS_EFFECT,
+                mud_world::EffectDef {
+                    id: INVIS_EFFECT,
+                    name: "status".into(),
+                    description: None,
+                    effect_type: "status".into(),
+                    tags: vec![],
+                    presence_override: None,
+                    default_params: serde_json::json!({}),
+                    prevents_speaking: false,
+                    prevents_casting: false,
+                    prevents_movement: false,
+                    on_apply: None,
+                    on_tick: None,
+                    on_remove: None,
+                },
+            );
+        let mut race = world.resource_mut::<RaceAbilitiesData>();
+        race.insert("DUERGAR", INVIS, 100);
+        race.set_cooldown(
+            "DUERGAR",
+            INVIS,
+            mud_world::InnateCooldown {
+                hours: 9,
+                stat: None,
+                phrase: Some("turn invisible".to_string()),
+            },
+        );
+        let mut slots = mud_world::SpellSlotData::default();
+        slots.ability_circle.insert((SORCERER, INVIS), 1);
+        slots.progression.insert((10, 1), 9);
+        world.insert_resource(slots);
+        world.insert_resource(mud_world::ClassSkillsData::default());
+    }
+
+    fn caster(world: &mut World, room: Entity, race: &str, class: i32) -> (Entity, Rx) {
+        let (e, rx) = player_in(world, room);
+        let mut p = profile(race);
+        p.class_id = Some(class);
+        world.entity_mut(e).insert((
+            p,
+            mud_world::Health { hp: 50, max: 50 },
+            mud_world::KnownAbilities {
+                entries: vec![(INVIS, 1000, true)],
+            },
+        ));
+        (e, rx)
+    }
+
+    fn has_cd(world: &World, e: Entity) -> bool {
+        world
+            .get::<Cooldowns>(e)
+            .is_some_and(|c| c.ready_at.contains_key(&innate_cooldown_key(INVIS)))
+    }
+
+    #[test]
+    fn a_class_granted_spell_never_touches_the_racial_cooldown() {
+        let (mut world, _elf, _human, _rx) = world_with_races();
+        invisible_fixture(&mut world);
+        let room = world.spawn(Room).id();
+        let (duergar, mut rx) = caster(&mut world, room, "DUERGAR", SORCERER);
+        for _ in 0..2 {
+            invoke_ability(&mut world, duergar, "invisible", AbilityKind::Spell, "cast");
+            let out = drain(&mut rx);
+            assert!(!out.contains("too tired"), "{out}");
+        }
+        assert!(
+            !has_cd(&world, duergar),
+            "class cast starts no racial cooldown"
+        );
+    }
+
+    #[test]
+    fn the_same_spell_through_innate_starts_the_cooldown() {
+        let (mut world, _elf, _human, _rx) = world_with_races();
+        invisible_fixture(&mut world);
+        let room = world.spawn(Room).id();
+        let (duergar, mut rx) = caster(&mut world, room, "DUERGAR", SORCERER);
+        use_innate(&mut world, duergar, "invisible");
+        let out = drain(&mut rx);
+        assert!(has_cd(&world, duergar), "{out}");
+        use_innate(&mut world, duergar, "invisible");
+        let out = drain(&mut rx);
+        assert!(out.contains("You can turn invisible again in"), "{out}");
+    }
+
+    #[test]
+    fn a_race_only_grant_is_gated_through_plain_cast_too() {
+        let (mut world, _elf, _human, _rx) = world_with_races();
+        invisible_fixture(&mut world);
+        let room = world.spawn(Room).id();
+        // A Duergar warrior: the class has no row for the spell.
+        let (warrior, mut rx) = caster(&mut world, room, "DUERGAR", WARRIOR);
+        invoke_ability(&mut world, warrior, "invisible", AbilityKind::Spell, "cast");
+        let out = drain(&mut rx);
+        assert!(has_cd(&world, warrior), "{out}");
+        invoke_ability(&mut world, warrior, "invisible", AbilityKind::Spell, "cast");
+        let out = drain(&mut rx);
+        assert!(out.contains("You can turn invisible again in"), "{out}");
+    }
+
+    #[test]
+    fn the_refusal_truncates_seconds_but_never_reads_zero() {
+        let (mut world, elf, _human, _rx) = world_with_races();
+        let def = world.resource::<AbilityCatalog>().by_name["inn_syll"].clone();
+        for (millis, shown) in [
+            (100_400, "100 seconds"),
+            (1_900, "1 second."),
+            (300, "1 second."),
+        ] {
+            world.entity_mut(elf).insert(Cooldowns {
+                ready_at: [(
+                    innate_cooldown_key(SYLL),
+                    std::time::Instant::now() + std::time::Duration::from_millis(millis),
+                )]
+                .into(),
+            });
+            let out = cooldown_refusal(&world, elf, &def).unwrap();
+            assert!(out.contains(shown), "{millis}ms: {out}");
+        }
     }
 }

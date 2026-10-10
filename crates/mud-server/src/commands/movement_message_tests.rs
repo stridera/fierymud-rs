@@ -194,6 +194,7 @@ fn a_casting_follower_stays_behind_when_the_leader_moves() {
         target: mud_world::CastTarget::Area,
         recognized_by: Vec::new(),
         slot_reservation: None,
+        via_innate: false,
     });
     cmd_move(&mut world, leader, Direction::North);
     let to = world.get::<mud_world::Located>(leader).unwrap().0;

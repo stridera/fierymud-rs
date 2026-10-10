@@ -347,6 +347,7 @@ async fn main() {
     // restore itself never queues deletes.
     corpses::load_from_db(&mut world, &pool).await;
     corpses::register_observers(&mut world);
+    flight::register_observers(&mut world);
     world.insert_resource(corpses::CorpseDb::spawn(pool.clone()));
     // Restore shop stock deltas from last shutdown so a server
     // restart doesn't silently refill every depleted shelf.

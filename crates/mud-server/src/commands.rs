@@ -14129,6 +14129,19 @@ pub(crate) fn invoke_ability(
     invoke_ability_with(world, player, args, kind, verb, false, false, false, None);
 }
 
+/// `innate <name>`: [`invoke_ability`] with the racial cooldown applied.
+pub(crate) fn invoke_ability_innate(
+    world: &mut World,
+    player: Entity,
+    args: &str,
+    kind: mud_db::abilities::AbilityKind,
+    verb: &str,
+) {
+    invoke_ability_core(
+        world, player, args, kind, verb, false, false, false, None, true,
+    );
+}
+
 /// Resolution entry called by `casting_tick` when a queued cast
 /// finishes its wind-up. Passes `skip_queue = true` so the queue
 /// branch doesn't re-fire.
@@ -14139,6 +14152,7 @@ pub(crate) fn resolve_queued_cast(
     kind: mud_db::abilities::AbilityKind,
     verb: &str,
     target: mud_world::CastTarget,
+    via_innate: bool,
 ) {
     use mud_world::CastTarget;
     // The target was locked when the wind-up started; `args` only
@@ -14153,7 +14167,9 @@ pub(crate) fn resolve_queued_cast(
         | CastTarget::Carried(e)
         | CastTarget::RoomObject(e) => Some(e),
     };
-    invoke_ability_with(world, player, args, kind, verb, false, false, true, forced);
+    invoke_ability_core(
+        world, player, args, kind, verb, false, false, true, forced, via_innate,
+    );
 }
 
 /// Entry point for item-driven casts (scroll/wand/staff). Bypasses
@@ -15283,6 +15299,41 @@ pub(crate) fn invoke_ability_with(
     skip_queue: bool,
     forced_target: Option<Entity>,
 ) {
+    invoke_ability_core(
+        world,
+        player,
+        args,
+        kind,
+        verb,
+        aoe_repeat,
+        from_item,
+        skip_queue,
+        forced_target,
+        false,
+    );
+}
+
+/// [`invoke_ability_with`] plus `via_innate`: set only by `innate <name>`
+/// (and carried through its wind-up in [`mud_world::Casting`]). The racial
+/// cooldown applies to a cast that comes through `innate`, or to one whose
+/// ability the caster's class does not grant (so a race-only grant cannot be
+/// spammed through `cast`). A class-granted spell cast normally never
+/// touches it.
+#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::fn_params_excessive_bools)]
+pub(crate) fn invoke_ability_core(
+    world: &mut World,
+    player: Entity,
+    args: &str,
+    kind: mud_db::abilities::AbilityKind,
+    verb: &str,
+    aoe_repeat: bool,
+    from_item: bool,
+    skip_queue: bool,
+    forced_target: Option<Entity>,
+    via_innate: bool,
+) {
     // Quoted phrases (`cast 'magic missile' goblin`) collapse to a
     // single token; otherwise behaves like the legacy whitespace
     // split. After the parse, normalize spaces inside the needle to
@@ -15613,6 +15664,7 @@ pub(crate) fn invoke_ability_with(
     // invokes it, `innate` and plain `cast` / `chant` / `perform` alike.
     if !aoe_repeat
         && !from_item
+        && innate::cooldown_applies(world, player, &def, via_innate)
         && let Some(refusal) = innate::cooldown_refusal(world, player, &def)
     {
         send_to(world, player, refusal);
@@ -15729,6 +15781,7 @@ pub(crate) fn invoke_ability_with(
             target: cast_target,
             recognized_by,
             slot_reservation: slot_hold,
+            via_innate,
         });
         // The reservation now lives in `Casting`; `casting_tick` /
         // `abort_casting` settle it.
@@ -19553,7 +19606,11 @@ pub(crate) fn invoke_ability_with(
     }
     // A race-granted active that landed starts its per-character racial
     // cooldown, kept apart from the ability's own `cooldown_ms` one.
-    if !aoe_repeat && !from_item && !applied_msgs.is_empty() {
+    if !aoe_repeat
+        && !from_item
+        && !applied_msgs.is_empty()
+        && innate::cooldown_applies(world, player, &def, via_innate)
+    {
         innate::start_cooldown(world, player, &def);
     }
     // USE_SKILL quest objective: ability resolved successfully.

@@ -5902,6 +5902,7 @@ mod tests {
             target: mud_world::CastTarget::Area,
             recognized_by: Vec::new(),
             slot_reservation: None,
+            via_innate: false,
         }
     }
 

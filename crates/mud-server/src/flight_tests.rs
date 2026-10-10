@@ -61,6 +61,7 @@ fn connect(world: &mut World, from: Entity, dir: Direction, to: Entity) {
 fn fx() -> Fx {
     let mut world = World::new();
     world.insert_resource(TickCount(0));
+    super::register_observers(&mut world);
     world.insert_resource(ObjectPrototypes::default());
     world.insert_resource(mud_world::WeatherCatalog::default());
     crate::commands::test_support::install_core_abilities(&mut world);
@@ -662,4 +663,41 @@ fn item_gravity_scan_prod_scale_is_fast() {
     if !cfg!(debug_assertions) {
         assert!(elapsed.as_millis() < 5, "scan took {elapsed:?}");
     }
+}
+
+#[test]
+fn a_settled_item_that_is_picked_up_and_dropped_again_falls_afresh() {
+    // sky1 -> b -> c -> b -> ...: the stone hangs in the cycle, settled.
+    let mut f = fx();
+    f.world.entity_mut(f.p).insert(Located(f.ground));
+    let b = room(&mut f.world, "Loop B", Sector::Air);
+    let c = room(&mut f.world, "Loop C", Sector::Air);
+    f.world.get_mut::<Exits>(f.sky1).unwrap().0.clear();
+    connect(&mut f.world, f.sky1, Direction::Down, b);
+    connect(&mut f.world, b, Direction::Down, c);
+    connect(&mut f.world, c, Direction::Down, b);
+    let stone = loose_item(&mut f.world, "a stone", f.sky1);
+    tick_until_still(&mut f.world);
+    let hung = f.world.get::<Located>(stone).unwrap().0;
+    assert!(
+        f.world.get::<super::ItemFallSettled>(stone).is_some(),
+        "hangs settled"
+    );
+    // Re-placing it where it already hangs keeps the hold.
+    f.world.entity_mut(stone).insert(Located(hung));
+    assert!(f.world.get::<super::ItemFallSettled>(stone).is_some());
+    // Picked up: the marker goes with the pickup.
+    f.world.entity_mut(stone).insert(Located(f.p));
+    assert!(
+        f.world.get::<super::ItemFallSettled>(stone).is_none(),
+        "pickup clears the settled marker"
+    );
+    // Dropped back into the same room, it falls again.
+    f.world.entity_mut(stone).insert(Located(hung));
+    f.world.resource_mut::<TickCount>().0 = 1000;
+    gravity_tick(&mut f.world);
+    assert!(
+        f.world.get::<super::ItemFalling>(stone).is_some(),
+        "a fresh drop falls"
+    );
 }

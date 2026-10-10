@@ -352,6 +352,24 @@ pub(crate) struct ItemFalling {
 #[derive(Component, Debug, Clone, Copy)]
 pub(crate) struct ItemFallSettled(Entity);
 
+/// Drop an item's [`ItemFallSettled`] hold as soon as it is placed anywhere
+/// but the room it hangs in (picked up, given, put in a container, moved):
+/// otherwise a later drop back into that room would still read as settled
+/// and the item would hang there. Boot registers it once.
+pub(crate) fn register_observers(world: &mut World) {
+    world.add_observer(
+        |on: On<Insert, Located>,
+         held: Query<(&Located, &ItemFallSettled)>,
+         mut commands: Commands| {
+            if let Ok((located, settled)) = held.get(on.entity)
+                && located.0 != settled.0
+            {
+                commands.entity(on.entity).remove::<ItemFallSettled>();
+            }
+        },
+    );
+}
+
 /// How often the world is scanned for items lying in air rooms. Legacy hooked
 /// `obj_to_room`; here the scan only touches items when an air room exists,
 /// and a drop waits at most this many ticks before it plummets.

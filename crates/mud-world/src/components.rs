@@ -1029,6 +1029,9 @@ pub struct Casting {
     /// completion; committed into the slot's cooldown when the spell
     /// lands. Like legacy, only a completed spell burns its slot.
     pub slot_reservation: Option<u64>,
+    /// Started by `innate <name>`: the racial cooldown applies when the
+    /// cast lands (see `invoke_ability_core`).
+    pub via_innate: bool,
 }
 
 /// What a wind-up is locked onto, and where the target has to still be

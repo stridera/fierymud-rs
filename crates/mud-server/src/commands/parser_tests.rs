@@ -159,6 +159,7 @@ fn quit_is_refused_while_casting() {
         target: mud_world::CastTarget::Caster,
         recognized_by: Vec::new(),
         slot_reservation: None,
+        via_innate: false,
     });
     dispatch(&mut world, p, "quit");
     assert!(drain(&mut rx).contains("You are busy spellcasting"));

@@ -3165,6 +3165,7 @@ mod tests {
             target: mud_world::CastTarget::Caster,
             recognized_by: Vec::new(),
             slot_reservation: None,
+            via_innate: false,
         });
         run_combat_tick(&mut world);
         assert_eq!(world.get::<Health>(target).unwrap().hp, 100);

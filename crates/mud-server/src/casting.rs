@@ -699,6 +699,7 @@ pub(crate) fn casting_tick(world: &mut World) {
             mud_db::abilities::AbilityKind::from_label(&snap.kind_label.to_ascii_uppercase()),
             &snap.verb,
             snap.target,
+            snap.via_innate,
         );
         // Refused at completion before the resolution reached the
         // slot (silenced, posture, cooldown, ...): nothing was cast,
