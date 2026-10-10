@@ -437,3 +437,53 @@ fn destroy_refuses_players_and_cleans_up_mobs_and_items() {
         "container contents go too"
     );
 }
+
+// ----- command-trigger recursion -----
+
+/// Room trigger 51/19 shape: on `look lantern` the room re-issues the same
+/// command through `actor:command`. Each re-issue fires the trigger again;
+/// legacy `MAX_SCRIPT_DEPTH` ends the chain, here the script-dispatch depth
+/// cap. It used to recurse until the stack overflowed.
+#[test]
+fn room_command_trigger_that_reissues_its_command_terminates() {
+    let mut fx: Fx = fixture();
+    install_executors(&mut fx.world);
+    fx.world.insert_resource(super::lua_script_hooks());
+    let a = fx.a;
+    let mut def = trigger(
+        ROOM_KEY.0,
+        19,
+        TriggerEvent::Command,
+        "if cmd ~= 'look' then return true end\n\
+         self:setvar('runs', (self:getvar('runs') or 0) + 1)\n\
+         actor:command('look lantern')\n\
+         return false",
+    );
+    def.attach_type = TriggerAttach::World;
+    let mut catalog = TriggerCatalog::default();
+    catalog.by_key.insert((ROOM_KEY.0, 19), def);
+    fx.world.insert_resource(catalog);
+    fx.world
+        .entity_mut(a)
+        .insert(AttachedTriggers(vec![(ROOM_KEY.0, 19)]));
+    let (bob, _rx) = player(&mut fx.world, a, "Bob");
+
+    super::dispatch(&mut fx.world, bob, "look lantern");
+
+    let runs = fx
+        .world
+        .get_resource::<EntityVariableCache>()
+        .and_then(|c| {
+            c.get(EntityType::Room, ROOM_KEY.0, ROOM_KEY.1, "runs")
+                .cloned()
+        })
+        .and_then(|v| v.as_i64())
+        .expect("trigger ran");
+    // The typed line plus at most MAX_SCRIPT_DEPTH script re-issues.
+    assert!(
+        (2..=11).contains(&runs),
+        "recursion must stop at the depth cap, ran {runs} times"
+    );
+    // The depth counter unwinds, so the next typed line starts fresh.
+    super::dispatch(&mut fx.world, bob, "look lantern");
+}

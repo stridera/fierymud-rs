@@ -1712,6 +1712,9 @@ thread_local! {
     static CAST_LANDED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static COMMAND_ORIGIN: std::cell::Cell<CommandOrigin> =
         const { std::cell::Cell::new(CommandOrigin::Direct) };
+    /// How many script-queued dispatches are currently on the stack
+    /// ([`flush_lua_outbox`]).
+    static SCRIPT_COMMAND_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     /// Whether the line most recently dispatched ended in whitespace, i.e.
     /// a client sent `verb ` with an argument slot that is present but empty.
     static LINE_HAS_TRAILING_SPACE: std::cell::Cell<bool> =
@@ -2539,8 +2542,41 @@ fn flush_lua_outbox(world: &mut World) {
     // these commands fire pushes onto the outbox again, which is
     // drained by THAT command handler before this loop continues.
     // Script-sourced: staff commands are refused (see `command_permitted`).
+    //
+    // Legacy `script_driver` refuses to start a script past
+    // `MAX_SCRIPT_DEPTH` (10) nested runs, which is what ends a command
+    // trigger that re-issues its own command. Here the nesting is
+    // dispatch -> trigger -> outbox -> dispatch, so the depth is counted
+    // around the queued dispatch; past the cap the lines are dropped.
+    let mut dropped = 0usize;
     for (actor, line) in commands {
+        let depth = SCRIPT_COMMAND_DEPTH.with(std::cell::Cell::get);
+        if depth >= MAX_SCRIPT_DEPTH {
+            dropped += 1;
+            continue;
+        }
+        SCRIPT_COMMAND_DEPTH.with(|d| d.set(depth + 1));
+        let _unwind = ScriptDepthRestore(depth);
         with_command_origin(CommandOrigin::Script, || dispatch(world, actor, &line));
+    }
+    if dropped > 0 {
+        warn!(
+            dropped,
+            max_depth = MAX_SCRIPT_DEPTH,
+            "script-queued commands dropped: triggers recursed beyond the maximum depth"
+        );
+    }
+}
+
+/// Most nested script-queued command dispatches (legacy `MAX_SCRIPT_DEPTH`).
+const MAX_SCRIPT_DEPTH: u32 = 10;
+
+/// Restores [`SCRIPT_COMMAND_DEPTH`] when a queued dispatch ends (or unwinds).
+struct ScriptDepthRestore(u32);
+
+impl Drop for ScriptDepthRestore {
+    fn drop(&mut self) {
+        SCRIPT_COMMAND_DEPTH.with(|d| d.set(self.0));
     }
 }
 
