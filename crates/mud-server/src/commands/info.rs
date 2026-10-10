@@ -8024,6 +8024,14 @@ pub(crate) fn cmd_wake(world: &mut World, player: Entity, args: &str) {
         );
         return;
     }
+    if crate::effects::has_sleep_effect(world, target) {
+        send_rendered(
+            world,
+            player,
+            &format!("You can't wake {target_name} up!\r\n"),
+        );
+        return;
+    }
     try_insert(world, target, Posture(PostureKind::Standing));
     let player_name = name_of(world, player);
     send_rendered(world, player, &format!("You wake {target_name}.\r\n"));

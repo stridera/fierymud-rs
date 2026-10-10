@@ -99,6 +99,59 @@ pub(crate) fn is_hold_name(name: &str) -> bool {
     name.eq_ignore_ascii_case("paralyzed") || name.eq_ignore_ascii_case("mesmerized")
 }
 
+/// Does an effect of this name keep its bearer asleep (legacy `EFF_SLEEP`,
+/// the Sleep spell)?
+pub(crate) fn is_sleep_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("sleeping")
+        || name.eq_ignore_ascii_case("sleep")
+        || name.eq_ignore_ascii_case("asleep")
+}
+
+/// True while any sleep effect is active on `target`.
+pub(crate) fn has_sleep_effect(world: &mut World, target: Entity) -> bool {
+    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+    q.iter(world)
+        .any(|(eff, applied)| applied.0 == target && is_sleep_name(&eff.name))
+}
+
+/// The Sleep spell lands: `target` drops into the sleeping posture, so it
+/// renders as asleep, stops wandering and acting, and a caster mid-chant
+/// loses the cast (`casting_tick`). Legacy sets `STANCE_SLEEPING`.
+pub(crate) fn fall_asleep(world: &mut World, target: Entity) {
+    try_remove::<mud_world::Meditating>(world, target);
+    try_insert(
+        world,
+        target,
+        mud_world::Posture(mud_world::PostureKind::Sleeping),
+    );
+}
+
+/// The last sleep effect on `target` ended (expiry, a hit, dispel): it
+/// wakes. A player stands; a mob returns to its prototype's default
+/// posture. A mob the day/night cycle tucked in stays asleep until
+/// morning. The wear-off or jolt text is the caller's.
+fn wake_after_sleep(world: &mut World, target: Entity) {
+    if has_sleep_effect(world, target)
+        || world.get::<crate::sleep::SleptByNight>(target).is_some()
+        || world.get::<mud_world::Posture>(target).map(|p| p.0)
+            != Some(mud_world::PostureKind::Sleeping)
+    {
+        return;
+    }
+    let posture = world
+        .get::<mud_world::WorldKey>(target)
+        .filter(|_| world.get::<mud_world::Mob>(target).is_some())
+        .and_then(|k| {
+            world
+                .get_resource::<mud_world::MobPrototypes>()
+                .and_then(|p| p.by_key.get(&(k.zone, k.id)))
+        })
+        .map_or(mud_world::PostureKind::Standing, |p| {
+            mud_world::Posture::from_default_position(p.default_position)
+        });
+    try_insert(world, target, mud_world::Posture(posture));
+}
+
 /// Make `target`'s [`Stunned`] marker match its effects: present exactly
 /// while at least one stun or paralysis instance is active, whatever
 /// overlapped with what. Legacy paralysis stops the victim fighting and
@@ -421,6 +474,9 @@ fn teardown_effect_instance(world: &mut World, target: Entity, eff_entity: Entit
     // instances (see `sync_stunned`).
     if is_stun_name(&name) {
         sync_stunned(world, target);
+    }
+    if is_sleep_name(&name) {
+        wake_after_sleep(world, target);
     }
     teardown_markers_after_removal(world, target, &name);
     if was_invisibility_source && !name.eq_ignore_ascii_case("invisible") {

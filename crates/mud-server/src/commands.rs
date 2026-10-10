@@ -11324,6 +11324,15 @@ pub(crate) fn set_posture(world: &mut World, player: Entity, new: PostureKind) {
         );
         return;
     }
+    // Magical sleep (the Sleep spell) cannot be shaken off by standing up
+    // (legacy `do_wake`: "You can't wake up!").
+    if current == Some(PostureKind::Sleeping)
+        && new != PostureKind::Sleeping
+        && crate::effects::has_sleep_effect(world, player)
+    {
+        send_to(world, player, "You can't wake up!\r\n");
+        return;
+    }
     // Posture leaves the meditating band: clear `Meditating` and
     // tell the player they've broken focus. Allowed band is
     // resting / sitting / kneeling — same as cmd_meditate's gate.
@@ -18746,6 +18755,12 @@ pub(crate) fn invoke_ability_with(
                 // every fight against it (legacy `mag_affect`).
                 if crate::effects::is_hold_name(&flag) {
                     stop_all_combat_with(world, target_entity);
+                }
+                // The Sleep spell puts its target to sleep (legacy sets
+                // `STANCE_SLEEPING`): the posture is what the room line,
+                // `combat_tick`, the wander and aggro gates read.
+                if crate::effects::is_sleep_name(&flag) {
+                    crate::effects::fall_asleep(world, target_entity);
                 }
                 // Fear: the victim panics and flees at once (legacy
                 // `inflict_fear` flee branch, `chant_ivory_symphony`).

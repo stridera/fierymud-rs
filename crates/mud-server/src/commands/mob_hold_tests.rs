@@ -317,3 +317,93 @@ fn a_paralysed_aggro_mob_does_not_engage_the_caster() {
     let hp = fx.world.get::<Health>(caster).unwrap().hp;
     assert_eq!(hp, 100, "the caster took no damage");
 }
+
+// -- the Sleep spell (#110) ----------------------------------------------------
+
+fn sleep_fight() -> (super::gmcp_tests::Fx, Entity, Rx, Entity) {
+    let (mut fx, caster, rx) = caster_with_spells(vec![(1, "Sleep", status_row("sleeping"))]);
+    let a = fx.a;
+    let ogre = fx
+        .world
+        .spawn((
+            Mob,
+            Named {
+                name: "an ogre".into(),
+            },
+            Located(a),
+            CombatStats {
+                alignment: -1000,
+                ..CombatStats::default()
+            },
+            Health { hp: 500, max: 500 },
+            Posture(PostureKind::Standing),
+        ))
+        .id();
+    (fx, caster, rx, ogre)
+}
+
+fn posture_of(world: &World, e: Entity) -> Option<PostureKind> {
+    world.get::<Posture>(e).map(|p| p.0)
+}
+
+#[test]
+fn the_sleep_spell_puts_a_mob_to_sleep_so_it_neither_aggros_nor_wakes_by_itself() {
+    let (mut fx, caster, mut rx, ogre) = sleep_fight();
+    make_aggro_target(&mut fx.world, caster);
+    cast(&mut fx, caster, "cast 'sleep' ogre");
+    let _ = drain(&mut rx);
+    assert_eq!(posture_of(&fx.world, ogre), Some(PostureKind::Sleeping));
+    // An aggro mob that is asleep opens no fight.
+    crate::commands::aggro_pulse(&mut fx.world);
+    assert!(fx.world.get::<Fighting>(ogre).is_none());
+    assert!(fx.world.get::<Fighting>(caster).is_none());
+}
+
+#[test]
+fn a_hit_or_the_spell_running_out_wakes_the_sleeper() {
+    // Expiry.
+    let (mut fx, caster, _rx, ogre) = sleep_fight();
+    cast(&mut fx, caster, "cast 'sleep' ogre");
+    assert_eq!(posture_of(&fx.world, ogre), Some(PostureKind::Sleeping));
+    {
+        let mut q = fx
+            .world
+            .query::<(&mut mud_world::EffectInstance, &mud_world::AppliedTo)>();
+        for (mut inst, applied) in q.iter_mut(&mut fx.world) {
+            if applied.0 == ogre {
+                inst.remaining_secs = 1;
+            }
+        }
+    }
+    fx.world.insert_resource(crate::TickCount(0));
+    crate::effects::effects_tick(&mut fx.world);
+    assert_eq!(posture_of(&fx.world, ogre), Some(PostureKind::Standing));
+
+    // A blow (the spell breaks on damage).
+    let (mut fx, caster, _rx, ogre) = sleep_fight();
+    cast(&mut fx, caster, "cast 'sleep' ogre");
+    assert_eq!(posture_of(&fx.world, ogre), Some(PostureKind::Sleeping));
+    crate::commands::apply_attacker_damage(&mut fx.world, ogre, 5, caster);
+    assert_eq!(posture_of(&fx.world, ogre), Some(PostureKind::Standing));
+    assert!(!crate::effects::has_sleep_effect(&mut fx.world, ogre));
+}
+
+#[test]
+fn magical_sleep_cannot_be_woken_or_stood_up_from() {
+    let (mut fx, caster, mut rx, _ogre) = sleep_fight();
+    let a = fx.a;
+    let (victim, mut vrx) = super::gmcp_tests::player(&mut fx.world, a, "Sleeper");
+    fx.world
+        .entity_mut(victim)
+        .insert((Health { hp: 50, max: 50 }, CombatStats::default()));
+    cast(&mut fx, caster, "cast 'sleep' sleeper");
+    assert_eq!(posture_of(&fx.world, victim), Some(PostureKind::Sleeping));
+    let _ = (drain(&mut rx), drain(&mut vrx));
+    super::dispatch(&mut fx.world, caster, "wake sleeper");
+    assert!(drain(&mut rx).contains("You can't wake Sleeper up!"));
+    super::dispatch(&mut fx.world, victim, "wake");
+    assert!(drain(&mut vrx).contains("You can't wake up!"));
+    super::dispatch(&mut fx.world, victim, "stand");
+    assert!(drain(&mut vrx).contains("You can't wake up!"));
+    assert_eq!(posture_of(&fx.world, victim), Some(PostureKind::Sleeping));
+}
