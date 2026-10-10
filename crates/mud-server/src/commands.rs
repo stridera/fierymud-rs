@@ -802,6 +802,9 @@ mod aggro_pulse_tests;
 #[path = "commands/cmd_parity_tests.rs"]
 mod cmd_parity_tests;
 #[cfg(test)]
+#[path = "commands/mob_ai_spawn_tests.rs"]
+mod mob_ai_spawn_tests;
+#[cfg(test)]
 #[path = "commands/mob_hold_tests.rs"]
 mod mob_hold_tests;
 #[cfg(test)]

@@ -5,9 +5,9 @@ use mud_db::{
     abilities, ability_components, ability_damage_components, ability_effects, ability_messages,
     ability_restrictions, ability_saving_throw, ability_targeting, achievements, boards, classes,
     content_tables, discord_config, effects, game_config, help, levels, liquids, login_message,
-    mob_reset_equipment, mob_resets, mobs, object_abilities, object_reset_contents, object_resets,
-    objects, races, room_exits, rooms, shops, socials, spell_slots, sqlx::PgPool, system_text,
-    triggers, zones,
+    mob_ai, mob_reset_equipment, mob_resets, mobs, object_abilities, object_reset_contents,
+    object_resets, objects, races, room_exits, rooms, shops, socials, spell_slots, sqlx::PgPool,
+    system_text, triggers, zones,
 };
 use tracing::{error, info, warn};
 
@@ -95,13 +95,24 @@ fn rows_or_empty<T>(
     missing: &str,
     consequence: &str,
 ) -> sqlx::Result<Vec<T>> {
+    rows_or_empty_with_fix(
+        res,
+        missing,
+        "apply fierylib/data/sql/2026-10-09-content-tables.sql (and deploy the muditor schema)",
+        consequence,
+    )
+}
+
+/// [`rows_or_empty`] with the remedy (`fix`) spelled out by the caller.
+fn rows_or_empty_with_fix<T>(
+    res: sqlx::Result<Vec<T>>,
+    missing: &str,
+    fix: &str,
+    consequence: &str,
+) -> sqlx::Result<Vec<T>> {
     match res {
         Err(e) if is_missing_schema(&e) => {
-            let e = schema_gap(
-                e,
-                missing,
-                "apply fierylib/data/sql/2026-10-09-content-tables.sql (and deploy the muditor schema)",
-            );
+            let e = schema_gap(e, missing, fix);
             error!("{e}; booting with no rows ({consequence})");
             Ok(Vec::new())
         }
@@ -181,6 +192,101 @@ pub async fn load_content_tables(world: &mut World, pool: &PgPool) -> sqlx::Resu
         "PromptLetters loaded"
     );
     world.insert_resource(prompt_letters);
+    load_mob_ai_data(world, pool).await?;
+    Ok(())
+}
+
+/// Load the mob spell / skill AI rule tables (`ClassAiRules`, `MobAbilities`
+/// rule columns, `Mobs.ai_mode`) into a [`MobAiData`] resource. The objects
+/// come from `fierylib/data/sql/2026-10-10-mob-ai-schema.sql`, which prod
+/// applies by hand, so a missing table / column logs an ERROR and leaves the
+/// affected part empty instead of failing the boot. The resource is inserted
+/// either way. Nothing consumes it while `mob_ai.enabled` is off.
+///
+/// # Errors
+/// Any database error other than a missing table / column.
+pub async fn load_mob_ai_data(world: &mut World, pool: &PgPool) -> sqlx::Result<()> {
+    use crate::mob_ai_rules::{AiRule, MobAiData, RawRule, RuleDiagnostics, build_rule};
+
+    const FIX: &str =
+        "apply fierylib/data/sql/2026-10-10-mob-ai-schema.sql (and deploy the muditor schema)";
+    let class_rows = rows_or_empty_with_fix(
+        mob_ai::list_class_rules(pool).await,
+        "table \"ClassAiRules\"",
+        FIX,
+        "class mobs have no spell / skill AI rules",
+    )?;
+    let mob_rows = rows_or_empty_with_fix(
+        mob_ai::list_mob_rules(pool).await,
+        "\"MobAbilities\" rule columns",
+        FIX,
+        "CUSTOM mobs have no spell / skill AI rules",
+    )?;
+    let mode_rows = rows_or_empty_with_fix(
+        mob_ai::list_non_class_modes(pool).await,
+        "column \"Mobs\".\"ai_mode\"",
+        FIX,
+        "every mob uses its class rules",
+    )?;
+
+    let mut diag = RuleDiagnostics::default();
+    let mut by_class: HashMap<i32, Vec<AiRule>> = HashMap::new();
+    for r in &class_rows {
+        let raw = RawRule {
+            ability_id: r.ability_id,
+            ability_type: &r.ability_type,
+            priority: r.priority,
+            chance_pct: r.chance_pct,
+            cooldown_s: r.cooldown_s,
+            conditions: r.conditions.as_ref(),
+            target: Some(&r.target),
+            min_level: r.min_level,
+        };
+        if let Some(rule) = build_rule(&raw, &mut diag) {
+            by_class.entry(r.class_id).or_default().push(rule);
+        }
+    }
+    let mut by_mob: HashMap<(i32, i32), Vec<AiRule>> = HashMap::new();
+    for r in &mob_rows {
+        let raw = RawRule {
+            ability_id: r.ability_id,
+            ability_type: &r.ability_type,
+            priority: r.priority,
+            chance_pct: r.chance_pct,
+            cooldown_s: r.cooldown_s,
+            conditions: r.conditions.as_ref(),
+            target: r.target.as_deref(),
+            min_level: None,
+        };
+        if let Some(rule) = build_rule(&raw, &mut diag) {
+            by_mob
+                .entry((r.mob_zone_id, r.mob_id))
+                .or_default()
+                .push(rule);
+        }
+    }
+    for key in &diag.unknown_keys {
+        warn!(key = %key, "mob AI rule: unknown `conditions` key ignored");
+    }
+    for why in &diag.dropped {
+        warn!("mob AI rule dropped: {why}");
+    }
+
+    let data = MobAiData {
+        by_class: by_class.into_iter().map(|(k, v)| (k, v.into())).collect(),
+        by_mob: by_mob.into_iter().map(|(k, v)| (k, v.into())).collect(),
+        modes: mode_rows
+            .into_iter()
+            .map(|r| ((r.zone_id, r.id), r.ai_mode))
+            .collect(),
+    };
+    info!(
+        classes = data.by_class.len(),
+        custom_mobs = data.by_mob.len(),
+        non_class_modes = data.modes.len(),
+        "MobAiData loaded"
+    );
+    world.insert_resource(data);
     Ok(())
 }
 

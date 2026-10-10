@@ -16,9 +16,10 @@ use bevy_ecs::prelude::*;
 use crate::components::{
     AttachedTriggers, Description, ExamineText, FromMobReset, Health, Keywords, LifeForceTag,
     Located, Mob, MobBehaviors, MobTraits, Mountable, MovementModeTag, MovementPoints, Named,
-    NaturalAttackType, NaturalDamage, Posture, Shopkeeper, Sized, WorldKey,
+    NaturalAttackType, NaturalDamage, Posture, Shopkeeper, Sized, SpellSlots, WorldKey,
 };
-use crate::resources::{MobProto, ShopCatalog, TriggerCatalog};
+use crate::mob_ai_rules::{MobAi, MobAiData};
+use crate::resources::{MobProto, RuntimeConfig, ShopCatalog, SpellSlotData, TriggerCatalog};
 
 /// Spawn a fresh mob from `proto` into `room` and apply its
 /// `MobDefaultEffects`. `reset_id` tags the instance with the
@@ -115,5 +116,52 @@ pub fn spawn_mob_from_proto(
     crate::mob_effects::apply_race_effects(world, mob, &proto.race);
     // Spawned into an air room without wings (or a fly effect): it drops.
     crate::movement::begin_fall_if_unsupported(world, mob);
+    attach_mob_ai(world, mob, proto);
     mob
+}
+
+/// Whether the mob spellcasting / skill AI is switched on
+/// (`GameConfig mob_ai.enabled`, default off).
+#[must_use]
+pub fn mob_ai_enabled(world: &World) -> bool {
+    world
+        .get_resource::<RuntimeConfig>()
+        .is_some_and(|c| c.get_bool("mob_ai", "enabled", false))
+}
+
+/// Mob AI part of spawning, a no-op while `mob_ai.enabled` is off (so a
+/// disabled build spawns byte-identical mobs). When on: a mob whose AI is
+/// active (see [`MobAiData::ai_active`]) gets
+///   * [`MobAi`] with its shared rule list (class rules for `CLASS`, its own
+///     `MobAbilities` rows for `CUSTOM`), when it has any, and
+///   * [`SpellSlots`] when its class has spell circles open at its level, the
+///     same `SpellSlotData::slots_for` the player `slots` command uses, so a
+///     mob's slot budget per circle is the player progression for its level.
+///
+/// `ai_mode = NONE`, and `NoClassAi` on a `CLASS` mob, get neither.
+fn attach_mob_ai(world: &mut World, mob: Entity, proto: &MobProto) {
+    if !mob_ai_enabled(world) {
+        return;
+    }
+    let Some(data) = world.get_resource::<MobAiData>() else {
+        return;
+    };
+    if !data.ai_active(proto) {
+        return;
+    }
+    let rules = data.rules_for(proto);
+    let caster = proto.class_id.is_some_and(|class_id| {
+        world.get_resource::<SpellSlotData>().is_some_and(|d| {
+            d.slots_for(class_id, proto.level)
+                .iter()
+                .any(|(_, slots)| *slots > 0)
+        })
+    });
+    let mut em = world.entity_mut(mob);
+    if let Some(rules) = rules {
+        em.insert(MobAi::new(rules));
+    }
+    if caster {
+        em.insert(SpellSlots::default());
+    }
 }

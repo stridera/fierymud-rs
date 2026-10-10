@@ -348,6 +348,18 @@ impl AchievementCategory {
     }
 }
 
+/// Where a mob's spell / skill AI rules come from (`Mobs.ai_mode`).
+/// `CLASS` = the `ClassAiRules` of its class (the default), `CUSTOM` = its own
+/// `MobAbilities` rows, `NONE` = no spell / skill AI at all.
+#[derive(sqlx::Type, Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[sqlx(type_name = r#""MobAiMode""#, rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum MobAiMode {
+    #[default]
+    Class,
+    Custom,
+    None,
+}
+
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[sqlx(type_name = r#""MobRole""#, rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum MobRole {

@@ -1408,6 +1408,77 @@ pub(crate) fn cmd_mstat(world: &mut World, player: Entity, args: &str) {
     send_to(world, player, out);
 }
 
+/// The "Class AI:" lines of a mob inspect: the rule list the mob runs, or
+/// the reason it has none. Mirrors what spawn attaches
+/// (`mud_world::mob_spawn`), including the master switch.
+fn describe_mob_ai(world: &World, p: &mud_world::MobProto) -> String {
+    use mud_db::enums::MobAiMode;
+
+    if !mud_world::mob_ai_enabled(world) {
+        return String::from("Class AI:      none (mob AI disabled)\r\n");
+    }
+    let Some(data) = world.get_resource::<mud_world::MobAiData>() else {
+        return String::from("Class AI:      none (no mob AI data loaded)\r\n");
+    };
+    let class_name = p.class_id.and_then(|cid| {
+        world
+            .get_resource::<mud_world::ClassCatalog>()
+            .and_then(|c| c.by_id.get(&cid).map(|d| d.plain_name.clone()))
+    });
+    let mode = data.mode((p.zone_id, p.id));
+    let Some(rules) = data.rules_for(p) else {
+        let why = match mode {
+            MobAiMode::None => String::from("AI mode is NONE"),
+            MobAiMode::Custom => String::from("AI mode is CUSTOM but the mob has no rules"),
+            MobAiMode::Class if !data.ai_active(p) => {
+                String::from("No-ClassAI flag is on, manual / scripted only")
+            }
+            MobAiMode::Class => match class_name {
+                Some(cls) => format!("no AI rules for class {cls}"),
+                None => String::from("no class"),
+            },
+        };
+        return format!("Class AI:      none ({why})\r\n");
+    };
+    let source = match (mode, class_name) {
+        (MobAiMode::Custom, _) => String::from("CUSTOM, this mob's own rules"),
+        (_, Some(cls)) => format!("CLASS, {cls}"),
+        (_, None) => String::from("CLASS"),
+    };
+    let ability_name = |id: i32| {
+        world
+            .get_resource::<mud_world::AbilityCatalog>()
+            .and_then(|c| c.by_name.values().find(|d| d.id == id))
+            .map_or_else(|| format!("ability {id}"), |d| d.name.clone())
+    };
+    let mut out = format!("Class AI:      {} rules ({source})\r\n", rules.len());
+    for (i, r) in rules.iter().enumerate() {
+        let when = if r.when.is_empty() {
+            String::from("always")
+        } else {
+            r.when
+                .iter()
+                .map(|c| format!("{c:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let min_level = r
+            .min_level
+            .map_or_else(String::new, |l| format!(", min level {l}"));
+        out.push_str(&format!(
+            "  {:>2}. {} [{:?}] p{} {}% cd {}s -> {:?}; when {when}{min_level}\r\n",
+            i + 1,
+            ability_name(r.ability_id),
+            r.kind,
+            r.priority,
+            r.chance_pct,
+            r.cooldown_s,
+            r.target,
+        ));
+    }
+    out
+}
+
 pub(crate) fn cmd_mob_ai(world: &mut World, player: Entity, args: &str) {
     let Some((zone, id)) = resolve_mob_target(world, player, args) else {
         return;
@@ -1459,26 +1530,9 @@ pub(crate) fn cmd_mob_ai(world: &mut World, player: Entity, args: &str) {
             .clamp(0, 100),
     ));
 
-    // Class-driven AI: a mob with a class id and without NoClassAi
-    // runs the class kit (warrior swings, mage casts) at runtime.
-    let no_class_ai = p
-        .behaviors
-        .iter()
-        .any(|b| matches!(b, MobBehavior::NoClassAi));
-    let class_label = p.class_id.and_then(|cid| {
-        world
-            .get_resource::<mud_world::ClassCatalog>()
-            .and_then(|c| c.by_id.get(&cid).map(|d| d.plain_name.clone()))
-    });
-    match (class_label, no_class_ai) {
-        (Some(cls), false) => out.push_str(&format!(
-            "Class AI:      Runs the {cls} combat kit (basic attacks + class abilities).\r\n",
-        )),
-        (Some(cls), true) => out.push_str(&format!(
-            "Class AI:      {cls} class set, but No-ClassAI flag is on — manual / scripted only.\r\n",
-        )),
-        (None, _) => out.push_str("Class AI:      No class — basic melee swings only.\r\n"),
-    }
+    // Spell / skill AI: the rules this mob would actually run, or why it
+    // has none. Off by default (GameConfig `mob_ai.enabled`).
+    out.push_str(&describe_mob_ai(world, &p));
 
     // Behavior list. Empty case is worth calling out — a designer
     // checking a mob deserves a clear "this is intentional" beat.
@@ -3596,4 +3650,69 @@ fn render_search_results(
         ));
     }
     crate::commands::send_rendered(world, player, &out);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use mud_db::enums::MobProfession;
+    use mud_world::{AiKind, AiRule, AiTarget, ConfigValue, MobAiData, RuntimeConfig};
+
+    use super::*;
+    use crate::commands::test_support::mob_proto;
+
+    fn enable(world: &mut World) {
+        let mut config = RuntimeConfig::default();
+        config
+            .by_key
+            .insert(("mob_ai".into(), "enabled".into()), ConfigValue::Bool(true));
+        world.insert_resource(config);
+    }
+
+    #[test]
+    fn inspect_says_ai_is_disabled_when_the_flag_is_off() {
+        let world = World::new();
+        let proto = mob_proto(30, 1, MobProfession::Trainer);
+        assert_eq!(
+            describe_mob_ai(&world, &proto),
+            "Class AI:      none (mob AI disabled)\r\n"
+        );
+    }
+
+    #[test]
+    fn inspect_lists_the_real_rules_when_the_flag_is_on() {
+        let mut world = World::new();
+        enable(&mut world);
+        let mut data = MobAiData::default();
+        data.by_class.insert(
+            7,
+            Arc::from(vec![AiRule {
+                ability_id: 11,
+                kind: AiKind::Spell,
+                priority: 3,
+                chance_pct: 75,
+                cooldown_s: 12,
+                when: vec![mud_world::AiCondition::SelfHpBelow(60)],
+                target: AiTarget::LowestAlly,
+                min_level: Some(9),
+            }]),
+        );
+        world.insert_resource(data);
+        let mut proto = mob_proto(30, 1, MobProfession::Trainer);
+        proto.class_id = Some(7);
+        let text = describe_mob_ai(&world, &proto);
+        assert!(text.contains("1 rules (CLASS)"), "{text}");
+        assert!(
+            text.contains("ability 11 [Spell] p3 75% cd 12s -> LowestAlly"),
+            "{text}"
+        );
+        assert!(
+            text.contains("SelfHpBelow(60)") && text.contains("min level 9"),
+            "{text}"
+        );
+
+        proto.class_id = None;
+        assert!(describe_mob_ai(&world, &proto).contains("none (no class)"));
+    }
 }

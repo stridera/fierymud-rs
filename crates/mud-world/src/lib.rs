@@ -1,5 +1,6 @@
 pub mod components;
 pub mod loader;
+pub mod mob_ai_rules;
 pub mod mob_effects;
 pub mod mob_spawn;
 pub mod movement;
@@ -46,10 +47,13 @@ pub use components::{
 };
 pub use loader::{
     LoadStats, ReloadStats, default_weather_for_climate, load_ability_catalog, load_content_tables,
-    load_effect_catalog, load_from_db, load_trigger_catalog, merge_prototypes, reload_zones,
-    wear_flags_primary_slot, wear_flags_slots,
+    load_effect_catalog, load_from_db, load_mob_ai_data, load_trigger_catalog, merge_prototypes,
+    reload_zones, wear_flags_primary_slot, wear_flags_slots,
 };
-pub use mob_spawn::spawn_mob_from_proto;
+pub use mob_ai_rules::{
+    AiAlign, AiCondition, AiKind, AiRule, AiTarget, MobAi, MobAiData, parse_conditions,
+};
+pub use mob_spawn::{mob_ai_enabled, spawn_mob_from_proto};
 pub use reset_gear::{
     ContentEntry, GearStats, MobGearCatalog, MobGearEntry, ObjectContentsCatalog,
     attach_proto_charges, fill_container, gear_cap, object_world_counts, outfit_mob, proto_charges,
