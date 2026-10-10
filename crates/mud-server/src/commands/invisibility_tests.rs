@@ -793,14 +793,18 @@ fn aggro_mob_lands_its_first_blow_on_engage_not_a_round_later() {
 }
 
 #[test]
-fn aggro_mob_that_cannot_act_still_waits_for_the_round() {
+fn aggro_mob_that_cannot_act_does_not_engage_at_all() {
     let mut fx = Fx::new();
     fx.world.entity_mut(fx.ghost).remove::<Invisible>();
     let wolf = fx.mob("a wolf", -1000);
     fx.world.entity_mut(wolf).insert(mud_world::Stunned);
     let _ = drain(&mut fx.grx);
     try_engage_aggressive_mob(&mut fx.world, fx.ghost, fx.room);
+    // Not "engaged but denied its swing": no Fighting, no banner, no
+    // prompt tank / target and nothing keeping the player in the room.
+    assert!(fx.world.get::<Fighting>(wolf).is_none());
+    assert!(fx.world.get::<Fighting>(fx.ghost).is_none());
     let out = drain(&mut fx.grx);
-    assert!(out.contains("sees you and attacks!"), "{out}");
+    assert!(!out.contains("sees you and attacks!"), "{out}");
     assert!(!out.contains("wolf hits you"), "{out}");
 }

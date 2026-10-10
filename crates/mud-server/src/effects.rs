@@ -91,6 +91,14 @@ pub(crate) fn is_stun_name(name: &str) -> bool {
         || name.eq_ignore_ascii_case("mesmerized")
 }
 
+/// Does an effect of this name hold its bearer in a trance rather than
+/// merely lag it? Paralysis and mesmerize do; a plain `stun` does not.
+/// Legacy `mag_affect` ends the bearer's fight (and everyone's against it)
+/// when one lands.
+pub(crate) fn is_hold_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("paralyzed") || name.eq_ignore_ascii_case("mesmerized")
+}
+
 /// Make `target`'s [`Stunned`] marker match its effects: present exactly
 /// while at least one stun or paralysis instance is active, whatever
 /// overlapped with what. Legacy paralysis stops the victim fighting and

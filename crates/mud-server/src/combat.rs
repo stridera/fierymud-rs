@@ -727,6 +727,10 @@ pub fn combat_tick(world: &mut World) {
                 if crate::commands::senses::is_blind(world, mob) {
                     return None;
                 }
+                // Asleep, held or sitting mobs do not turn on anyone.
+                if !crate::mob_ai::mob_can_swing(world, mob) {
+                    return None;
+                }
                 hate.0
                     .iter()
                     .rev()

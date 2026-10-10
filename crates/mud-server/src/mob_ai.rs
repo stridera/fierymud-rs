@@ -59,6 +59,18 @@ pub(crate) fn mob_can_act(world: &World, mob: Entity) -> bool {
         && world.get::<mud_world::Ghost>(mob).is_none()
 }
 
+/// Whether a mob may start or carry on a fight, walk about, or otherwise
+/// move under its own power: [`mob_can_act`] and on its feet. Legacy
+/// `mobile_activity` only lets a mob wander while `GET_POS >= POS_STANDING`,
+/// and a sitting, resting or sleeping body does not swing in `combat_tick`
+/// either. A mob with no [`mud_world::Posture`] counts as standing.
+pub(crate) fn mob_can_swing(world: &World, mob: Entity) -> bool {
+    mob_can_act(world, mob)
+        && world
+            .get::<mud_world::Posture>(mob)
+            .is_none_or(|p| p.0 == mud_world::PostureKind::Standing)
+}
+
 /// A mob's percent in a skill at `level` once it has it. Legacy
 /// `roll_mob_skill` (chars.cpp:247) gives an NPC `random(50,100)` plus
 /// `random(5,15)` per level above the first, capped at 1000, and

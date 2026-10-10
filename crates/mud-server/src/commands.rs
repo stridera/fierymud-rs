@@ -627,6 +627,9 @@ mod aggro_pulse_tests;
 #[path = "commands/cmd_parity_tests.rs"]
 mod cmd_parity_tests;
 #[cfg(test)]
+#[path = "commands/mob_hold_tests.rs"]
+mod mob_hold_tests;
+#[cfg(test)]
 #[path = "commands/order_tests.rs"]
 mod order_tests;
 #[cfg(test)]
@@ -18739,6 +18742,11 @@ pub(crate) fn invoke_ability_with(
                 if crate::effects::is_stun_name(&flag) {
                     crate::effects::sync_stunned(world, target_entity);
                 }
+                // Paralysis and mesmerize also end the victim's fight, and
+                // every fight against it (legacy `mag_affect`).
+                if crate::effects::is_hold_name(&flag) {
+                    stop_all_combat_with(world, target_entity);
+                }
                 // Fear: the victim panics and flees at once (legacy
                 // `inflict_fear` flee branch, `chant_ivory_symphony`).
                 // Area abilities keep the chant's extra gates.
@@ -22409,6 +22417,24 @@ pub(crate) fn disengage_attackers_of(world: &mut World, target: Entity) {
     }
 }
 
+/// Legacy `stop_fighting(victim)` + `stop_attackers(victim)`: `victim`
+/// stops fighting and so does everyone who was fighting it, silently. Used
+/// when paralysis or mesmerize takes hold, so a held mob is never left in a
+/// fight it cannot take part in (and its opponent never auto-attacks it).
+pub(crate) fn stop_all_combat_with(world: &mut World, victim: Entity) {
+    let attackers: Vec<Entity> = {
+        let mut q = world.query::<(Entity, &Fighting)>();
+        q.iter(world)
+            .filter(|(_, f)| f.0 == victim)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for a in attackers.into_iter().chain([victim]) {
+        try_remove::<Fighting>(world, a);
+        try_remove::<combat_commands::ReengageLag>(world, a);
+    }
+}
+
 /// Pay the stamina cost. Caps current at zero. Sends one-time messages
 /// when crossing the "tired" (25% of max) and "exhausted" (0) thresholds
 /// downward — never on the way back up (regen handles that silently).
@@ -23405,18 +23431,21 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
                 &Follower,
                 Has<Fighting>,
                 Has<mud_world::Casting>,
+                Has<Stunned>,
                 Option<&Posture>,
             )>();
             q.iter(world)
-                .filter(|(e, l, f, fighting, casting, posture)| {
+                .filter(|(e, l, f, fighting, casting, held, posture)| {
                     f.0 == leader
                         && l.0 == from_room
                         && !fighting
                         && !casting
+                        // Paralysed, mesmerized or stunned: it cannot walk.
+                        && !held
                         && posture.is_none_or(|p| p.0 == PostureKind::Standing)
                         && !movers.contains(e)
                 })
-                .map(|(e, _, _, _, _, _)| e)
+                .map(|(e, _, _, _, _, _, _)| e)
                 .collect()
         };
         for f in new_followers {
@@ -23646,6 +23675,7 @@ pub(crate) fn try_engage_remembered_mob(world: &mut World, player: Entity, room:
             .find(|(e, l, mem)| {
                 l.0 == room
                     && mem.0.contains(&player)
+                    && crate::mob_ai::mob_can_swing(world, *e)
                     && can_see_player(world, *e, player)
                     && !attack_ok::is_servant(world, *e)
                     && !wimpy_mob_is_scared(world, *e)
@@ -23767,6 +23797,12 @@ pub(crate) fn engage_combat(world: &mut World, attacker: Entity, defender: Entit
     if world.get::<mud_world::PeacefulRoom>(room).is_some() {
         return;
     }
+    // A mob that cannot act (asleep, paralysed, mesmerized, stunned, not on
+    // its feet) never opens or joins a fight: engaging it would publish
+    // `Fighting` (prompt, GMCP, "can't leave") while it swings at nothing.
+    if world.get::<Mob>(attacker).is_some() && !crate::mob_ai::mob_can_swing(world, attacker) {
+        return;
+    }
     let attacker_name = name_of(world, attacker);
     let defender_name = name_of(world, defender);
     try_insert(world, attacker, Fighting(defender));
@@ -23832,6 +23868,7 @@ pub(crate) fn try_engage_aggressive_mob(world: &mut World, player: Entity, room:
         q.iter(world)
             .filter(|(e, l, _, _)| {
                 l.0 == room
+                    && crate::mob_ai::mob_can_swing(world, *e)
                     && can_see_player(world, *e, player)
                     && mob_will_start_fight(world, *e, player)
             })

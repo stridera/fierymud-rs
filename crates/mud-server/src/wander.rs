@@ -98,6 +98,12 @@ pub fn wander_tick(world: &mut World) {
         if rand::random_range(0..WANDER_CHANCE_DENOM) != 0 {
             continue;
         }
+        // Asleep, held (paralysis, mesmerize, stun), mid-cast, frozen, or
+        // not on its feet: the mob stays where it is. Checked after the
+        // roll so the common skip costs nothing.
+        if !crate::mob_ai::mob_can_swing(world, mob) {
+            continue;
+        }
         // StayZone-aware exit pool: the destination must be in the
         // same zone for StayZone-flagged mobs. Other mobs walk
         // wherever an open exit leads.
@@ -509,6 +515,103 @@ mod tests {
             }
         }
         assert!(moved, "mob should have wandered into the unflagged room");
+    }
+
+    /// A mob that cannot act or is not on its feet never wanders (#100,
+    /// #105, #110): paralysed / mesmerized / stunned (`Stunned`), asleep,
+    /// sitting, resting, frozen. The standing control proves the
+    /// setup would otherwise walk.
+    #[test]
+    fn held_asleep_and_seated_mobs_do_not_wander() {
+        use mud_world::{Frozen, Posture, PostureKind, Stunned};
+        enum Hold {
+            Stunned,
+            Frozen,
+            Asleep,
+            Sitting,
+            Resting,
+        }
+        let mut world = World::new();
+        let from = make_room(&mut world);
+        let to = make_room(&mut world);
+        link(&mut world, from, Direction::North, to);
+        let control = make_mob(&mut world, from);
+        let mut held = Vec::new();
+        for hold in [
+            Hold::Stunned,
+            Hold::Frozen,
+            Hold::Asleep,
+            Hold::Sitting,
+            Hold::Resting,
+        ] {
+            let mob = make_mob(&mut world, from);
+            let mut em = world.entity_mut(mob);
+            match hold {
+                Hold::Stunned => em.insert(Stunned),
+                Hold::Frozen => em.insert(Frozen),
+                Hold::Asleep => em.insert(Posture(PostureKind::Sleeping)),
+                Hold::Sitting => em.insert(Posture(PostureKind::Sitting)),
+                Hold::Resting => em.insert(Posture(PostureKind::Resting)),
+            };
+            held.push(mob);
+        }
+        world.insert_resource(TickCount(WANDER_PERIOD_TICKS));
+        for _ in 0..200 {
+            wander_tick(&mut world);
+            // Put the control back so every tick re-rolls the same mix.
+            world.entity_mut(control).insert(Located(from));
+        }
+        for mob in held {
+            assert_eq!(world.get::<Located>(mob).map(|l| l.0), Some(from));
+        }
+        // Control: the same room does let an upright mob go.
+        let mut moved = false;
+        for _ in 0..200 {
+            wander_tick(&mut world);
+            if world.get::<Located>(control).map(|l| l.0) == Some(to) {
+                moved = true;
+                break;
+            }
+        }
+        assert!(moved, "an upright mob wanders");
+    }
+
+    /// Scavenging also needs a mob that can act (#100, #105, #110).
+    #[test]
+    fn held_and_sleeping_scavengers_leave_the_floor_alone() {
+        use mud_world::{Posture, PostureKind, Stunned};
+        crate::mob_ai::force_scavenge_roll(Some(true));
+        let mut world = World::new();
+        world.insert_resource(TickCount(SCAVENGER_PERIOD_TICKS));
+        let mut mobs = Vec::new();
+        for hold in 0..3 {
+            let room = make_room(&mut world);
+            world.spawn((
+                Item,
+                Named {
+                    name: "a coin".into(),
+                },
+                Located(room),
+            ));
+            let mob = make_mob(&mut world, room);
+            let mut em = world.entity_mut(mob);
+            em.insert(MobBehaviors(vec![MobBehavior::Scavenger]));
+            match hold {
+                0 => em.insert(Stunned),
+                1 => em.insert(Posture(PostureKind::Sleeping)),
+                _ => em.insert(Posture(PostureKind::Standing)),
+            };
+            mobs.push(mob);
+        }
+        scavenger_tick(&mut world);
+        crate::mob_ai::force_scavenge_roll(None);
+        let held_by = |world: &mut World, mob: Entity| {
+            let mut q = world.query_filtered::<&Located, With<Item>>();
+            q.iter(world).filter(|l| l.0 == mob).count()
+        };
+        assert_eq!(held_by(&mut world, mobs[0]), 0, "paralysed mob took loot");
+        assert_eq!(held_by(&mut world, mobs[1]), 0, "sleeping mob took loot");
+        assert_eq!(held_by(&mut world, mobs[2]), 1, "control picks up");
     }
 
     /// AQUATIC trait (Wave 2.L) wander gate: a shark with
