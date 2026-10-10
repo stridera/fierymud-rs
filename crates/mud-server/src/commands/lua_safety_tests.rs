@@ -487,3 +487,104 @@ fn room_command_trigger_that_reissues_its_command_terminates() {
     // The depth counter unwinds, so the next typed line starts fresh.
     super::dispatch(&mut fx.world, bob, "look lantern");
 }
+
+// ----- command triggers see the full command name -----
+
+/// A room COMMAND trigger that records the `cmd` it was handed and consumes
+/// the line.
+fn record_cmd_world(room_trigger_body: &str) -> (Fx, Entity, Entity) {
+    let mut fx: Fx = fixture();
+    install_executors(&mut fx.world);
+    fx.world.insert_resource(super::lua_script_hooks());
+    let a = fx.a;
+    let mut def = trigger(ROOM_KEY.0, 20, TriggerEvent::Command, room_trigger_body);
+    def.attach_type = TriggerAttach::World;
+    let mut catalog = TriggerCatalog::default();
+    catalog.by_key.insert((ROOM_KEY.0, 20), def);
+    fx.world.insert_resource(catalog);
+    fx.world
+        .entity_mut(a)
+        .insert(AttachedTriggers(vec![(ROOM_KEY.0, 20)]));
+    let (bob, _rx) = player(&mut fx.world, a, "Bob");
+    (fx, a, bob)
+}
+
+fn room_var(world: &World, key: &str) -> Option<String> {
+    world
+        .get_resource::<EntityVariableCache>()?
+        .get(EntityType::Room, ROOM_KEY.0, ROOM_KEY.1, key)
+        .and_then(|v| v.as_str().map(str::to_string))
+}
+
+/// Legacy matched the typed word as a prefix of the trigger's word, so `n`
+/// fired a trigger on `north` (the level guards 162/75, 583/75, 80/39 and
+/// the hidden-exit room trigger 30/4 all compare `cmd` to a full direction).
+#[test]
+fn command_trigger_sees_the_full_name_of_an_abbreviated_command() {
+    let (mut fx, _a, bob) = record_cmd_world("self:setvar('cmd', cmd)\nreturn false");
+    for (typed, full) in [
+        ("n", "north"),
+        ("s", "south"),
+        ("e", "east"),
+        ("ne", "northeast"),
+        ("sw", "southwest"),
+        ("north", "north"),
+        ("l", "look"),
+        ("lo", "look"),
+        ("exa", "examine"),
+    ] {
+        fx.world.insert_resource(EntityVariableCache::default());
+        super::dispatch(&mut fx.world, bob, typed);
+        assert_eq!(room_var(&fx.world, "cmd").as_deref(), Some(full), "{typed}");
+    }
+}
+
+/// A word that is not an abbreviation of its command stays as typed: an
+/// unrelated alias, an unknown word, and a command that must be typed in
+/// full (`q` is never `quit`).
+#[test]
+fn command_trigger_keeps_words_that_are_not_abbreviations() {
+    let (mut fx, _a, bob) =
+        record_cmd_world("self:setvar('cmd', cmd)\nself:setvar('arg', arg)\nreturn false");
+    for typed in ["zzzzz", "qui", "take"] {
+        fx.world.insert_resource(EntityVariableCache::default());
+        super::dispatch(&mut fx.world, bob, &format!("{typed} thing"));
+        assert_eq!(room_var(&fx.world, "cmd").as_deref(), Some(typed));
+        assert_eq!(room_var(&fx.world, "arg").as_deref(), Some("thing"));
+    }
+}
+
+/// Level-guard shape (162/75): a mob in the room blocks a low-level
+/// player's `n`, and the player stays put.
+#[test]
+fn newbie_guard_blocks_an_abbreviated_direction() {
+    let mut fx: Fx = fixture();
+    install_executors(&mut fx.world);
+    fx.world.insert_resource(super::lua_script_hooks());
+    let (a, b) = (fx.a, fx.b);
+    fx.world.get_mut::<mud_world::Exits>(a).unwrap().0.insert(
+        mud_db::enums::Direction::North,
+        super::gmcp_tests::exit(b, mud_db::enums::ExitState::Open, false, &[]),
+    );
+    let guard = mob(&mut fx.world, a, "guard", (900, 7), 10);
+    fx.world
+        .entity_mut(guard)
+        .insert(AttachedTriggers(vec![(900, 7)]));
+    let mut catalog = TriggerCatalog::default();
+    catalog.by_key.insert(
+        (900, 7),
+        trigger(
+            900,
+            7,
+            TriggerEvent::Command,
+            "if cmd ~= 'north' then return true end\n\
+             if actor.is_player and actor.level < 40 then return false end\n\
+             return true",
+        ),
+    );
+    fx.world.insert_resource(catalog);
+    let (bob, _rx) = player(&mut fx.world, a, "Bob");
+
+    super::dispatch(&mut fx.world, bob, "n");
+    assert_eq!(fx.world.get::<Located>(bob).map(|l| l.0), Some(a));
+}

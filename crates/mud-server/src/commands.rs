@@ -1495,7 +1495,7 @@ fn dispatch_line(world: &mut World, player: Entity, line: &str, run: &mut AliasR
     // If any trigger returns `false`, the command is consumed (a
     // mob intercepted it) and we stop dispatch here.
     if let Some(located) = world.get::<Located>(player).copied() {
-        let cmd_word = tokens[0].to_string();
+        let cmd_word = trigger_command_word(world, player, &tokens);
         let cmd_args = skip_n_tokens(trimmed, 1).to_string();
         if crate::triggers::fire_command_in_room(world, player, located.0, &cmd_word, &cmd_args) {
             return;
@@ -2179,6 +2179,55 @@ pub(crate) fn resolve_abbrev<'a>(
         (Some((_, cmd)), None) => Some(Abbrev::Command(cmd)),
         (None, Some((_, social))) => Some(Abbrev::Social(social)),
         (None, None) => None,
+    }
+}
+
+/// The command word a COMMAND trigger sees as `cmd`. Legacy DG matched the
+/// typed word as a prefix of the trigger's own word (`strn_cmp(arg, cmd,
+/// strlen(cmd))`), so `n` fired a trigger on `north`; the scripts compare
+/// `cmd` for equality, so a typed abbreviation (or short alias such as `n`)
+/// is expanded to the full command it resolves to, by the same rules the
+/// dispatcher uses. An exact name or an unrelated alias (`take` for `get`)
+/// stays as typed, as does a word that resolves to nothing, to a multi-word
+/// command, or to a command that must be typed in full.
+fn trigger_command_word(world: &World, player: Entity, tokens: &[&str]) -> String {
+    let typed = tokens[0];
+    let full = |cmd: &Command| {
+        // The name the typed word is a prefix of; the canonical name is the
+        // fallback when it only matches through the abbreviation table.
+        cmd.names
+            .iter()
+            .copied()
+            .filter(|n| !n.contains(char::is_whitespace) && n.starts_with(typed))
+            .min_by_key(|n| prefix_rank(n, false))
+            .unwrap_or(cmd.names[0])
+    };
+    if let Some((cmd, n)) = longest_prefix_match(tokens) {
+        // An exact hit. Only an abbreviation alias (`n` for `north`) expands.
+        let short_diagonal = matches!(typed, "ne" | "nw" | "se" | "sw");
+        return if n == 1
+            && cmd.names[0] != typed
+            && (cmd.names[0].starts_with(typed) || short_diagonal)
+        {
+            cmd.names[0].to_string()
+        } else {
+            typed.to_string()
+        };
+    }
+    let registry = world.get_resource::<SocialRegistry>();
+    if registry.is_some_and(|r| r.get(typed).is_some()) {
+        return typed.to_string();
+    }
+    let (role, perms) = world.get::<Account>(player).map_or_else(
+        || (UserRole::Player, Vec::new()),
+        |a| (a.role, a.perms.clone()),
+    );
+    let grants = world.get::<mud_world::CommandGrants>(player);
+    let allow = grants::mortal_allowlist_for(world, role, grants);
+    match resolve_abbrev(typed, role, &perms, grants, &allow, registry) {
+        Some(Abbrev::Command(cmd)) if abbrev_allowed(cmd) => full(cmd).to_string(),
+        Some(Abbrev::Social(name)) => name.to_string(),
+        _ => typed.to_string(),
     }
 }
 

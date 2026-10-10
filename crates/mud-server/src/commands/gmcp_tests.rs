@@ -109,7 +109,7 @@ pub(crate) fn fixture() -> Fx {
     Fx { world, a, b }
 }
 
-fn exit(to: Entity, state: ExitState, hidden: bool, kw: &[&str]) -> ExitData {
+pub(crate) fn exit(to: Entity, state: ExitState, hidden: bool, kw: &[&str]) -> ExitData {
     ExitData {
         to: Some(to),
         state,
