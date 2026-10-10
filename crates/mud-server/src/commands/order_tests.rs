@@ -339,7 +339,7 @@ fn indexed_actor_target_matches_look_mobs_before_players() {
         .id();
     // The mob arrives after the player, so a single newest-first ranking
     // would agree by accident; spawn a second, newer player so it would
-    // not: `look` renders the mob lines, then "Also here:" players.
+    // not: `look` renders the mob lines, then one line per player.
     let mob = spawn_mob(&mut world, room, "a bobby rat");
     let newer = world
         .spawn((
@@ -351,7 +351,14 @@ fn indexed_actor_target_matches_look_mobs_before_players() {
         ))
         .id();
     dispatch(&mut world, p, "look");
-    assert_in_order(&drain(&mut rx), &["a bobby rat", "Bobbo, Bobby"]);
+    assert_in_order(
+        &drain(&mut rx),
+        &[
+            "a bobby rat",
+            "Bobbo is standing here.",
+            "Bobby is standing here.",
+        ],
+    );
     let find = |w: &mut World, n: &str| super::find_actor_in_room(w, n, room, p);
     assert_eq!(find(&mut world, "bob"), Some(mob));
     assert_eq!(find(&mut world, "2.bob"), Some(newer));

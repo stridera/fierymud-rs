@@ -620,6 +620,12 @@ mod wand_charge_tests;
 #[path = "commands/identify_actor_tests.rs"]
 mod identify_actor_tests;
 
+#[path = "commands/room_line.rs"]
+pub(crate) mod room_line;
+#[cfg(test)]
+#[path = "commands/room_line_tests.rs"]
+mod room_line_tests;
+
 #[cfg(test)]
 #[path = "commands/aggro_pulse_tests.rs"]
 mod aggro_pulse_tests;
@@ -8026,7 +8032,9 @@ fn mob_is_hostile_to(world: &World, mob: Entity, viewer: Entity) -> bool {
 ///     hostile:      boolean,
 ///     `hp_percent`:   number,    // 0..100
 ///     targeting:    string|null, // null when the mob isn't swinging
-///     status?:      string,    // "stunned" (more later: casting / fleeing)
+///     posture:      string,    // standing|sitting|kneeling|resting|sleeping|flying
+///     status?:      string,    // "stunned" while held (more later: casting / fleeing)
+///     hold?:        string,    // with status: paralyzed|mesmerized|stunned
 ///     professions?: string[],  // ["shop","bank",...] from the mob's proto
 ///   }>
 ///
@@ -8110,10 +8118,13 @@ pub(crate) fn send_room_mobs(world: &mut World, viewer: Entity, force: bool) {
                 || "null".to_string(),
                 |n| format!("\"{}\"", plain_for_gmcp(&n)),
             );
-        let status_field = if world.get::<Stunned>(mob).is_some() {
-            r#","status":"stunned""#
-        } else {
-            ""
+        // Posture and hold come from the same rules as the text room line
+        // (`room_line`): "sleeping", "flying", ...; a held mob also says
+        // whether it is paralyzed, mesmerized or just stunned.
+        let posture = room_line::posture_word(world, mob);
+        let status_field = match room_line::hold_of(world, mob) {
+            Some(hold) => format!(r#","status":"stunned","hold":"{}""#, hold.status()),
+            None => String::new(),
         };
         // Professions come off the proto, not the spawned entity.
         // We emit `professions:[]` (always present, even when empty)
@@ -8166,7 +8177,7 @@ pub(crate) fn send_room_mobs(world: &mut World, viewer: Entity, force: bool) {
         };
         let id_bits = mob.to_bits();
         entries.push(format!(
-            r#"{{"id":"{id_bits}","name":"{mob_plain}","hostile":{hostile},"hp_percent":{hp_pct},"targeting":{targeting_json}{status_field},"professions":{prof_json}}}"#,
+            r#"{{"id":"{id_bits}","name":"{mob_plain}","hostile":{hostile},"hp_percent":{hp_pct},"targeting":{targeting_json},"posture":"{posture}"{status_field},"professions":{prof_json}}}"#,
         ));
     }
     let mobs_payload = format!("[{}]", entries.join(","));
@@ -13723,7 +13734,7 @@ pub(crate) fn parse_count_prefix(input: &str) -> (Option<usize>, &str) {
 
 /// Find a non-Item entity in `room` (player or mob) for give/attack-style
 /// targeting. `N.` indexes the order `look` renders them: mob lines first,
-/// then the visible players ("Also here:"), each newest arrival first.
+/// then the visible players (one line each), each newest arrival first.
 pub(crate) fn find_actor_in_room(
     world: &mut World,
     needle: &str,
@@ -13747,7 +13758,7 @@ pub(crate) fn find_actor_in_room(
         .map(|(e, _, _, _, _)| e)
         .collect();
     sort_newest_first(world, room, &mut hits, |e| *e);
-    // `look` renders the mob lines first and the "Also here:" player block
+    // `look` renders the mob lines first and the player lines
     // after them, each newest first; the stable sort keeps that inner order.
     hits.sort_by_key(|e| mobs_before_players_key(world, *e));
     hits.get(index - 1).copied()

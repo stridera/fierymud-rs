@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 
 use super::{
     ColorMode, Connection, Description, direction_name, exit_is_hidden_to, render_color_tags,
-    room_composite_num, sector_label,
+    room_composite_num, room_line, sector_label,
 };
 
 /// Per-player record of the last payload hash sent for each GMCP
@@ -154,21 +154,29 @@ pub(crate) fn build_room_players(world: &mut World, viewer: Entity) -> String {
             .map(|(e, _)| e)
             .collect()
     };
-    let mut names: Vec<String> = here
+    // Posture and hold ride along for a clearly seen player, from the same
+    // rules as the text room line (`room_line`); a shape in the dark gets
+    // the generic label only.
+    let mut rows: Vec<(String, Value)> = here
         .into_iter()
         .filter_map(|e| {
             let how = perceives(world, viewer, e, room_seen);
-            perceived_name(world, e, how)
+            let name = perceived_name(world, e, how)?;
+            let mut entry = json!({ "name": name, "full_name": name });
+            if how == Perceived::Clear {
+                entry["posture"] = json!(room_line::posture_word(world, e));
+                if let Some(hold) = room_line::hold_of(world, e) {
+                    entry["status"] = json!("stunned");
+                    entry["hold"] = json!(hold.status());
+                }
+            }
+            Some((name, entry))
         })
         .collect();
     // ECS query order shifts whenever an unrelated component is added or
     // removed, which would change the hash and resend an identical list.
-    names.sort();
-    let entries: Vec<Value> = names
-        .into_iter()
-        .map(|n| json!({ "name": n, "full_name": n }))
-        .collect();
-    Value::Array(entries).to_string()
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    Value::Array(rows.into_iter().map(|(_, v)| v).collect()).to_string()
 }
 
 /// Send `Room.Players` for `viewer`'s room. `force` always sends; the

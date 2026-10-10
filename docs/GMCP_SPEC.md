@@ -215,9 +215,15 @@ movement direction), which gets corner cases wrong.
 Array<{
   name: string,
   full_name: string,    // same as name today; reserved for color-bearing display form
+  posture?: string,     // standing|sitting|kneeling|resting|sleeping|flying (omitted for a shape seen by infravision)
+  status?: string,      // "stunned" while held (paralysis, mesmerize or stun)
+  hold?: string,        // with status: paralyzed|mesmerized|stunned
   // potentially: class, level, with_leader — currently unused
 }>
 ```
+
+The text `look` lists each of these players on a line of their own with the
+same state ("Bob is sleeping here.").
 
 **Cadence:** On room entry + on player connect/disconnect in the
 current room. Empty array shows `(no one else here)`.
@@ -330,7 +336,9 @@ Array<{
   hostile: boolean,       // currently engaged, hates/remembers viewer, OR alignment ≤ aggro threshold
   hp_percent: number,     // 0..100; emit for all mobs (client can hide bar on friendlies)
   targeting: string | null, // who the mob is swinging at; null when not engaged
-  status?: string,        // "stunned" (more later: casting / fleeing)
+  posture: string,        // standing|sitting|kneeling|resting|sleeping|flying
+  status?: string,        // "stunned" while held (more later: casting / fleeing)
+  hold?: string,          // with status: paralyzed|mesmerized|stunned
   professions: string[],  // ["shop","bank","inn","mail","guild","trainer"] — empty array on plain mobs
 }>
 ```

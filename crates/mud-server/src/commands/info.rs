@@ -6433,32 +6433,28 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
         })
         .unwrap_or_default();
 
-    // Players in the room — names go in "Also here:". Non-standing players
-    // get a posture annotation.
+    // Other players in the room, one status line each (name, title, and
+    // what they are doing: "Bob is sleeping here."), newest arrival first.
     let other_players: Vec<String> = {
-        let mut q =
-            world.query_filtered::<(Entity, &Located, &Named, Option<&Posture>), With<Player>>();
-        let mut rows: Vec<(Entity, String)> = q
+        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
+        let mut rows: Vec<(Entity, ())> = q
             .iter(world)
-            .filter(|(e, l, _, _)| {
+            .filter(|(e, l)| {
                 *e != player && l.0 == room && crate::commands::can_see_player(world, player, *e)
             })
-            .map(|(e, _, n, posture)| {
-                let p = posture.map_or(PostureKind::Standing, |p| p.0);
-                let mut line = if p == PostureKind::Standing {
-                    n.name.clone()
-                } else {
-                    format!("{} (is {} here)", n.name, p.label())
-                };
+            .map(|(e, _)| (e, ()))
+            .collect();
+        crate::commands::sort_newest_first(world, room, &mut rows, |r| r.0);
+        rows.into_iter()
+            .map(|(e, ())| {
+                let mut line = room_line::player_line(world, player, e);
                 if let Some(aura) = crate::commands::senses::alignment_aura(world, player, e) {
                     line.push(' ');
                     line.push_str(aura);
                 }
-                (e, line)
+                line
             })
-            .collect();
-        crate::commands::sort_newest_first(world, room, &mut rows, |r| r.0);
-        rows.into_iter().map(|(_, l)| l).collect()
+            .collect()
     };
     // Mobs — each gets their own line with their room_description, falling
     // back to the name if Description is missing or empty. Aggressive
@@ -6478,28 +6474,35 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
         let mut q = world.query_filtered::<(
             Entity,
             &Located,
-            &Named,
             Option<&Description>,
             Option<&CombatStats>,
         ), With<Mob>>();
         // Newest arrival first (legacy `char_to_room` pushes the list head).
-        let mut mob_rows: Vec<_> = q
+        let mut mob_rows: Vec<(Entity, String, Option<i32>)> = q
             .iter(world)
-            .filter(|(e, l, _, _, _)| {
+            .filter(|(e, l, _, _)| {
                 l.0 == room && crate::commands::can_see_player(world, player, *e)
+            })
+            .map(|(e, _, desc, stats)| {
+                (
+                    e,
+                    desc.map_or_else(String::new, |d| d.0.clone()),
+                    stats.map(|s| s.alignment),
+                )
             })
             .collect();
         crate::commands::sort_newest_first(world, room, &mut mob_rows, |r| r.0);
-        for (mob, _, n, desc, stats) in mob_rows {
-            let body = desc
-                .filter(|d| !d.0.trim().is_empty())
-                .map_or_else(|| n.name.clone(), |d| d.0.trim_end().to_string());
+        for (mob, desc, alignment) in mob_rows {
+            // The long description while the mob is in its default state,
+            // otherwise its name and what it is doing (asleep, held,
+            // fighting, flying...): see `room_line`.
+            let body = room_line::mob_line(world, player, mob, &desc);
             // Default yellow on plain mob descriptions so they stand
             // out from the white room description above. Builder
             // colors are preserved — `colorize_default` only adds
             // hue when the body carries no XML-Lite markup.
             let body = colorize_default(&body, "<yellow>");
-            let mut line = if stats.is_some_and(|s| s.alignment <= aggro_threshold) {
+            let mut line = if alignment.is_some_and(|a| a <= aggro_threshold) {
                 format!("{body} <red>(HOSTILE)</>")
             } else {
                 body
@@ -6667,13 +6670,8 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
     for line in &mob_lines {
         out.push_str(&format!("{}\r\n", render_color_tags(line, mode)));
     }
-    if !other_players.is_empty() {
-        let rendered: Vec<String> = other_players
-            .iter()
-            .map(|p| render_color_tags(p, mode))
-            .collect();
-        let header = render_color_tags("<cyan>Also here:</>", mode);
-        out.push_str(&format!("{header} {}\r\n", rendered.join(", ")));
+    for line in &other_players {
+        out.push_str(&format!("{}\r\n", render_color_tags(line, mode)));
     }
     let sensed = crate::commands::senses::lit_room_lines(world, player, room);
     out.push_str(&render_color_tags(&sensed, mode));
