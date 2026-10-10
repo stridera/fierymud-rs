@@ -78,6 +78,33 @@ fn room_objects_list_one_per_line_with_long_descriptions() {
     assert!(!out.contains(", "), "{out:?}");
 }
 
+/// A corpse in the room reads as a sentence, not as a bare noun phrase (#97).
+#[test]
+fn a_corpse_in_the_room_is_a_full_sentence() {
+    let (mut world, room, player, mut rx) = setup();
+    for name in ["the corpse of a creeping vine", "the corpse of Bob"] {
+        world.spawn((
+            Item,
+            mud_world::Corpse,
+            Named {
+                name: name.to_string(),
+            },
+            Located(room),
+        ));
+    }
+    cmd_look(&mut world, player, "");
+    let out = plain(&mut rx);
+    assert!(
+        out.contains("The corpse of a creeping vine is lying here.\r\n"),
+        "{out:?}"
+    );
+    assert!(
+        out.contains("The corpse of Bob is lying here.\r\n"),
+        "{out:?}"
+    );
+    assert!(!out.contains("\r\nthe corpse of"), "{out:?}");
+}
+
 #[test]
 fn identical_room_objects_stack_unless_expandobjs() {
     let (mut world, room, player, mut rx) = setup();

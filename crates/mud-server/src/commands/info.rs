@@ -13075,6 +13075,15 @@ pub(crate) fn cmd_equipment(world: &mut World, player: Entity, _args: &str) {
 /// prototype (corpses, synthetic items), an empty long description,
 /// or a per-instance rename.
 fn item_room_line(world: &World, item: Entity, short_name: &str) -> String {
+    // A corpse has no prototype; its short name ("the corpse of a creeping
+    // vine") is a noun phrase, so the room line makes it a sentence, as
+    // legacy `make_corpse` does ("The corpse of X is lying here.").
+    if world.get::<mud_world::Corpse>(item).is_some() {
+        return format!(
+            "{} is lying here.",
+            crate::commands::cap_sentence_start(short_name)
+        );
+    }
     if world
         .get::<mud_world::ItemCustomization>(item)
         .is_some_and(|c| c.name.is_some())
