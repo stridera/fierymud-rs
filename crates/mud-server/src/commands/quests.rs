@@ -1441,18 +1441,47 @@ async fn qreward_claim(
         );
         return;
     }
-    // Grant the simple reward via the existing path (ITEM is spawned
-    // by the update below). The single-row slice keeps the DB code
-    // shared with the auto-grant flow.
-    let single = vec![reward.clone()];
-    let outcome =
-        match mud_db::quest_objectives::grant_simple_rewards(pool, character_id, &single).await {
-            Ok(o) => o,
-            Err(e) => {
-                send_to(world, player, format!("Reward grant failed: {e}\r\n"));
-                return;
-            }
-        };
+    // Grant the reward and record the claim in ONE transaction (ITEM is
+    // spawned by the update below). Doing them separately let a failed
+    // `claimed_rewards` write leave a granted reward the player could
+    // claim again; the quest row lock inside `claim_reward` also
+    // serializes two simultaneous claims.
+    let blocking_ids: Vec<i32> = match reward.choice_group {
+        Some(group) => all_choices
+            .iter()
+            .filter(|r| r.choice_group == Some(group))
+            .map(|r| r.id)
+            .collect(),
+        None => vec![reward.id],
+    };
+    let outcome = match mud_db::quest_objectives::claim_reward(
+        pool,
+        character_id,
+        &cqid,
+        &reward,
+        &blocking_ids,
+    )
+    .await
+    {
+        Ok(mud_db::quest_objectives::ClaimOutcome::Claimed(o)) => o,
+        Ok(mud_db::quest_objectives::ClaimOutcome::AlreadyClaimed) => {
+            send_to(world, player, "You've already claimed that reward.\r\n");
+            return;
+        }
+        Ok(mud_db::quest_objectives::ClaimOutcome::QuestMissing) => {
+            send_to(
+                world,
+                player,
+                format!("You haven't completed quest ({zone}, {id}).\r\n"),
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "qreward: claim failed");
+            send_to(world, player, format!("Reward grant failed: {e}\r\n"));
+            return;
+        }
+    };
     // Mirror live ECS state for the running player. SpawnItem only
     // works for ITEM; the rest update Profile / Wealth / etc.
     let update_tx = world.get_resource::<PlayerUpdateTx>().map(|t| t.0.clone());
@@ -1496,15 +1525,9 @@ async fn qreward_claim(
             let _ = tx.send(u).await;
         }
     }
-    // Persist the claim. Append reward.id to claimed_rewards.
+    // The claim was recorded by `claim_reward`; mirror it for the tally.
     let mut new_claimed = claimed;
     new_claimed.push(reward.id);
-    let array =
-        serde_json::Value::Array(new_claimed.iter().map(|n| serde_json::json!(n)).collect());
-    if let Err(e) = mud_db::quests::set_quest_variable(pool, &cqid, "claimed_rewards", &array).await
-    {
-        tracing::warn!(error = %e, "qreward: persist claim failed");
-    }
     // Remaining-claims tally across all of this player's completed
     // quests: unfinished choice groups + unclaimed conditionals.
     // Cheap-ish (one DB pass per completed quest) but bounded by

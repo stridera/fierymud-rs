@@ -6,8 +6,8 @@
 //! dev database is not reachable, like the other live-DB tests.
 
 use mud_db::quest_objectives::{
-    PhaseAdvance, QuestRewardRow, grant_simple_rewards, list_kill_mob_progress, try_advance_phase,
-    upsert_progress,
+    ClaimOutcome, PhaseAdvance, QuestRewardRow, claim_reward, grant_simple_rewards,
+    list_kill_mob_progress, try_advance_phase, upsert_progress,
 };
 use mud_db::quests::{AcceptOutcome, accept_for_player};
 use sqlx::PgPool;
@@ -727,5 +727,128 @@ async fn housing_reward_is_granted_once() {
             .unwrap(),
         0
     );
+    fx.end().await;
+}
+
+fn gold_reward(id: i32, amount: i32) -> QuestRewardRow {
+    QuestRewardRow {
+        id,
+        reward_type: "GOLD".into(),
+        amount: Some(amount),
+        object_zone_id: None,
+        object_id: None,
+        ability_id: None,
+        quantity: 1,
+        choice_group: None,
+        condition: None,
+    }
+}
+
+async fn wealth_of(fx: &Fx) -> i64 {
+    sqlx::query_scalar("SELECT wealth FROM \"Characters\" WHERE id = $1")
+        .bind(&fx.char_id)
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap()
+}
+
+async fn claimed_of(fx: &Fx, cq: &str) -> serde_json::Value {
+    let vars: serde_json::Value =
+        sqlx::query_scalar("SELECT variables FROM \"CharacterQuest\" WHERE id = $1")
+            .bind(cq)
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap();
+    vars.get("claimed_rewards")
+        .cloned()
+        .unwrap_or(serde_json::json!([]))
+}
+
+/// A reward is granted once: the grant and the claim record commit
+/// together, so a repeat claim (or the other member of its choice group)
+/// is refused without paying out again.
+#[tokio::test]
+async fn qreward_claim_pays_once() {
+    let Some(fx) = fixture().await else { return };
+    fx.accept().await;
+    let cq = fx.cq_id().await;
+    let before = wealth_of(&fx).await;
+    let pick = gold_reward(1_001, 50);
+    let sibling = gold_reward(1_002, 70);
+    let group = [pick.id, sibling.id];
+
+    let first = claim_reward(&fx.pool, &fx.char_id, &cq, &pick, &group)
+        .await
+        .unwrap();
+    assert!(matches!(first, ClaimOutcome::Claimed(_)));
+    assert_eq!(wealth_of(&fx).await, before + 50);
+    assert_eq!(claimed_of(&fx, &cq).await, serde_json::json!([1_001]));
+
+    let again = claim_reward(&fx.pool, &fx.char_id, &cq, &pick, &group)
+        .await
+        .unwrap();
+    assert_eq!(again, ClaimOutcome::AlreadyClaimed);
+    let other = claim_reward(&fx.pool, &fx.char_id, &cq, &sibling, &group)
+        .await
+        .unwrap();
+    assert_eq!(other, ClaimOutcome::AlreadyClaimed, "same choice group");
+    assert_eq!(wealth_of(&fx).await, before + 50, "no second payout");
+
+    let missing = claim_reward(&fx.pool, &fx.char_id, "no-such-quest-row", &pick, &group)
+        .await
+        .unwrap();
+    assert_eq!(missing, ClaimOutcome::QuestMissing);
+    fx.end().await;
+}
+
+/// If recording the claim fails, the grant is rolled back with it: the
+/// player is not paid for a claim that was never recorded, so a retry
+/// pays exactly once instead of the failed attempt having paid for free.
+#[tokio::test]
+async fn qreward_failed_claim_record_rolls_the_grant_back() {
+    let Some(fx) = fixture().await else { return };
+    fx.accept().await;
+    let cq = fx.cq_id().await;
+    let before = wealth_of(&fx).await;
+    let pick = gold_reward(2_001, 50);
+    let uniq = cq.replace('-', "_");
+    // A trigger that rejects updates to this one quest row stands in for
+    // a database failure at the moment the claim is written.
+    sqlx::query(&format!(
+        "CREATE OR REPLACE FUNCTION zz_qreward_fail_{uniq}() RETURNS trigger AS $$ \
+         BEGIN RAISE EXCEPTION 'zz boom'; END $$ LANGUAGE plpgsql"
+    ))
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    sqlx::query(&format!(
+        "CREATE TRIGGER zz_qreward_fail_{uniq} BEFORE UPDATE ON \"CharacterQuest\" \
+         FOR EACH ROW WHEN (NEW.id = '{cq}') EXECUTE FUNCTION zz_qreward_fail_{uniq}()"
+    ))
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+
+    let failed = claim_reward(&fx.pool, &fx.char_id, &cq, &pick, &[pick.id]).await;
+    assert!(failed.is_err(), "claim write failed");
+    assert_eq!(wealth_of(&fx).await, before, "grant rolled back");
+    assert_eq!(claimed_of(&fx, &cq).await, serde_json::json!([]));
+
+    sqlx::query(&format!(
+        "DROP TRIGGER zz_qreward_fail_{uniq} ON \"CharacterQuest\""
+    ))
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    sqlx::query(&format!("DROP FUNCTION zz_qreward_fail_{uniq}()"))
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+
+    let retry = claim_reward(&fx.pool, &fx.char_id, &cq, &pick, &[pick.id])
+        .await
+        .unwrap();
+    assert!(matches!(retry, ClaimOutcome::Claimed(_)));
+    assert_eq!(wealth_of(&fx).await, before + 50, "paid exactly once");
     fx.end().await;
 }

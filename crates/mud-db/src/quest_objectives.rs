@@ -766,8 +766,22 @@ pub async fn grant_simple_rewards(
     character_id: &str,
     rewards: &[QuestRewardRow],
 ) -> sqlx::Result<GrantOutcome> {
-    let mut out = GrantOutcome::default();
     let mut tx = pool.begin().await?;
+    let out = grant_simple_rewards_tx(&mut tx, character_id, rewards).await?;
+    tx.commit().await?;
+    Ok(out)
+}
+
+/// [`grant_simple_rewards`] inside the caller's transaction, so a
+/// grant can commit or roll back together with other writes (the
+/// `qreward` claim record).
+async fn grant_simple_rewards_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    character_id: &str,
+    rewards: &[QuestRewardRow],
+) -> sqlx::Result<GrantOutcome> {
+    let tx: &mut sqlx::PgConnection = &mut *tx;
+    let mut out = GrantOutcome::default();
     for r in rewards {
         match r.reward_type.as_str() {
             "EXPERIENCE" => {
@@ -821,7 +835,7 @@ pub async fn grant_simple_rewards(
                 }
             }
             "HOUSING" => {
-                if crate::housing::grant_house(&mut tx, character_id)
+                if crate::housing::grant_house(tx, character_id)
                     .await?
                     .is_some()
                 {
@@ -832,8 +846,86 @@ pub async fn grant_simple_rewards(
             _ => {}
         }
     }
-    tx.commit().await?;
     Ok(out)
+}
+
+/// Result of [`claim_reward`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimOutcome {
+    /// The reward was granted and recorded as claimed.
+    Claimed(GrantOutcome),
+    /// One of `blocking_ids` was already in `claimed_rewards`; nothing
+    /// was granted.
+    AlreadyClaimed,
+    /// The `CharacterQuest` row is gone; nothing was granted.
+    QuestMissing,
+}
+
+/// Grant one `qreward` pick and record it in the quest's
+/// `claimed_rewards` in a single transaction. The quest row is locked
+/// while the claim list is re-read, so two simultaneous claims
+/// serialize and only the first wins, and a failed write of the claim
+/// record rolls the grant back instead of leaving a reward the player
+/// can claim again. `blocking_ids` are the reward ids whose presence in
+/// `claimed_rewards` means "already claimed" (every member of the
+/// reward's choice group, or just the reward itself).
+pub async fn claim_reward(
+    pool: &PgPool,
+    character_id: &str,
+    character_quest_id: &str,
+    reward: &QuestRewardRow,
+    blocking_ids: &[i32],
+) -> sqlx::Result<ClaimOutcome> {
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query!(
+        r#"
+        SELECT variables
+        FROM "CharacterQuest"
+        WHERE id = $1 AND character_id = $2
+        FOR UPDATE
+        "#,
+        character_quest_id,
+        character_id,
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(row) = row else {
+        return Ok(ClaimOutcome::QuestMissing);
+    };
+    let mut claimed: Vec<i64> = row
+        .variables
+        .get("claimed_rewards")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(serde_json::Value::as_i64).collect())
+        .unwrap_or_default();
+    if claimed
+        .iter()
+        .any(|c| blocking_ids.iter().any(|b| i64::from(*b) == *c))
+    {
+        return Ok(ClaimOutcome::AlreadyClaimed);
+    }
+    let granted =
+        grant_simple_rewards_tx(&mut tx, character_id, std::slice::from_ref(reward)).await?;
+    claimed.push(i64::from(reward.id));
+    let array = serde_json::Value::Array(claimed.into_iter().map(Into::into).collect());
+    let path: Vec<String> = vec!["claimed_rewards".to_string()];
+    let updated = sqlx::query!(
+        r#"
+        UPDATE "CharacterQuest"
+        SET variables = jsonb_set(variables, $2::text[], $3::jsonb, true)
+        WHERE id = $1
+        "#,
+        character_quest_id,
+        path.as_slice(),
+        array,
+    )
+    .execute(&mut *tx)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(sqlx::Error::RowNotFound);
+    }
+    tx.commit().await?;
+    Ok(ClaimOutcome::Claimed(granted))
 }
 
 /// Outcome of the post-completion phase-advance check.
