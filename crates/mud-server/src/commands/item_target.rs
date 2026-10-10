@@ -9,9 +9,9 @@
 //! | Class           | Search order                      | Commands |
 //! |-----------------|-----------------------------------|----------|
 //! | `Room`          | room                              | `get`/`take` (the item), `drag`, `enter` |
-//! | `Inventory`     | pack (unworn)                     | `wear`, `wield`, `eat`, `drink`, `quaff`, `sell`, `junk`, `donate`, `put` (the item), `deposit`, `palm` |
+//! | `Inventory`     | pack (unworn)                     | `wear`, `wield`, `eat`, `drink`, `quaff`, `sell`, `junk`, `donate`, `drop`, `give`, `put` (the item), `deposit`, `palm` |
 //! | `Equipment`     | worn                              | `remove` |
-//! | `Carried`       | pack, then worn                   | `drop`, `give`, `use`, `hold`, `light`, `identify`, `compare`, `pour`, `repair`, `taste`, `iedit` |
+//! | `Carried`       | pack, then worn                   | `use`, `hold`, `light`, `identify`, `compare`, `pour`, `repair`, `taste`, `iedit` |
 //! | `RoomFirst`     | room, then pack, then worn        | `look`/`examine`, `read`, `value`, `point`, `search`, `get ... from`, `look in` |
 //! | `CarriedFirst`  | pack, then worn, then room        | `put ... in`, `write`, `fill`/`drink` sources, spells/wands aimed at an item |
 //!
