@@ -1794,6 +1794,20 @@ impl ClassSkillsData {
 #[derive(Resource, Debug, Default)]
 pub struct RaceAbilitiesData {
     pub proficiency_cap: HashMap<(String, i32), i32>,
+    /// Cooldown of a racial active (`innate <ability>`), by the same key.
+    pub cooldown: HashMap<(String, i32), InnateCooldown>,
+}
+
+/// How long a character waits to reuse a racial active
+/// (`RaceAbilities.cooldown_*`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InnateCooldown {
+    /// MUD hours (75 real seconds each), before any stat adjustment.
+    pub hours: i32,
+    /// Stat name (`CON`) whose small skill bonus is subtracted from `hours`.
+    pub stat: Option<String>,
+    /// Completes "You can <phrase> again in N seconds."
+    pub phrase: Option<String>,
 }
 
 impl RaceAbilitiesData {
@@ -1801,6 +1815,18 @@ impl RaceAbilitiesData {
     pub fn insert(&mut self, race: &str, ability_id: i32, proficiency_cap: i32) {
         self.proficiency_cap
             .insert((race.to_ascii_lowercase(), ability_id), proficiency_cap);
+    }
+
+    /// Record the cooldown of a row inserted with [`Self::insert`].
+    pub fn set_cooldown(&mut self, race: &str, ability_id: i32, cooldown: InnateCooldown) {
+        self.cooldown
+            .insert((race.to_ascii_lowercase(), ability_id), cooldown);
+    }
+
+    /// The cooldown `race` (any case) has on `ability_id`, if it has one.
+    #[must_use]
+    pub fn cooldown_of(&self, race: &str, ability_id: i32) -> Option<&InnateCooldown> {
+        self.cooldown.get(&(race.to_ascii_lowercase(), ability_id))
     }
 
     /// True if `race` (any case) grants `ability_id`.

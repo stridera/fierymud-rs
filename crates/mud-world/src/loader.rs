@@ -470,8 +470,34 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     // RaceAbilities: race-innate grants (legacy `races[race].skills`),
     // consulted alongside ClassSkills when a mob's skill is checked.
     let mut race_abilities_data = crate::resources::RaceAbilitiesData::default();
-    for r in mud_db::race_abilities::list_all(pool).await? {
+    let race_ability_rows = match mud_db::race_abilities::list_all(pool).await {
+        Ok(rows) => rows,
+        Err(e) if is_missing_schema(&e) => {
+            let e = schema_gap(
+                e,
+                "column \"RaceAbilities\".cooldown_hours",
+                "apply fierylib/data/sql/2026-10-10-race-innate-actives.sql (and deploy the muditor schema)",
+            );
+            error!(
+                "{e}; booting with NO racial innate cooldowns (innate abilities can be spammed)"
+            );
+            mud_db::race_abilities::list_all_without_cooldowns(pool).await?
+        }
+        Err(e) => return Err(e),
+    };
+    for r in race_ability_rows {
         race_abilities_data.insert(&r.race, r.ability_id, r.proficiency_cap);
+        if let Some(hours) = r.cooldown_hours {
+            race_abilities_data.set_cooldown(
+                &r.race,
+                r.ability_id,
+                crate::resources::InnateCooldown {
+                    hours,
+                    stat: r.cooldown_stat,
+                    phrase: r.cooldown_phrase,
+                },
+            );
+        }
     }
     world.insert_resource(race_abilities_data);
 

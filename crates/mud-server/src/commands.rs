@@ -15511,6 +15511,17 @@ pub(crate) fn invoke_ability_with(
         }
     }
 
+    // Racial cooldown gate: an ability the caster's race grants (and
+    // `RaceAbilities` gives a cooldown) is limited on every path that
+    // invokes it, `innate` and plain `cast` / `chant` / `perform` alike.
+    if !aoe_repeat
+        && !from_item
+        && let Some(refusal) = innate::cooldown_refusal(world, player, &def)
+    {
+        send_to(world, player, refusal);
+        return;
+    }
+
     // SUMMON-specific early gates. The dispatcher arm catches these
     // again as a safety net, but that fires *after* the 8s wind-up
     // + slot deduction — an expensive penalty for what's usually a
@@ -19427,6 +19438,11 @@ pub(crate) fn invoke_ability_with(
             .unwrap_or_default();
         cd.ready_at.insert(def.id, ready_at);
         crate::commands::try_insert(world, player, cd);
+    }
+    // A race-granted active that landed starts its per-character racial
+    // cooldown, kept apart from the ability's own `cooldown_ms` one.
+    if !aoe_repeat && !from_item && !applied_msgs.is_empty() {
+        innate::start_cooldown(world, player, &def);
     }
     // USE_SKILL quest objective: ability resolved successfully.
     // Bumped here (post-cooldown) so failed-cast paths (early

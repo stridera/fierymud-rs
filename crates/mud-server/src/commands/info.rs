@@ -13150,11 +13150,18 @@ pub(crate) fn cmd_cooldowns(world: &mut World, player: Entity, _args: &str) {
             .iter()
             .filter(|(_, ready)| **ready > now)
             .map(|(id, ready)| {
+                // A racial active's own cooldown is keyed by the negated id.
+                let (ability_id, innate) = if *id < 0 { (-*id, true) } else { (*id, false) };
                 let name = catalog
                     .by_name
                     .values()
-                    .find(|d| d.id == *id)
-                    .map_or_else(|| format!("ability #{id}"), |d| d.name.clone());
+                    .find(|d| d.id == ability_id)
+                    .map_or_else(|| format!("ability #{ability_id}"), |d| d.name.clone());
+                let name = if innate {
+                    format!("{name} (innate)")
+                } else {
+                    name
+                };
                 let remaining = ready.saturating_duration_since(now).as_secs_f32();
                 (name, remaining)
             })

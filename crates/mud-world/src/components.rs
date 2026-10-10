@@ -2138,6 +2138,14 @@ pub struct Cooldowns {
     pub ready_at: std::collections::HashMap<i32, std::time::Instant>,
 }
 
+/// Key under which a racial active's own cooldown lives in [`Cooldowns`]:
+/// the negated `Ability.id`, so it never collides with the ability's normal
+/// `cooldown_ms` entry. Persisted with the rest of the table.
+#[must_use]
+pub const fn innate_cooldown_key(ability_id: i32) -> i32 {
+    -ability_id
+}
+
 /// Following state: this entity moves automatically when the target moves.
 /// Distinct from Located — followers retain their own Located even while
 /// chasing the leader, and the follow edge is preserved across rooms.

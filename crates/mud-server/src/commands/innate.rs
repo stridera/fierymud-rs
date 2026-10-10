@@ -12,7 +12,10 @@
 use bevy_ecs::prelude::{Entity, World};
 use mud_db::abilities::AbilityKind;
 use mud_world::targeting::{NameRank, rank_ability_name};
-use mud_world::{AbilityCatalog, AbilityDef, Profile, RaceAbilitiesData};
+use mud_world::{
+    AbilityCatalog, AbilityDef, Cooldowns, CoreStats, Profile, RaceAbilitiesData,
+    innate_cooldown_key,
+};
 
 use crate::commands::{invoke_ability, send_to};
 
@@ -36,6 +39,104 @@ pub(crate) fn racial_actives(world: &World, player: Entity) -> Vec<AbilityDef> {
         .collect();
     out.sort_by_key(|d| d.plain_name.to_ascii_lowercase());
     out
+}
+
+/// Real seconds in one MUD hour (legacy `SECS_PER_MUD_HOUR`).
+const SECS_PER_MUD_HOUR: u64 = 75;
+
+/// Legacy `LVL_IMMORT`: characters above it ignore innate cooldowns.
+const LVL_IMMORT: i32 = 100;
+
+/// Legacy `stat_bonus[x].skill_small` (`constants.cpp`): -7 at 0 rising to
+/// -1 at 44, zero through 59, then 1 at 60 rising to 5 at 100, each value
+/// truncated toward zero from single-precision arithmetic as the legacy
+/// table is built. A fixed legacy curve, not builder-tunable content.
+#[must_use]
+pub(crate) fn skill_small_bonus(stat: i32) -> i32 {
+    let stat = stat.clamp(0, 100);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    let x = stat as f32;
+    #[allow(clippy::cast_possible_truncation)]
+    match stat {
+        0..=44 => (6.0_f32 / 44.0 * x - 7.0) as i32,
+        45..=59 => 0,
+        _ => (1.0_f32 / 10.0 * x - 5.0) as i32,
+    }
+}
+
+/// The caller's `stat` (`STR`..`CHA`, any case) score, if `stat` names one.
+fn stat_score(world: &World, player: Entity, stat: &str) -> Option<i32> {
+    let core = world.get::<CoreStats>(player)?;
+    match stat.to_ascii_uppercase().as_str() {
+        "STR" => Some(core.strength),
+        "DEX" => Some(core.dexterity),
+        "CON" => Some(core.constitution),
+        "INT" => Some(core.intelligence),
+        "WIS" => Some(core.wisdom),
+        "CHA" => Some(core.charisma),
+        _ => None,
+    }
+}
+
+/// Real seconds the caller must wait after using `def` again, from their
+/// race's `RaceAbilities` cooldown (`hours` minus the stat's small skill
+/// bonus, in MUD hours). `None` when the row has no cooldown.
+fn cooldown_secs(world: &World, player: Entity, def: &AbilityDef) -> Option<u64> {
+    let race = world.get::<Profile>(player)?.race.clone();
+    let cd = world
+        .get_resource::<RaceAbilitiesData>()?
+        .cooldown_of(&race, def.id)?;
+    let bonus = cd
+        .stat
+        .as_deref()
+        .and_then(|stat| stat_score(world, player, stat))
+        .map_or(0, skill_small_bonus);
+    let hours = u64::try_from(cd.hours.saturating_sub(bonus)).ok()?;
+    (hours > 0).then(|| hours * SECS_PER_MUD_HOUR)
+}
+
+/// The refusal while `def` is still on cooldown for the caller (legacy
+/// `do_innate`), or `None` when it is ready.
+pub(crate) fn cooldown_refusal(world: &World, player: Entity, def: &AbilityDef) -> Option<String> {
+    if mud_world::effective_level(world, player) > LVL_IMMORT {
+        return None;
+    }
+    let ready_at = *world
+        .get::<Cooldowns>(player)?
+        .ready_at
+        .get(&innate_cooldown_key(def.id))?;
+    let left = ready_at.checked_duration_since(std::time::Instant::now())?;
+    // Round up: a cooldown still running never reads "0 seconds".
+    let secs = left.as_secs() + u64::from(left.subsec_nanos() > 0);
+    let unit = if secs == 1 { "second" } else { "seconds" };
+    let phrase = world
+        .get_resource::<RaceAbilitiesData>()
+        .and_then(|d| {
+            let race = &world.get::<Profile>(player)?.race;
+            d.cooldown_of(race, def.id)?.phrase.clone()
+        })
+        .unwrap_or_else(|| "use that".to_string());
+    Some(format!(
+        "You're too tired right now.\r\nYou can {phrase} again in {secs} {unit}.\r\n"
+    ))
+}
+
+/// Start the caller's cooldown on `def` (it just landed), if their race
+/// gives it one.
+pub(crate) fn start_cooldown(world: &mut World, player: Entity, def: &AbilityDef) {
+    let Some(secs) = cooldown_secs(world, player, def) else {
+        return;
+    };
+    if mud_world::effective_level(world, player) > LVL_IMMORT {
+        return;
+    }
+    let ready_at = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    let mut cd = world
+        .get_mut::<Cooldowns>(player)
+        .map(|mut c| std::mem::take(&mut *c))
+        .unwrap_or_default();
+    cd.ready_at.insert(innate_cooldown_key(def.id), ready_at);
+    crate::commands::try_insert(world, player, cd);
 }
 
 /// The caller's racial breath weapon (`BREATHE_*`), if their race has one.
@@ -133,12 +234,15 @@ pub(crate) fn use_innate(world: &mut World, player: Entity, args: &str) {
 mod tests {
     use super::*;
     use crate::commands::test_support::{Rx, ability_def, drain, player_in};
+    use mud_world::CoreStats;
     use mud_world::{Profile, Room};
 
     const SYLL: i32 = 1;
     const MISSILE: i32 = 2;
     const SLASH: i32 = 3;
     const BREATH: i32 = 4;
+    const DOOR: i32 = 5;
+    const BARK: i32 = 6;
 
     fn world_with_races() -> (World, Entity, Entity, Rx) {
         let mut world = World::new();
@@ -152,7 +256,11 @@ mod tests {
         breath.plain_name = "BREATHE_FIRE".into();
         let mut missile = ability_def(MISSILE, "Magic Missile", AbilityKind::Spell);
         missile.plain_name = "MAGIC_MISSILE".into();
-        for d in [syll, missile, slash, breath] {
+        let mut door = ability_def(DOOR, "Dimension Door", AbilityKind::Spell);
+        door.plain_name = "DIMENSION_DOOR".into();
+        let mut bark = ability_def(BARK, "Barkskin", AbilityKind::Spell);
+        bark.plain_name = "BARKSKIN".into();
+        for d in [syll, missile, slash, breath, door, bark] {
             catalog.by_name.insert(d.plain_name.to_ascii_lowercase(), d);
         }
         world.insert_resource(catalog);
@@ -162,6 +270,16 @@ mod tests {
         race.insert("ELF", MISSILE, 100);
         race.insert("ELF", SLASH, 100);
         race.insert("DRAGONBORN_FIRE", BREATH, 100);
+        race.insert("FAERIE_SEELIE", DOOR, 100);
+        race.insert("ARBOREAN", BARK, 100);
+        let cd = |hours, stat: Option<&str>, phrase: &str| mud_world::InnateCooldown {
+            hours,
+            stat: stat.map(str::to_string),
+            phrase: Some(phrase.to_string()),
+        };
+        race.set_cooldown("ELF", SYLL, cd(7, None, "improve your grace"));
+        race.set_cooldown("FAERIE_SEELIE", DOOR, cd(7, None, "traverse the Reverie"));
+        race.set_cooldown("ARBOREAN", BARK, cd(20, Some("CON"), "armor yourself"));
         world.insert_resource(race);
         let room = world.spawn(Room).id();
         let (elf, rx) = player_in(&mut world, room);
@@ -290,5 +408,170 @@ mod tests {
             world2.get::<mud_world::Stamina>(human2).unwrap().current < 50,
             "breathing costs stamina: {out}"
         );
+    }
+
+    fn ready_in(world: &mut World, e: Entity, ability: i32, secs: u64) {
+        let mut cd = world
+            .get_mut::<Cooldowns>(e)
+            .map(|mut c| std::mem::take(&mut *c));
+        let mut cd = cd.take().unwrap_or_default();
+        cd.ready_at.insert(
+            innate_cooldown_key(ability),
+            std::time::Instant::now() + std::time::Duration::from_secs(secs),
+        );
+        world.entity_mut(e).insert(cd);
+    }
+
+    fn knows(world: &mut World, e: Entity, ability: i32) {
+        world.insert_resource(mud_world::SpellSlotData::default());
+        world.insert_resource(mud_world::ClassSkillsData::default());
+        world.entity_mut(e).insert((
+            mud_world::Health { hp: 50, max: 50 },
+            mud_world::KnownAbilities {
+                entries: vec![(ability, 1000, true)],
+            },
+        ));
+    }
+
+    #[test]
+    fn innate_on_cooldown_is_refused_with_the_legacy_message() {
+        let (mut world, elf, _human, mut rx) = world_with_races();
+        knows(&mut world, elf, SYLL);
+        ready_in(&mut world, elf, SYLL, 100);
+        use_innate(&mut world, elf, "syll");
+        let out = drain(&mut rx);
+        assert!(
+            out.contains("You're too tired right now.\r\nYou can improve your grace again in 100 seconds.\r\n"),
+            "{out}"
+        );
+        assert!(world.get::<mud_world::Casting>(elf).is_none());
+    }
+
+    #[test]
+    fn innate_is_usable_again_after_the_cooldown_expires() {
+        let (mut world, elf, _human, mut rx) = world_with_races();
+        knows(&mut world, elf, SYLL);
+        let past = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(1))
+            .unwrap();
+        world.entity_mut(elf).insert(Cooldowns {
+            ready_at: [(innate_cooldown_key(SYLL), past)].into(),
+        });
+        use_innate(&mut world, elf, "syll");
+        let out = drain(&mut rx);
+        assert!(!out.contains("too tired"), "{out}");
+        assert!(world.get::<mud_world::Casting>(elf).is_some(), "{out}");
+    }
+
+    #[test]
+    fn plain_cast_of_a_race_granted_ability_obeys_the_same_cooldown() {
+        let (mut world, elf, _human, mut rx) = world_with_races();
+        let room = world.get::<mud_world::Located>(elf).unwrap().0;
+        let (faerie, mut frx) = player_in(&mut world, room);
+        world.entity_mut(faerie).insert(profile("FAERIE_SEELIE"));
+        knows(&mut world, faerie, DOOR);
+        ready_in(&mut world, faerie, DOOR, 300);
+        invoke_ability(
+            &mut world,
+            faerie,
+            "'dimension door'",
+            AbilityKind::Spell,
+            "cast",
+        );
+        let out = drain(&mut frx);
+        assert!(
+            out.contains("You can traverse the Reverie again in 300 seconds."),
+            "{out}"
+        );
+        assert!(world.get::<mud_world::Casting>(faerie).is_none());
+        // Off cooldown the very same cast begins.
+        world.entity_mut(faerie).insert(Cooldowns::default());
+        invoke_ability(
+            &mut world,
+            faerie,
+            "'dimension door'",
+            AbilityKind::Spell,
+            "cast",
+        );
+        let out = drain(&mut frx);
+        assert!(!out.contains("too tired"), "{out}");
+        assert!(world.get::<mud_world::Casting>(faerie).is_some(), "{out}");
+        let _ = drain(&mut rx);
+    }
+
+    #[test]
+    fn the_cooldown_belongs_to_the_race_grant_not_to_the_ability() {
+        // A human casting the same spell is not limited by the elf's row.
+        let (mut world, _elf, human, mut rx) = world_with_races();
+        knows(&mut world, human, SYLL);
+        ready_in(&mut world, human, SYLL, 100);
+        invoke_ability(&mut world, human, "'inn_syll'", AbilityKind::Spell, "cast");
+        assert!(!drain(&mut rx).contains("too tired"));
+    }
+
+    #[test]
+    fn cooldown_length_is_mud_hours_minus_the_stat_bonus() {
+        let (mut world, elf, human, _rx) = world_with_races();
+        let def = |w: &World, name: &str| w.resource::<AbilityCatalog>().by_name[name].clone();
+        let sylldef = def(&world, "inn_syll");
+        assert_eq!(cooldown_secs(&world, elf, &sylldef), Some(7 * 75));
+        assert_eq!(
+            cooldown_secs(&world, human, &sylldef),
+            None,
+            "no row, no cooldown"
+        );
+        let bark = def(&world, "barkskin");
+        world.entity_mut(human).insert(profile("ARBOREAN"));
+        for (con, hours) in [(50, 20), (60, 19), (80, 17), (100, 15), (20, 24)] {
+            world.entity_mut(human).insert(CoreStats {
+                strength: 50,
+                dexterity: 50,
+                constitution: con,
+                intelligence: 50,
+                wisdom: 50,
+                charisma: 50,
+            });
+            assert_eq!(
+                cooldown_secs(&world, human, &bark),
+                Some(hours * 75),
+                "CON {con}"
+            );
+        }
+    }
+
+    #[test]
+    fn landing_starts_the_cooldown_and_gods_ignore_it() {
+        let (mut world, elf, _human, _rx) = world_with_races();
+        let def = world.resource::<AbilityCatalog>().by_name["inn_syll"].clone();
+        start_cooldown(&mut world, elf, &def);
+        let ready = world.get::<Cooldowns>(elf).unwrap().ready_at[&innate_cooldown_key(SYLL)];
+        let left = ready
+            .saturating_duration_since(std::time::Instant::now())
+            .as_secs();
+        assert!((7 * 75 - 2..=7 * 75).contains(&left), "{left}");
+        assert!(
+            !world
+                .get::<Cooldowns>(elf)
+                .unwrap()
+                .ready_at
+                .contains_key(&SYLL),
+            "the spell's own cooldown entry is untouched"
+        );
+        assert!(cooldown_refusal(&world, elf, &def).is_some());
+        world.entity_mut(elf).get_mut::<Profile>().unwrap().level = 101;
+        assert!(cooldown_refusal(&world, elf, &def).is_none());
+    }
+
+    #[test]
+    fn skill_small_bonus_follows_the_legacy_table() {
+        assert_eq!(skill_small_bonus(0), -7);
+        assert_eq!(skill_small_bonus(44), -1);
+        for x in 45..=59 {
+            assert_eq!(skill_small_bonus(x), 0, "{x}");
+        }
+        assert_eq!(skill_small_bonus(60), 1);
+        assert_eq!(skill_small_bonus(80), 3);
+        assert_eq!(skill_small_bonus(100), 5);
+        assert_eq!(skill_small_bonus(250), 5, "clamped");
     }
 }

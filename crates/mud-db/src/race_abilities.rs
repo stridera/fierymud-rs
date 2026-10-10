@@ -53,6 +53,14 @@ pub struct RaceGrantRow {
     pub race: String,
     pub ability_id: i32,
     pub proficiency_cap: i32,
+    /// MUD hours before the same character may use this racial active
+    /// again (`innate <ability>`); `None` = no cooldown.
+    pub cooldown_hours: Option<i32>,
+    /// Stat (`CON`, ...) whose legacy small skill bonus is subtracted from
+    /// `cooldown_hours` (barkskin: 20 - CON bonus).
+    pub cooldown_stat: Option<String>,
+    /// "You can `<phrase>` again in N seconds." for the refusal line.
+    pub cooldown_phrase: Option<String>,
 }
 
 /// Every race-innate row, for the boot-time `RaceAbilitiesData` load.
@@ -63,7 +71,31 @@ pub async fn list_all(pool: &PgPool) -> sqlx::Result<Vec<RaceGrantRow>> {
         SELECT
             race::text AS "race!: String",
             ability_id,
-            proficiency_cap
+            proficiency_cap,
+            cooldown_hours,
+            cooldown_stat,
+            cooldown_phrase
+        FROM "RaceAbilities"
+        "#
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// [`list_all`] for a database that predates the cooldown columns
+/// (`fierylib/data/sql/2026-10-10-race-innate-actives.sql` not applied
+/// yet): every row, with no cooldown.
+pub async fn list_all_without_cooldowns(pool: &PgPool) -> sqlx::Result<Vec<RaceGrantRow>> {
+    sqlx::query_as!(
+        RaceGrantRow,
+        r#"
+        SELECT
+            race::text AS "race!: String",
+            ability_id,
+            proficiency_cap,
+            NULL::int  AS cooldown_hours,
+            NULL::text AS cooldown_stat,
+            NULL::text AS cooldown_phrase
         FROM "RaceAbilities"
         "#
     )
