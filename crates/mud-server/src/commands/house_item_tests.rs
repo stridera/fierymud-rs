@@ -613,3 +613,102 @@ async fn place_get_reload_leaves_exactly_one_sword() {
     assert_eq!(world.get::<Located>(sword).unwrap().0, owner);
     db.end().await;
 }
+
+// ---------------------------------------------------------------------------
+// Containers: contents are not persisted with a placed item
+// ---------------------------------------------------------------------------
+
+use super::info::cmd_put;
+
+fn bag_world() -> (World, Entity, Entity, super::test_support::Rx) {
+    let (mut world, room, owner, rx) = house_world();
+    let mut bag = object_proto(30, 8, ObjectType::Container);
+    bag.name = "a leather bag".into();
+    bag.keywords = vec!["bag".into()];
+    world
+        .resource_mut::<ObjectPrototypes>()
+        .by_key
+        .insert((30, 8), bag);
+    (world, room, owner, rx)
+}
+
+fn bag_at(world: &mut World, holder: Entity) -> Entity {
+    world
+        .spawn((
+            Item,
+            Named {
+                name: "a leather bag".into(),
+            },
+            Keywords(vec!["bag".into()]),
+            WorldKey { zone: 30, id: 8 },
+            Located(holder),
+        ))
+        .id()
+}
+
+fn sword_at(world: &mut World, holder: Entity) -> Entity {
+    world
+        .spawn((
+            Item,
+            Named {
+                name: "a plain sword".into(),
+            },
+            Keywords(vec!["sword".into()]),
+            WorldKey { zone: 30, id: 7 },
+            Located(holder),
+        ))
+        .id()
+}
+
+#[test]
+fn a_container_with_contents_cannot_be_placed() {
+    let (mut world, room, owner, mut rx) = bag_world();
+    let bag = bag_at(&mut world, owner);
+    let sword = sword_at(&mut world, bag);
+    cmd_house_place(&mut world, owner, &house_summary(), "bag");
+    let out = drain(&mut rx);
+    assert!(out.contains("Empty it first"), "{out}");
+    assert_eq!(world.get::<Located>(bag).unwrap().0, owner);
+    assert!(world.get::<HousePlacement>(bag).is_none());
+    assert_eq!(world.get::<Located>(sword).unwrap().0, bag);
+
+    // Once emptied it places fine.
+    world.entity_mut(sword).insert(Located(owner));
+    cmd_house_place(&mut world, owner, &house_summary(), "bag");
+    assert_eq!(world.get::<Located>(bag).unwrap().0, room);
+}
+
+#[test]
+fn nothing_can_be_put_into_a_placed_container() {
+    let (mut world, room, owner, mut rx) = bag_world();
+    for marker in [
+        Some(HouseItem(3)),
+        None, // placed this session: carries a HousePlacement instead
+    ] {
+        let bag = bag_at(&mut world, room);
+        match marker {
+            Some(m) => world.entity_mut(bag).insert(m),
+            None => world.entity_mut(bag).insert(HousePlacement::pending()),
+        };
+        let sword = sword_at(&mut world, owner);
+        cmd_put(&mut world, owner, "sword bag");
+        let out = drain(&mut rx);
+        assert!(out.contains("can't hold anything"), "{out}");
+        assert_eq!(world.get::<Located>(sword).unwrap().0, owner);
+        cmd_put(&mut world, owner, "all bag");
+        assert!(drain(&mut rx).contains("can't hold anything"));
+        assert_eq!(world.get::<Located>(sword).unwrap().0, owner);
+        world.despawn(bag);
+        world.despawn(sword);
+    }
+}
+
+#[test]
+fn an_ordinary_carried_bag_still_takes_items() {
+    let (mut world, _room, owner, mut rx) = bag_world();
+    let bag = bag_at(&mut world, owner);
+    let sword = sword_at(&mut world, owner);
+    cmd_put(&mut world, owner, "sword bag");
+    assert!(drain(&mut rx).contains("You put"));
+    assert_eq!(world.get::<Located>(sword).unwrap().0, bag);
+}

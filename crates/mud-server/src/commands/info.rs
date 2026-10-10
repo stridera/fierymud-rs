@@ -11221,6 +11221,22 @@ fn put_plain(world: &mut World, player: Entity, args: &str) {
         return;
     }
 
+    // A placed house item is stored as a single row: whatever went inside
+    // would be gone after the next reboot (and a pickup would not take it).
+    if world.get::<mud_world::HouseItem>(container).is_some()
+        || world.get::<mud_world::HousePlacement>(container).is_some()
+    {
+        send_rendered(
+            world,
+            player,
+            &format!(
+                "{container_name} is part of your house and can't hold anything. \
+                 Take it with 'house take' first.\r\n"
+            ),
+        );
+        return;
+    }
+
     // `put all in <container>` — store every carried (non-equipped)
     // item in the target. Skips the container itself.
     // `put all.<filter> in <container>` restricts to items whose
@@ -15296,6 +15312,19 @@ pub(crate) fn cmd_house_place(
         return;
     };
     let item_name = name_of(world, item);
+    // A placed item is one row: anything inside a container would not be
+    // stored with it and would vanish at the next reboot.
+    if world
+        .get::<mud_world::Contents>(item)
+        .is_some_and(|c| c.iter().next().is_some())
+    {
+        send_rendered(
+            world,
+            player,
+            &format!("{item_name} still has things in it. Empty it first.\r\n"),
+        );
+        return;
+    }
     // Captured before the item leaves the player's hands: the label and any
     // enchantment / curse are stored with the row.
     let custom = house_item_custom(world, item);
