@@ -1306,19 +1306,50 @@ fn go_linkdead(world: &mut World, entity: Entity) {
     info!(entity = ?entity, "connection lost mid-fight; character stays in the world");
 }
 
+/// Every `PersistentPet` (paid pet, charmed mob, saved mount) following
+/// `owner`.
+fn persistent_pets(world: &mut World, owner: Entity) -> Vec<Entity> {
+    let mut q =
+        world.query_filtered::<(Entity, &Follower), (With<Mob>, With<mud_world::PersistentPet>)>();
+    q.iter(world)
+        .filter(|(_, f)| f.0 == owner)
+        .map(|(e, _)| e)
+        .collect()
+}
+
+/// Move whatever `owner`'s persistent pets carry or wear into the owner's
+/// pack. The save records a pet as prototype, name and hp only, so gear
+/// handed to a pet (`give sword wolf`, an `order` pickup) would vanish with
+/// the pet when its owner leaves; in the pack it is saved with the owner.
+/// Must run BEFORE the owner's final save snapshot.
+fn hand_pet_gear_to_owner(world: &mut World, owner: Entity) {
+    for pet in persistent_pets(world, owner) {
+        let items: Vec<Entity> = world
+            .get::<mud_world::Contents>(pet)
+            .map(|c| {
+                c.iter()
+                    .filter(|e| world.get::<Item>(*e).is_some())
+                    .collect()
+            })
+            .unwrap_or_default();
+        for item in items {
+            // Worn gear stops affecting the pet, then rides in the pack
+            // (nested items stay inside their container).
+            crate::equip_apply::release_gear(world, item);
+            commands::try_remove::<EquippedSlot>(world, item);
+            if let Ok(mut e) = world.get_entity_mut(item) {
+                e.insert(Located(owner));
+            }
+        }
+    }
+}
+
 /// Remove every `PersistentPet` (paid pet, charmed mob, saved mount)
-/// following `owner` from the world, with whatever it carries. Called when
-/// the owner leaves, after the save that records them.
+/// following `owner` from the world. Called when the owner leaves, after the
+/// save that records them. Their gear was already handed to the owner
+/// ([`hand_pet_gear_to_owner`]); anything left is destroyed with the pet.
 fn despawn_persistent_pets(world: &mut World, owner: Entity) {
-    let pets: Vec<Entity> = {
-        let mut q = world
-            .query_filtered::<(Entity, &Follower), (With<Mob>, With<mud_world::PersistentPet>)>();
-        q.iter(world)
-            .filter(|(_, f)| f.0 == owner)
-            .map(|(e, _)| e)
-            .collect()
-    };
-    for pet in pets {
+    for pet in persistent_pets(world, owner) {
         commands::extract_mob(world, pet, None, true);
     }
 }
@@ -1354,6 +1385,9 @@ async fn retire_player(world: &mut World, entity: Entity, pool: &PgPool) {
             &commands::cap_sentence_start(&departure),
         );
     }
+    // Gear on the owner's pets rides in the owner's pack: a pet is saved
+    // without its items, so this must precede the save snapshot.
+    hand_pet_gear_to_owner(world, entity);
     // Disconnect path — player is gone before we could
     // report a partial save. A failed write is handed to the
     // background writer for retry before the entity (and its
@@ -1512,6 +1546,7 @@ impl ConnRouter {
             // tracing::warn inside save_player covers staff
             // diagnostics. A failed write is retried in the background
             // (and awaited by the flush below, up to its timeout).
+            hand_pet_gear_to_owner(world, entity);
             let outcome = save_player_final(world, entity, pool).await;
             retry_failed_save(world, outcome, pool);
         }
@@ -10833,6 +10868,65 @@ mod tests {
         assert!(world.get_entity(wolf).is_err(), "saved pet despawned");
         assert!(world.get_entity(tagalong).is_ok(), "unsaved follower stays");
         assert!(world.get_entity(others_pet).is_ok(), "other's pet stays");
+    }
+
+    /// Gear handed to a pet (carried or worn) must not die with the pet when
+    /// its owner quits: it moves into the owner's pack before the final save,
+    /// so the next login finds it there.
+    #[tokio::test(flavor = "current_thread")]
+    async fn gear_on_a_pet_is_saved_with_the_owner_on_quit() {
+        let Some((pool, _db_lock)) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let Some((oz, oid)) = first_object(&pool).await else {
+            return;
+        };
+        let (_user, c) = temp_unlinked_char(&pool, "petgear").await;
+        let mut world = World::new();
+        world.insert_resource(SaveCoordinator::default());
+        let room = world.spawn_empty().id();
+        let me = spawn_player_for(&mut world, &c.id, room);
+        let wolf = world
+            .spawn((
+                Mob,
+                Named {
+                    name: "a wolf".into(),
+                },
+                WorldKey { zone: 30, id: 1 },
+                Health { hp: 20, max: 20 },
+                Located(room),
+                Follower(me),
+                mud_world::PersistentPet,
+            ))
+            .id();
+        world.spawn((Item, WorldKey { zone: oz, id: oid }, Located(wolf)));
+        world.spawn((
+            Item,
+            WorldKey { zone: oz, id: oid },
+            Located(wolf),
+            EquippedSlot(mud_world::Slot::Wield),
+        ));
+
+        let mut router = ConnRouter::new();
+        router.playing.insert(1, me);
+        router.on_disconnect(&mut world, 1, &pool).await;
+        let coordinator = world.resource::<SaveCoordinator>().clone();
+        assert!(coordinator.flush(&mut world, Duration::from_secs(10)).await);
+
+        assert!(world.get_entity(wolf).is_err(), "pet despawned");
+        assert!(world.get_entity(me).is_err(), "owner despawned");
+        let rows: Vec<(i32, Option<String>)> = mud_db::sqlx::query_as(
+            "SELECT id, equipped_location::text FROM \"CharacterItems\" \
+             WHERE character_id = $1 ORDER BY id",
+        )
+        .bind(&c.id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 2, "both the carried and the worn item saved");
+        drop_item_rows(&pool, &[&c.id]).await;
+        temp_cleanup(&pool, &[], &[&c.id], &[]).await;
     }
 
     static RELOG_RETRY: &[Duration] = &[Duration::from_millis(150)];
