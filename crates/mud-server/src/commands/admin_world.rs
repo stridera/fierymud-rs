@@ -417,7 +417,9 @@ inventory::submit! {
             long: "Builder+. Writes the row in the target's \
                    KnownAbilities. Inserts a new entry when the \
                    ability isn't already learned. Proficiency is \
-                   0..=1000 (legacy convention).",
+                   0..=1000 (legacy convention). Multi-word abilities \
+                   work as written or quoted: skillset bob 'sphere of \
+                   healing' 1000.",
         },
         run: cmd_skillset,
     }
@@ -2082,20 +2084,38 @@ pub(crate) fn cmd_advance(world: &mut World, player: Entity, args: &str) {
     );
 }
 
+/// Split `skillset <player> <ability...> <proficiency>` into its three
+/// parts. The player is the first word and the proficiency the last, so
+/// whatever lies between is the ability name: multi-word names work bare
+/// (`sphere of healing`) or quoted (`'sphere of healing'`, `"..."`).
+fn split_skillset_args(args: &str) -> Option<(&str, &str, &str)> {
+    let (target, rest) = args.trim().split_once(char::is_whitespace)?;
+    let (ability, prof) = rest.trim().rsplit_once(char::is_whitespace)?;
+    let ability = ability.trim();
+    let ability = ['\'', '"']
+        .iter()
+        .find_map(|q| {
+            ability
+                .strip_prefix(*q)
+                .and_then(|a| a.strip_suffix(*q))
+                .map(str::trim)
+        })
+        .unwrap_or(ability);
+    (!ability.is_empty()).then_some((target, ability, prof.trim()))
+}
+
 pub(crate) fn cmd_skillset(world: &mut World, player: Entity, args: &str) {
     record_admin_action(world, player, "skillset", args);
-    let parts: Vec<&str> = args.splitn(3, char::is_whitespace).collect();
-    if parts.len() != 3 {
+    let Some((target_word, ability_word, prof_word)) = split_skillset_args(args) else {
         send_to(
             world,
             player,
-            "Usage: skillset <player> <ability> <proficiency>\r\n",
+            "Usage: skillset <player> <ability> <proficiency>\r\n\
+             (quote multi-word abilities if you like: skillset bob 'sphere of healing' 1000)\r\n",
         );
         return;
-    }
-    let target_word = parts[0];
-    let ability_word = parts[1].trim();
-    let Ok(prof) = parts[2].trim().parse::<i32>() else {
+    };
+    let Ok(prof) = prof_word.parse::<i32>() else {
         send_to(world, player, "Proficiency must be an integer.\r\n");
         return;
     };
@@ -2113,8 +2133,11 @@ pub(crate) fn cmd_skillset(world: &mut World, player: Entity, args: &str) {
     // catalog keys on the lower-cased canonical name.
     let ability_id = world
         .resource::<mud_world::AbilityCatalog>()
-        .by_name
-        .get(&ability_word.to_ascii_lowercase())
+        .find_by_prefix(
+            ability_word,
+            None,
+            world.get::<mud_world::KnownAbilities>(target),
+        )
         .map(|d| d.id);
     let Some(ability_id) = ability_id else {
         send_to(
@@ -3383,5 +3406,87 @@ mod purge_tests {
         assert!(world.get_entity(held).is_ok());
         let out = drain(&mut rx);
         assert!(out.contains("still settling"), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod skillset_tests {
+    use super::*;
+    use crate::commands::test_support::{ability_def, drain, player_in};
+    use mud_db::abilities::AbilityKind;
+    use mud_db::enums::UserRole;
+    use mud_world::{AbilityCatalog, Account, KnownAbilities, Online, Room};
+
+    #[test]
+    fn splits_player_ability_and_trailing_proficiency() {
+        for (args, want) in [
+            ("bob armor 100", Some(("bob", "armor", "100"))),
+            (
+                "bob sphere of healing 1000",
+                Some(("bob", "sphere of healing", "1000")),
+            ),
+            (
+                "bob 'sphere of healing' 1000",
+                Some(("bob", "sphere of healing", "1000")),
+            ),
+            (
+                "bob \"sphere of healing\" 1000",
+                Some(("bob", "sphere of healing", "1000")),
+            ),
+            (
+                "  bob   'cure light'   -5 ",
+                Some(("bob", "cure light", "-5")),
+            ),
+            ("bob armor", None),
+            ("bob", None),
+            ("bob '' 5", None),
+            ("", None),
+        ] {
+            assert_eq!(split_skillset_args(args), want, "{args:?}");
+        }
+    }
+
+    fn admin_and_target() -> (World, Entity, Entity, crate::commands::test_support::Rx) {
+        let mut world = World::new();
+        let mut catalog = AbilityCatalog::default();
+        for (id, name) in [(1, "Armor"), (2, "Sphere of Healing")] {
+            let d = ability_def(id, name, AbilityKind::Spell);
+            catalog.by_name.insert(d.plain_name.to_ascii_lowercase(), d);
+        }
+        world.insert_resource(catalog);
+        let room = world.spawn(Room).id();
+        let (admin, rx) = player_in(&mut world, room);
+        world.entity_mut(admin).insert(Account {
+            user_id: "u".into(),
+            character_id: "c".into(),
+            role: UserRole::Builder,
+            account_role: UserRole::Builder,
+            perms: vec![],
+        });
+        let (target, _trx) = player_in(&mut world, room);
+        world.entity_mut(target).insert((
+            Named {
+                name: "Daedela".into(),
+            },
+            Online,
+        ));
+        (world, admin, target, rx)
+    }
+
+    #[test]
+    fn multi_word_ability_names_set_the_proficiency() {
+        for args in [
+            "daedela 'sphere of healing' 1000",
+            "daedela \"sphere of healing\" 1000",
+            "daedela sphere of healing 1000",
+            "daedela sphere_of_healing 1000",
+        ] {
+            let (mut world, admin, target, mut rx) = admin_and_target();
+            cmd_skillset(&mut world, admin, args);
+            let out = drain(&mut rx);
+            assert!(out.contains("proficiency to 1000"), "{args}: {out}");
+            let known = world.get::<KnownAbilities>(target).unwrap();
+            assert_eq!(known.entries, vec![(2, 1000, true)], "{args}");
+        }
     }
 }
