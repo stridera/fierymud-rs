@@ -17,6 +17,7 @@ mod events;
 mod fear;
 mod flight;
 mod hiding;
+mod house_items;
 mod idle;
 mod item_alter;
 mod item_custom;
@@ -348,6 +349,7 @@ async fn main() {
     corpses::load_from_db(&mut world, &pool).await;
     corpses::register_observers(&mut world);
     flight::register_observers(&mut world);
+    house_items::register_observers(&mut world);
     world.insert_resource(corpses::CorpseDb::spawn(pool.clone()));
     // Restore shop stock deltas from last shutdown so a server
     // restart doesn't silently refill every depleted shelf.

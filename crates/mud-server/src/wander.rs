@@ -341,6 +341,7 @@ pub fn scavenger_tick(world: &mut World) {
             With<Named>,
             Without<Corpse>,
             Without<mud_world::HouseItem>,
+            Without<mud_world::HousePlacement>,
         )>();
         for (item, loc, restrictions) in q.iter(world) {
             // Same gate as the `get` command: a !TAKE item is fixed in

@@ -254,15 +254,19 @@ pub async fn guests_for_house(
 
 /// Insert a placed item with its per-instance state, returning the new row
 /// id so the runtime can attach it to the spawned ECS entity for later
-/// removal.
+/// removal. `inventory_row_id` is the item's `CharacterItems` row (when it
+/// was ever saved): it is deleted in the same transaction, so the item is
+/// never in both a pack and a house, whatever happens next.
 pub async fn place_item(
     pool: &PgPool,
     room_id: i32,
     object_zone_id: i32,
     object_id: i32,
     custom: &HouseItemCustom,
+    inventory_row_id: Option<i32>,
 ) -> sqlx::Result<i32> {
     let values = custom.values();
+    let mut tx = pool.begin().await?;
     let row = sqlx::query!(
         r#"
         INSERT INTO player_house_items
@@ -277,8 +281,17 @@ pub async fn place_item(
         custom.examine,
         values,
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
+    if let Some(inventory_row_id) = inventory_row_id {
+        sqlx::query!(
+            r#"DELETE FROM "CharacterItems" WHERE id = $1"#,
+            inventory_row_id,
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
     Ok(row.id)
 }
 

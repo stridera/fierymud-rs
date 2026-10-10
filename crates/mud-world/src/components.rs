@@ -221,6 +221,77 @@ pub struct HouseRoom {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct HouseItem(pub i32);
 
+/// Where the `PlayerHouseItem` row of an item placed THIS session stands.
+/// The insert runs in a background task, so the row id is not known when
+/// `house place` returns; this shared slot lets a pickup that races the
+/// insert still reach the row. Whoever finishes second cleans up: if the
+/// item was picked up first the insert task deletes the row it just made,
+/// otherwise the pickup deletes the settled row. Items loaded from the
+/// database carry the plain [`HouseItem`] instead.
+#[derive(Component, Debug, Clone)]
+pub struct HousePlacement(std::sync::Arc<std::sync::Mutex<PlacementState>>);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlacementState {
+    /// Insert still in flight.
+    Pending,
+    /// Row exists with this id.
+    Placed(i32),
+    /// The item left the house (or the row is already being deleted).
+    Released,
+}
+
+impl HousePlacement {
+    #[must_use]
+    pub fn pending() -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(
+            PlacementState::Pending,
+        )))
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, PlacementState> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The insert finished with row `id`. Returns `false` when the item was
+    /// already picked up, in which case the caller must delete the row.
+    #[must_use]
+    pub fn settle(&self, id: i32) -> bool {
+        let mut st = self.state();
+        if *st == PlacementState::Pending {
+            *st = PlacementState::Placed(id);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// The item left the house. Returns the row id to delete when the row
+    /// already exists; `None` when the insert is still in flight (it will
+    /// see the release and clean up) or the item was already released.
+    #[must_use]
+    pub fn release(&self) -> Option<i32> {
+        let mut st = self.state();
+        let row = match *st {
+            PlacementState::Placed(id) => Some(id),
+            PlacementState::Pending | PlacementState::Released => None,
+        };
+        *st = PlacementState::Released;
+        row
+    }
+
+    /// Row id once the insert has finished and the item is still placed.
+    #[must_use]
+    pub fn row_id(&self) -> Option<i32> {
+        match *self.state() {
+            PlacementState::Placed(id) => Some(id),
+            _ => None,
+        }
+    }
+}
+
 /// Loot-claim window on a freshly-spawned mob corpse. Only
 /// `owner` (and their group, once group bridging lands) can `get`
 /// items from this corpse until `expires_at` — past that,

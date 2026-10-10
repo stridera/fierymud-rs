@@ -15299,48 +15299,47 @@ pub(crate) fn cmd_house_place(
     // Captured before the item leaves the player's hands: the label and any
     // enchantment / curse are stored with the row.
     let custom = house_item_custom(world, item);
+    let inventory_row_id = world.get::<mud_world::PersistedItemId>(item).map(|p| p.0);
+    let character_id = world
+        .get::<mud_world::Account>(player)
+        .map(|a| a.character_id.clone());
     if world.get::<Located>(item).is_some() {
         world.entity_mut(item).insert(Located(room));
     }
+    // From here the house row is the item's only persisted form: drop the
+    // stale pack-row stamp, and track the row so a pickup (or `house take`)
+    // deletes it even while the insert below is still in flight.
+    let placement = mud_world::HousePlacement::pending();
+    world
+        .entity_mut(item)
+        .remove::<mud_world::PersistedItemId>()
+        .insert(placement.clone());
     send_rendered(
         world,
         player,
         &format!("You place {item_name} in your house.\r\n"),
     );
-    // Fire-and-forget DB insert; the returned id is attached to
-    // the entity so a later `house take` can DELETE the row.
-    if let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) {
-        let outbound_player = player;
-        tokio::spawn(async move {
-            match mud_db::housing::place_item(
-                &pool,
+    if let Some(character_id) = character_id {
+        crate::house_items::persist_placement(
+            world,
+            crate::house_items::PlacementWrite {
+                character_id,
                 room_row_id,
-                proto_key.zone,
-                proto_key.id,
-                &custom,
-            )
-            .await
-            {
-                Ok(id) => {
-                    tracing::debug!(?outbound_player, item_id = id, "house item placed");
-                    // Note: we don't flow the id back into the
-                    // entity here (would need a world handle).
-                    // The component is attached on next login when
-                    // the row reloads via spawn_house_item.
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "house item place failed");
-                }
-            }
-        });
+                object_zone_id: proto_key.zone,
+                object_id: proto_key.id,
+                custom,
+                inventory_row_id,
+                placement,
+            },
+        );
     }
 }
 
 /// `house take <item>` — pick up a placed item back into the
-/// player's inventory. Requires the item to carry a
-/// `HouseItem(row_id)` component (which only fully-loaded house
-/// items have — items placed *this session* won't be takeable
-/// until next login, see the comment in `cmd_house_place`).
+/// player's inventory. Requires the item to be tracked as a house item
+/// (loaded from its row, or placed this session). Releasing it deletes
+/// its row through `house_items::release_house_item`, the same path a
+/// plain `get` takes.
 pub(crate) fn cmd_house_take(
     world: &mut World,
     player: Entity,
@@ -15366,21 +15365,18 @@ pub(crate) fn cmd_house_take(
             return;
         }
     }
-    // Find a HouseItem in this room matching the keyword.
-    let matched: Option<(Entity, i32, String)> = {
-        let mut q = world.query_filtered::<(
-            Entity,
-            &Located,
-            &Named,
-            Option<&Keywords>,
-            &mud_world::HouseItem,
-        ), With<Item>>();
+    // Find a house item in this room matching the keyword.
+    let matched: Option<(Entity, String)> = {
+        let mut q = world.query_filtered::<(Entity, &Located, &Named, Option<&Keywords>), (
+            With<Item>,
+            Or<(With<mud_world::HouseItem>, With<mud_world::HousePlacement>)>,
+        )>();
         q.iter(world)
-            .filter(|(_, l, _, _, _)| l.0 == room)
-            .find(|(_, _, named, kw, _)| name_or_keyword_matches(target_word, &named.name, *kw))
-            .map(|(e, _, n, _, hi)| (e, hi.0, n.name.clone()))
+            .filter(|(_, l, _, _)| l.0 == room)
+            .find(|(_, _, named, kw)| name_or_keyword_matches(target_word, &named.name, *kw))
+            .map(|(e, _, n, _)| (e, n.name.clone()))
     };
-    let Some((item, house_item_id, item_name)) = matched else {
+    let Some((item, item_name)) = matched else {
         send_rendered(
             world,
             player,
@@ -15392,22 +15388,14 @@ pub(crate) fn cmd_house_take(
         world.entity_mut(item).insert(Located(player));
         crate::hiding::set_hiddenness(world, item, 0);
     }
-    // Strip the FK so the item is now an ordinary carried item.
-    if let Ok(mut e) = world.get_entity_mut(item) {
-        e.remove::<mud_world::HouseItem>();
-    }
+    // Strip the markers and delete the row (the `Located` observer already
+    // did when it is registered; this keeps `take` correct without it).
+    crate::house_items::release_house_item(world, item);
     send_rendered(
         world,
         player,
         &format!("You take {item_name} from the room.\r\n"),
     );
-    if let Some(pool) = world.get_resource::<DbPool>().map(|p| p.0.clone()) {
-        tokio::spawn(async move {
-            if let Err(e) = mud_db::housing::remove_item(&pool, house_item_id).await {
-                tracing::warn!(error = %e, "house item remove failed");
-            }
-        });
-    }
 }
 
 /// `house rename <#> <new name>` and `house describe <#> <text>`.

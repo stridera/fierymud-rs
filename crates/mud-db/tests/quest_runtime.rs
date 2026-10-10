@@ -601,6 +601,7 @@ async fn concurrent_phase_checks_complete_the_quest_once() {
 /// A HOUSING reward creates one house (with a foyer) and is a no-op
 /// the second time, so re-completing a quest never yields two houses.
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn housing_reward_is_granted_once() {
     let Some(fx) = fixture().await else { return };
     // Entrance fallback for races with no start room on record.
@@ -668,7 +669,7 @@ async fn housing_reward_is_granted_once() {
         }),
         charges: Some(0),
     };
-    let placed = mud_db::housing::place_item(&fx.pool, rooms[0].id, oz, oid, &custom)
+    let placed = mud_db::housing::place_item(&fx.pool, rooms[0].id, oz, oid, &custom, None)
         .await
         .unwrap();
     let items = mud_db::housing::items_for_house(&fx.pool, house.id)
@@ -679,5 +680,52 @@ async fn housing_reward_is_granted_once() {
     mud_db::housing::remove_item(&fx.pool, placed)
         .await
         .unwrap();
+
+    // Placing an item that was carried takes its pack row away in the same
+    // transaction, so it can never be in both a pack and a house.
+    let pack_row: i32 = sqlx::query_scalar(
+        "INSERT INTO \"CharacterItems\" (character_id, object_zone_id, object_id, updated_at) \
+         VALUES ($1, $2, $3, NOW()) RETURNING id",
+    )
+    .bind(&fx.char_id)
+    .bind(oz)
+    .bind(oid)
+    .fetch_one(&fx.pool)
+    .await
+    .unwrap();
+    let placed = mud_db::housing::place_item(
+        &fx.pool,
+        rooms[0].id,
+        oz,
+        oid,
+        &mud_db::housing::HouseItemCustom::default(),
+        Some(pack_row),
+    )
+    .await
+    .unwrap();
+    let pack_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM \"CharacterItems\" WHERE id = $1")
+            .bind(pack_row)
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap();
+    assert_eq!(pack_rows, 0, "pack row removed by the placement");
+    let items = mud_db::housing::items_for_house(&fx.pool, house.id)
+        .await
+        .unwrap();
+    assert_eq!(items.iter().filter(|i| i.id == placed).count(), 1);
+    // Removing it (pickup) deletes exactly that row, once.
+    assert_eq!(
+        mud_db::housing::remove_item(&fx.pool, placed)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        mud_db::housing::remove_item(&fx.pool, placed)
+            .await
+            .unwrap(),
+        0
+    );
     fx.end().await;
 }
