@@ -270,9 +270,9 @@ pub fn fire_speech_at(world: &mut World, listener: Entity, speaker: Entity, text
 }
 
 /// Fire SPEECH-flagged triggers for every entity in `room` (other
-/// than the speaker) that carries `AttachedTriggers`. Each listener
-/// runs as `self` with `actor` bound to the speaker, so the 681 corpus
-/// scripts that answer `actor` reply to whoever spoke.
+/// than the speaker) that carries `AttachedTriggers`, then the room's
+/// own. Each listener runs as `self` with `actor` bound to the speaker,
+/// so the 681 corpus scripts that answer `actor` reply to whoever spoke.
 pub fn fire_speech_in_room(world: &mut World, speaker: Entity, room: Entity, text: &str) {
     if crate::deferred_triggers::lua_busy(world) {
         let text = text.to_string();
@@ -286,6 +286,12 @@ pub fn fire_speech_in_room(world: &mut World, speaker: Entity, room: Entity, tex
         .collect();
     for listener in listeners {
         fire_speech_at(world, listener, speaker, text);
+    }
+    // Legacy `do_say` calls `speech_wtrigger` right after
+    // `speech_mtrigger`: the room's own SPEECH triggers (`self` = the
+    // room) hear it too.
+    if world.get::<AttachedTriggers>(room).is_some() {
+        fire_speech_at(world, room, speaker, text);
     }
 }
 
@@ -529,12 +535,38 @@ pub fn fire_receive(world: &mut World, recipient: Entity, giver: Entity, item: E
     }
 }
 
-/// Fire `COMMAND`-flagged triggers for every entity in the player's
-/// room (skipping the player themselves) that carries
-/// `AttachedTriggers`. Each fire binds `cmd` (command word) and
-/// `args` (rest of input) as Lua globals. Returns `true` if any
-/// trigger explicitly returned `false`, signaling the caller to
-/// stop dispatch (the command was consumed by the trigger).
+/// Legacy `command_wtrigger` / `command_mtrigger` / `command_otrigger`
+/// do not run for staff: the interpreter gates them on
+/// `GET_LEVEL(ch) < LVL_IMMORT`. They also skip a wizinvis actor
+/// (`char_susceptible_to_triggers`).
+fn command_triggers_exempt(world: &World, actor: Entity) -> bool {
+    if world
+        .get::<mud_world::WizInvis>(actor)
+        .is_some_and(|w| w.0 > 0)
+    {
+        return true;
+    }
+    crate::room_access::is_immortal(world, actor)
+        && world
+            .get::<mud_world::Profile>(actor)
+            .is_some_and(|p| p.level >= 100)
+}
+
+/// Fire `COMMAND`-flagged triggers for a command `player` just typed,
+/// in the legacy interpreter order (`command_wtrigger ||
+/// command_mtrigger || command_otrigger`):
+///
+/// 1. the room itself (WORLD triggers),
+/// 2. mobs in the room,
+/// 3. objects the player wears, then carries, then objects on the floor.
+///
+/// `cmd` is the typed word. `args` (also bound as `arg`, the name the
+/// converted bodies use) is the rest of the line. Object triggers also
+/// get `location` (`"equip"` / `"inventory"` / `"room"`), the legacy
+/// `OCMD_*` mask the converter folds into a guard in the body.
+///
+/// Returns `true` when a trigger returned `false`, consuming the
+/// command so the caller stops dispatch.
 pub fn fire_command_in_room(
     world: &mut World,
     player: Entity,
@@ -547,42 +579,45 @@ pub fn fire_command_in_room(
     if crate::deferred_triggers::lua_busy(world) {
         return false;
     }
-    let listeners: Vec<Entity> = crate::room_index::contents_of(world, room)
-        .filter(|&e| e != player && world.get::<AttachedTriggers>(e).is_some())
-        .collect();
-    if listeners.is_empty() {
+    if command_triggers_exempt(world, player) {
         return false;
     }
-    let mut consumed = false;
-    for listener in listeners {
-        let to_fire: Vec<(i32, i32, String, String)> = {
-            let Some(at) = world.get::<AttachedTriggers>(listener) else {
-                continue;
-            };
-            let keys = at.0.clone();
-            let catalog = world.resource::<TriggerCatalog>();
-            keys.into_iter()
-                .filter_map(|(zone, id)| {
-                    let def = catalog.by_key.get(&(zone, id))?;
-                    if def.flags.contains(&TriggerEvent::Command) {
-                        Some((zone, id, def.name.clone(), def.commands.clone()))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        };
+    let has_triggers = |world: &World, e: Entity| world.get::<AttachedTriggers>(e).is_some();
+    let in_room: Vec<Entity> = crate::room_index::contents_of(world, room).collect();
+    // (source entity, location label for object triggers)
+    let mut sources: Vec<(Entity, Option<&'static str>)> = Vec::new();
+    if has_triggers(world, room) {
+        sources.push((room, None));
+    }
+    for &e in &in_room {
+        if e != player && world.get::<Mob>(e).is_some() && has_triggers(world, e) {
+            sources.push((e, None));
+        }
+    }
+    let (worn, carried): (Vec<Entity>, Vec<Entity>) = crate::room_index::contents_of(world, player)
+        .filter(|&e| world.get::<mud_world::Item>(e).is_some() && has_triggers(world, e))
+        .partition(|&e| world.get::<mud_world::EquippedSlot>(e).is_some());
+    sources.extend(worn.into_iter().map(|e| (e, Some("equip"))));
+    sources.extend(carried.into_iter().map(|e| (e, Some("inventory"))));
+    for &e in &in_room {
+        if world.get::<mud_world::Item>(e).is_some() && has_triggers(world, e) {
+            sources.push((e, Some("room")));
+        }
+    }
+
+    for (listener, location) in sources {
+        let to_fire = triggers_with(world, listener, &[TriggerEvent::Command]);
+        if to_fire.is_empty() {
+            continue;
+        }
         for (zone, id, name, body) in to_fire {
+            let mut extras: Vec<(&str, &str)> = vec![("cmd", cmd), ("args", args), ("arg", args)];
+            if let Some(loc) = location {
+                extras.push(("location", loc));
+            }
             let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
                 gated(&mut host, TriggerEvent::Command, |h| {
-                    h.exec_for_event_with_value(
-                        world,
-                        listener,
-                        player,
-                        None,
-                        &body,
-                        &[("cmd", cmd), ("args", args)],
-                    )
+                    h.exec_for_event_with_value(world, listener, player, None, &body, &extras)
                 })
             });
             drain_lua_outbox(world);
@@ -595,18 +630,35 @@ pub fn fire_command_in_room(
                 result.is_ok(),
             );
             match result {
-                Ok((_out, Some(false))) => {
-                    consumed = true;
-                }
+                Ok((_out, Some(false))) => return true,
                 Ok(_) => {}
                 Err(e) => record_failure(world, zone, id, &name, "COMMAND", &e),
             }
         }
-        if consumed {
-            break;
-        }
     }
-    consumed
+    false
+}
+
+/// `(zone, id, name, body)` of every trigger attached to `entity` whose
+/// flags include any of `events`, in attachment order.
+fn triggers_with(
+    world: &World,
+    entity: Entity,
+    events: &[TriggerEvent],
+) -> Vec<(i32, i32, String, String)> {
+    let Some(at) = world.get::<AttachedTriggers>(entity) else {
+        return Vec::new();
+    };
+    let catalog = world.resource::<TriggerCatalog>();
+    at.0.iter()
+        .filter_map(|key| {
+            let def = catalog.by_key.get(key)?;
+            def.flags
+                .iter()
+                .any(|f| events.contains(f))
+                .then(|| (key.0, key.1, def.name.clone(), def.commands.clone()))
+        })
+        .collect()
 }
 
 /// Bulk-fire `LOAD` triggers for every Mob in the world that carries
@@ -1060,7 +1112,9 @@ mod dispatch_tests {
         let mut world = World::new();
         world.insert_resource(TriggerCatalog::default());
         world.insert_resource(mud_script::LuaHost::new());
-        let room = world.spawn_empty().id();
+        let room = world
+            .spawn((mud_world::Room, WorldKey { zone: 99, id: 0 }))
+            .id();
         (world, room)
     }
 
@@ -1130,5 +1184,159 @@ mod dispatch_tests {
         let speaker = spawn_player(&mut world, room, "Bob");
         fire_speech_in_room(&mut world, speaker, room, "hi");
         assert_eq!(var(&world, 1, "who"), Some("Bob".into()));
+    }
+
+    // ----- command triggers (rooms, carried objects, return value) -----
+
+    fn spawn_item(
+        world: &mut World,
+        located: Entity,
+        id: i32,
+        triggers: Vec<(i32, i32)>,
+    ) -> Entity {
+        world
+            .spawn((
+                mud_world::Item,
+                Named {
+                    name: format!("item{id}"),
+                },
+                WorldKey { zone: 99, id },
+                Located(located),
+                AttachedTriggers(triggers),
+            ))
+            .id()
+    }
+
+    fn ran(world: &World, id: i32, kind: EntityType, key: &str) -> Option<serde_json::Value> {
+        world
+            .get_resource::<EntityVariableCache>()
+            .and_then(|c| c.get(kind, 99, id, key).cloned())
+    }
+
+    #[test]
+    fn room_command_trigger_fires_and_consumes() {
+        let (mut world, room) = base_world();
+        add_trigger(
+            &mut world,
+            1,
+            vec![TriggerEvent::Command],
+            "if cmd ~= 'push' then return true end\nself:setvar('arg', arg)\nreturn false",
+        );
+        world
+            .entity_mut(room)
+            .insert(AttachedTriggers(vec![(99, 1)]));
+        let player = spawn_player(&mut world, room, "Pat");
+        assert!(!fire_command_in_room(&mut world, player, room, "look", ""));
+        assert!(fire_command_in_room(
+            &mut world, player, room, "push", "ice"
+        ));
+        assert_eq!(ran(&world, 0, EntityType::Room, "arg"), Some("ice".into()));
+    }
+
+    #[test]
+    fn carried_and_worn_object_command_triggers_fire_with_their_location() {
+        let (mut world, room) = base_world();
+        add_trigger(
+            &mut world,
+            1,
+            vec![TriggerEvent::Command],
+            "if cmd ~= 'light' then return true end\nself:setvar('loc', location)\nself:setvar('arg', arg)\nreturn false",
+        );
+        let player = spawn_player(&mut world, room, "Pat");
+        let torch = spawn_item(&mut world, player, 9, vec![(99, 1)]);
+        assert!(fire_command_in_room(
+            &mut world, player, room, "light", "torch"
+        ));
+        assert_eq!(
+            ran(&world, 9, EntityType::Object, "loc"),
+            Some("inventory".into())
+        );
+        assert_eq!(
+            ran(&world, 9, EntityType::Object, "arg"),
+            Some("torch".into())
+        );
+        // Worn: the slot marker flips the location label.
+        world.insert_resource(EntityVariableCache::default());
+        world
+            .entity_mut(torch)
+            .insert(mud_world::EquippedSlot(mud_world::Slot::Hold));
+        assert!(fire_command_in_room(
+            &mut world, player, room, "light", "torch"
+        ));
+        assert_eq!(
+            ran(&world, 9, EntityType::Object, "loc"),
+            Some("equip".into())
+        );
+        // On the floor of the room.
+        world.insert_resource(EntityVariableCache::default());
+        world.entity_mut(torch).remove::<mud_world::EquippedSlot>();
+        world.entity_mut(torch).insert(Located(room));
+        assert!(fire_command_in_room(
+            &mut world, player, room, "light", "torch"
+        ));
+        assert_eq!(
+            ran(&world, 9, EntityType::Object, "loc"),
+            Some("room".into())
+        );
+    }
+
+    #[test]
+    fn command_triggers_run_in_legacy_order_and_the_first_verdict_wins() {
+        let (mut world, room) = base_world();
+        let body = |tag: &str, ret: &str| {
+            format!(
+                "if cmd ~= 'go' then return true end\nglobals.x = 1\nself:setvar('{tag}', 1)\nreturn {ret}"
+            )
+        };
+        add_trigger(
+            &mut world,
+            1,
+            vec![TriggerEvent::Command],
+            &body("hit", "true"),
+        );
+        add_trigger(
+            &mut world,
+            2,
+            vec![TriggerEvent::Command],
+            &body("hit", "false"),
+        );
+        add_trigger(
+            &mut world,
+            3,
+            vec![TriggerEvent::Command],
+            &body("hit", "true"),
+        );
+        let player = spawn_player(&mut world, room, "Pat");
+        spawn_mob(&mut world, room, 20, vec![(99, 2)]);
+        spawn_item(&mut world, player, 30, vec![(99, 3)]);
+        spawn_item(&mut world, room, 31, vec![(99, 3)]);
+        assert!(fire_command_in_room(&mut world, player, room, "go", ""));
+        // The mob consumed it: carried and floor objects never ran.
+        assert!(ran(&world, 20, EntityType::Mob, "hit").is_some());
+        assert!(ran(&world, 30, EntityType::Object, "hit").is_none());
+        assert!(ran(&world, 31, EntityType::Object, "hit").is_none());
+    }
+
+    #[test]
+    fn room_speech_triggers_hear_say() {
+        let (mut world, room) = base_world();
+        add_trigger(
+            &mut world,
+            1,
+            vec![TriggerEvent::Speech],
+            "self:setvar('who', actor.name)",
+        );
+        world
+            .entity_mut(room)
+            .insert(AttachedTriggers(vec![(99, 1)]));
+        let speaker = spawn_player(&mut world, room, "Dana");
+        fire_speech_in_room(&mut world, speaker, room, "open sesame");
+        assert_eq!(
+            world
+                .resource::<EntityVariableCache>()
+                .get(EntityType::Room, 99, 0, "who")
+                .cloned(),
+            Some("Dana".into())
+        );
     }
 }

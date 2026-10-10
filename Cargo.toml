@@ -20,6 +20,10 @@ missing_panics_doc = "allow"
 # `out.push_str(&format!(...))` is fine for incremental string building;
 # write!/writeln! is no clearer.
 format_push_string = "allow"
+# The generated test harness holds one pointer per #[test] in a local array;
+# mud-server's bin crosses 16384 bytes (2,048 tests), which is not a stack
+# hazard and has no source span to fix.
+large_stack_arrays = "allow"
 
 [profile.release]
 lto = "thin"
