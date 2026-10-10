@@ -336,12 +336,21 @@ pub fn gravity_tick(world: &mut World) {
 
 /// An item (a corpse, a dropped weapon, a thrown pouch) dropping through air
 /// rooms: legacy `start_obj_falling` / `gravity_event` for objects.
-#[derive(Component, Debug, Clone, Copy)]
+#[derive(Component, Debug, Clone)]
 pub(crate) struct ItemFalling {
-    start_room: Entity,
+    /// Every room this fall has been in, start first. A fall that reaches a
+    /// room already on the list is going round a downward air cycle.
+    visited: Vec<Entity>,
     distance: u32,
     due_tick: u64,
 }
+
+/// An item whose fall ended in an air room it cannot leave downward (a
+/// downward cycle, or the [`MAX_FALL_ROOMS`] cap): it hangs there. The scan
+/// skips it while it stays in that room, so it does not start another
+/// endless fall every few ticks; moving it elsewhere clears the hold.
+#[derive(Component, Debug, Clone, Copy)]
+pub(crate) struct ItemFallSettled(Entity);
 
 /// How often the world is scanned for items lying in air rooms. Legacy hooked
 /// `obj_to_room`; here the scan only touches items when an air room exists,
@@ -359,7 +368,7 @@ fn item_can_fall(world: &World, item: Entity) -> bool {
 /// falling steps once its delay has passed.
 fn item_gravity_tick(world: &mut World, tick: u64) {
     if tick.is_multiple_of(ITEM_SCAN_TICKS) {
-        let air_rooms: Vec<Entity> = {
+        let air_rooms: std::collections::HashSet<Entity> = {
             let mut q = world.query_filtered::<(Entity, &RoomSector), With<mud_world::Room>>();
             q.iter(world)
                 .filter(|(_, s)| s.0 == Sector::Air)
@@ -368,11 +377,15 @@ fn item_gravity_tick(world: &mut World, tick: u64) {
         };
         if !air_rooms.is_empty() {
             let starters: Vec<(Entity, Entity)> = {
-                let mut q = world
-                    .query_filtered::<(Entity, &Located), (With<mud_world::Item>, Without<ItemFalling>)>();
+                let mut q = world.query_filtered::<
+                    (Entity, &Located, Option<&ItemFallSettled>),
+                    (With<mud_world::Item>, Without<ItemFalling>),
+                >();
                 q.iter(world)
-                    .filter(|(_, l)| air_rooms.contains(&l.0))
-                    .map(|(e, l)| (e, l.0))
+                    .filter(|(_, l, settled)| {
+                        air_rooms.contains(&l.0) && settled.is_none_or(|s| s.0 != l.0)
+                    })
+                    .map(|(e, l, _)| (e, l.0))
                     .collect()
             };
             for (item, room) in starters {
@@ -381,11 +394,12 @@ fn item_gravity_tick(world: &mut World, tick: u64) {
                         world,
                         item,
                         ItemFalling {
-                            start_room: room,
+                            visited: vec![room],
                             distance: 0,
                             due_tick: 0,
                         },
                     );
+                    try_remove::<ItemFallSettled>(world, item);
                 }
             }
         }
@@ -404,7 +418,7 @@ fn item_gravity_tick(world: &mut World, tick: u64) {
 
 /// One step of legacy `gravity_event` for an object.
 fn item_fall_step(world: &mut World, item: Entity, tick: u64) {
-    let Some(mut fall) = world.get::<ItemFalling>(item).copied() else {
+    let Some(mut fall) = world.get::<ItemFalling>(item).cloned() else {
         return;
     };
     let stop = |world: &mut World| try_remove::<ItemFalling>(world, item);
@@ -434,16 +448,20 @@ fn item_fall_step(world: &mut World, item: Entity, tick: u64) {
         &[],
         &format!("{what} <red>falls from above.</>\r\n"),
     );
-    if to_room == fall.start_room {
-        return stop(world);
-    }
+    let cycled = fall.visited.contains(&to_room);
+    fall.visited.push(to_room);
     fall.distance += 1;
-    if fall.distance < MAX_FALL_ROOMS
-        && is_air(world, to_room)
-        && room_below(world, to_room).is_some()
-    {
+    let falls_on = is_air(world, to_room) && room_below(world, to_room).is_some();
+    if falls_on && !cycled && fall.distance < MAX_FALL_ROOMS {
         fall.due_tick = tick + FALL_STEP_TICKS;
         try_insert(world, item, fall);
+        return;
+    }
+    if falls_on {
+        // Round a downward cycle or past the cap, still over thin air: hang
+        // here rather than land, and do not restart until it is moved.
+        stop(world);
+        try_insert(world, item, ItemFallSettled(to_room));
         return;
     }
     // The bottom.

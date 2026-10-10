@@ -605,3 +605,61 @@ fn an_item_picked_up_mid_fall_stops_falling() {
     assert_eq!(f.world.get::<Located>(coin).unwrap().0, f.p);
     assert!(f.world.get::<super::ItemFalling>(coin).is_none());
 }
+
+#[test]
+fn an_item_in_a_downward_air_cycle_stops_and_does_not_fall_again() {
+    // sky1 -> b -> c -> b -> ...: never returns to the start room.
+    let mut f = fx();
+    f.world.entity_mut(f.p).insert(Located(f.ground));
+    let b = room(&mut f.world, "Loop B", Sector::Air);
+    let c = room(&mut f.world, "Loop C", Sector::Air);
+    f.world.get_mut::<Exits>(f.sky1).unwrap().0.clear();
+    connect(&mut f.world, f.sky1, Direction::Down, b);
+    connect(&mut f.world, b, Direction::Down, c);
+    connect(&mut f.world, c, Direction::Down, b);
+    let stone = loose_item(&mut f.world, "a stone", f.sky1);
+    tick_until_still(&mut f.world);
+    assert!(f.world.get::<super::ItemFalling>(stone).is_none());
+    let hung = f.world.get::<Located>(stone).unwrap().0;
+    assert!(hung == b || hung == c, "stopped inside the cycle");
+    // Later scans leave it where it hangs: no second endless fall.
+    for t in 400..800 {
+        f.world.resource_mut::<TickCount>().0 = t;
+        gravity_tick(&mut f.world);
+        assert!(f.world.get::<super::ItemFalling>(stone).is_none(), "t={t}");
+    }
+    assert_eq!(f.world.get::<Located>(stone).unwrap().0, hung);
+    // Moved elsewhere over thin air, it falls again.
+    f.world.entity_mut(stone).insert(Located(f.sky2));
+    tick_until_still(&mut f.world);
+    assert_eq!(f.world.get::<Located>(stone).unwrap().0, f.ground);
+}
+
+/// Timing guard: a scan over a prod-sized world (10k rooms, 1k of them air,
+/// 20k loose items) must stay cheap. Hard limit only enforced in release.
+#[test]
+fn item_gravity_scan_prod_scale_is_fast() {
+    let mut world = World::new();
+    world.insert_resource(TickCount(0));
+    let mut rooms = Vec::new();
+    for i in 0..10_000 {
+        let sector = if i % 10 == 0 {
+            Sector::Air
+        } else {
+            Sector::Field
+        };
+        rooms.push(room(&mut world, "r", sector));
+    }
+    // Air rooms with no way down: items there are scanned but never fall.
+    for i in 0..20_000usize {
+        loose_item(&mut world, "an item", rooms[i % rooms.len()]);
+    }
+    let start = std::time::Instant::now();
+    world.resource_mut::<TickCount>().0 = 5;
+    gravity_tick(&mut world);
+    let elapsed = start.elapsed();
+    eprintln!("item gravity scan 10k rooms / 20k items: {elapsed:?}");
+    if !cfg!(debug_assertions) {
+        assert!(elapsed.as_millis() < 5, "scan took {elapsed:?}");
+    }
+}
