@@ -147,13 +147,8 @@ pub(crate) fn build_room_players(world: &mut World, viewer: Entity) -> String {
         return "[]".to_string();
     };
     let room_seen = viewer_sees_room(world, viewer, room);
-    let here: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<mud_world::Player>>();
-        q.iter(world)
-            .filter(|(e, loc)| loc.0 == room && *e != viewer)
-            .map(|(e, _)| e)
-            .collect()
-    };
+    let mut here = crate::room_index::players_in(world, room);
+    here.retain(|&e| e != viewer);
     // Posture and hold ride along for a clearly seen player, from the same
     // rules as the text room line (`room_line`); a shape in the dark gets
     // the generic label only.

@@ -2468,13 +2468,9 @@ pub(crate) fn drain_lua_outbox(world: &mut World) {
     // Room broadcasts: snapshot recipients per room so the inner loop
     // doesn't re-borrow World mid-send.
     for (room, msg, except) in messages {
-        let mut recipients: Vec<Entity> = Vec::new();
-        let mut q = world.query_filtered::<(Entity, &Located), With<Connection>>();
-        for (e, l) in q.iter(world) {
-            if l.0 == room && Some(e) != except {
-                recipients.push(e);
-            }
-        }
+        let recipients: Vec<Entity> = crate::room_index::contents_of(world, room)
+            .filter(|&e| Some(e) != except && world.get::<Connection>(e).is_some())
+            .collect();
         for r in recipients {
             send_to(world, r, format!("{msg}\r\n"));
         }
@@ -7841,13 +7837,8 @@ pub(crate) fn broadcast_room_player_diff(
     subject: Entity,
     verb: &str, // "AddPlayer" or "RemovePlayer"
 ) {
-    let observers: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-        q.iter(world)
-            .filter(|(e, loc)| loc.0 == room && *e != subject)
-            .map(|(e, _)| e)
-            .collect()
-    };
+    let mut observers = crate::room_index::players_in(world, room);
+    observers.retain(|&e| e != subject);
     for e in observers {
         // Same visibility as the `Room.Players` snapshot: nothing for
         // an observer who can't perceive the subject, a generic shape
@@ -8193,10 +8184,8 @@ pub(crate) fn send_room_mobs(world: &mut World, viewer: Entity, force: bool) {
     // hostility on hidden mobs never leak into the frame.
     let room_seen = gmcp::viewer_sees_room(world, viewer, room);
     let mut candidates: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Mob>>();
-        q.iter(world)
-            .filter(|(_, l)| l.0 == room)
-            .map(|(e, _)| e)
+        crate::room_index::contents_of(world, room)
+            .filter(|&e| world.get::<Mob>(e).is_some())
             .collect()
     };
     // Query order shifts when unrelated components change; sort by the
@@ -11900,13 +11889,7 @@ fn replace_name_whole_word(msg: &str, name: &str) -> String {
 /// Re-push the `Room.Players` panel to every player in `room` (after
 /// someone's visibility changed).
 pub(crate) fn refresh_room_players(world: &mut World, room: Entity) {
-    let viewers: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-        q.iter(world)
-            .filter(|(_, l)| l.0 == room)
-            .map(|(e, _)| e)
-            .collect()
-    };
+    let viewers = crate::room_index::players_in(world, room);
     for v in viewers {
         send_room_players_snapshot(world, v);
     }
@@ -12024,44 +12007,24 @@ pub(crate) fn aggro_pulse(world: &mut World) {
 /// light source ([`mud_world::is_lit`]: lit by the `light` command, or
 /// permanent). An unlit torch gives no light. Used to override
 /// `room_is_dark` for rooms with active light sources.
-pub(crate) fn room_has_light(world: &mut World, room: Entity) -> bool {
+pub(crate) fn room_has_light(world: &World, room: Entity) -> bool {
     // Magical ILLUMINATION counts as a light source for the
     // room-light check — the room glows on its own, no torch
     // required.
     if world.get::<mud_world::RoomMagicalLight>(room).is_some() {
         return true;
     }
-    // 1. Loose lit items on the floor.
-    let any_floor = lit_items_located_in(world, |holder| holder == room);
-    if any_floor {
-        return true;
-    }
-    // 2. Lit items carried/worn by actors in the room. We snapshot
-    // who's here, then check each as a potential carrier.
-    let inhabitants: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), Or<(With<Player>, With<Mob>)>>();
-        q.iter(world)
-            .filter(|(_, l)| l.0 == room)
-            .map(|(e, _)| e)
-            .collect()
-    };
-    for actor in inhabitants {
-        if lit_items_located_in(world, |holder| holder == actor) {
-            return true;
+    // 1. Loose lit items on the floor, 2. lit items carried/worn by
+    // actors in the room. Both come off the room's `Contents` index
+    // (and each actor's), not a scan of every item in the world.
+    crate::room_index::contents_of(world, room).any(|e| {
+        if world.get::<Item>(e).is_some() {
+            return mud_world::is_lit(world, e);
         }
-    }
-    false
-}
-
-/// True if some light source is lit ([`mud_world::is_lit`]) and its
-/// `Located` parent satisfies `holder`.
-fn lit_items_located_in(world: &mut World, holder: impl Fn(Entity) -> bool) -> bool {
-    world
-        .query_filtered::<(&Located, Has<mud_world::Lit>, Option<&mud_world::LightFuel>), With<Item>>()
-        .iter(world)
-        .any(|(l, marked, fuel)| {
-            holder(l.0) && (marked || fuel.is_some_and(mud_world::LightFuel::is_permanent))
-        })
+        (world.get::<Player>(e).is_some() || world.get::<Mob>(e).is_some())
+            && crate::room_index::contents_of(world, e)
+                .any(|held| world.get::<Item>(held).is_some() && mud_world::is_lit(world, held))
+    })
 }
 
 /// True for room sectors where the sky is visible — used by `look`
@@ -22714,13 +22677,8 @@ pub(crate) fn broadcast_room_except_rendered(
     except: &[Entity],
     raw_msg: &str,
 ) {
-    let targets: Vec<Entity> = {
-        let mut q = world.query::<(Entity, &Located)>();
-        q.iter(world)
-            .filter(|(e, l)| l.0 == room && !except.contains(e))
-            .map(|(e, _)| e)
-            .collect()
-    };
+    let mut targets = crate::room_index::listeners_in(world, room);
+    targets.retain(|e| !except.contains(e));
     for t in targets {
         send_to(world, t, raw_msg);
     }
@@ -22736,13 +22694,8 @@ pub(crate) fn broadcast_room_anonymised(
     actors: &[(Entity, &str)],
     raw_msg: &str,
 ) {
-    let targets: Vec<Entity> = {
-        let mut q = world.query::<(Entity, &Located)>();
-        q.iter(world)
-            .filter(|(e, l)| l.0 == room && !except.contains(e))
-            .map(|(e, _)| e)
-            .collect()
-    };
+    let mut targets = crate::room_index::listeners_in(world, room);
+    targets.retain(|e| !except.contains(e));
     for t in targets {
         let msg = anonymise_for(world, t, actors, raw_msg);
         send_to(world, t, msg);
@@ -22760,13 +22713,8 @@ pub(crate) fn broadcast_room_except_players_rendered(
     except: &[Entity],
     raw_msg: &str,
 ) {
-    let targets: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-        q.iter(world)
-            .filter(|(e, l)| l.0 == room && !except.contains(e))
-            .map(|(e, _)| e)
-            .collect()
-    };
+    let mut targets = crate::room_index::player_listeners_in(world, room);
+    targets.retain(|e| !except.contains(e));
     for t in targets {
         send_to(world, t, raw_msg);
     }
@@ -22785,15 +22733,8 @@ pub(crate) fn broadcast_room_visible(
     except: &[Entity],
     raw_msg: &str,
 ) {
-    let targets: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-        q.iter(world)
-            .filter(|(e, l)| {
-                l.0 == room && !except.contains(e) && can_see_player(world, *e, sender)
-            })
-            .map(|(e, _)| e)
-            .collect()
-    };
+    let mut targets = crate::room_index::player_listeners_in(world, room);
+    targets.retain(|e| !except.contains(e) && can_see_player(world, *e, sender));
     for t in targets {
         send_to(world, t, raw_msg);
     }
@@ -22813,21 +22754,14 @@ pub(crate) fn broadcast_room_visual(
     except: &[Entity],
     raw_msg: &str,
 ) {
-    let targets: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-        q.iter(world)
-            .filter(|(e, l)| {
-                l.0 == room && !except.contains(e) && can_see_player(world, *e, sender)
-            })
-            .map(|(e, _)| e)
-            .collect()
-    };
+    let mut targets = crate::room_index::player_listeners_in(world, room);
+    targets.retain(|e| !except.contains(e) && can_see_player(world, *e, sender));
     if targets.is_empty() {
         return;
     }
     // Light precondition for the source room is the same for every
     // observer in it — compute it once, and only when someone is there
-    // to see (`room_has_light` scans every light-bearing item).
+    // to see (`room_has_light` walks the room's contents).
     let visible_here = !room_is_dark(world, room) || room_has_light(world, room);
     for t in targets {
         if visible_here || sees_characters_in_dark(world, t) {
@@ -23384,24 +23318,17 @@ pub(crate) fn mob_helpers_engage(
     if world.get::<mud_world::PeacefulRoom>(room).is_some() {
         return;
     }
-    let helpers: Vec<Entity> = {
-        let mut q = world.query_filtered::<(
-            Entity,
-            &Located,
-            &mud_world::MobBehaviors,
-            Option<&Fighting>,
-        ), With<Mob>>();
-        q.iter(world)
-            .filter(|(e, l, beh, fighting)| {
-                *e != defender
-                    && *e != attacker
-                    && l.0 == room
-                    && fighting.is_none()
-                    && is_mob_assister(beh)
-            })
-            .map(|(e, _, _, _)| e)
-            .collect()
-    };
+    let helpers: Vec<Entity> = crate::room_index::contents_of(world, room)
+        .filter(|&e| {
+            e != defender
+                && e != attacker
+                && world.get::<Mob>(e).is_some()
+                && world.get::<Fighting>(e).is_none()
+                && world
+                    .get::<mud_world::MobBehaviors>(e)
+                    .is_some_and(is_mob_assister)
+        })
+        .collect();
     for helper in helpers {
         if crate::mob_ai::mob_can_act(world, helper) {
             mob_assist(
@@ -23422,9 +23349,9 @@ pub(crate) fn mob_helpers_engage(
 /// battle") and the familiarity "stops, confused" line print on every
 /// pulse the helper is still free.
 ///
-/// Cost is O(fighters + mobs): fights are bucketed by room first and only
-/// assister mobs standing in one of those rooms are considered; with no
-/// fight anywhere it is a single `Fighting` scan.
+/// Cost is O(fighters + occupants of fight rooms): fights are bucketed by
+/// room first and only the contents of those rooms are looked at (via the
+/// `Contents` index); with no fight anywhere it is a single `Fighting` scan.
 pub(crate) fn mob_assist_pulse(world: &mut World) {
     let mut fights: HashMap<Entity, Vec<(Entity, Entity)>> = HashMap::new();
     {
@@ -23443,27 +23370,21 @@ pub(crate) fn mob_assist_pulse(world: &mut World) {
     if fights.is_empty() {
         return;
     }
-    let helpers: Vec<(Entity, Entity)> = {
-        let mut q = world.query_filtered::<(
-            Entity,
-            &Located,
-            &mud_world::MobBehaviors,
-            Option<&Fighting>,
-            Option<&Follower>,
-        ), With<Mob>>();
-        q.iter(world)
-            .filter(|(_, l, beh, fighting, follower)| {
-                fights.contains_key(&l.0)
-                    && fighting.is_none()
-                    && is_mob_assister(beh)
-                    // Legacy: a charmed mob away from its master does nothing.
-                    && follower.is_none_or(|f| {
-                        world.get::<Located>(f.0).is_some_and(|m| m.0 == l.0)
-                    })
-            })
-            .map(|(e, l, _, _, _)| (e, l.0))
-            .collect()
-    };
+    let helpers: Vec<(Entity, Entity)> = fights
+        .keys()
+        .flat_map(|&room| crate::room_index::contents_of(world, room).map(move |e| (e, room)))
+        .filter(|&(e, room)| {
+            world.get::<Mob>(e).is_some()
+                && world.get::<Fighting>(e).is_none()
+                && world
+                    .get::<mud_world::MobBehaviors>(e)
+                    .is_some_and(is_mob_assister)
+                // Legacy: a charmed mob away from its master does nothing.
+                && world.get::<Follower>(e).is_none_or(|f| {
+                    world.get::<Located>(f.0).is_some_and(|m| m.0 == room)
+                })
+        })
+        .collect();
     for (helper, room) in helpers {
         if !crate::mob_ai::mob_can_act(world, helper) {
             continue;
@@ -24350,23 +24271,18 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
 /// it. Returns true if an engagement fired so the caller can skip
 /// the generic alignment-aggro check.
 pub(crate) fn try_engage_remembered_mob(world: &mut World, player: Entity, room: Entity) -> bool {
-    let grudger: Option<Entity> = {
-        let mut q = world.query_filtered::<
-            (Entity, &Located, &crate::combat::MobMemory),
-            (With<Mob>, Without<Fighting>),
-        >();
-        q.iter(world)
-            .find(|(e, l, mem)| {
-                l.0 == room
-                    && mem.0.contains(&player)
-                    && crate::mob_ai::mob_can_act(world, *e)
-                    && can_see_player(world, *e, player)
-                    && !attack_ok::is_servant(world, *e)
-                    && !wimpy_mob_is_scared(world, *e)
-                    && !crate::fear::is_feared(world, *e)
-            })
-            .map(|(e, _, _)| e)
-    };
+    let grudger: Option<Entity> = crate::room_index::contents_of(world, room).find(|&e| {
+        world.get::<Mob>(e).is_some()
+            && world.get::<Fighting>(e).is_none()
+            && world
+                .get::<crate::combat::MobMemory>(e)
+                .is_some_and(|mem| mem.0.contains(&player))
+            && crate::mob_ai::mob_can_act(world, e)
+            && can_see_player(world, e, player)
+            && !attack_ok::is_servant(world, e)
+            && !wimpy_mob_is_scared(world, e)
+            && !crate::fear::is_feared(world, e)
+    });
     let Some(mob) = grudger else { return false };
     engage_and_strike(world, mob, player, room);
     true
@@ -24548,20 +24464,20 @@ pub(crate) fn try_engage_aggressive_mob(world: &mut World, player: Entity, room:
     // aggression_formula (engine §B3). Either match engages.
     #[allow(clippy::type_complexity)]
     let candidates: Vec<(Entity, i32, Option<(i32, i32)>)> = {
-        let mut q = world.query_filtered::<
-            (Entity, &Located, &CombatStats, Option<&WorldKey>),
-            (With<Mob>, Without<Fighting>),
-        >();
         // A mob cannot aggro what it cannot see (invisible player, no
         // detect-invisible).
-        q.iter(world)
-            .filter(|(e, l, _, _)| {
-                l.0 == room
-                    && crate::mob_ai::mob_can_act(world, *e)
-                    && can_see_player(world, *e, player)
-                    && mob_will_start_fight(world, *e, player)
+        crate::room_index::contents_of(world, room)
+            .filter(|&e| world.get::<Mob>(e).is_some() && world.get::<Fighting>(e).is_none())
+            .filter_map(|e| Some((e, world.get::<CombatStats>(e)?)))
+            .filter(|&(e, _)| {
+                crate::mob_ai::mob_can_act(world, e)
+                    && can_see_player(world, e, player)
+                    && mob_will_start_fight(world, e, player)
             })
-            .map(|(e, _, cs, wk)| (e, cs.alignment, wk.map(|k| (k.zone, k.id))))
+            .map(|(e, cs)| {
+                let wk = world.get::<WorldKey>(e).map(|k| (k.zone, k.id));
+                (e, cs.alignment, wk)
+            })
             .collect()
     };
     if candidates.is_empty() {

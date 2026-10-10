@@ -6120,6 +6120,16 @@ fn search_exits(
     None
 }
 
+/// True when an item with the `Hum` flag lies on the floor of `room`.
+fn room_has_hum_item(world: &World, room: Entity) -> bool {
+    crate::room_index::contents_of(world, room).any(|e| {
+        world.get::<Item>(e).is_some()
+            && world
+                .get::<mud_world::ObjectFlags>(e)
+                .is_some_and(|f| f.has(mud_db::enums::ObjectFlag::Hum))
+    })
+}
+
 /// The hidden-character half of `search` (legacy `do_search`,
 /// act.informative.cpp:1036): every hiding non-group character the
 /// searcher could see if it were not hiding has its hiddenness cut by
@@ -6136,14 +6146,8 @@ fn search_characters(
 ) -> bool {
     use crate::hiding;
     let perception = hiding::perception_of(world, player);
-    let hidden: Vec<Entity> = {
-        let mut q = world
-            .query_filtered::<(Entity, &Located), bevy_ecs::query::Or<(With<Player>, With<Mob>)>>();
-        q.iter(world)
-            .filter(|(e, l)| l.0 == room && *e != player)
-            .map(|(e, _)| e)
-            .collect()
-    };
+    let mut hidden = crate::room_index::actors_in(world, room);
+    hidden.retain(|&e| e != player);
     let searcher_name = name_of(world, player);
     let mut found = false;
     for target in hidden {
@@ -6451,10 +6455,7 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
         // HUM items still carry through the dark — sound doesn't
         // need light. Single line regardless of count; the room
         // gets one ambient cue, not one per humming item.
-        let any_hum_dark = world
-            .query_filtered::<(&Located, &mud_world::ObjectFlags), With<Item>>()
-            .iter(world)
-            .any(|(l, f)| l.0 == room && f.has(mud_db::enums::ObjectFlag::Hum));
+        let any_hum_dark = room_has_hum_item(world, room);
         if any_hum_dark {
             out.push_str("You hear something humming nearby.\r\n");
         }
@@ -6495,13 +6496,10 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
     // Other players in the room, one status line each (name, title, and
     // what they are doing: "Bob is sleeping here."), newest arrival first.
     let other_players: Vec<String> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-        let mut rows: Vec<(Entity, ())> = q
-            .iter(world)
-            .filter(|(e, l)| {
-                *e != player && l.0 == room && crate::commands::can_see_player(world, player, *e)
-            })
-            .map(|(e, _)| (e, ()))
+        let mut rows: Vec<(Entity, ())> = crate::room_index::players_in(world, room)
+            .into_iter()
+            .filter(|&e| e != player && crate::commands::can_see_player(world, player, e))
+            .map(|e| (e, ()))
             .collect();
         crate::commands::sort_newest_first(world, room, &mut rows, |r| r.0);
         rows.into_iter()
@@ -6530,26 +6528,23 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
     let mob_lines: Vec<String> = {
         let aggro_threshold = aggro_alignment(world);
         let mut lines: Vec<String> = Vec::new();
-        let mut q = world.query_filtered::<(
-            Entity,
-            &Located,
-            Option<&Description>,
-            Option<&CombatStats>,
-        ), With<Mob>>();
         // Newest arrival first (legacy `char_to_room` pushes the list head).
-        let mut mob_rows: Vec<(Entity, String, Option<i32>)> = q
-            .iter(world)
-            .filter(|(e, l, _, _)| {
-                l.0 == room && crate::commands::can_see_player(world, player, *e)
-            })
-            .map(|(e, _, desc, stats)| {
-                (
-                    e,
-                    desc.map_or_else(String::new, |d| d.0.clone()),
-                    stats.map(|s| s.alignment),
-                )
-            })
-            .collect();
+        let mut mob_rows: Vec<(Entity, String, Option<i32>)> =
+            crate::room_index::contents_of(world, room)
+                .filter(|&e| {
+                    world.get::<Mob>(e).is_some()
+                        && crate::commands::can_see_player(world, player, e)
+                })
+                .map(|e| {
+                    (
+                        e,
+                        world
+                            .get::<Description>(e)
+                            .map_or_else(String::new, |d| d.0.clone()),
+                        world.get::<CombatStats>(e).map(|s| s.alignment),
+                    )
+                })
+                .collect();
         crate::commands::sort_newest_first(world, room, &mut mob_rows, |r| r.0);
         for (mob, desc, alignment) in mob_rows {
             // The long description while the mob is in its default state,
@@ -6592,11 +6587,13 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
     // pierces invisibility (detect invisible, HOLY_LIGHT, Immortal+).
     let items: Vec<String> = {
         let mut names: Vec<String> = Vec::new();
-        let mut q = world.query_filtered::<(Entity, &Located, &Named), With<Item>>();
         // Newest arrival first (legacy `obj_to_room` pushes the list head).
-        let mut item_rows: Vec<_> = q.iter(world).filter(|(_, l, _)| l.0 == room).collect();
+        let mut item_rows: Vec<(Entity, Named)> = crate::room_index::contents_of(world, room)
+            .filter(|&e| world.get::<Item>(e).is_some())
+            .filter_map(|e| Some((e, world.get::<Named>(e)?.clone())))
+            .collect();
         crate::commands::sort_newest_first(world, room, &mut item_rows, |r| r.0);
-        for (e, _l, n) in item_rows {
+        for (e, n) in item_rows {
             if !crate::commands::senses::item_visible_to(world, player, e) {
                 continue;
             }
@@ -6621,10 +6618,7 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
     // is on the floor we add a "you hear something humming" line
     // below regardless of light state. Cheap to compute (filter
     // pass + bool).
-    let any_hum_item = world
-        .query_filtered::<(&Located, &mud_world::ObjectFlags), With<Item>>()
-        .iter(world)
-        .any(|(l, f)| l.0 == room && f.has(mud_db::enums::ObjectFlag::Hum));
+    let any_hum_item = room_has_hum_item(world, room);
 
     let mode = color_mode_for(world, player);
     let mut out = String::new();

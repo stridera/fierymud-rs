@@ -1143,7 +1143,7 @@ mod tests {
         recompute_equipped_for(&mut world, wearer);
         assert!(world.get::<mud_world::Lit>(item).is_none());
         assert!(!mud_world::is_lit(&world, item));
-        assert!(!crate::commands::room_has_light(&mut world, room));
+        assert!(!crate::commands::room_has_light(&world, room));
     }
 
     #[test]
@@ -1153,14 +1153,14 @@ mod tests {
             .entity_mut(item)
             .insert(mud_world::Keywords(vec!["torch".into()]));
         apply_object_to_wearer(&mut world, item, wearer);
-        assert!(!crate::commands::room_has_light(&mut world, room));
+        assert!(!crate::commands::room_has_light(&world, room));
         crate::commands::info::cmd_light(&mut world, wearer, "torch");
         assert!(world.get::<mud_world::Lit>(item).is_some());
-        assert!(crate::commands::room_has_light(&mut world, room));
+        assert!(crate::commands::room_has_light(&world, room));
         // Extinguishing a normal torch works and darkens the room again.
         crate::commands::info::cmd_extinguish(&mut world, wearer, "torch");
         assert!(world.get::<mud_world::Lit>(item).is_none());
-        assert!(!crate::commands::room_has_light(&mut world, room));
+        assert!(!crate::commands::room_has_light(&world, room));
     }
 
     #[test]
@@ -1171,7 +1171,7 @@ mod tests {
             .insert(mud_world::Keywords(vec!["torch".into()]));
         crate::commands::info::cmd_light(&mut world, wearer, "torch");
         assert!(world.get::<mud_world::Lit>(item).is_none());
-        assert!(!crate::commands::room_has_light(&mut world, room));
+        assert!(!crate::commands::room_has_light(&world, room));
     }
 
     #[test]
@@ -1186,7 +1186,7 @@ mod tests {
             .insert(crate::commands::Connection(tx));
         // Lit with no marker and no `light` command, even unworn.
         assert!(mud_world::is_lit(&world, item));
-        assert!(crate::commands::room_has_light(&mut world, room));
+        assert!(crate::commands::room_has_light(&world, room));
         crate::commands::info::cmd_extinguish(&mut world, wearer, "torch");
         let mut out = String::new();
         while let Ok(b) = rx.try_recv() {
@@ -1194,7 +1194,7 @@ mod tests {
         }
         assert!(out.contains("You can't put out a torch."), "{out}");
         assert!(mud_world::is_lit(&world, item));
-        assert!(crate::commands::room_has_light(&mut world, room));
+        assert!(crate::commands::room_has_light(&world, room));
         // `light` on it is just "already lit".
         crate::commands::info::cmd_light(&mut world, wearer, "torch");
         assert!(world.get::<mud_world::Lit>(item).is_none());
@@ -1209,7 +1209,7 @@ mod tests {
             .insert(mud_world::Mob);
         apply_object_to_wearer(&mut world, item, wearer);
         assert!(world.get::<mud_world::Lit>(item).is_some());
-        assert!(crate::commands::room_has_light(&mut world, room));
+        assert!(crate::commands::room_has_light(&world, room));
     }
 
     #[test]
@@ -1217,7 +1217,7 @@ mod tests {
         let (mut world, room, wearer, item) = light_world(None, Some(Slot::Hold));
         apply_object_to_wearer(&mut world, item, wearer);
         assert!(world.get::<mud_world::Lit>(item).is_none());
-        assert!(!crate::commands::room_has_light(&mut world, room));
+        assert!(!crate::commands::room_has_light(&world, room));
     }
 
     #[test]
@@ -1232,7 +1232,7 @@ mod tests {
         recompute_equipped_for(&mut world, wearer);
         assert!(world.get::<mud_world::Lit>(item).is_none());
         assert!(mud_world::is_lit(&world, item));
-        assert!(crate::commands::room_has_light(&mut world, room));
+        assert!(crate::commands::room_has_light(&world, room));
     }
 
     #[test]
@@ -1246,7 +1246,7 @@ mod tests {
         );
         apply_object_to_wearer(&mut world, item, wearer);
         assert!(world.get::<mud_world::Lit>(item).is_none());
-        assert!(!crate::commands::room_has_light(&mut world, room));
+        assert!(!crate::commands::room_has_light(&world, room));
     }
 
     #[test]

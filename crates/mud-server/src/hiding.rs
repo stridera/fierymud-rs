@@ -61,13 +61,8 @@ pub(crate) fn reveal(world: &mut World, e: Entity) -> i32 {
     }
     set_hiddenness(world, e, 0);
     if let Some(room) = world.get::<Located>(e).map(|l| l.0) {
-        let watchers: Vec<Entity> = {
-            let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-            q.iter(world)
-                .filter(|(w, l)| l.0 == room && *w != e)
-                .map(|(w, _)| w)
-                .collect()
-        };
+        let mut watchers = crate::room_index::players_in(world, room);
+        watchers.retain(|&w| w != e);
         for w in watchers {
             crate::commands::mark_for_prompt(w);
         }

@@ -54,7 +54,7 @@
 use bevy_ecs::prelude::*;
 use mud_world::{
     AbilityCatalog, AbilityDef, Account, CastTarget, Casting, CoreStats, Fighting, Health,
-    KnownAbilities, Located, Player, Posture, PostureKind, Profile, SlotHold, SpellSlotData,
+    KnownAbilities, Located, Posture, PostureKind, Profile, SlotHold, SpellSlotData,
 };
 
 use crate::commands::{
@@ -379,15 +379,14 @@ fn observers(world: &mut World, caster: Entity) -> Vec<Entity> {
     let Some(room) = world.get::<Located>(caster).map(|l| l.0) else {
         return Vec::new();
     };
-    let mut q = world.query_filtered::<(Entity, &Located, Option<&Posture>), With<Player>>();
-    q.iter(world)
-        .filter(|(e, l, posture)| {
-            *e != caster
-                && l.0 == room
-                && !posture.is_some_and(|p| matches!(p.0, PostureKind::Sleeping))
-        })
-        .map(|(e, _, _)| e)
-        .collect()
+    let mut here = crate::room_index::players_in(world, room);
+    here.retain(|&e| {
+        e != caster
+            && !world
+                .get::<Posture>(e)
+                .is_some_and(|p| matches!(p.0, PostureKind::Sleeping))
+    });
+    here
 }
 
 fn is_staff(world: &World, e: Entity) -> bool {

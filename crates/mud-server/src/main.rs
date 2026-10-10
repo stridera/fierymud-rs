@@ -35,6 +35,7 @@ mod regen;
 mod respawn;
 mod rest;
 mod room_access;
+mod room_index;
 mod shops;
 mod sleep;
 mod syslog;

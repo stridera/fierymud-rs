@@ -608,7 +608,7 @@ mod tests {
             &[eq_row(1, 1, TORCH, Some("HOLD"), 0.99)],
         );
         let booted = boot_mob(&mut world, room, 1);
-        assert!(crate::commands::room_has_light(&mut world, room));
+        assert!(crate::commands::room_has_light(&world, room));
         kill(&mut world, booted, room);
         // The torch went into the corpse; nothing lights the room.
         let lit: Vec<Entity> = {
@@ -618,11 +618,11 @@ mod tests {
         for e in lit {
             world.despawn(e);
         }
-        assert!(!crate::commands::room_has_light(&mut world, room));
+        assert!(!crate::commands::room_has_light(&world, room));
         run_respawn(&mut world, 6000);
         assert!(mob_of(&mut world, 1).is_some());
         assert!(
-            crate::commands::room_has_light(&mut world, room),
+            crate::commands::room_has_light(&world, room),
             "respawned mob's worn torch is lit"
         );
     }

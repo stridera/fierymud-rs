@@ -91,11 +91,9 @@ fn announce_to_outdoor_players(world: &mut World, msg: &str) {
 /// scan is skipped for them. Nobody moves during the sweep, so one
 /// snapshot serves it.
 fn listener_rooms(world: &mut World) -> HashSet<Entity> {
-    let mut q = world.query::<(&Located, Has<Connection>, Has<SwitchedFrom>, Has<SnoopedBy>)>();
-    q.iter(world)
-        .filter(|(_, conn, switched, snooped)| *conn || *switched || *snooped)
-        .map(|(l, ..)| l.0)
-        .collect()
+    let mut q = world
+        .query_filtered::<&Located, Or<(With<Connection>, With<SwitchedFrom>, With<SnoopedBy>)>>();
+    q.iter(world).map(|l| l.0).collect()
 }
 
 fn sleep_outdoor_mobs(world: &mut World) {

@@ -13,8 +13,8 @@ use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
 use mud_world::{
-    AttachedTriggers, DeferredRoomTriggerFire, DeferredRoomTriggerFires, Located, Mob, Room,
-    ScriptError, ScriptErrorLog, TriggerCatalog, TriggerEvent, WorldKey, WorldKeyIndex,
+    AttachedTriggers, DeferredRoomTriggerFire, DeferredRoomTriggerFires, Mob, Room, ScriptError,
+    ScriptErrorLog, TriggerCatalog, TriggerEvent, WorldKey, WorldKeyIndex,
 };
 use tracing::warn;
 
@@ -255,13 +255,9 @@ pub fn fire_speech_at(world: &mut World, listener: Entity, speaker: Entity, text
 }
 
 pub fn fire_speech_in_room(world: &mut World, speaker: Entity, room: Entity, text: &str) {
-    let listeners: Vec<Entity> = {
-        let mut q = world.query::<(Entity, &Located, &AttachedTriggers)>();
-        q.iter(world)
-            .filter(|(e, l, _)| *e != speaker && l.0 == room)
-            .map(|(e, _, _)| e)
-            .collect()
-    };
+    let listeners: Vec<Entity> = crate::room_index::contents_of(world, room)
+        .filter(|&e| e != speaker && world.get::<AttachedTriggers>(e).is_some())
+        .collect();
     if listeners.is_empty() {
         return;
     }
@@ -349,13 +345,9 @@ pub fn fire_room_entry(world: &mut World, room: Entity, entering: Entity, event:
 /// room. Each fire binds `self` to the listener and `actor` to the
 /// entering player.
 pub fn fire_greet_in_room(world: &mut World, entering: Entity, room: Entity) {
-    let listeners: Vec<Entity> = {
-        let mut q = world.query::<(Entity, &Located, &AttachedTriggers)>();
-        q.iter(world)
-            .filter(|(e, l, _)| *e != entering && l.0 == room)
-            .map(|(e, _, _)| e)
-            .collect()
-    };
+    let listeners: Vec<Entity> = crate::room_index::contents_of(world, room)
+        .filter(|&e| e != entering && world.get::<AttachedTriggers>(e).is_some())
+        .collect();
     if listeners.is_empty() {
         return;
     }
@@ -541,13 +533,9 @@ pub fn fire_command_in_room(
     cmd: &str,
     args: &str,
 ) -> bool {
-    let listeners: Vec<Entity> = {
-        let mut q = world.query::<(Entity, &Located, &AttachedTriggers)>();
-        q.iter(world)
-            .filter(|(e, l, _)| *e != player && l.0 == room)
-            .map(|(e, _, _)| e)
-            .collect()
-    };
+    let listeners: Vec<Entity> = crate::room_index::contents_of(world, room)
+        .filter(|&e| e != player && world.get::<AttachedTriggers>(e).is_some())
+        .collect();
     if listeners.is_empty() {
         return false;
     }
@@ -895,8 +883,8 @@ mod sleep_gate_tests {
     use super::*;
     use mud_db::enums::EntityType;
     use mud_world::{
-        EntityVariableCache, Health, Mob, Named, Posture, PostureKind, TriggerAttach, TriggerDef,
-        WorldKey,
+        EntityVariableCache, Health, Located, Mob, Named, Posture, PostureKind, TriggerAttach,
+        TriggerDef, WorldKey,
     };
 
     const BODY: &str = "self:setvar('ran', 1)";

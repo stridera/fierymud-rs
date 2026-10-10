@@ -3,7 +3,7 @@
 //! lifeforms are counted) and `detect_align` (good and evil auras on
 //! actors). Legacy `EFF_INFRAVISION`, `EFF_SENSE_LIFE`, `EFF_DETECT_ALIGN`.
 
-use bevy_ecs::prelude::{Entity, With, World};
+use bevy_ecs::prelude::{Entity, World};
 use mud_db::enums::{Alignment, LifeForce, ObjectFlag, Sector, Size};
 use mud_world::{
     AbilityCatalog, AppliedTo, Blinded, CombatStats, DetectAlign, EffectInstance, Infravision,
@@ -310,13 +310,9 @@ fn senses_living(world: &World, ch: Entity, vict: Entity, basepct: i32, roll: i3
 /// the room is too dark): a `SENSE_LIFE` observer has a 50% chance of
 /// feeling a living creature depart. `except` are the movers themselves.
 pub(crate) fn sense_departure(world: &mut World, room: Entity, mover: Entity, except: &[Entity]) {
-    let observers: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), (With<Player>, With<SenseLife>)>();
-        q.iter(world)
-            .filter(|(e, l)| l.0 == room && *e != mover && !except.contains(e))
-            .map(|(e, _)| e)
-            .collect()
-    };
+    let mut observers = crate::room_index::players_in(world, room);
+    observers
+        .retain(|&e| world.get::<SenseLife>(e).is_some() && e != mover && !except.contains(&e));
     if observers.is_empty() {
         return;
     }
@@ -340,13 +336,8 @@ pub(crate) fn sense_departure(world: &mut World, room: Entity, mover: Entity, ex
 /// Other players and mobs standing in `room`, minus anyone a `WizInvis`
 /// level hides entirely.
 fn others_in(world: &mut World, viewer: Entity, room: Entity) -> Vec<Entity> {
-    let mut q = world
-        .query_filtered::<(Entity, &Located), bevy_ecs::query::Or<(With<Player>, With<Mob>)>>();
-    let mut found: Vec<Entity> = q
-        .iter(world)
-        .filter(|(e, l)| *e != viewer && l.0 == room)
-        .map(|(e, _)| e)
-        .collect();
+    let mut found = crate::room_index::actors_in(world, room);
+    found.retain(|&e| e != viewer);
     found.retain(|e| !wiz_hidden_from(world, viewer, *e));
     found
 }
