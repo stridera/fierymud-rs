@@ -446,6 +446,9 @@ mod channels;
 mod clan_chat;
 #[path = "commands/combat.rs"]
 mod combat_commands;
+#[cfg(test)]
+#[path = "commands/combat_hunt_tests.rs"]
+mod combat_hunt_tests;
 #[path = "commands/conjuration.rs"]
 mod conjuration;
 #[cfg(test)]
@@ -4475,7 +4478,7 @@ mod tests {
     }
 
     #[test]
-    fn room_enemies_spare_the_casters_followers_and_leader() {
+    fn room_enemies_spare_the_casters_followers_leader_and_groupmates_pets() {
         use super::{AoeScope, aoe_targets_in_room};
         let mut world = World::new();
         let room = world.spawn_empty().id();
@@ -4520,8 +4523,9 @@ mod tests {
         assert!(!names.iter().any(|n| n == "a charmed wolf"), "{names:?}");
         assert!(!names.iter().any(|n| n == "Leader"), "{names:?}");
         assert!(names.iter().any(|n| n == "a stray dog"), "{names:?}");
+        // A groupmate's pet is spared too (the leader is in the caster's group).
         assert!(
-            names.iter().any(|n| n == "someone else's wolf"),
+            !names.iter().any(|n| n == "someone else's wolf"),
             "{names:?}"
         );
     }
@@ -14632,14 +14636,22 @@ fn aoe_targets_in_room(
             let leader = world.get::<Follower>(caster).map(|f| f.0);
             let mut names: Vec<(Entity, String)> = Vec::new();
             {
-                let mut q = world
-                    .query_filtered::<(Entity, &Located, &Named, Option<&Follower>), With<Mob>>();
-                for (e, l, n, f) in q.iter(world) {
+                let mut q = world.query_filtered::<(
+                    Entity,
+                    &Located,
+                    &Named,
+                    Option<&Follower>,
+                    Option<&mud_world::RiddenBy>,
+                ), With<Mob>>();
+                for (e, l, n, f, rider) in q.iter(world) {
+                    // Also spare a pet of any group member (not just the
+                    // caster's) and a mount a group member is riding.
                     if l.0 == room
                         && !group.contains(&e)
                         && e != caster
                         && Some(e) != leader
-                        && f.is_none_or(|f| f.0 != caster)
+                        && f.is_none_or(|f| f.0 != caster && !group.contains(&f.0))
+                        && rider.is_none_or(|r| !group.contains(&r.0))
                     {
                         names.push((e, n.name.clone()));
                     }
@@ -17435,11 +17447,7 @@ pub(crate) fn invoke_ability_core(
                 }
                 let applied_amount = match (target_stat.as_deref(), amount) {
                     (Some(t), Some(a)) if a != 0 => {
-                        if apply_modify_delta(world, target_entity, t, a) {
-                            Some(a)
-                        } else {
-                            None
-                        }
+                        apply_modify_delta_actual(world, target_entity, t, a)
                     }
                     _ => None,
                 };
@@ -19433,6 +19441,10 @@ pub(crate) fn invoke_ability_core(
                     && world.get::<Player>(target_entity).is_none()
                 {
                     try_insert(world, target_entity, Follower(player));
+                    // A charmed mob stops fighting its new master (and
+                    // everyone else stops fighting it), legacy `add_follower`
+                    // + `stop_fighting`.
+                    crate::combat::stop_fighting_both_ways(world, target_entity);
                     // Spell-effort spent → tag as durable so the
                     // disconnect-save snapshots it for ≤1h restore.
                     try_insert(world, target_entity, mud_world::PersistentPet);
@@ -20884,6 +20896,42 @@ fn apply_size_shift(world: &mut World, target: Entity, amount: i32) {
             state,
             mud_world::Sized(Size::from_rank(base_rank.saturating_add(state.shift))),
         ));
+    }
+}
+
+/// Current value of a stat whose `apply_modify_delta` arm clamps (floor at
+/// 0 or 1, cap at 100), so the delta that really landed can be measured.
+/// `None` for the stats that add without clamping.
+fn clamped_stat_value(world: &World, target: Entity, stat: &str) -> Option<i32> {
+    match stat {
+        "max_hp" => world.get::<Health>(target).map(|h| h.max),
+        "max_move" | "max_stamina" | "stamina_max" => world.get::<Stamina>(target).map(|s| s.max),
+        "armor_flat" => world.get::<CombatStats>(target).map(|c| c.armor_flat),
+        "hardness" => world.get::<CombatStats>(target).map(|c| c.hardness),
+        "ward" | "ward_pct" => world.get::<CombatStats>(target).map(|c| c.ward_pct),
+        "armor_pct" => world.get::<CombatStats>(target).map(|c| c.armor_pct),
+        _ => None,
+    }
+}
+
+/// [`apply_modify_delta`], returning the delta that actually landed (`None`
+/// for an unsupported stat). A clamped stat (max HP floored at 1, armor
+/// capped at 100, ...) can take less than `amount`; whoever records the
+/// delta for a later [`reverse_modify_delta`] must record this value, or the
+/// reversal hands out the clamped part as a permanent gain.
+pub(crate) fn apply_modify_delta_actual(
+    world: &mut World,
+    target: Entity,
+    stat: &str,
+    amount: i32,
+) -> Option<i32> {
+    let before = clamped_stat_value(world, target, stat);
+    if !apply_modify_delta(world, target, stat, amount) {
+        return None;
+    }
+    match (before, clamped_stat_value(world, target, stat)) {
+        (Some(b), Some(a)) => Some(a.saturating_sub(b)),
+        _ => Some(amount),
     }
 }
 
@@ -23402,7 +23450,7 @@ pub(crate) fn engage_skill_shim(
         send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
         return;
     };
-    if !attack_ok::attack_ok(world, player, target, true) {
+    if !attack_ok::offensive_target_allowed(world, player, target) {
         return;
     }
     if !check_stamina(world, player, cost, skill) {

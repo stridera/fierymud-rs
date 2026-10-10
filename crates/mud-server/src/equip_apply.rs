@@ -37,7 +37,7 @@ use mud_world::{
     ObjectGrantedEffect, ObjectPrototypes, Resistances, Stamina, WorldKey,
 };
 
-use crate::commands::{apply_modify_delta, reverse_modify_delta, try_insert};
+use crate::commands::{apply_modify_delta_actual, reverse_modify_delta, try_insert};
 
 /// Per-item bookkeeping: the `(stat_key, applied_delta)` pairs we
 /// pushed onto the wearer when the item was equipped. Stored on the
@@ -144,8 +144,10 @@ pub fn apply_object_to_wearer(world: &mut World, item: Entity, wearer: Entity) {
     // the item type itself provides, pre-scaled at fierylib import
     // time. Recorded in `applied_deltas` so unequip reverses it
     // through the same path apply-block deltas use.
-    if proto.armor_pct != 0 && apply_modify_delta(world, wearer, "armor_pct", proto.armor_pct) {
-        applied_deltas.push(("armor_pct".to_string(), proto.armor_pct));
+    if proto.armor_pct != 0
+        && let Some(landed) = apply_modify_delta_actual(world, wearer, "armor_pct", proto.armor_pct)
+    {
+        applied_deltas.push(("armor_pct".to_string(), landed));
     }
     for grant in granted_effects_to_spawn {
         let effect_def = world
@@ -179,8 +181,8 @@ pub fn apply_object_to_wearer(world: &mut World, item: Entity, wearer: Entity) {
                 .map(|n| n as i32);
             match (target, amount) {
                 (Some(t), Some(a)) if a != 0 => {
-                    if apply_modify_delta(world, wearer, &t, a) {
-                        applied_deltas.push((t, a));
+                    if let Some(landed) = apply_modify_delta_actual(world, wearer, &t, a) {
+                        applied_deltas.push((t, landed));
                     } else {
                         tracing::warn!(
                             proto_zone = proto.zone_id,
@@ -299,8 +301,10 @@ pub fn apply_object_to_wearer(world: &mut World, item: Entity, wearer: Entity) {
         .map(|a| a.0.clone())
         .unwrap_or_default();
     for (target, amount) in instance_applies {
-        if amount != 0 && apply_modify_delta(world, wearer, &target, amount) {
-            applied_deltas.push((target, amount));
+        if amount != 0
+            && let Some(landed) = apply_modify_delta_actual(world, wearer, &target, amount)
+        {
+            applied_deltas.push((target, landed));
         }
     }
     // ---- Bookkeeping for unapply ----
@@ -330,10 +334,11 @@ pub(crate) fn grant_applies_to_worn(world: &mut World, item: Entity, applies: &[
     };
     let granted: Vec<(String, i32)> = applies
         .iter()
-        .filter(|(target, amount)| {
-            *amount != 0 && apply_modify_delta(world, wearer, target, *amount)
+        .filter(|(_, amount)| *amount != 0)
+        .filter_map(|(target, amount)| {
+            apply_modify_delta_actual(world, wearer, target, *amount)
+                .map(|landed| (target.clone(), landed))
         })
-        .cloned()
         .collect();
     if granted.is_empty() {
         return;

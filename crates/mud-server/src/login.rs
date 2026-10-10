@@ -1340,6 +1340,8 @@ async fn retire_player(world: &mut World, entity: Entity, pool: &PgPool) {
     // the next member, a leaving member just drops out. Quit, camp, idle
     // kicks and linkdead timeouts all land here.
     commands::ungroup(world, entity, true, false);
+    // A leaving rider leaves the mount behind, free of its rider link.
+    crate::combat::clear_mount_links(world, entity);
     // Despawn the player AND every item they were carrying / wearing
     // (Located(player) catches both inventory and equipped —
     // EquippedSlot is additive), including items nested inside

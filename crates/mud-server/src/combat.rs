@@ -394,12 +394,42 @@ pub(crate) fn carry_mount(world: &mut World, rider: Entity, dest: Entity) {
     }
 }
 
+/// Cut every mount link `who` is part of, both sides: as a rider it clears
+/// its own `Mounted` and the mount's `RiddenBy`; as a mount it clears its
+/// `RiddenBy` and the rider's `Mounted`. Call when either side dies, is
+/// despawned or is moved without the other (legacy `extract_char` dismounts),
+/// so the survivor isn't left riding a corpse or an absent steed.
+pub(crate) fn clear_mount_links(world: &mut World, who: Entity) {
+    if let Some(mud_world::Mounted(mount)) = world.get::<mud_world::Mounted>(who).copied() {
+        try_remove::<mud_world::Mounted>(world, who);
+        if world
+            .get::<mud_world::RiddenBy>(mount)
+            .is_some_and(|r| r.0 == who)
+        {
+            try_remove::<mud_world::RiddenBy>(world, mount);
+        }
+    }
+    if let Some(mud_world::RiddenBy(rider)) = world.get::<mud_world::RiddenBy>(who).copied() {
+        try_remove::<mud_world::RiddenBy>(world, who);
+        if world
+            .get::<mud_world::Mounted>(rider)
+            .is_some_and(|m| m.0 == who)
+        {
+            try_remove::<mud_world::Mounted>(world, rider);
+        }
+    }
+}
+
 /// Pick a random open exit and walk a fleeing mob through it.
 /// No-op if the room has no open exits — the swing path falls
 /// through and the mob takes the next hit normally. Drops the
 /// mob's `Fighting` so attackers will auto-disengage on the room
 /// mismatch in the next combat tick. Returns whether the mob moved.
 pub(crate) fn mob_flee(world: &mut World, mob: Entity, from_room: Entity) -> bool {
+    // A ridden mount goes where its rider goes (same rule as `can_flee_now`).
+    if world.get::<mud_world::RiddenBy>(mob).is_some() {
+        return false;
+    }
     let candidates: Vec<(mud_db::enums::Direction, Entity)> = world
         .get::<Exits>(from_room)
         .map(|e| {
@@ -1809,7 +1839,13 @@ fn kill_credit_recipients(world: &mut World, killer: Entity) -> Vec<Entity> {
     let members = crate::commands::group_members(world, root);
     let recipients: Vec<Entity> = members
         .into_iter()
-        .filter(|m| killer_room.is_some() && world.get::<Located>(*m).map(|l| l.0) == killer_room)
+        .filter(|m| {
+            killer_room.is_some()
+                && world.get::<Located>(*m).map(|l| l.0) == killer_room
+                // The dead share in nothing: no XP, trophy or alignment for a
+                // ghost groupmate.
+                && world.get::<Ghost>(*m).is_none()
+        })
         .collect();
     if recipients.is_empty() {
         vec![killer]
@@ -2118,6 +2154,8 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
         if let Some(mut hp) = world.get_mut::<Health>(victim) {
             hp.hp = 0;
         }
+        // The dead don't ride: the mount (if any) keeps its place in the room.
+        clear_mount_links(world, victim);
         // Lines queued behind a cast (an alias chain) must not run after the
         // respawn: the dead player's plans died with them.
         crate::commands::input_queue::clear(world, victim);
@@ -2195,7 +2233,10 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
         // legacy `die()` from `do_slay`: no XP, trophy, alignment, kill
         // count, achievement, quest progress, loot claim or autoloot.
         let slain = world.get::<StaffSlain>(victim).is_some();
-        let killer = if slain {
+        // A player's pet or summon is not a trophy: killing your own
+        // follower (or letting it die) pays no XP, coin or trophy credit.
+        let pet = is_player_pet(world, victim);
+        let killer = if slain || pet {
             None
         } else {
             resolve_killer(world, victim, room)
@@ -2203,7 +2244,7 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
         // Legacy `disburse_kill_exp` returns early for an illusory mob:
         // no XP, no trophy credit.
         let illusory = is_illusory_mob(world, victim);
-        if !illusory && !slain {
+        if !illusory && !slain && !pet {
             award_kill_xp(world, victim, victim_name, killer);
         }
         // Legacy `receive_kill_credit` shifts every credited member's
@@ -2315,7 +2356,9 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
         // the coin can still be claimed via `get all from corpse`.
         // Runs after the corpse is spawned so the CoinPile has
         // somewhere to attach.
-        award_kill_coin(world, victim, victim_name, corpse, killer);
+        if !pet {
+            award_kill_coin(world, victim, victim_name, corpse, killer);
+        }
         // Auto-loot: if the killer has the flag, immediately
         // pull every item out of the corpse onto them. Quiet —
         // players opted in.
@@ -2346,6 +2389,25 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
     }
 }
 
+/// A mob that belongs to a player: it follows one (shop pet, charmed or
+/// animated follower), carries the durable `PersistentPet` marker, or is a
+/// conjured `summoned-*` creature.
+pub(crate) fn is_player_pet(world: &mut World, mob: Entity) -> bool {
+    if world.get::<Mob>(mob).is_none() {
+        return false;
+    }
+    if world.get::<mud_world::PersistentPet>(mob).is_some()
+        || world
+            .get::<mud_world::Follower>(mob)
+            .is_some_and(|f| world.get::<Player>(f.0).is_some())
+    {
+        return true;
+    }
+    let mut q = world.query::<(&mud_world::EffectInstance, &mud_world::AppliedTo)>();
+    q.iter(world)
+        .any(|(i, a)| a.0 == mob && i.name.starts_with("summoned-"))
+}
+
 /// True for a mob flagged illusory (`MobTrait::Illusion`, legacy
 /// `MOB_ILLUSORY`).
 fn is_illusory_mob(world: &World, mob: Entity) -> bool {
@@ -2367,6 +2429,8 @@ fn finish_mob_death(world: &mut World, victim: Entity) {
         }
     }
     crate::commands::ungroup_on_despawn(world, victim);
+    // A dead mount drops its rider (and a dead mounted mob its steed).
+    clear_mount_links(world, victim);
     if let Ok(e) = world.get_entity_mut(victim) {
         e.despawn();
     }
@@ -6027,5 +6091,136 @@ mod tests {
         let d = defender_knowing(&mut world, vec![(core.dodge.unwrap(), 1250, true)]);
         world.entity_mut(d).insert(Posture(PostureKind::Sitting));
         assert_eq!(evasions(&world, d, "dodge", 1000), 0);
+    }
+
+    // ---- combat hunt fixes ----
+
+    /// Goblin (XP + 75 coin) killed by `Killer`, whose pet it is when `owned`.
+    fn kill_goblin_owned_by_killer(owned: bool) -> (World, Entity) {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let goblin = credit_goblin(&mut world, room, 0, None);
+        let killer = credit_player(&mut world, room, "Killer", 0);
+        if owned {
+            world.entity_mut(goblin).insert(mud_world::Follower(killer));
+        }
+        world.entity_mut(killer).insert(Fighting(goblin));
+        run_combat_tick(&mut world);
+        assert!(world.get_entity(goblin).is_err(), "goblin died");
+        (world, killer)
+    }
+
+    #[test]
+    fn killing_your_own_follower_pays_nothing() {
+        let (control, killer) = kill_goblin_owned_by_killer(false);
+        assert!(xp_of(&control, killer) > 0, "control: a stranger pays XP");
+        let (mut world, killer) = kill_goblin_owned_by_killer(true);
+        assert_eq!(xp_of(&world, killer), 0, "no XP");
+        assert!(
+            world.get::<mud_world::Trophy>(killer).is_none(),
+            "no trophy"
+        );
+        assert_eq!(wealth_of(&world, killer), 0, "no coin");
+        let coin: i64 = world
+            .query_filtered::<&mud_world::CoinPile, With<Corpse>>()
+            .iter(&world)
+            .map(|c| c.0)
+            .sum();
+        assert_eq!(coin, 0, "no purse on the pet's corpse either");
+    }
+
+    #[test]
+    fn killing_a_persistent_pet_or_a_summon_pays_nothing() {
+        for summoned in [false, true] {
+            let mut world = World::new();
+            let room = make_room(&mut world);
+            let goblin = credit_goblin(&mut world, room, 0, None);
+            let killer = credit_player(&mut world, room, "Killer", 0);
+            if summoned {
+                world.spawn((
+                    mud_world::EffectInstance {
+                        kind: 1,
+                        name: "summoned-wolf".into(),
+                        strength: 0,
+                        remaining_secs: 60,
+                        source: mud_world::EffectSource::Spell,
+                        ability_id: None,
+                    },
+                    mud_world::AppliedTo(goblin),
+                ));
+            } else {
+                world.entity_mut(goblin).insert(mud_world::PersistentPet);
+            }
+            world.entity_mut(killer).insert(Fighting(goblin));
+            run_combat_tick(&mut world);
+            assert!(world.get_entity(goblin).is_err(), "goblin died");
+            assert_eq!(xp_of(&world, killer), 0, "summoned={summoned}: no XP");
+            assert_eq!(wealth_of(&world, killer), 0);
+        }
+    }
+
+    #[test]
+    fn a_ghost_groupmate_shares_no_kill_credit() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let leader = credit_player(&mut world, room, "Leader", 0);
+        let alive = credit_player(&mut world, room, "Alive", 0);
+        let dead = credit_player(&mut world, room, "Dead", 0);
+        for m in [alive, dead] {
+            world.entity_mut(m).insert(mud_world::GroupMember(leader));
+        }
+        world.entity_mut(dead).insert(Ghost);
+        let mut got = kill_credit_recipients(&mut world, leader);
+        got.sort();
+        let mut want = vec![leader, alive];
+        want.sort();
+        assert_eq!(got, want, "the ghost is not credited");
+    }
+
+    #[test]
+    fn a_dead_mount_drops_its_rider() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let steed = credit_goblin(&mut world, room, 0, None);
+        let rider = credit_player(&mut world, room, "Rider", 0);
+        world.entity_mut(rider).insert(mud_world::Mounted(steed));
+        world.entity_mut(steed).insert(mud_world::RiddenBy(rider));
+        handle_death(&mut world, steed, "a goblin", room);
+        assert!(world.get_entity(steed).is_err(), "the mount died");
+        assert!(
+            world.get::<mud_world::Mounted>(rider).is_none(),
+            "the rider is not left riding a ghost entity"
+        );
+    }
+
+    #[test]
+    fn a_dead_rider_frees_the_mount() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let steed = credit_goblin(&mut world, room, 0, None);
+        let rider = credit_player(&mut world, room, "Rider", 0);
+        world.entity_mut(rider).insert(mud_world::Mounted(steed));
+        world.entity_mut(steed).insert(mud_world::RiddenBy(rider));
+        handle_death(&mut world, rider, "Rider", room);
+        assert!(world.get::<Ghost>(rider).is_some());
+        assert!(world.get::<mud_world::Mounted>(rider).is_none());
+        assert!(
+            world.get::<mud_world::RiddenBy>(steed).is_none(),
+            "the mount is free again"
+        );
+    }
+
+    #[test]
+    fn a_ridden_mount_will_not_flee_on_its_own() {
+        let mut world = World::new();
+        let (room_a, _room_b, mob) = hurt_mob_under_attack(&mut world, vec![], 60);
+        let rider = world.spawn((Player, Located(room_a))).id();
+        world.entity_mut(mob).insert(mud_world::RiddenBy(rider));
+        world.entity_mut(rider).insert(mud_world::Mounted(mob));
+        assert!(!mob_flee(&mut world, mob, room_a));
+        assert_eq!(world.get::<Located>(mob).map(|l| l.0), Some(room_a));
+        // Without the rider it would have run (control).
+        clear_mount_links(&mut world, mob);
+        assert!(mob_flee(&mut world, mob, room_a));
     }
 }

@@ -43,13 +43,6 @@ pub(crate) fn cmd_release(world: &mut World, player: Entity, _args: &str) {
         );
         return;
     }
-    // Stamina is intentionally left at whatever it was when they died —
-    // the death-corpse cycle's recovery cost is the move back to recall
-    // plus losing stamina momentum, not a hard reset.
-    if let Some(mut hp) = world.get_mut::<Health>(player) {
-        hp.hp = hp.max;
-    }
-    try_remove::<Ghost>(world, player);
     // Respawn precedence (G4.2). Save_location (rented/camped) is
     // not modeled yet — when it lands, prepend it to this chain.
     //   1. Last touchstone (RecallPoint)
@@ -93,6 +86,19 @@ pub(crate) fn cmd_release(world: &mut World, player: Entity, _args: &str) {
         );
         return;
     }
+    // The target is good: only now does the spirit return. (Un-ghosting
+    // before the checks above left a refused release alive, at full HP, in
+    // the room it died in.)
+    //
+    // Stamina is intentionally left at whatever it was when they died —
+    // the death-corpse cycle's recovery cost is the move back to recall
+    // plus losing stamina momentum, not a hard reset.
+    if let Some(mut hp) = world.get_mut::<Health>(player) {
+        hp.hp = hp.max;
+    }
+    try_remove::<Ghost>(world, player);
+    // The spirit travels alone: a mount (either side of the link) stays put.
+    crate::combat::clear_mount_links(world, player);
     if world.get::<Located>(player).is_some() {
         world.entity_mut(player).insert(Located(target));
     } else {
