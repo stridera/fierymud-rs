@@ -463,6 +463,9 @@ mod enter;
 mod feedback;
 #[path = "commands/game.rs"]
 mod game;
+#[path = "commands/input_queue.rs"]
+pub(crate) mod input_queue;
+pub use input_queue::{has_queued_input, run_queued_input};
 #[path = "commands/item_target.rs"]
 pub(crate) mod item_target;
 pub(crate) use item_target::{ItemClass, find_item};
@@ -1059,6 +1062,9 @@ fn dispatch_async_line<'a>(
             run.active.pop();
             return;
         }
+        if !composing && input_queue::defer_if_needed(world, player, line, run) {
+            return;
+        }
         if !try_dispatch_async(world, player, pool, line).await {
             dispatch_line(world, player, line, run);
         }
@@ -1074,9 +1080,32 @@ fn dispatch_async_line<'a>(
 struct AliasRun {
     active: Vec<String>,
     queued: usize,
+    /// An earlier line of this run was held in the player's input queue
+    /// (see `input_queue`), so every later one must queue behind it.
+    deferred: bool,
+    /// The line being dispatched was replayed from the input queue: it is
+    /// already alias-expanded and runs now.
+    replaying: bool,
     /// Bytes of expanded command text produced so far across every
     /// alias level of this typed line (see [`MAX_ALIAS_RUN_BYTES`]).
     bytes: usize,
+}
+
+impl AliasRun {
+    /// A run for a line released from the input queue.
+    fn replay() -> Self {
+        Self {
+            replaying: true,
+            ..Self::default()
+        }
+    }
+
+    /// Whether the line being dispatched came out of an alias / `;`
+    /// expansion (or a replayed queue entry) rather than straight from the
+    /// player's keyboard.
+    fn in_expansion(&self) -> bool {
+        !self.active.is_empty() || self.replaying
+    }
 }
 
 /// Longest alias definition (replacement text) a character may store.
@@ -1605,6 +1634,9 @@ fn expand_alias(
     line: &str,
     run: &mut AliasRun,
 ) -> Option<Result<(String, Vec<String>), AliasLimit>> {
+    if run.replaying {
+        return None;
+    }
     let aliases = world.get::<mud_world::Aliases>(player)?;
     if aliases.entries.is_empty() {
         return None;

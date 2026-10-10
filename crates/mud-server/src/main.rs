@@ -690,6 +690,9 @@ async fn main() {
                 };
                 if run_world {
                     schedule.run(&mut world);
+                    // Queued alias / `;` lines whose cast lock just lifted.
+                    router.drain_input_queues(&mut world, &pool).await;
+                    tick_stats::lap(&mut world, "input_queue");
                     // Periodic autosave. Cadence reads from
                     // `server.auto_save_interval_seconds` GameConfig
                     // (default 300s = 5 min). Cheap insurance against

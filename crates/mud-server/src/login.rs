@@ -1977,6 +1977,28 @@ impl ConnRouter {
         }
     }
 
+    /// Release one waiting input line per playing character whose cast lock
+    /// has lifted (`commands::input_queue`). Driven once per tick, so a
+    /// queued alias such as `cast 'armor';cast 'bless'` runs its second
+    /// spell the tick after the first lands.
+    pub async fn drain_input_queues(&mut self, world: &mut World, pool: &PgPool) {
+        let waiting: Vec<(ConnId, Entity)> = self
+            .playing
+            .iter()
+            .filter(|(_, e)| commands::has_queued_input(world, **e))
+            .map(|(c, e)| (*c, *e))
+            .collect();
+        for (conn_id, entity) in waiting {
+            if !commands::run_queued_input(world, entity, pool).await {
+                continue;
+            }
+            if world.get::<commands::Quitting>(entity).is_some() {
+                self.on_disconnect(world, conn_id, pool).await;
+                (self.close_conn)(conn_id);
+            }
+        }
+    }
+
     // The state machine is naturally a sequence of stage-arm bodies; splitting
     // would just hide the linear flow.
     #[allow(clippy::too_many_lines)]
