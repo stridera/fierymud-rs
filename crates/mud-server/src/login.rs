@@ -6192,13 +6192,6 @@ pub(crate) async fn save_player_final(
     entity: Entity,
     pool: &PgPool,
 ) -> SaveOutcome {
-    // Quest rewards already written to the database (gold, experience,
-    // skill points) reach the in-memory character through the update inbox.
-    // Apply whatever is waiting first, or this save would write the
-    // pre-reward values over them and the player would quit poorer.
-    if world.contains_resource::<commands::PlayerUpdateInbox>() {
-        commands::drain_player_updates(world);
-    }
     save_player_inner(world, entity, pool, true).await
 }
 
@@ -6222,6 +6215,15 @@ async fn save_player_inner(
     // The write we just waited for (if any) finished before we got the
     // lock; fold its stamps into the world BEFORE snapshotting.
     coordinator.apply_completions(world);
+    // Updates written to the database but not yet applied to the character
+    // (quest gold, experience, skill points) reach it through the update
+    // inbox. Apply whatever is waiting, now that the turn is ours and before
+    // the snapshot: the save would otherwise write the pre-reward values over
+    // them, and a house placement that failed while this save waited for its
+    // turn would not yet have put its item back in the pack.
+    if world.contains_resource::<commands::PlayerUpdateInbox>() {
+        commands::drain_player_updates(world);
+    }
     let generation = ordered.next_generation();
     let Some(mut snap) = snapshot_player(world, entity, generation) else {
         return SaveOutcome {
@@ -11096,6 +11098,7 @@ mod tests {
             world,
             crate::house_items::PlacementWrite {
                 character_id: character_id.to_string(),
+                item,
                 room_row_id: foyer_row_id,
                 object_zone_id: key.0,
                 object_id: key.1,
@@ -11388,6 +11391,87 @@ mod tests {
                 .get::<crate::house_items::PendingHouseDeletes>(player)
                 .is_none()
         );
+    }
+
+    /// A placement whose insert fails does not strand the item in the house
+    /// room with no row behind it: it goes back to the player's pack with a
+    /// message, even when the player quits while the insert is still failing
+    /// (the quit save waits for the placement's turn and drains the hand-back
+    /// before its snapshot).
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_house_placement_returns_the_item_to_the_pack() {
+        let Some((pool, _db_lock)) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let Some(key) = first_object(&pool).await else {
+            return;
+        };
+        for quit in [false, true] {
+            let (_user, c) = temp_unlinked_char(&pool, "hpf").await;
+            let mut world = World::new();
+            world.insert_resource(SaveCoordinator::default());
+            world.insert_resource(commands::DbPool(pool.clone()));
+            let (tx, inbox_rx) = tokio::sync::mpsc::channel(8);
+            world.insert_resource(commands::PlayerUpdateTx(tx));
+            world.insert_resource(commands::PlayerUpdateInbox(std::sync::Mutex::new(inbox_rx)));
+            crate::house_items::register_observers(&mut world);
+            let room = world.spawn_empty().id();
+            let house_room = world
+                .spawn(mud_world::HouseRoom {
+                    house_id: 1,
+                    local_index: 0,
+                })
+                .id();
+            let (out_tx, mut out_rx) = tokio::sync::mpsc::channel(16);
+            let me = spawn_player_for(&mut world, &c.id, room);
+            world.entity_mut(me).insert(Connection(out_tx));
+            let item = world
+                .spawn((
+                    Item,
+                    Named {
+                        name: "a plain sword".into(),
+                    },
+                    WorldKey {
+                        zone: key.0,
+                        id: key.1,
+                    },
+                    Located(me),
+                ))
+                .id();
+            assert!(save_player(&mut world, me, &pool).await.committed);
+
+            // A room row that does not exist: the insert is refused.
+            place_in_world(&mut world, item, house_room, &c.id, -1, key);
+            assert_eq!(world.get::<Located>(item).unwrap().0, house_room);
+            let coordinator = world.resource::<SaveCoordinator>().clone();
+            if quit {
+                let out = save_player_final(&mut world, me, &pool).await;
+                assert!(out.committed, "{:?}", out.error);
+            } else {
+                assert!(coordinator.flush(&mut world, Duration::from_secs(10)).await);
+                commands::drain_player_updates(&mut world);
+                assert!(
+                    drain(&mut out_rx).contains("could not be stored in your house"),
+                    "player told"
+                );
+            }
+            assert_eq!(
+                world.get::<Located>(item).unwrap().0,
+                me,
+                "back in the pack"
+            );
+            assert!(world.get::<mud_world::HousePlacement>(item).is_none());
+            if !quit {
+                assert!(save_player(&mut world, me, &pool).await.committed);
+            }
+            assert_eq!(
+                item_rows(&pool, &[&c.id]).await.len(),
+                1,
+                "saved in the pack"
+            );
+            drop_item_rows(&pool, &[&c.id]).await;
+        }
     }
 
     static RELOG_RETRY: &[Duration] = &[Duration::from_millis(150)];

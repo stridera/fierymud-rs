@@ -15432,6 +15432,7 @@ pub(crate) fn cmd_house_place(
             world,
             crate::house_items::PlacementWrite {
                 character_id,
+                item,
                 room_row_id,
                 object_zone_id: proto_key.zone,
                 object_id: proto_key.id,

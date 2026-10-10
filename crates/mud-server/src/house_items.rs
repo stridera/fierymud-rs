@@ -28,7 +28,7 @@ use bevy_ecs::prelude::*;
 use mud_world::{Account, Follower, HouseItem, HousePlacement, HouseRoom, Located, PersistentPet};
 
 use crate::autosave::SaveCoordinator;
-use crate::commands::DbPool;
+use crate::commands::{DbPool, PendingPlayerUpdate, PlayerUpdateTx};
 
 /// Query filter for entities tracked as house items.
 pub(crate) type HouseTracked = Or<(With<HouseItem>, With<HousePlacement>)>;
@@ -183,6 +183,8 @@ async fn delete_row_until_gone(pool: mud_db::sqlx::PgPool, id: i32) {
 /// What a placement needs to persist itself.
 pub(crate) struct PlacementWrite {
     pub character_id: String,
+    /// The placed item's entity (handed back if the insert fails).
+    pub item: Entity,
     pub room_row_id: i32,
     pub object_zone_id: i32,
     pub object_id: i32,
@@ -211,6 +213,7 @@ pub(crate) fn persist_placement(world: &World, w: PlacementWrite) {
         .unwrap_or_default();
     let character_id = w.character_id.clone();
     let tracker = coordinator.clone();
+    let update_tx = world.get_resource::<PlayerUpdateTx>().map(|t| t.0.clone());
     coordinator.spawn_ordered(&character_id, move |mut ordered| async move {
         if w.placement.is_released() {
             // Picked up before this turn came: the item is back in a pack
@@ -246,6 +249,24 @@ pub(crate) fn persist_placement(world: &World, w: PlacementWrite) {
             }
             Err(e) => {
                 tracing::warn!(error = %e, "house item place failed");
+                // The pack row is untouched (the transaction rolled back) but
+                // the item stands in the house room with no row: hand it back
+                // to the player. Queued while still holding the turn, so the
+                // player's queued save drains it before taking its snapshot.
+                if let Some(tx) = update_tx
+                    && w.placement.fail()
+                    && tx
+                        .try_send(PendingPlayerUpdate::HousePlaceFailed {
+                            character_id: w.character_id.clone(),
+                            item: w.item,
+                        })
+                        .is_err()
+                {
+                    tracing::error!(
+                        character_id = %w.character_id,
+                        "failed house placement could not be handed back to the player"
+                    );
+                }
             }
         }
     });

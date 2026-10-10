@@ -282,6 +282,19 @@ impl HousePlacement {
         row
     }
 
+    /// The insert failed. Returns `true` when the item is still waiting in
+    /// the house (the caller must put it back in the player's pack), `false`
+    /// when a pickup already took it. Either way the slot ends up released.
+    #[must_use]
+    pub fn fail(&self) -> bool {
+        let mut st = self.state();
+        let pending = *st == PlacementState::Pending;
+        if pending {
+            *st = PlacementState::Released;
+        }
+        pending
+    }
+
     /// The item already left the house (a pickup beat the insert task to its
     /// turn): there is nothing to insert.
     #[must_use]

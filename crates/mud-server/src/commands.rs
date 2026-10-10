@@ -127,6 +127,11 @@ pub enum PendingPlayerUpdate {
         quest_zone: i32,
         quest_id: i32,
     },
+    /// `house place` could not store the item (its insert failed): it is
+    /// still standing in the house room with no row behind it, so give it
+    /// back to the player instead of leaving it there to vanish at the next
+    /// reboot.
+    HousePlaceFailed { character_id: String, item: Entity },
     /// A quest dialogue opened: the mob speaks to the player and, for
     /// a tree, the conversation is tracked from `open.enter`.
     DialogueReply {
@@ -157,6 +162,7 @@ impl PendingPlayerUpdate {
             | Self::TriggerCandidates { character_id, .. }
             | Self::GiverCandidates { character_id, .. }
             | Self::QuestAccepted { character_id, .. }
+            | Self::HousePlaceFailed { character_id, .. }
             | Self::DialogueReply { character_id, .. } => character_id,
         }
     }
@@ -388,6 +394,25 @@ pub fn drain_player_updates(world: &mut World) {
                     quest_zone,
                     quest_id,
                 );
+            }
+            PendingPlayerUpdate::HousePlaceFailed { item, .. } => {
+                // Still the placed item (nobody picked it up since the
+                // insert failed): back into the pack. The `Located`
+                // observer strips the house markers.
+                if world.get_entity(item).is_ok()
+                    && world.get::<mud_world::HousePlacement>(item).is_some()
+                {
+                    let name = name_of(world, item);
+                    world.entity_mut(item).insert(Located(entity));
+                    send_to(
+                        world,
+                        entity,
+                        format!(
+                            "{} could not be stored in your house and is back in your pack.\r\n",
+                            cap_sentence_start(&name)
+                        ),
+                    );
+                }
             }
             PendingPlayerUpdate::DialogueReply {
                 mob_name,
