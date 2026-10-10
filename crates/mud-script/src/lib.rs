@@ -664,12 +664,22 @@ impl LuaHost {
             return 0;
         }
         let due_tick = self.current_tick;
+        // A script whose `self` has despawned (killed, purged) can never
+        // act again: drop it now rather than carrying it to its deadline.
+        self.yielded
+            .retain(|y| world.get_entity(y.listener).is_ok());
         let (due, parked): (Vec<_>, Vec<_>) = std::mem::take(&mut self.yielded)
             .into_iter()
             .partition(|y| y.resume_at_tick <= due_tick);
         self.yielded = parked;
         let mut resumed = 0;
         for mut yielded in due {
+            // The entity that triggered the script may be gone by now
+            // (player quit, mob died during the wait). Its `actor`
+            // binding would dangle, so the script is abandoned.
+            if world.get_entity(yielded.acting).is_err() {
+                continue;
+            }
             if yielded.gate == ScriptGate::Mob {
                 match mob_block(world, yielded.listener) {
                     // Legacy aborts the script when the mob is not awake.
@@ -699,7 +709,21 @@ impl LuaHost {
     /// any other trigger that fired between yield and resume would
     /// have trampled them. On a second yield, re-parks; on completion
     /// or error, falls off.
-    fn resume_thread(&mut self, world: &mut World, yielded: YieldedThread) -> Result<(), String> {
+    fn resume_thread(
+        &mut self,
+        world: &mut World,
+        mut yielded: YieldedThread,
+    ) -> Result<(), String> {
+        // Never bind a dead listener / actor: every binding below assumes
+        // the entities named by the script context still exist.
+        if world.get_entity(yielded.listener).is_err() || world.get_entity(yielded.acting).is_err()
+        {
+            return Err("lua resume skipped: listener or actor despawned".to_string());
+        }
+        // An item the script was handed may have been consumed meanwhile.
+        if yielded.object.is_some_and(|o| world.get_entity(o).is_err()) {
+            yielded.object = None;
+        }
         let world_ptr = WorldPtr(NonNull::from(&mut *world));
         self.lua.set_app_data(world_ptr);
         self.lua.set_app_data(LuaCapture::default());
@@ -1315,8 +1339,11 @@ impl LuaHost {
                         // calls are always `combat.engage(actor)`
                         // where `self` triggers the engagement, so
                         // bind via the Lua-globals `self` lookup.
-                        if let Some(self_ud) = lua.app_data_ref::<SelfEntity>().map(|s| s.0) {
-                            world.entity_mut(self_ud).insert(Fighting(target_entity));
+                        if let Some(self_ud) = lua.app_data_ref::<SelfEntity>().map(|s| s.0)
+                            && world.get_entity(target_entity).is_ok()
+                            && let Ok(mut em) = world.get_entity_mut(self_ud)
+                        {
+                            em.insert(Fighting(target_entity));
                         }
                     })
                 })?,
@@ -1342,9 +1369,14 @@ impl LuaHost {
                                 }
                             }
                         }
-                        if let Some(&attacker) = attackers.first() {
-                            world.entity_mut(attacker).insert(Fighting(self_ent));
-                            world.entity_mut(self_ent).insert(Fighting(attacker));
+                        if let Some(&attacker) = attackers.first()
+                            && world.get_entity(self_ent).is_ok()
+                            && let Ok(mut em) = world.get_entity_mut(attacker)
+                        {
+                            em.insert(Fighting(self_ent));
+                            if let Ok(mut me) = world.get_entity_mut(self_ent) {
+                                me.insert(Fighting(attacker));
+                            }
                         }
                     })
                 })?,
@@ -1781,6 +1813,9 @@ fn skills_execute(
         let Some(f) = world.get_resource::<SkillExecutor>().and_then(|e| e.0) else {
             return;
         };
+        if world.get_entity(caster).is_err() {
+            return;
+        }
         let args = match target.map(str::trim).filter(|s| !s.is_empty()) {
             Some(t) => format!("{skill} {t}"),
             None => skill.to_string(),
@@ -1821,6 +1856,9 @@ where
         let Some(f) = lookup(world) else {
             return;
         };
+        if world.get_entity(caster).is_err() {
+            return;
+        }
         let args_str = match target_name
             .as_deref()
             .map(str::trim)
@@ -1865,6 +1903,9 @@ fn spells_cast_dispatch(lua: &Lua, args: MultiValue) -> mlua::Result<()> {
         let Some(f) = world.get_resource::<SpellExecutor>().and_then(|e| e.0) else {
             return;
         };
+        if world.get_entity(caster).is_err() {
+            return;
+        }
         let args_str = match target_name
             .as_deref()
             .map(str::trim)
@@ -1896,10 +1937,15 @@ fn skills_set_level(lua: &Lua, entity: Entity, name: &str, level: i32) -> mlua::
         let known = if let Some(existing) = world.get_mut::<KnownAbilities>(entity) {
             existing
         } else {
-            world.entity_mut(entity).insert(KnownAbilities::default());
-            world
-                .get_mut::<KnownAbilities>(entity)
-                .expect("just inserted")
+            // Despawned entity: nothing to teach.
+            let Ok(mut em) = world.get_entity_mut(entity) else {
+                return;
+            };
+            em.insert(KnownAbilities::default());
+            let Some(known) = world.get_mut::<KnownAbilities>(entity) else {
+                return;
+            };
+            known
         };
         let mut known = known;
         if let Some(slot) = known
@@ -2872,6 +2918,9 @@ impl UserData for LuaActor {
                 let Some(f) = world.get_resource::<AttackAllExecutor>().and_then(|e| e.0) else {
                     return;
                 };
+                if world.get_entity(this.entity).is_err() {
+                    return;
+                }
                 f(world, this.entity);
             })
         });
@@ -3038,9 +3087,12 @@ impl UserData for LuaActor {
                     return Ok(());
                 }
                 world_mut_from_lua(lua, |world| {
-                    world
-                        .entity_mut(this.entity)
-                        .insert(Follower(leader_entity));
+                    if world.get_entity(leader_entity).is_err() {
+                        return;
+                    }
+                    if let Ok(mut em) = world.get_entity_mut(this.entity) {
+                        em.insert(Follower(leader_entity));
+                    }
                 })
             },
         );
@@ -5978,3 +6030,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod despawn_tests;
