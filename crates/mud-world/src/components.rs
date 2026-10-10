@@ -1513,7 +1513,47 @@ pub struct BoardLink(pub i32);
 /// movement into a room, mob kill, item use, etc. — and runs the
 /// matching trigger bodies through `mlua`.
 #[derive(Component, Debug, Clone, Default)]
+#[component(on_insert = index_random_triggers)]
 pub struct AttachedTriggers(pub Vec<(i32, i32)>);
+
+/// Marker kept in sync with [`AttachedTriggers`] by its insert hook:
+/// present exactly while at least one attached trigger carries the
+/// RANDOM flag in the `TriggerCatalog`. The per-pulse RANDOM dispatcher
+/// queries `With<RandomTriggers>`, so it only ever visits entities that
+/// have something to roll for instead of every scripted mob, item and
+/// room.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct RandomTriggers;
+
+/// `AttachedTriggers` insert hook: add or drop the [`RandomTriggers`]
+/// marker. Needs the `TriggerCatalog` resource to be in place before
+/// triggers are attached (the loader and `apply_reloaded_catalog`
+/// guarantee that); without it the marker is simply not set.
+fn index_random_triggers(
+    mut world: bevy_ecs::world::DeferredWorld,
+    ctx: bevy_ecs::lifecycle::HookContext,
+) {
+    use crate::resources::{TriggerCatalog, TriggerEvent};
+    let has_random = match (
+        world.get::<AttachedTriggers>(ctx.entity),
+        world.get_resource::<TriggerCatalog>(),
+    ) {
+        (Some(attached), Some(catalog)) => attached.0.iter().any(|key| {
+            catalog
+                .by_key
+                .get(key)
+                .is_some_and(|def| def.flags.contains(&TriggerEvent::Random))
+        }),
+        _ => false,
+    };
+    let mut commands = world.commands();
+    let mut entity = commands.entity(ctx.entity);
+    if has_random {
+        entity.insert(RandomTriggers);
+    } else {
+        entity.remove::<RandomTriggers>();
+    }
+}
 
 /// One row in a player's `Trophy` ring buffer. `amount` is the
 /// accumulated kill count (fractional for group splits — a 4-way

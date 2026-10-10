@@ -707,12 +707,17 @@ pub fn apply_reloaded_catalog(world: &mut World, new: TriggerCatalog) -> ReloadS
         rooms_with_triggers: 0,
     };
 
+    // The new catalog goes in first: `AttachedTriggers`' insert hook
+    // reads it to index entities with RANDOM triggers.
+    let room_attachments = new.room_attachments.clone();
+    world.insert_resource(new);
+
     let rooms_to_refresh: Vec<(Entity, (i32, i32))> = {
         let mut q = world.query_filtered::<(Entity, &WorldKey), With<Room>>();
         q.iter(world).map(|(e, k)| (e, (k.zone, k.id))).collect()
     };
     for (room, key) in rooms_to_refresh {
-        let attached = new.room_attachments.get(&key).cloned();
+        let attached = room_attachments.get(&key).cloned();
         if let Ok(mut em) = world.get_entity_mut(room) {
             em.remove::<AttachedTriggers>();
             if let Some(list) = attached
@@ -724,7 +729,9 @@ pub fn apply_reloaded_catalog(world: &mut World, new: TriggerCatalog) -> ReloadS
         }
     }
 
-    world.insert_resource(new);
+    // Mob and object instances keep their attachments across a reload,
+    // but an edited trigger may have gained or lost the RANDOM flag.
+    reindex_random_triggers(world);
     tracing::info!(
         total = stats.total,
         mob_links = stats.mob_links,
@@ -856,6 +863,204 @@ pub fn lua_coroutine_tick(world: &mut World) {
     drain_deferred_room_triggers(world);
     // Fires a script's server calls had to queue (see `deferred_triggers`).
     crate::deferred_triggers::drain(world);
+}
+
+/// Legacy `PULSE_DG_SCRIPT`: RANDOM triggers are rolled every 13 real
+/// seconds.
+const RANDOM_PULSE_TICKS: u64 = 13 * crate::TICK_HZ;
+
+/// Split the converter's leading probability gate off a trigger body:
+///
+/// ```lua
+/// -- 25% chance to trigger
+/// if not percent_chance(25) then
+///     return true
+/// end
+/// ```
+///
+/// Returns the percentage and the body with the gate removed, or `None`
+/// and the untouched body when it does not start with one (comment and
+/// blank lines before it are fine). The converter folds the DG numeric
+/// argument into this gate, but for several event types the argument is
+/// not a chance to run: for HIT_PERCENT it is the HP% threshold. The
+/// dispatcher reads it back out so it can apply the legacy meaning and,
+/// for RANDOM, roll in Rust (sparing a Lua environment for the rolls
+/// that fail).
+fn split_leading_gate(body: &str) -> (Option<i64>, &str) {
+    fn parse(mut rest: &str) -> Option<(i64, &str)> {
+        while let Some(line_end) = rest.find('\n') {
+            let line = rest[..line_end].trim();
+            if line.is_empty() || line.starts_with("--") {
+                rest = &rest[line_end + 1..];
+            } else {
+                break;
+            }
+        }
+        let rest = rest.strip_prefix("if not percent_chance(")?;
+        let (num, rest) = rest.split_once(')')?;
+        let pct: i64 = num.trim().parse().ok()?;
+        let rest = rest.trim_start().strip_prefix("then")?.trim_start();
+        let rest = rest.strip_prefix("return true")?;
+        // Optional trailing comment on the `return true` line.
+        let (tail, rest) = rest.split_once('\n')?;
+        if !(tail.trim().is_empty() || tail.trim_start().starts_with("--")) {
+            return None;
+        }
+        let rest = rest.trim_start().strip_prefix("end")?;
+        let rest = rest.strip_prefix('\n').unwrap_or(rest);
+        Some((pct, rest))
+    }
+    match parse(body) {
+        Some((pct, rest)) => (Some(pct), rest),
+        None => (None, body),
+    }
+}
+
+/// Recompute the [`mud_world::RandomTriggers`] marker for every
+/// scripted entity against the current catalog. The marker is kept
+/// current on insert by a component hook; this catches the entities
+/// whose attachments survive a catalog reload.
+fn reindex_random_triggers(world: &mut World) {
+    let attached: Vec<(Entity, Vec<(i32, i32)>)> = {
+        let mut q = world.query::<(Entity, &AttachedTriggers)>();
+        q.iter(world).map(|(e, at)| (e, at.0.clone())).collect()
+    };
+    let scripted: Vec<(Entity, bool)> = {
+        let catalog = world.resource::<TriggerCatalog>();
+        attached
+            .into_iter()
+            .map(|(e, keys)| {
+                let random = keys.iter().any(|key| {
+                    catalog
+                        .by_key
+                        .get(key)
+                        .is_some_and(|d| d.flags.contains(&TriggerEvent::Random))
+                });
+                (e, random)
+            })
+            .collect()
+    };
+    for (e, random) in scripted {
+        if let Ok(mut em) = world.get_entity_mut(e) {
+            if random {
+                em.insert(mud_world::RandomTriggers);
+            } else {
+                em.remove::<mud_world::RandomTriggers>();
+            }
+        }
+    }
+}
+
+/// Per-pulse RANDOM dispatch (legacy `script_trigger_check`). Every 13
+/// seconds each scripted mob, object and room rolls its RANDOM triggers.
+/// A mob or room only rolls while a player is in its zone, unless one of
+/// its triggers carries the GLOBAL flag ("check even if zone empty");
+/// objects roll everywhere. Only entities carrying the
+/// [`mud_world::RandomTriggers`] marker are visited, so the cost tracks
+/// the number of RANDOM-scripted entities, not the size of the world.
+///
+/// Legacy runs at most one RANDOM trigger per entity per pulse: the first
+/// whose percent passes. Here the percent is read from the body's leading
+/// gate and rolled before any Lua runs, and a trigger that passes runs
+/// with the gate stripped so the chance is not rolled twice.
+pub fn random_trigger_tick(world: &mut World) {
+    let tick = world.resource::<crate::TickCount>().0;
+    if tick == 0 || !tick.is_multiple_of(RANDOM_PULSE_TICKS) {
+        return;
+    }
+    run_random_pulse(world);
+}
+
+/// One RANDOM pulse; split out so tests can run it without tick math.
+pub(crate) fn run_random_pulse(world: &mut World) {
+    let candidates: Vec<Entity> = {
+        let mut q = world.query_filtered::<Entity, With<mud_world::RandomTriggers>>();
+        q.iter(world).collect()
+    };
+    if candidates.is_empty() {
+        return;
+    }
+    // Zones with a player in them, built once per pulse and only when a
+    // mob or room needs the answer.
+    let mut active_zones: Option<std::collections::HashSet<i32>> = None;
+    let mut zone_is_active = |world: &mut World, zone: i32| -> bool {
+        active_zones
+            .get_or_insert_with(|| {
+                let mut zones = std::collections::HashSet::new();
+                let mut q = world.query_filtered::<&mud_world::Located, With<mud_world::Player>>();
+                let rooms: Vec<Entity> = q.iter(world).map(|l| l.0).collect();
+                for room in rooms {
+                    if let Some(k) = world.get::<WorldKey>(room) {
+                        zones.insert(k.zone);
+                    }
+                }
+                zones
+            })
+            .contains(&zone)
+    };
+    for entity in candidates {
+        let Ok(em) = world.get_entity(entity) else {
+            continue;
+        };
+        let is_item = em.contains::<mud_world::Item>();
+        let defs = triggers_with(world, entity, &[TriggerEvent::Random]);
+        if defs.is_empty() {
+            continue;
+        }
+        if !is_item {
+            let global = {
+                let catalog = world.resource::<TriggerCatalog>();
+                world.get::<AttachedTriggers>(entity).is_some_and(|at| {
+                    at.0.iter().any(|k| {
+                        catalog
+                            .by_key
+                            .get(k)
+                            .is_some_and(|d| d.flags.contains(&TriggerEvent::Global))
+                    })
+                })
+            };
+            if !global {
+                // A mob's zone is its room's; a room's is its own.
+                let room = if world.get::<Room>(entity).is_some() {
+                    Some(entity)
+                } else {
+                    world.get::<mud_world::Located>(entity).map(|l| l.0)
+                };
+                let zone = room.and_then(|r| world.get::<WorldKey>(r)).map(|k| k.zone);
+                match zone {
+                    Some(z) if zone_is_active(world, z) => {}
+                    _ => continue,
+                }
+            }
+        }
+        for (zone, id, name, body) in defs {
+            let (gate, rest) = split_leading_gate(&body);
+            if let Some(pct) = gate
+                && rand::random_range(1i64..=100) > pct.clamp(0, 100)
+            {
+                continue;
+            }
+            let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
+                gated(&mut host, TriggerEvent::Random, |h| {
+                    h.exec_for_actor(world, entity, rest)
+                })
+            });
+            drain_lua_outbox(world);
+            record_fire(
+                world,
+                entity,
+                zone,
+                id,
+                TriggerEvent::Random,
+                result.is_ok(),
+            );
+            if let Err(e) = result {
+                record_failure(world, zone, id, &name, "RANDOM", &e);
+            }
+            // Legacy: only the first RANDOM trigger that passes runs.
+            break;
+        }
+    }
 }
 
 /// One trigger whose body failed to compile.
@@ -1149,6 +1354,7 @@ mod dispatch_tests {
     fn spawn_player(world: &mut World, room: Entity, name: &str) -> Entity {
         world
             .spawn((
+                mud_world::Player,
                 Named {
                     name: name.to_string(),
                 },
@@ -1420,5 +1626,200 @@ return _return_value"#;
                 .cloned(),
             Some("Dana".into())
         );
+    }
+
+    // ----- RANDOM -----
+
+    /// A room at `zone` (WorldKey) that is not the default zone-99 room.
+    fn spawn_room_in(world: &mut World, zone: i32, id: i32) -> Entity {
+        world.spawn((mud_world::Room, WorldKey { zone, id })).id()
+    }
+
+    #[test]
+    fn split_leading_gate_reads_the_converter_header() {
+        let body = "-- Trigger: x\n\n-- 25% chance to trigger\nif not percent_chance(25) then\n    return true\nend\nself:say('hi')\n";
+        let (pct, rest) = split_leading_gate(body);
+        assert_eq!(pct, Some(25));
+        assert_eq!(rest, "self:say('hi')\n");
+        // Trailing comment on the return line is fine.
+        let (pct, rest) = split_leading_gate(
+            "if not percent_chance(7) then\n    return true  -- nope\nend\nbody()",
+        );
+        assert_eq!((pct, rest), (Some(7), "body()"));
+        // No gate, or code before it: untouched.
+        for b in [
+            "self:say('hi')\n",
+            "x = 1\nif not percent_chance(5) then\n return true\nend\n",
+        ] {
+            assert_eq!(split_leading_gate(b), (None, b));
+        }
+    }
+
+    #[test]
+    fn random_triggers_roll_only_where_legacy_does() {
+        let (mut world, room) = base_world();
+        // Zone 99 has a player; zone 98 does not.
+        spawn_player(&mut world, room, "Watcher");
+        let empty = spawn_room_in(&mut world, 98, 0);
+        add_trigger(
+            &mut world,
+            1,
+            vec![TriggerEvent::Random],
+            "self:setvar('rolled', (self:getvar('rolled') or 0) + 1)",
+        );
+        add_trigger(
+            &mut world,
+            2,
+            vec![TriggerEvent::Random, TriggerEvent::Global],
+            "self:setvar('rolled', (self:getvar('rolled') or 0) + 1)",
+        );
+        let near = spawn_mob(&mut world, room, 1, vec![(99, 1)]);
+        let far = spawn_mob(&mut world, empty, 2, vec![(99, 1)]);
+        let far_global = spawn_mob(&mut world, empty, 3, vec![(99, 2)]);
+        let item = spawn_item(&mut world, empty, 4, vec![(99, 1)]);
+        let plain = spawn_mob(&mut world, room, 5, vec![]);
+        // The insert hook indexed exactly the RANDOM-scripted entities.
+        for e in [near, far, far_global, item] {
+            assert!(world.get::<mud_world::RandomTriggers>(e).is_some());
+        }
+        assert!(world.get::<mud_world::RandomTriggers>(plain).is_none());
+
+        run_random_pulse(&mut world);
+        let rolled = |w: &World, id: i32, kind| ran(w, id, kind, "rolled");
+        assert_eq!(
+            rolled(&world, 1, EntityType::Mob),
+            Some(1.into()),
+            "player in zone"
+        );
+        assert!(
+            rolled(&world, 2, EntityType::Mob).is_none(),
+            "empty zone, not GLOBAL"
+        );
+        assert_eq!(
+            rolled(&world, 3, EntityType::Mob),
+            Some(1.into()),
+            "GLOBAL ignores the gate"
+        );
+        assert_eq!(
+            rolled(&world, 4, EntityType::Object),
+            Some(1.into()),
+            "objects always roll"
+        );
+    }
+
+    #[test]
+    fn random_percent_gate_is_rolled_once_and_only_one_trigger_runs() {
+        let (mut world, room) = base_world();
+        spawn_player(&mut world, room, "Watcher");
+        let gate = |pct: u32, tag: &str| {
+            format!(
+                "-- {pct}% chance to trigger\nif not percent_chance({pct}) then\n    return true\nend\nself:setvar('{tag}', 1)\n"
+            )
+        };
+        add_trigger(&mut world, 1, vec![TriggerEvent::Random], &gate(0, "never"));
+        add_trigger(
+            &mut world,
+            2,
+            vec![TriggerEvent::Random],
+            &gate(100, "first"),
+        );
+        add_trigger(
+            &mut world,
+            3,
+            vec![TriggerEvent::Random],
+            &gate(100, "second"),
+        );
+        spawn_mob(&mut world, room, 1, vec![(99, 1), (99, 2), (99, 3)]);
+        for _ in 0..5 {
+            run_random_pulse(&mut world);
+        }
+        assert!(var(&world, 1, "never").is_none(), "0% never runs");
+        assert_eq!(var(&world, 1, "first"), Some(1.into()));
+        assert!(
+            var(&world, 1, "second").is_none(),
+            "one RANDOM trigger per pulse"
+        );
+    }
+
+    #[test]
+    fn random_pulse_runs_on_the_13_second_boundary_only() {
+        let (mut world, room) = base_world();
+        spawn_player(&mut world, room, "Watcher");
+        add_trigger(
+            &mut world,
+            1,
+            vec![TriggerEvent::Random],
+            "self:setvar('n', (self:getvar('n') or 0) + 1)",
+        );
+        spawn_mob(&mut world, room, 1, vec![(99, 1)]);
+        for tick in [1u64, 129, 131] {
+            world.insert_resource(crate::TickCount(tick));
+            random_trigger_tick(&mut world);
+        }
+        assert!(var(&world, 1, "n").is_none());
+        world.insert_resource(crate::TickCount(130));
+        random_trigger_tick(&mut world);
+        assert_eq!(var(&world, 1, "n"), Some(1.into()));
+    }
+
+    /// RANDOM dispatch visits only entities with a RANDOM trigger, so a
+    /// prod-sized world costs what its scripted mobs cost. Prod scale:
+    /// 10k rooms, 5,500 mobs (1,600 with RANDOM scripts: 600 of them in
+    /// empty zones, 60 GLOBAL), 4,000 items (150 RANDOM), 60 RANDOM rooms,
+    /// 50 players. The Lua cost is the passes: one in twenty here.
+    /// Hard limit only enforced in release.
+    #[test]
+    fn random_pulse_prod_scale_is_fast() {
+        const ZONES: i32 = 200;
+        const ROOMS_PER_ZONE: i32 = 50;
+        let (mut world, _) = base_world();
+        let gated = "-- 5% chance to trigger\nif not percent_chance(5) then\n    return true\nend\nself:setvar('n', 1)\n";
+        add_trigger(&mut world, 1, vec![TriggerEvent::Random], gated);
+        add_trigger(
+            &mut world,
+            2,
+            vec![TriggerEvent::Random, TriggerEvent::Global],
+            gated,
+        );
+        let rooms: Vec<Entity> = (0..ZONES * ROOMS_PER_ZONE)
+            .map(|i| spawn_room_in(&mut world, i / ROOMS_PER_ZONE, i % ROOMS_PER_ZONE))
+            .collect();
+        // Players only in the first 20 zones.
+        for p in 0..50usize {
+            let room = rooms[(p * 19) % (20 * ROOMS_PER_ZONE as usize)];
+            spawn_player(&mut world, room, &format!("p{p}"));
+        }
+        for i in 0..5500usize {
+            let room = rooms[(i * 7) % rooms.len()];
+            let triggers = match i {
+                _ if i % 11 == 0 && i % 7 == 0 => vec![(99, 2)],
+                _ if i % 3 == 0 => vec![(99, 1)],
+                _ => vec![],
+            };
+            spawn_mob(&mut world, room, i as i32, triggers);
+        }
+        for i in 0..4000usize {
+            let holder = rooms[(i * 13) % rooms.len()];
+            let triggers = if i % 27 == 0 { vec![(99, 1)] } else { vec![] };
+            spawn_item(&mut world, holder, i as i32, triggers);
+        }
+        for i in 0..60usize {
+            world
+                .entity_mut(rooms[i * 150])
+                .insert(AttachedTriggers(vec![(99, 1)]));
+        }
+        let scripted = world
+            .query_filtered::<Entity, With<mud_world::RandomTriggers>>()
+            .iter(&world)
+            .count();
+        assert!(scripted > 1600, "scripted entities: {scripted}");
+
+        let start = std::time::Instant::now();
+        run_random_pulse(&mut world);
+        let elapsed = start.elapsed();
+        eprintln!("random pulse, {scripted} RANDOM-scripted entities of ~20k: {elapsed:?}");
+        if !cfg!(debug_assertions) {
+            assert!(elapsed.as_millis() < 50, "random pulse took {elapsed:?}");
+        }
     }
 }

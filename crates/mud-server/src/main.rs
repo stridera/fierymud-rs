@@ -607,6 +607,7 @@ async fn main() {
                 timed!(flight::gravity_tick),
                 timed!(weather::weather_tick),
                 timed!(sleep::mob_sleep_tick),
+                timed!(triggers::random_trigger_tick),
             )
                 .chain(),
             (

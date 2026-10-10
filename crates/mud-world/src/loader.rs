@@ -1154,11 +1154,13 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 room_to_attach.push((room_entity, list.clone()));
             }
         }
+        // The catalog goes in first: `AttachedTriggers`' insert hook reads
+        // it to index entities with RANDOM triggers.
+        world.insert_resource(trigger_catalog);
         for (room_entity, list) in room_to_attach {
             world.entity_mut(room_entity).insert(AttachedTriggers(list));
         }
     }
-    world.insert_resource(trigger_catalog);
 
     // Pass 4.7c: hydrate the EntityVariableCache from the
     // `entity_variables` table. One bulk read at boot is cheaper than
