@@ -596,6 +596,9 @@ mod item_edit_tests;
 #[path = "commands/item_effects_tests.rs"]
 mod item_effects_tests;
 #[cfg(test)]
+#[path = "commands/item_guard_tests.rs"]
+mod item_guard_tests;
+#[cfg(test)]
 #[path = "commands/item_tag_tests.rs"]
 mod item_tag_tests;
 #[cfg(test)]

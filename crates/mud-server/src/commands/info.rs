@@ -5067,6 +5067,10 @@ pub(crate) fn cmd_sell(world: &mut World, player: Entity, args: &str) {
         );
         return;
     }
+    // The shop despawns what it buys; a full bag's contents would be lost.
+    if refuse_nonempty_container(world, player, item, &item_name) {
+        return;
+    }
     let Some(shop) = world
         .resource::<ShopCatalog>()
         .by_key
@@ -11353,6 +11357,11 @@ pub(crate) fn cmd_junk(world: &mut World, player: Entity, args: &str) {
     let Some(located) = world.get::<Located>(player).copied() else {
         return;
     };
+    // Junking destroys only the item itself; a full bag's contents would be
+    // orphaned and lost without the player ever choosing that.
+    if refuse_nonempty_container(world, player, item, &item_name) {
+        return;
+    }
     crate::equip_apply::despawn_item(world, item);
     send_rendered(world, player, &format!("You destroy {item_name}.\r\n"));
     broadcast_room_except_rendered(
@@ -11429,6 +11438,33 @@ pub(crate) fn has_restriction(
     world
         .get::<mud_world::ObjectRestrictions>(item)
         .is_some_and(|r| r.has(restriction))
+}
+
+/// True when `item` is a container with something inside it.
+pub(crate) fn has_contents(world: &World, item: Entity) -> bool {
+    world
+        .get::<mud_world::Contents>(item)
+        .is_some_and(|c| c.iter().next().is_some())
+}
+
+/// Refuse (and say so) when `item` still holds things. Used wherever the
+/// item is about to be destroyed or stored as a single row: its contents are
+/// separate entities that would otherwise be orphaned and lost.
+pub(crate) fn refuse_nonempty_container(
+    world: &mut World,
+    player: Entity,
+    item: Entity,
+    item_name: &str,
+) -> bool {
+    if !has_contents(world, item) {
+        return false;
+    }
+    send_rendered(
+        world,
+        player,
+        &format!("{item_name} still has things in it. Empty it first.\r\n"),
+    );
+    true
 }
 
 /// True when dropping this item should be refused — either it
@@ -15314,15 +15350,7 @@ pub(crate) fn cmd_house_place(
     let item_name = name_of(world, item);
     // A placed item is one row: anything inside a container would not be
     // stored with it and would vanish at the next reboot.
-    if world
-        .get::<mud_world::Contents>(item)
-        .is_some_and(|c| c.iter().next().is_some())
-    {
-        send_rendered(
-            world,
-            player,
-            &format!("{item_name} still has things in it. Empty it first.\r\n"),
-        );
+    if refuse_nonempty_container(world, player, item, &item_name) {
         return;
     }
     // Captured before the item leaves the player's hands: the label and any
