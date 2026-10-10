@@ -2293,7 +2293,11 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
         // self.room, broadcast last words, etc. The trigger
         // dispatcher takes a snapshot of bodies up front, so even if
         // the body somehow despawns mid-fire it still completes
-        // safely.
+        // safely. Legacy `death_mtrigger(ch, killer)` binds `actor` to
+        // the killer (the 81 corpus scripts that use `actor` expect
+        // that), and sets no `actor` at all on a killerless death (a
+        // staff slay, a pet): there the dying mob stands in so the
+        // binding is never a dangling nil.
         //
         // A script's own spell / skill / damage can kill the mob while that
         // script holds the `LuaHost`. The fire is then queued until the
@@ -2302,7 +2306,12 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
         if crate::deferred_triggers::lua_busy(world) {
             try_insert(world, victim, crate::deferred_triggers::DeathFirePending);
         }
-        crate::triggers::fire_event(world, victim, mud_world::TriggerEvent::Death);
+        crate::triggers::fire_event_with_actor(
+            world,
+            victim,
+            killer.unwrap_or(victim),
+            mud_world::TriggerEvent::Death,
+        );
         let owned_items: Vec<Entity> = {
             let mut q = world.query_filtered::<(Entity, &Located), With<Item>>();
             q.iter(world)
@@ -5628,6 +5637,66 @@ mod tests {
         run_combat_tick(&mut world);
         assert!(world.get_entity(goblin).is_err(), "goblin died");
         (world, killer)
+    }
+
+    /// A DEATH script receives the killer as `actor` (legacy
+    /// `death_mtrigger(ch, killer)`), not the dying mob.
+    fn goblin_with_death_script(world: &mut World, goblin: Entity) {
+        use mud_world::{
+            AttachedTriggers, TriggerAttach, TriggerCatalog, TriggerDef, TriggerEvent,
+        };
+        let mut catalog = TriggerCatalog::default();
+        catalog.by_key.insert(
+            (99, 1),
+            TriggerDef {
+                zone_id: 99,
+                id: 1,
+                name: "death".to_string(),
+                attach_type: TriggerAttach::Mob,
+                commands: "self:setvar('killer', actor.name)".to_string(),
+                flags: vec![TriggerEvent::Death],
+                arg_list: vec![],
+                num_args: 0,
+            },
+        );
+        world.insert_resource(catalog);
+        world.insert_resource(mud_script::LuaHost::new());
+        world
+            .entity_mut(goblin)
+            .insert(AttachedTriggers(vec![(99, 1)]));
+    }
+
+    #[test]
+    fn death_trigger_binds_actor_to_the_killer() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let goblin = credit_goblin(&mut world, room, 0, None);
+        let killer = credit_player(&mut world, room, "Killer", 0);
+        world.entity_mut(killer).insert(Fighting(goblin));
+        goblin_with_death_script(&mut world, goblin);
+        run_combat_tick(&mut world);
+        assert!(world.get_entity(goblin).is_err(), "goblin died");
+        let seen = world
+            .resource::<mud_world::EntityVariableCache>()
+            .get(mud_db::enums::EntityType::Mob, 1, 1, "killer")
+            .cloned();
+        assert_eq!(seen, Some("Killer".into()));
+    }
+
+    #[test]
+    fn killerless_death_trigger_binds_the_dying_mob() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let goblin = credit_goblin(&mut world, room, 0, None);
+        goblin_with_death_script(&mut world, goblin);
+        // A staff slay is credited to nobody.
+        world.entity_mut(goblin).insert(StaffSlain);
+        super::handle_death(&mut world, goblin, "a goblin", room);
+        let seen = world
+            .resource::<mud_world::EntityVariableCache>()
+            .get(mud_db::enums::EntityType::Mob, 1, 1, "killer")
+            .cloned();
+        assert_eq!(seen, Some("a goblin".into()));
     }
 
     fn wealth_of(world: &World, e: Entity) -> i64 {
