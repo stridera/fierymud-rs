@@ -26,9 +26,10 @@ use mud_world::{
 
 use crate::TickCount;
 use crate::commands::{
-    Prevent, apply_damage, broadcast_room_anonymised, broadcast_room_except_rendered,
-    cap_sentence_start, carried_weight, carry_capacity, direction_name, effect_prevents,
-    has_effect_named, name_of, opposite, send_to, try_insert, try_remove,
+    Prevent, anonymise_for, apply_damage, broadcast_room_anonymised,
+    broadcast_room_except_rendered, can_see_player, cap_sentence_start, carried_weight,
+    carry_capacity, direction_name, effect_prevents, has_effect_named, name_of, opposite, send_to,
+    try_insert, try_remove,
 };
 
 /// Legacy `LVL_IMMORT`: gods neither fall nor feel weight.
@@ -58,11 +59,32 @@ const DIRECTIONS: [Direction; 10] = [
 
 /// Tell `room` what `actor` is doing. Observers who cannot see the actor
 /// (invisible, hidden, wizinvis) read "Someone" in place of the name, so a
-/// fall never gives away an invisible flier.
+/// fall never gives away an invisible flier. A `{self}` token in `msg` is the
+/// actor's reflexive ("himself"); observers who cannot see the actor get the
+/// neutral "themself" instead, so the pronoun does not leak the gender.
 fn tell_room(world: &mut World, room: Entity, actor: Entity, msg: &str) {
     let name = name_of(world, actor);
-    broadcast_room_anonymised(world, room, &[actor], &[(actor, name.as_str())], msg);
+    if !msg.contains(SELF_TOKEN) {
+        broadcast_room_anonymised(world, room, &[actor], &[(actor, name.as_str())], msg);
+        return;
+    }
+    let reflexive = reflexive(world, actor);
+    let mut targets = crate::room_index::listeners_in(world, room);
+    targets.retain(|t| *t != actor);
+    for t in targets {
+        let pronoun = if can_see_player(world, t, actor) {
+            reflexive
+        } else {
+            "themself"
+        };
+        let msg = msg.replace(SELF_TOKEN, pronoun);
+        let msg = anonymise_for(world, t, &[(actor, name.as_str())], &msg);
+        send_to(world, t, msg);
+    }
 }
+
+/// Placeholder for the actor's reflexive pronoun in a [`tell_room`] message.
+const SELF_TOKEN: &str = "{self}";
 
 fn sector_of(world: &World, room: Entity) -> Option<Sector> {
     world.get::<RoomSector>(room).map(|s| s.0)
@@ -255,8 +277,9 @@ pub(crate) fn check_overweight(world: &mut World, e: Entity) {
 }
 
 /// How often fliers are re-weighed (one effect period, a second). Weight
-/// also changes without a command: a Strength buff ending lowers the carry
-/// capacity, a quest reward or a looting mob adds load.
+/// also changes without a command: a level change lowers the carry capacity
+/// (`100 + 5 * level`; Strength does not enter into it), a quest reward or a
+/// looting mob adds load.
 const OVERWEIGHT_SWEEP_TICKS: u64 = 10;
 
 /// Re-check every flier's load. Only entities carrying [`Flying`] are
@@ -539,7 +562,6 @@ fn room_below(world: &World, room: Entity) -> Option<Entity> {
 /// The first step of a fall: the actor finds itself on thin air.
 fn announce_fall_start(world: &mut World, e: Entity, room: Entity, feather: bool) {
     let who = cap_sentence_start(&name_of(world, e));
-    let itself = reflexive(world, e);
     if feather {
         send_to(
             world,
@@ -550,7 +572,7 @@ fn announce_fall_start(world: &mut World, e: Entity, room: Entity, feather: bool
             world,
             room,
             e,
-            &format!("<b:red>{who} finds {itself} in midair and begins descending.</>\r\n"),
+            &format!("<b:red>{who} finds {SELF_TOKEN} in midair and begins descending.</>\r\n"),
         );
     } else {
         send_to(
@@ -562,7 +584,9 @@ fn announce_fall_start(world: &mut World, e: Entity, room: Entity, feather: bool
             world,
             room,
             e,
-            &format!("<b:red>{who} finds {itself} on thin air and falls</> <green>DOWN!</>\r\n"),
+            &format!(
+                "<b:red>{who} finds {SELF_TOKEN} on thin air and falls</> <green>DOWN!</>\r\n"
+            ),
         );
         falling_yell(world, e, room);
     }

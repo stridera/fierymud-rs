@@ -2301,6 +2301,12 @@ pub struct AbilityCatalog {
     /// application; missing required reagents refuse the cast
     /// with a templated message.
     pub components: HashMap<i32, Vec<AbilityComponentReq>>,
+    /// Ids of abilities tagged `passive`, derived from `by_name` by
+    /// [`AbilityCatalog::index_passives`] (the loader calls it after
+    /// filling `by_name`). Lets the per-swing passive-skill scan test
+    /// "is this ability passive" with one hash lookup instead of walking
+    /// the whole catalog.
+    pub passive_ids: std::collections::HashSet<i32>,
 }
 
 /// Display name reduced to matchable words: colour tags and apostrophes
@@ -2321,6 +2327,16 @@ fn display_key(name: &str) -> String {
 }
 
 impl AbilityCatalog {
+    /// Rebuild [`AbilityCatalog::passive_ids`] from `by_name`.
+    pub fn index_passives(&mut self) {
+        self.passive_ids = self
+            .by_name
+            .values()
+            .filter(|d| d.passive)
+            .map(|d| d.id)
+            .collect();
+    }
+
     /// Resolve a typed ability name (`invis`, `c l`, `magic missile`) with
     /// legacy semantics. An exact name wins; otherwise each typed word must
     /// prefix the corresponding word of the ability name, in order. Among

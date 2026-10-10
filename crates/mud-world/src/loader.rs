@@ -1907,6 +1907,8 @@ pub async fn load_ability_catalog(pool: &PgPool) -> sqlx::Result<AbilityCatalog>
         );
     }
 
+    ability_catalog.index_passives();
+
     // Restriction messages: only the `message` field per rule, indexed
     // by ability_id. Rule type/parameters parse on demand once real
     // gating lands.

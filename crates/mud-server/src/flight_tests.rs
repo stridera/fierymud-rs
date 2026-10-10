@@ -807,13 +807,38 @@ fn an_invisible_fliers_fall_names_no_one() {
     on_flight_lost(&mut f.world, f.p);
     run_falls(&mut f.world);
     let (up, down) = (drain(&mut up_rx), drain(&mut down_rx));
-    assert!(up.contains("Someone finds himself on thin air"), "{up}");
+    assert!(up.contains("Someone finds themself on thin air"), "{up}");
     assert!(
         down.contains("Someone falls screaming from above"),
         "{down}"
     );
     assert!(down.contains("Someone lands with a resounding"), "{down}");
     assert!(!up.contains("Zephyr") && !down.contains("Zephyr"));
+}
+
+/// A visible faller keeps the gendered reflexive; only observers who cannot
+/// see the faller get the neutral "themself".
+#[test]
+fn a_visible_fall_keeps_the_reflexive_and_an_unseen_one_does_not_leak_it() {
+    let mut f = fx();
+    let (_watcher, mut wrx) = player_in(&mut f.world, f.sky1);
+    f.world.entity_mut(f.p).remove::<Flying>();
+    on_flight_lost(&mut f.world, f.p);
+    run_falls(&mut f.world);
+    let seen = drain(&mut wrx);
+    assert!(seen.contains("finds himself on thin air"), "{seen}");
+
+    let mut f = fx();
+    let (_watcher, mut wrx) = invisible_flier(&mut f);
+    f.world.entity_mut(f.p).remove::<Flying>();
+    on_flight_lost(&mut f.world, f.p);
+    run_falls(&mut f.world);
+    let unseen = drain(&mut wrx);
+    assert!(
+        unseen.contains("Someone finds themself on thin air"),
+        "{unseen}"
+    );
+    assert!(!unseen.contains("himself") && !unseen.contains("herself"));
 }
 
 #[test]

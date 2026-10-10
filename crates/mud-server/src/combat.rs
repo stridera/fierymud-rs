@@ -347,6 +347,35 @@ fn weapon_family(damage_type: &str) -> Option<&'static str> {
     }
 }
 
+/// Weapon-skill family label (`weapon_type` param of the passives); `None` for
+/// an untyped or elemental weapon.
+type WeaponFamily = Option<&'static str>;
+
+/// Per-wielder dice / family snapshots built once per `combat_tick`.
+type WeaponDiceMap = std::collections::HashMap<Entity, (i32, i32, i32)>;
+type WeaponFamilyMap = std::collections::HashMap<Entity, WeaponFamily>;
+
+/// A wielded dice weapon: `(num, size, bonus)` plus its skill family.
+type WieldedDice = ((i32, i32, i32), WeaponFamily);
+
+/// Weapon-skill family of a dice-weapon prototype: its damage-type family
+/// ([`weapon_family`]), or the matching `two_hand_*` family when it is
+/// wielded in both hands (legacy `weapon_proficiency` picks the `SKILL_2H_*`
+/// skill for `WEAR_2HWIELD`). The runtime has one Wield slot, so "two-handed"
+/// is read from the prototype's wear flags: `Twohand` without `Mainhand`.
+fn proto_weapon_family(proto: &mud_world::ObjectProto) -> Option<&'static str> {
+    use mud_db::enums::WearFlag;
+    let family = weapon_family(proto.weapon_damage_type.as_deref()?)?;
+    let two_handed = proto.wear_flags.contains(&WearFlag::Twohand)
+        && !proto.wear_flags.contains(&WearFlag::Mainhand);
+    Some(match (two_handed, family) {
+        (false, f) => f,
+        (true, "slashing") => "two_hand_slashing",
+        (true, "bludgeoning") => "two_hand_bludgeoning",
+        (true, _) => "two_hand_piercing",
+    })
+}
+
 /// Sum of the passive-skill `modify` rows of `entity` that target `key`
 /// (`unarmed_damage`, `weapon_hitroll`): the Barehand and weapon-skill
 /// proficiencies. Each row's `amount` formula is evaluated with `skill` set
@@ -368,6 +397,11 @@ fn passive_skill_bonus(world: &World, entity: Entity, key: &str, family: Option<
         if !is_known || prof <= 0 {
             continue;
         }
+        // Active abilities that target the same key go through the normal
+        // apply/reverse path and are never counted here.
+        if !abilities.passive_ids.contains(&ability_id) {
+            continue;
+        }
         let Some(rows) = abilities.effects_for.get(&ability_id) else {
             continue;
         };
@@ -387,13 +421,6 @@ fn passive_skill_bonus(world: &World, entity: Entity, key: &str, family: Option<
             }
             if let Some(want) = param("weapon_type")
                 && !family.is_some_and(|f| f.eq_ignore_ascii_case(want))
-            {
-                continue;
-            }
-            if !abilities
-                .by_name
-                .values()
-                .any(|d| d.id == ability_id && d.passive)
             {
                 continue;
             }
@@ -422,30 +449,15 @@ fn unarmed_damage_bonus(world: &World, attacker: Entity) -> i32 {
 }
 
 /// Accuracy a swing gains from `weapon_hitroll`: gear and buffs plus the
-/// weapon-skill passive for the wielded weapon's family. 0 when the
-/// attacker wields no dice weapon (the same test the damage roll uses).
-/// Added to `CombatStats.accuracy`, the one hit-roll stat, so it cannot
-/// double-count with the `accuracy` key.
-fn weapon_hitroll_bonus(world: &mut World, attacker: Entity) -> i32 {
-    let wielded_key = {
-        let mut q = world.query::<(&Located, &EquippedSlot, &WorldKey)>();
-        q.iter(world).find_map(|(loc, eq, key)| {
-            (loc.0 == attacker && eq.0 == Slot::Wield).then_some((key.zone, key.id))
-        })
-    };
-    let Some(key) = wielded_key else {
-        return 0;
-    };
-    let Some(proto) = world
-        .get_resource::<ObjectPrototypes>()
-        .and_then(|p| p.by_key.get(&key))
-    else {
-        return 0;
-    };
-    if proto.weapon_dice_num <= 0 || proto.weapon_dice_size <= 0 {
+/// weapon-skill passive for the wielded weapon's `family`. 0 when the
+/// attacker wields no dice weapon (`armed` false; the same test the damage
+/// roll uses). Added to `CombatStats.accuracy`, the one hit-roll stat, so it
+/// cannot double-count with the `accuracy` key. The wielded weapon is
+/// resolved once per tick by the caller, not looked up per swing.
+fn weapon_hitroll_bonus(world: &World, attacker: Entity, armed: bool, family: Option<&str>) -> i32 {
+    if !armed {
         return 0;
     }
-    let family = proto.weapon_damage_type.as_deref().and_then(weapon_family);
     world
         .get::<mud_world::WeaponHitroll>(attacker)
         .map_or(0, |w| w.0)
@@ -980,7 +992,7 @@ pub fn combat_tick(world: &mut World) {
     // `proto.damage_dice_*`). Test worlds without an
     // ObjectPrototypes resource just skip the pre-pass and fall
     // through to the per-entity NaturalDamage / dmg_roll branch.
-    let weapon_dice: std::collections::HashMap<Entity, (i32, i32, i32)> =
+    let (weapon_dice, weapon_families): (WeaponDiceMap, WeaponFamilyMap) =
         if world.get_resource::<ObjectPrototypes>().is_some() {
             let protos: Vec<(Entity, (i32, i32), i32)> = {
                 let mut q = world.query::<(
@@ -995,6 +1007,8 @@ pub fn combat_tick(world: &mut World) {
                     .collect()
             };
             let proto_catalog = world.resource::<ObjectPrototypes>();
+            // Dice and weapon-skill family per wielder, resolved once here so
+            // the per-swing hit roll never re-queries the world's equipment.
             protos
                 .into_iter()
                 .filter_map(|(wielder, key, adjust)| {
@@ -1009,11 +1023,16 @@ pub fn combat_tick(world: &mut World) {
                             (p.weapon_dice_size + adjust).max(1),
                             p.weapon_dice_bonus,
                         ),
+                        proto_weapon_family(p),
                     ))
                 })
-                .collect()
+                .map(|(w, dice, family)| ((w, dice), (w, family)))
+                .unzip()
         } else {
-            std::collections::HashMap::new()
+            (
+                std::collections::HashMap::new(),
+                std::collections::HashMap::new(),
+            )
         };
     // Pre-pass: snapshot every entity's NaturalDamage component
     // (claws/teeth/fists) so the swing snapshot can roll for
@@ -1160,6 +1179,8 @@ pub fn combat_tick(world: &mut World) {
                     damage,
                     weapon_roll,
                     attacker_name: name.name.clone(),
+                    armed: weapon_dice.contains_key(&attacker),
+                    weapon_family: weapon_families.get(&attacker).copied().flatten(),
                 }
             })
             .collect()
@@ -1264,6 +1285,10 @@ struct Swing {
     damage: i32,      // post-AP, pre-crit base damage
     weapon_roll: i32, // raw dice roll (pre-AP) — surfaced by show_dice
     attacker_name: String,
+    /// Wields a dice weapon (gates `weapon_hitroll`).
+    armed: bool,
+    /// Weapon-skill family of the wielded weapon, if any.
+    weapon_family: Option<&'static str>,
 }
 
 /// Build + apply one swing for a freshly-engaged attacker (G3.1).
@@ -1323,18 +1348,22 @@ pub(crate) fn engage_swing_now(world: &mut World, attacker: Entity, target: Enti
             }
         })
     };
-    let weapon_dice: Option<(i32, i32, i32)> = wielded_key.and_then(|(key, adjust)| {
+    let wielded: Option<WieldedDice> = wielded_key.and_then(|(key, adjust)| {
         let protos = world.get_resource::<ObjectPrototypes>()?;
         let p = protos.by_key.get(&key)?;
         if p.weapon_dice_num <= 0 || p.weapon_dice_size <= 0 {
             return None;
         }
         Some((
-            p.weapon_dice_num,
-            (p.weapon_dice_size + adjust).max(1),
-            p.weapon_dice_bonus,
+            (
+                p.weapon_dice_num,
+                (p.weapon_dice_size + adjust).max(1),
+                p.weapon_dice_bonus,
+            ),
+            proto_weapon_family(p),
         ))
     });
+    let weapon_dice = wielded.map(|(dice, _)| dice);
     let natural: Option<(i32, i32, i32)> = world
         .get::<NaturalDamage>(attacker)
         .map(|n| (n.num, n.size, n.bonus));
@@ -1402,6 +1431,8 @@ pub(crate) fn engage_swing_now(world: &mut World, attacker: Entity, target: Enti
             damage,
             weapon_roll,
             attacker_name: name,
+            armed: wielded.is_some(),
+            weapon_family: wielded.and_then(|(_, family)| family),
         },
     );
 }
@@ -1511,7 +1542,7 @@ fn apply_swing(world: &mut World, s: &Swing) {
     // Bless: +5 accuracy when the attacker is blessed. Mirrors the
     // legacy +1 hit-roll bump scaled to the modern 100-point band.
     let bless_acc_bonus = i32::from(world.get::<mud_world::Bless>(s.attacker).is_some()) * 5;
-    let weapon_hit_bonus = weapon_hitroll_bonus(world, s.attacker);
+    let weapon_hit_bonus = weapon_hitroll_bonus(world, s.attacker, s.armed, s.weapon_family);
     let attacker_accuracy = world
         .get::<CombatStats>(s.attacker)
         .map_or(50, |cs| cs.accuracy)
@@ -6622,13 +6653,30 @@ mod tests {
 
     const BAREHAND: i32 = 16;
     const BLUDGEONING: i32 = 28;
+    const SLASHING: i32 = 316;
+    const PIERCING: i32 = 267;
+    const TWO_HAND_BLUDGEONING: i32 = 369;
+    const TWO_HAND_PIERCING: i32 = 370;
+    const TWO_HAND_SLASHING: i32 = 371;
     const MODIFY_FX: i32 = 3;
 
     /// Put a dice weapon (`1d1 + bonus`, optional damage type) in `wielder`'s
     /// Wield slot, registering its prototype.
     fn wield(world: &mut World, wielder: Entity, bonus: i32, damage_type: Option<&str>) {
+        wield_with_flags(world, wielder, bonus, damage_type, &[]);
+    }
+
+    /// [`wield`] with explicit wear flags (`Twohand` makes a two-hander).
+    fn wield_with_flags(
+        world: &mut World,
+        wielder: Entity,
+        bonus: i32,
+        damage_type: Option<&str>,
+        wear_flags: &[mud_db::enums::WearFlag],
+    ) {
         use crate::commands::test_support::object_proto;
         let mut proto = object_proto(1, 1, mud_db::enums::ObjectType::Weapon);
+        proto.wear_flags = wear_flags.to_vec();
         proto.weapon_dice_num = 1;
         proto.weapon_dice_size = 1;
         proto.weapon_dice_bonus = bonus;
@@ -6647,25 +6695,47 @@ mod tests {
         ));
     }
 
-    /// Catalogs holding Barehand (`unarmed_damage`, skill / 10) and
-    /// Bludgeoning Weapons (`weapon_hitroll`, skill / 20, bludgeoning only)
-    /// as passive skills, like the dev data. `passive = false` models the
+    /// The bonus a swing by `attacker` would get right now, resolving the
+    /// wielded weapon the way `combat_tick`'s pre-pass does.
+    fn hitroll_now(world: &mut World, attacker: Entity) -> i32 {
+        let key = {
+            let mut q = world.query::<(&Located, &EquippedSlot, &WorldKey)>();
+            q.iter(world).find_map(|(loc, eq, key)| {
+                (loc.0 == attacker && eq.0 == Slot::Wield).then_some((key.zone, key.id))
+            })
+        };
+        let proto = key.and_then(|k| world.resource::<ObjectPrototypes>().by_key.get(&k));
+        let armed = proto.is_some_and(|p| p.weapon_dice_num > 0 && p.weapon_dice_size > 0);
+        let family = proto.and_then(proto_weapon_family);
+        weapon_hitroll_bonus(world, attacker, armed, family)
+    }
+
+    /// Catalogs holding Barehand (`unarmed_damage`, skill / 10) and the six
+    /// weapon-skill passives (`weapon_hitroll`, skill / 20, one `weapon_type`
+    /// per family, one-handed and two-handed) as passive skills, like the
+    /// dev data. `passive = false` models the
     /// same rows on an ACTIVE ability.
     fn install_passive_skills(world: &mut World, passive: bool) {
         use crate::commands::test_support::ability_def;
         let mut abilities = mud_world::AbilityCatalog::default();
         for (id, name, params) in [
-            (
-                BAREHAND,
-                "Barehand",
-                serde_json::json!({"type": "passive", "amount": "skill / 10", "target": "unarmed_damage"}),
-            ),
-            (
-                BLUDGEONING,
-                "Bludgeoning Weapons",
-                serde_json::json!({"type": "passive", "amount": "skill / 20", "target": "weapon_hitroll", "weapon_type": "bludgeoning"}),
-            ),
-        ] {
+            (BLUDGEONING, "Bludgeoning Weapons", "bludgeoning"),
+            (SLASHING, "Slashing Weapons", "slashing"),
+            (PIERCING, "Piercing Weapons", "piercing"),
+            (TWO_HAND_BLUDGEONING, "Two-Hand Bludgeoning", "two_hand_bludgeoning"),
+            (TWO_HAND_SLASHING, "Two-Hand Slashing", "two_hand_slashing"),
+            (TWO_HAND_PIERCING, "Two-Hand Piercing", "two_hand_piercing"),
+        ]
+        .map(|(id, name, family)| {
+            (id, name, serde_json::json!({"type": "passive", "amount": "skill / 20", "target": "weapon_hitroll", "weapon_type": family}))
+        })
+        .into_iter()
+        .chain([(
+            BAREHAND,
+            "Barehand",
+            serde_json::json!({"type": "passive", "amount": "skill / 10", "target": "unarmed_damage"}),
+        )])
+        {
             let mut def = ability_def(id, name, mud_db::abilities::AbilityKind::Skill);
             def.passive = passive;
             abilities.by_name.insert(name.to_ascii_lowercase(), def);
@@ -6673,6 +6743,7 @@ mod tests {
                 .effects_for
                 .insert(id, vec![(MODIFY_FX, Some(params))]);
         }
+        abilities.index_passives();
         world.insert_resource(abilities);
         let mut effects = mud_world::EffectCatalog::default();
         effects.by_id.insert(
@@ -6835,11 +6906,11 @@ mod tests {
     fn weapon_hitroll_counts_only_while_wielding() {
         let (mut world, attacker, _) = duel();
         crate::commands::apply_modify_delta(&mut world, attacker, "weapon_hitroll", 20);
-        assert_eq!(weapon_hitroll_bonus(&mut world, attacker), 0, "bare-handed");
+        assert_eq!(hitroll_now(&mut world, attacker), 0, "bare-handed");
         wield(&mut world, attacker, 0, Some("SLASH"));
-        assert_eq!(weapon_hitroll_bonus(&mut world, attacker), 20);
+        assert_eq!(hitroll_now(&mut world, attacker), 20);
         crate::commands::reverse_modify_delta(&mut world, attacker, "weapon_hitroll", 20);
-        assert_eq!(weapon_hitroll_bonus(&mut world, attacker), 0);
+        assert_eq!(hitroll_now(&mut world, attacker), 0);
     }
 
     /// Pin the d100 hit roll to `roll`, run one combat tick, report whether
@@ -6898,15 +6969,72 @@ mod tests {
             entries: vec![(BLUDGEONING, 1000, true)],
         });
         // skill / 20 at 100% = +5, bludgeoning weapons only.
-        assert_eq!(weapon_hitroll_bonus(&mut world, attacker), 0, "bare-handed");
+        assert_eq!(hitroll_now(&mut world, attacker), 0, "bare-handed");
         wield(&mut world, attacker, 0, Some("CRUSH"));
-        assert_eq!(weapon_hitroll_bonus(&mut world, attacker), 5);
+        assert_eq!(hitroll_now(&mut world, attacker), 5);
         wield(&mut world, attacker, 0, Some("SLASH"));
-        assert_eq!(
-            weapon_hitroll_bonus(&mut world, attacker),
-            0,
-            "slashing weapon"
-        );
+        assert_eq!(hitroll_now(&mut world, attacker), 0, "slashing weapon");
+    }
+
+    /// Every weapon family (one- and two-handed) gets its own skill's
+    /// `skill / 20` bonus, and only its own: a one-hander never reads the
+    /// Two-Hand skill, a two-hander never reads the one-hand skill.
+    #[test]
+    fn every_weapon_family_gets_its_own_hitroll_passive() {
+        use mud_db::enums::WearFlag::{Mainhand, Twohand};
+        let skills = [
+            ("CRUSH", BLUDGEONING, TWO_HAND_BLUDGEONING),
+            ("SLASH", SLASHING, TWO_HAND_SLASHING),
+            ("STAB", PIERCING, TWO_HAND_PIERCING),
+        ];
+        for (damage_type, one_hand, two_hand) in skills {
+            for (flags, own, other) in [
+                (&[][..], one_hand, two_hand),
+                (&[Mainhand][..], one_hand, two_hand),
+                (&[Twohand][..], two_hand, one_hand),
+                // Wieldable either way: treated as one-handed.
+                (&[Mainhand, Twohand][..], one_hand, two_hand),
+            ] {
+                for (skill, want) in [(own, 5), (other, 0)] {
+                    let (mut world, attacker, _) = duel();
+                    install_passive_skills(&mut world, true);
+                    world.entity_mut(attacker).insert(KnownAbilities {
+                        entries: vec![(skill, 1000, true)],
+                    });
+                    wield_with_flags(&mut world, attacker, 0, Some(damage_type), flags);
+                    assert_eq!(
+                        hitroll_now(&mut world, attacker),
+                        want,
+                        "{damage_type} {flags:?} with skill {skill}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The swing carries the wielded weapon's family from the tick's
+    /// pre-pass: a known Slashing skill raises the real hit chance of a
+    /// slashing weapon and not of a bludgeon.
+    #[test]
+    fn combat_tick_applies_the_family_passive_to_the_hit_roll() {
+        // Roll 26 vs a 25% base chance misses; a 100% skill adds +5 accuracy.
+        for (damage_type, skill, hits) in [
+            ("SLASH", SLASHING, true),
+            ("CRUSH", SLASHING, false),
+            ("STAB", PIERCING, true),
+        ] {
+            let (mut world, attacker, target) = duel();
+            install_passive_skills(&mut world, true);
+            world.entity_mut(attacker).insert(KnownAbilities {
+                entries: vec![(skill, 1000, true)],
+            });
+            wield(&mut world, attacker, 4, Some(damage_type));
+            assert_eq!(
+                lands_at_roll(&mut world, attacker, target, 26),
+                hits,
+                "{damage_type} with skill {skill}"
+            );
+        }
     }
 
     #[test]
