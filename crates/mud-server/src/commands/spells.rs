@@ -552,22 +552,11 @@ pub(crate) fn cmd_study(world: &mut World, player: Entity, args: &str) {
     );
 }
 pub(crate) fn cmd_memorize(world: &mut World, player: Entity, _args: &str) {
-    send_to(
-        world,
-        player,
-        "FieryMUD uses pooled spell slots — there's nothing to memorize \
-         ahead of time. Spent slots recover on their own under rest / \
-         sleep / meditate. Showing your slot pool:\r\n",
-    );
+    // Pooled slots recover on their own, so there is nothing to prepare:
+    // `memorize` is the legacy name for looking at the slot pool.
     crate::commands::info::cmd_slots(world, player, "");
 }
 pub(crate) fn cmd_forget(world: &mut World, player: Entity, _args: &str) {
-    send_to(
-        world,
-        player,
-        "Spell slots aren't pre-prepared, so there's nothing to forget. \
-         Showing your slot pool:\r\n",
-    );
     crate::commands::info::cmd_slots(world, player, "");
 }
 pub(crate) fn cmd_cast(world: &mut World, player: Entity, args: &str) {

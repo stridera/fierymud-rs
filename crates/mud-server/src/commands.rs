@@ -14690,6 +14690,188 @@ fn ability_is_hostile(world: &World, def: &mud_world::AbilityDef) -> bool {
     }
 }
 
+/// Stats Enhance Ability can raise: full name (what the caster may abbreviate)
+/// and the modify-effect target key.
+const ENHANCE_STATS: [(&str, &str); 6] = [
+    ("strength", "str"),
+    ("dexterity", "dex"),
+    ("constitution", "con"),
+    ("intelligence", "int"),
+    ("wisdom", "wis"),
+    ("charisma", "cha"),
+];
+
+/// The stat key for a typed word, if it abbreviates one of [`ENHANCE_STATS`].
+fn enhance_stat_key(word: &str) -> Option<&'static str> {
+    let w = word.to_ascii_lowercase();
+    if w.is_empty() {
+        return None;
+    }
+    ENHANCE_STATS
+        .iter()
+        .find(|(full, _)| full.starts_with(&w))
+        .map(|(_, key)| *key)
+}
+
+/// Split the tail of `cast 'enhance ability' ...` into the target name and
+/// the stat: `<target> <stat>` or just `<stat>` (self).
+fn split_enhance_args(tail: Option<&str>) -> (Option<&str>, Option<&'static str>) {
+    let Some(tail) = tail.map(str::trim).filter(|t| !t.is_empty()) else {
+        return (None, None);
+    };
+    match tail.rsplit_once(char::is_whitespace) {
+        Some((target, stat)) => (
+            Some(target.trim()).filter(|t| !t.is_empty()),
+            enhance_stat_key(stat),
+        ),
+        None => match enhance_stat_key(tail) {
+            Some(key) => (None, Some(key)),
+            None => (Some(tail), None),
+        },
+    }
+}
+
+/// Whether `def` carries a `teleport` effect with `destination: "target"`
+/// (Relocate, Dimension Door): the caster travels to the named character
+/// wherever they are, so the target is looked up across the whole world.
+/// Returns the effect's params when so, for the `range` / `scope` reads.
+fn travel_to_target_params(
+    world: &World,
+    def: &mud_world::AbilityDef,
+) -> Option<serde_json::Value> {
+    let effects = world.get_resource::<mud_world::EffectCatalog>()?;
+    let rows = world
+        .resource::<AbilityCatalog>()
+        .effects_for
+        .get(&def.id)?;
+    rows.iter().find_map(|(effect_id, over)| {
+        let eff = effects.by_id.get(effect_id)?;
+        if eff.effect_type != "teleport" {
+            return None;
+        }
+        let dest = resolve_teleport_destination(over.as_ref(), Some(&eff.default_params));
+        (dest.as_deref() == Some("target")).then(|| {
+            let mut merged = eff.default_params.clone();
+            if let (Some(m), Some(serde_json::Value::Object(o))) = (merged.as_object_mut(), over) {
+                for (k, v) in o {
+                    m.insert(k.clone(), v.clone());
+                }
+            }
+            merged
+        })
+    })
+}
+
+/// Relocate / Dimension Door (legacy `spell_relocate`, `spell_dimension_door`):
+/// move `caster` to the room of `target`, a player anywhere in the world
+/// (`zone_only`: the same zone as the caster). The refusal text has already
+/// been sent to the caster when this returns `Err`; the `Err` payload is a
+/// short reason for the effect log. Relocate leaves the caster resting.
+fn travel_to_target(
+    world: &mut World,
+    caster: Entity,
+    target: Entity,
+    def: &mud_world::AbilityDef,
+    zone_only: bool,
+) -> Result<(), &'static str> {
+    let relocate = def.plain_name.eq_ignore_ascii_case("RELOCATE");
+    let Some(dest) = world.get::<Located>(target).map(|l| l.0) else {
+        send_to(world, caster, "You failed.\r\n");
+        return Err("no destination");
+    };
+    let here = world.get::<Located>(caster).map(|l| l.0);
+    // Only characters can be travelled to: a mob named in the room resolves,
+    // but the magic finds nothing to anchor on.
+    if target != caster && world.get::<Player>(target).is_none() {
+        send_to(world, caster, "You failed.\r\n");
+        return Err("not a player");
+    }
+    if target == caster || here == Some(dest) {
+        send_to(world, caster, "You are already here.\r\n");
+        return Err("already there");
+    }
+    // Staff are out of reach unless (Relocate only) the caster outranks them.
+    let target_level = mud_world::effective_level(world, target);
+    if target_level >= 100 {
+        if !relocate {
+            send_to(world, caster, "You failed.\r\n");
+            return Err("staff target");
+        }
+        if mud_world::effective_level(world, caster) < target_level {
+            send_to(
+                world,
+                caster,
+                "Your magics are stamped out by the gods.\r\n",
+            );
+            return Err("stamped out");
+        }
+    }
+    if crate::room_access::teleport_blocked_here(world, caster) {
+        send_to(
+            world,
+            caster,
+            "A strange force in this place smothers the spell.\r\n",
+        );
+        return Err("no-teleport room");
+    }
+    if zone_only {
+        let zone_of = |w: &World, room: Entity| w.get::<WorldKey>(room).map(|k| k.zone);
+        if here.and_then(|r| zone_of(world, r)) != zone_of(world, dest) {
+            send_to(
+                world,
+                caster,
+                "<b:black>Your magics are not strong enough for such a great journey.</>\r\n",
+            );
+            if let Some(room) = here {
+                broadcast_room_visual(
+                    world,
+                    room,
+                    caster,
+                    &[caster],
+                    "<b:black>A rift in space opens up, wavers, then dissipates into thin air.</>\r\n",
+                );
+            }
+            return Err("different zone");
+        }
+    }
+    if !crate::room_access::entry_allowed(world, caster, dest) {
+        send_to(world, caster, crate::room_access::ENTRY_REFUSED);
+        return Err("entry restricted");
+    }
+    let who = cap_sentence_start(&name_of(world, caster));
+    let (to_caster, leaving, arriving) = if relocate {
+        (
+            "<b:white>Your body begins to fade from existence,</> <b:black>then you black out...</>\r\n",
+            format!(
+                "<b:white>{who}'s molecules loosen and eventually dissipate into thin air.</>\r\n"
+            ),
+            format!(
+                "<b:cyan>The air begins to thicken, slowly revealing a living form...</>\r\n<b:white>{who}'s molecules condense and finally take hold... {who} appears quite tired.</>\r\n"
+            ),
+        )
+    } else {
+        (
+            "<b:black>You quickly enter the black rift that tears open at your command...</>\r\n",
+            format!("<b:black>A black rift in space tears open and {who} steps inside.</>\r\n"),
+            format!(
+                "<b:black>A black rift in space tears open and {who} steps out, grinning.</>\r\n"
+            ),
+        )
+    };
+    send_to(world, caster, to_caster);
+    if let Some(from) = here {
+        broadcast_room_visual(world, from, caster, &[caster], &leaving);
+    }
+    crate::combat::relocate(world, caster, dest);
+    broadcast_room_visual(world, dest, caster, &[caster], &arriving);
+    if relocate {
+        // The journey drains the caster: legacy `POS_SITTING` /
+        // `STANCE_RESTING`.
+        try_insert(world, caster, Posture(PostureKind::Resting));
+    }
+    Ok(())
+}
+
 /// Resolve the single target of a cast and run the target-dependent
 /// gates (peaceful room, `AbilityTargeting`, `AbilityRestrictions`).
 /// Sends the refusal to the caster and returns `None` when the cast
@@ -14794,6 +14976,21 @@ fn resolve_and_gate_target(
         } else {
             None
         };
+    if forced_target.is_none()
+        && target_word.is_none()
+        && travel_to_target_params(world, def).is_some()
+    {
+        let display = def.plain_name.to_ascii_lowercase().replace('_', " ");
+        send_to(
+            world,
+            player,
+            format!(
+                "{} needs a destination. Try: {verb} '{display}' <character>.\r\n",
+                def.name
+            ),
+        );
+        return None;
+    }
     let target_entity = if let Some(locked) = forced_target {
         locked
     } else if let Some(opp) = default_combat_target {
@@ -14834,8 +15031,24 @@ fn resolve_and_gate_target(
         } else {
             None
         };
-        match in_room.or(summon_remote) {
+        // Relocate / Dimension Door travel to a character anywhere in the
+        // world (legacy TAR_CHAR_WORLD | TAR_NOT_SELF). Players only: a mob
+        // in the room still resolves above and is refused by the spell.
+        let travel_remote = if in_room.is_none() && travel_to_target_params(world, def).is_some() {
+            find_online_player_anywhere(world, word, player)
+        } else {
+            None
+        };
+        match in_room.or(summon_remote).or(travel_remote) {
             Some(found) => found,
+            None if travel_to_target_params(world, def).is_some() => {
+                send_to(
+                    world,
+                    player,
+                    format!("There's no one named '{word}' online to travel to.\r\n"),
+                );
+                return None;
+            }
             None if def.plain_name.eq_ignore_ascii_case("SUMMON") => {
                 // SUMMON specifically — surface a clearer message
                 // since the global lookup failed too. "You don't see
@@ -15002,6 +15215,25 @@ pub(crate) fn invoke_ability_with(
         );
         return;
     };
+
+    // Enhance Ability takes the stat as an argument (`cast 'enhance ability'
+    // <target> <stat>`, legacy `spell_enhance_ability` / `buf2`), so split
+    // it off before the rest of the tail is read as a target name.
+    let is_enhance_ability = def.plain_name.eq_ignore_ascii_case("ENHANCE_ABILITY");
+    let (target_word, enhance_stat) = if is_enhance_ability {
+        split_enhance_args(target_word)
+    } else {
+        (target_word, None)
+    };
+    if is_enhance_ability && enhance_stat.is_none() && !from_item {
+        send_to(
+            world,
+            player,
+            "What ability do you want to enhance? (strength, dexterity, constitution, \
+             intelligence, wisdom or charisma)\r\n",
+        );
+        return;
+    }
 
     // Anti-magic / silence gate. SPELL/CHANT/SONG kinds are
     // verbal-magical; SKILL bypasses the gate (pure-physical action).
@@ -15778,6 +16010,9 @@ pub(crate) fn invoke_ability_with(
     // arrival-room description splits "You read aloud from {scroll}"
     // from "you cast Recall (Blue)" in the output stream.
     let mut auto_look_after_cast = false;
+    // Who the auto-look is for when that is not the effect target
+    // (Relocate / Dimension Door move the caster, not the named target).
+    let mut auto_look_for: Option<Entity> = None;
     // L4/L5: success-template ordering policy.
     //
     // Damage spells must emit `success_to_caster` BEFORE the effect
@@ -16975,12 +17210,23 @@ pub(crate) fn invoke_ability_with(
                 // Unsupported targets (unarmed_damage, weapon_hitroll,
                 // max_mana, ...) spawn a labeled effect
                 // without applying anything.
-                let target_stat = spec
+                let mut target_stat = spec
                     .override_params
                     .as_ref()
                     .and_then(|p| p.get("target"))
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_ascii_lowercase);
+                // Enhance Ability: the caster names the stat. Recasting
+                // swaps the enhancement rather than stacking a second one
+                // (legacy `effect_from_char(SPELL_ENHANCE_ABILITY)`).
+                if let Some(stat) = enhance_stat {
+                    for (_, short) in ENHANCE_STATS {
+                        if short != stat {
+                            refresh_existing_effect(world, target_entity, short, def.id);
+                        }
+                    }
+                    target_stat = Some(stat.to_string());
+                }
                 let amount = resolve_effect_amount(
                     spec.override_params.as_ref(),
                     Some(&spec.default_params),
@@ -17160,6 +17406,32 @@ pub(crate) fn invoke_ability_with(
                 // (spell_summon). All other teleport variants (recall
                 // scrolls, word-of-recall, summon-corpse) skip these
                 // gates entirely.
+                // Relocate / Dimension Door: the *caster* travels to the
+                // named character. Handled whole here; nothing below moves
+                // `target_entity`.
+                if resolve_teleport_destination(
+                    spec.override_params.as_ref(),
+                    Some(&spec.default_params),
+                )
+                .as_deref()
+                    == Some("target")
+                {
+                    custom_messaging = true;
+                    let zone_only = [spec.override_params.as_ref(), Some(&spec.default_params)]
+                        .into_iter()
+                        .flatten()
+                        .find_map(|p| p.get("range").and_then(serde_json::Value::as_str))
+                        .is_some_and(|r| r.eq_ignore_ascii_case("zone"));
+                    match travel_to_target(world, player, target_entity, &def, zone_only) {
+                        Ok(()) => {
+                            auto_look_after_cast = true;
+                            auto_look_for = Some(player);
+                            applied_msgs.push(format!("{pretty} (teleported)"));
+                        }
+                        Err(why) => applied_msgs.push(format!("{pretty} (refused: {why})")),
+                    }
+                    continue;
+                }
                 let is_summon_spell = def.plain_name.eq_ignore_ascii_case("SUMMON");
                 if is_summon_spell {
                     let caster_room_opt = world.get::<Located>(player).map(|l| l.0);
@@ -19034,7 +19306,7 @@ pub(crate) fn invoke_ability_with(
     // (only set on actual successful moves) so non-teleport casts
     // don't get a phantom re-look.
     if auto_look_after_cast {
-        crate::commands::cmd_look(world, target_entity, "");
+        crate::commands::cmd_look(world, auto_look_for.unwrap_or(target_entity), "");
     }
     // Target-side: templated success_to_victim → terse default.
     if target_entity != player

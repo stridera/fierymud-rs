@@ -1138,3 +1138,205 @@ fn teleport_from_a_scroll_by_an_unskilled_caster_uses_level() {
         assert_eq!(fx.room_of(caster), there, "{}", drain(&mut rx));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Relocate / Dimension Door: travel to a named character
+// ---------------------------------------------------------------------------
+
+const TRAVEL_ABILITY: i32 = 289;
+const TRAVEL_EFFECT: i32 = 8;
+
+/// Install a `destination: "target"` teleport spell called `name`.
+fn travel_fixture(fx: &mut Fx, name: &str, params: serde_json::Value) {
+    let effect_type = if name == "Enhance Ability" {
+        "modify"
+    } else {
+        "teleport"
+    };
+    let mut abilities = mud_world::AbilityCatalog::default();
+    let mut def = super::test_support::ability_def(TRAVEL_ABILITY, name, AbilityKind::Spell);
+    def.plain_name = name.to_ascii_uppercase().replace(' ', "_");
+    def.cast_time_rounds = 0;
+    abilities
+        .by_name
+        .insert(name.to_ascii_lowercase().replace(' ', "_"), def);
+    abilities
+        .effects_for
+        .insert(TRAVEL_ABILITY, vec![(TRAVEL_EFFECT, Some(params))]);
+    fx.world.insert_resource(abilities);
+    let mut effects = mud_world::EffectCatalog::default();
+    effects.by_id.insert(
+        TRAVEL_EFFECT,
+        mud_world::EffectDef {
+            id: TRAVEL_EFFECT,
+            name: effect_type.into(),
+            description: None,
+            effect_type: effect_type.into(),
+            tags: vec![],
+            presence_override: None,
+            default_params: serde_json::json!({}),
+            prevents_speaking: false,
+            prevents_casting: false,
+            prevents_movement: false,
+            on_apply: None,
+            on_tick: None,
+            on_remove: None,
+        },
+    );
+    fx.world.insert_resource(effects);
+}
+
+fn cast_at(fx: &mut Fx, caster: Entity, args: &str) {
+    crate::commands::invoke_ability_with(
+        &mut fx.world,
+        caster,
+        args,
+        AbilityKind::Spell,
+        "cast",
+        false,
+        true,
+        true,
+        None,
+    );
+}
+
+fn relocate_params() -> serde_json::Value {
+    serde_json::json!({"type": "self", "scope": "self", "destination": "target"})
+}
+
+#[test]
+fn relocate_goes_to_a_named_player_anywhere_and_leaves_the_caster_resting() {
+    let mut fx = Fx::new();
+    let home = fx.zone(30, false);
+    let far = fx.zone(31, false);
+    let here = fx.room(home, 30, 0);
+    let there = fx.room(far, 31, 1);
+    let (caster, mut rx) = fx.person("Mage", 30, here);
+    let (_friend, _frx) = fx.person("Strider", 30, there);
+    travel_fixture(&mut fx, "Relocate", relocate_params());
+    cast_at(&mut fx, caster, "relocate strider");
+    let out = drain(&mut rx);
+    assert_eq!(fx.room_of(caster), there, "{out}");
+    assert!(out.contains("Room 31:1"), "arrival look: {out}");
+    assert_eq!(
+        fx.world.get::<mud_world::Posture>(caster).map(|p| p.0),
+        Some(mud_world::PostureKind::Resting),
+        "Relocate leaves the caster resting: {out}"
+    );
+}
+
+#[test]
+fn relocate_refuses_mobs_and_unknown_names_without_moving() {
+    let mut fx = Fx::new();
+    let zone = fx.zone(30, false);
+    let here = fx.room(zone, 30, 0);
+    let (caster, mut rx) = fx.person("Mage", 30, here);
+    let _mob = fx
+        .world
+        .spawn((
+            mud_world::Mob,
+            Named {
+                name: "a goblin".into(),
+            },
+            mud_world::Keywords(vec!["goblin".into()]),
+            Located(here),
+        ))
+        .id();
+    travel_fixture(&mut fx, "Relocate", relocate_params());
+    cast_at(&mut fx, caster, "relocate goblin");
+    let out = drain(&mut rx);
+    assert!(out.contains("You failed."), "{out}");
+    cast_at(&mut fx, caster, "relocate nobody");
+    assert!(drain(&mut rx).contains("no one named 'nobody' online"));
+    cast_at(&mut fx, caster, "relocate");
+    assert!(drain(&mut rx).contains("needs a destination"));
+    assert_eq!(fx.room_of(caster), here);
+}
+
+#[test]
+fn dimension_door_stays_in_the_zone_and_refuses_the_next_zone_over() {
+    let mut fx = Fx::new();
+    let home = fx.zone(30, false);
+    let far = fx.zone(31, false);
+    let here = fx.room(home, 30, 0);
+    let same = fx.room(home, 30, 1);
+    let other = fx.room(far, 31, 1);
+    let (caster, mut rx) = fx.person("Mage", 30, here);
+    let (_a, _arx) = fx.person("Near", 30, same);
+    let (_b, _brx) = fx.person("Far", 30, other);
+    travel_fixture(
+        &mut fx,
+        "Dimension Door",
+        serde_json::json!({"type": "self", "destination": "target", "range": "zone"}),
+    );
+    cast_at(&mut fx, caster, "'dimension door' far");
+    let out = drain(&mut rx);
+    assert!(
+        out.contains("not strong enough for such a great journey"),
+        "{out}"
+    );
+    assert_eq!(fx.room_of(caster), here);
+    cast_at(&mut fx, caster, "'dimension door' near");
+    let out = drain(&mut rx);
+    assert_eq!(fx.room_of(caster), same, "{out}");
+    assert_eq!(
+        fx.world.get::<mud_world::Posture>(caster).map(|p| p.0),
+        None,
+        "no resting after a dimension door"
+    );
+}
+
+#[test]
+fn enhance_ability_raises_the_named_stat_and_swaps_on_recast() {
+    use mud_world::CoreStats;
+    let mut fx = Fx::new();
+    let zone = fx.zone(30, false);
+    let here = fx.room(zone, 30, 0);
+    let (caster, mut rx) = fx.person("Mage", 30, here);
+    let (friend, _frx) = fx.person("Mukashi", 30, here);
+    let stats = CoreStats {
+        strength: 50,
+        dexterity: 50,
+        constitution: 50,
+        intelligence: 50,
+        wisdom: 50,
+        charisma: 50,
+    };
+    fx.world.entity_mut(friend).insert(stats);
+    travel_fixture(
+        &mut fx,
+        "Enhance Ability",
+        serde_json::json!({"target": "cha", "amount": "5", "duration": "60"}),
+    );
+    let get = |fx: &Fx| *fx.world.get::<CoreStats>(friend).unwrap();
+    cast_at(&mut fx, caster, "'enhance ability' mukashi dex");
+    let after = get(&fx);
+    assert_eq!(after.dexterity, 55, "{}", drain(&mut rx));
+    assert_eq!(after.charisma, 50, "the data's default stat is not used");
+    cast_at(&mut fx, caster, "'enhance ability' mukashi str");
+    let after = get(&fx);
+    assert_eq!(
+        (after.strength, after.dexterity),
+        (55, 50),
+        "swapped, not stacked"
+    );
+    // A typed cast with no stat is refused before anything is spent.
+    fx.world
+        .entity_mut(caster)
+        .insert(mud_world::KnownAbilities {
+            entries: vec![(TRAVEL_ABILITY, 1000, true)],
+        });
+    crate::commands::invoke_ability_with(
+        &mut fx.world,
+        caster,
+        "'enhance ability' mukashi",
+        AbilityKind::Spell,
+        "cast",
+        false,
+        false,
+        false,
+        None,
+    );
+    assert!(drain(&mut rx).contains("What ability do you want to enhance?"));
+    assert_eq!(get(&fx).strength, 55, "no stat, no cast");
+}
