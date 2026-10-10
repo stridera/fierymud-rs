@@ -1479,6 +1479,42 @@ fn describe_mob_ai(world: &World, p: &mud_world::MobProto) -> String {
     out
 }
 
+/// The "Live AI:" lines of a mob inspect: for each live instance of the
+/// prototype that runs spell / skill AI (first few), when each of its rules
+/// last fired. Empty when none is alive.
+fn describe_mob_ai_live(world: &mut World, zone: i32, id: i32) -> String {
+    const MAX_SHOWN: usize = 3;
+    const TICKS_PER_SECOND: u64 = 10;
+    let tick = world.get_resource::<crate::TickCount>().map_or(0, |t| t.0);
+    let live: Vec<(String, mud_world::MobAi)> = {
+        let mut q = world.query_filtered::<
+            (&mud_world::WorldKey, &mud_world::Named, &mud_world::MobAi),
+            With<Mob>,
+        >();
+        q.iter(world)
+            .filter(|(k, _, _)| k.zone == zone && k.id == id)
+            .take(MAX_SHOWN)
+            .map(|(_, n, ai)| (n.name.clone(), ai.clone()))
+            .collect()
+    };
+    let mut out = String::new();
+    for (name, ai) in live {
+        out.push_str(&format!("Live AI:       {name}\r\n"));
+        for (i, r) in ai.rules.iter().enumerate() {
+            let label = world
+                .get_resource::<mud_world::AbilityCatalog>()
+                .and_then(|c| c.by_name.values().find(|d| d.id == r.ability_id))
+                .map_or_else(|| format!("ability {}", r.ability_id), |d| d.name.clone());
+            let used = ai.last_used(i).map_or_else(
+                || String::from("never"),
+                |t| format!("{}s ago", tick.saturating_sub(t) / TICKS_PER_SECOND),
+            );
+            out.push_str(&format!("  {:>2}. {label}: last used {used}\r\n", i + 1));
+        }
+    }
+    out
+}
+
 pub(crate) fn cmd_mob_ai(world: &mut World, player: Entity, args: &str) {
     let Some((zone, id)) = resolve_mob_target(world, player, args) else {
         return;
@@ -1533,6 +1569,7 @@ pub(crate) fn cmd_mob_ai(world: &mut World, player: Entity, args: &str) {
     // Spell / skill AI: the rules this mob would actually run, or why it
     // has none. Off by default (GameConfig `mob_ai.enabled`).
     out.push_str(&describe_mob_ai(world, &p));
+    out.push_str(&describe_mob_ai_live(world, zone, id));
 
     // Behavior list. Empty case is worth calling out — a designer
     // checking a mob deserves a clear "this is intentional" beat.
@@ -3714,5 +3751,39 @@ mod tests {
 
         proto.class_id = None;
         assert!(describe_mob_ai(&world, &proto).contains("none (no class)"));
+    }
+
+    #[test]
+    fn inspect_shows_each_live_rules_last_use() {
+        let mut world = World::new();
+        world.insert_resource(TickCount(300));
+        let rules: Arc<[AiRule]> = Arc::from(vec![
+            AiRule {
+                ability_id: 11,
+                kind: AiKind::Spell,
+                priority: 1,
+                chance_pct: 100,
+                cooldown_s: 0,
+                when: Vec::new(),
+                target: AiTarget::Auto,
+                min_level: None,
+            };
+            2
+        ]);
+        let mut ai = mud_world::MobAi::new(rules);
+        ai.mark_used(1, 100);
+        world.spawn((
+            Mob,
+            mud_world::Named {
+                name: "a dark mage".into(),
+            },
+            mud_world::WorldKey { zone: 30, id: 1 },
+            ai,
+        ));
+        let text = describe_mob_ai_live(&mut world, 30, 1);
+        assert!(text.contains("a dark mage"), "{text}");
+        assert!(text.contains("1. ability 11: last used never"), "{text}");
+        assert!(text.contains("2. ability 11: last used 20s ago"), "{text}");
+        assert!(describe_mob_ai_live(&mut world, 30, 2).is_empty());
     }
 }

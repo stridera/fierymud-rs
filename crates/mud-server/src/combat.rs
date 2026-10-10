@@ -907,6 +907,11 @@ pub fn combat_tick(world: &mut World) {
     // Legacy `perform_mob_violence`: a fighting mob below standing spends
     // its round getting up and swings from the next one. (Sleeping, stunned,
     // frozen and casting mobs stay as they are.)
+    // Mob spell / skill AI (behind `mob_ai.enabled`): a fighting mob that
+    // uses an ability this round gives up its melee swing for it. Runs
+    // before the stand-up pass so a mob that spends the round getting to
+    // its feet (not yet standing here) casts nothing.
+    let mob_acted = crate::mob_ai::mob_combat_ai_tick(world);
     let scrambled: std::collections::HashSet<Entity> = {
         let mut q = world.query_filtered::<(Entity, &Posture), (
             With<Mob>,
@@ -951,6 +956,7 @@ pub fn combat_tick(world: &mut World) {
             .filter(|(attacker, _, _, _, posture, stunned)| {
                 stunned.is_none()
                     && !scrambled.contains(attacker)
+                    && !mob_acted.contains(attacker)
                     && matches!(posture.map(|p| p.0), None | Some(PostureKind::Standing))
             })
             .map(|(attacker, fighting, cs, name, _, _)| {

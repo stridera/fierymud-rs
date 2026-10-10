@@ -1724,6 +1724,16 @@ thread_local! {
         const { std::cell::Cell::new(false) };
 }
 
+/// Clear the "a cast landed" latch ([`cast_landed`] reads it back).
+pub(crate) fn reset_cast_landed() {
+    CAST_LANDED.with(|c| c.set(false));
+}
+
+/// Whether any cast settled as landed since [`reset_cast_landed`].
+pub(crate) fn cast_landed() -> bool {
+    CAST_LANDED.with(std::cell::Cell::get)
+}
+
 /// True when the line being dispatched ended in whitespace after its last
 /// token. The dispatcher trims lines, so this is the only way a handler can
 /// tell `rent` from `rent ` (a client button with an empty name).
@@ -14711,7 +14721,7 @@ fn reserve_spell_slot(
     player: Entity,
     def: &mud_world::AbilityDef,
 ) -> Result<Option<u64>, ()> {
-    let Some(class_id) = world.get::<Profile>(player).and_then(|p| p.class_id) else {
+    let Some(class_id) = crate::mob_ai::spell_class_id(world, player) else {
         return Ok(None);
     };
     let Some(circle) = world
@@ -14722,7 +14732,7 @@ fn reserve_spell_slot(
     else {
         return Ok(None);
     };
-    let level = world.get::<Profile>(player).map_or(0, |p| p.level);
+    let level = mud_world::effective_level(world, player);
     let native = circle;
     let max_circle = i32::try_from(mud_world::CIRCLE_RECOVER_TIME.len()).unwrap_or(1) - 1;
     // Legacy upcasting: when the native circle is spent, use the lowest
@@ -14860,6 +14870,11 @@ fn aoe_targets_in_room(
     let group: std::collections::HashSet<Entity> =
         group_members(world, group_root_e).into_iter().collect();
     match scope {
+        // A mob running spell AI hits its enemies (players and their pets),
+        // never the other mobs standing beside it.
+        AoeScope::RoomEnemies if world.get::<mud_world::MobAi>(caster).is_some() => {
+            crate::mob_ai::mob_aoe_enemies(world, caster, room)
+        }
         AoeScope::RoomEnemies => {
             // Mobs in the room, plus PK-flagged players (excluding
             // self / group members). Legacy `area_attack_target` also
@@ -15134,7 +15149,7 @@ pub fn lua_extract_mob(world: &mut World, mob: Entity) {
 /// Whether `def` is hostile magic for the peaceful-room gate: any
 /// `ENEMY_*` / `AREA_FOES` / `AREA_HOSTILE` targeting. Abilities without an
 /// `AbilityTargeting` row (most of them) fall back to `violent`.
-fn ability_is_hostile(world: &World, def: &mud_world::AbilityDef) -> bool {
+pub(crate) fn ability_is_hostile(world: &World, def: &mud_world::AbilityDef) -> bool {
     let valid_targets: Vec<String> = world
         .resource::<AbilityCatalog>()
         .targeting
@@ -16314,7 +16329,7 @@ pub(crate) fn invoke_ability_core(
     // a spell. Skill-only abilities (BACKSTAB / KICK / etc.) treat
     // base_damage as zero, which matches the data: their formulas
     // fall back to `weapon_damage`-based math instead.
-    let caster_class_id = world.get::<Profile>(player).and_then(|p| p.class_id);
+    let caster_class_id = crate::mob_ai::spell_class_id(world, player);
     // Lowercased `Class.plain_name`s of the caster's class chain (subclass
     // first, then ancestors) for the `casterClassMultiplier` damage key.
     let caster_class_names: Vec<String> = world
@@ -22041,7 +22056,10 @@ fn known_skill_pct(world: &World, entity: Entity, ability_id: i32) -> i32 {
                 .find(|(id, _, _)| *id == ability_id)
                 .map(|(_, p, _)| *p)
         })
-        .map_or(0, |raw| (raw / 10).clamp(0, 100))
+        .map_or_else(
+            || crate::mob_ai::ai_mob_skill_pct(world, entity),
+            |raw| (raw / 10).clamp(0, 100),
+        )
 }
 
 /// Caster-only formula symbols for casts that never reach the full

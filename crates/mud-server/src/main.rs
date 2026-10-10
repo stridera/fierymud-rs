@@ -34,6 +34,8 @@ mod memorize;
 mod mob_ai;
 #[cfg(test)]
 mod mob_ai_loader_tests;
+#[cfg(test)]
+mod mob_combat_ai_tests;
 mod prompt;
 mod quest_dialogue;
 mod quest_progress;

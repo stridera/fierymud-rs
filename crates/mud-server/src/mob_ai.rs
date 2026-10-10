@@ -15,14 +15,16 @@
 //! fillingness, the `NORENT` flag.
 
 use std::cell::Cell;
+use std::collections::{HashMap, HashSet};
 
 use bevy_ecs::prelude::*;
+use mud_db::abilities::AbilityKind;
 use mud_db::enums::{ObjectFlag, ObjectRestriction, ObjectType};
 use mud_world::{
-    AbilityCatalog, Charges, Contents, DetectInvis, EffectCatalog, EquippedSlot, Item, LightFuel,
-    LiquidContainer, Located, MobPrototypes, ObjectAbilityCatalog, ObjectFlags, ObjectProto,
-    ObjectPrototypes, ObjectRestrictions, Slot, SpellSlotData, WorldKey,
-    components::WeaponDiceSizeAdjust,
+    AbilityCatalog, AiCondition, AiKind, AiRule, AiTarget, Charges, Contents, DetectInvis,
+    EffectCatalog, EquippedSlot, Item, LightFuel, LiquidContainer, Located, MobAi, MobPrototypes,
+    ObjectAbilityCatalog, ObjectFlags, ObjectProto, ObjectPrototypes, ObjectRestrictions,
+    RuntimeConfig, Slot, SpellSlotData, WorldKey, components::WeaponDiceSizeAdjust,
 };
 
 use crate::commands::{
@@ -614,6 +616,579 @@ pub(crate) fn mob_attempt_equip(world: &mut World, mob: Entity) {
             crate::commands::wear_item(world, mob, cur, WearWhere::Position(slot), true);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Combat-round spell / skill AI (WP-C of `ops/plans/mob-ai.md`)
+//
+// Once per combat round (`combat::combat_tick`, only with `mob_ai.enabled`
+// on) every fighting mob that carries a `MobAi` walks its rule list in
+// priority order and may replace its melee swing with one ability, the way
+// legacy `perform_mob_violence` lets a cast or a special skill stand in for
+// the swing. The ability itself goes through `invoke_ability_core` with a
+// forced target, so slots, wind-up, interrupts, silence, cooldowns and
+// effects all behave exactly as they do for a player.
+//
+// Mobs carry no `Stamina` and abilities carry no stamina cost, so no skill
+// cost is charged.
+
+/// Rules a mob may consider per combat round (legacy tries "best 2-3").
+const MAX_RULE_EVALS: u32 = 3;
+/// Rule cooldowns are written in seconds; the server ticks at 10 Hz.
+const TICKS_PER_SECOND: u64 = 10;
+
+/// The class a caster's spell slots and circles are read from: a player's
+/// `Profile.class_id`, or, for a mob running spell AI (so only with
+/// `mob_ai.enabled`), its prototype's class. Mobs carry no `Profile`.
+pub(crate) fn spell_class_id(world: &World, entity: Entity) -> Option<i32> {
+    if let Some(p) = world.get::<mud_world::Profile>(entity) {
+        return p.class_id;
+    }
+    world.get::<MobAi>(entity)?;
+    mob_class_id(world, entity)
+}
+
+/// Proficiency (0..=100) of a mob running spell AI in an ability: legacy
+/// `roll_mob_skill`'s mean for its level ([`mob_skill_percent_at`]). Zero for
+/// anything else, so players and AI-less mobs keep their `KnownAbilities`.
+pub(crate) fn ai_mob_skill_pct(world: &World, entity: Entity) -> i32 {
+    if world.get::<MobAi>(entity).is_some()
+        && world.get::<mud_world::KnownAbilities>(entity).is_none()
+    {
+        mob_skill_percent_at(mud_world::effective_level(world, entity))
+    } else {
+        0
+    }
+}
+
+/// Who a mob's room-wide hostile ability (breath, area spell) hits: the
+/// players in the room and their pets. Other mobs beside it are allies, so
+/// they are never swept up.
+pub(crate) fn mob_aoe_enemies(
+    world: &mut World,
+    _caster: Entity,
+    room: Entity,
+) -> Vec<(Entity, String)> {
+    let mut out: Vec<(Entity, String)> = Vec::new();
+    let mut q =
+        world.query_filtered::<(Entity, &Located, &mud_world::Named), With<mud_world::Player>>();
+    for (e, l, n) in q.iter(world) {
+        if l.0 == room {
+            out.push((e, n.name.clone()));
+        }
+    }
+    let mut q =
+        world.query_filtered::<(Entity, &Located, &mud_world::Named), With<mud_world::Mob>>();
+    let pets: Vec<(Entity, String)> = q
+        .iter(world)
+        .filter(|(_, l, _)| l.0 == room)
+        .map(|(e, _, n)| (e, n.name.clone()))
+        .collect();
+    out.extend(
+        pets.into_iter()
+            .filter(|(e, _)| crate::commands::is_servant(world, *e)),
+    );
+    out.retain(|(e, _)| combat_target_alive(world, *e));
+    out
+}
+
+/// What the engine needs to know about an ability a rule names.
+#[derive(Clone)]
+struct AbilityInfo {
+    /// Lowercase `plain_name`, the key `invoke_ability_core` resolves.
+    key: String,
+    display: String,
+    hostile: bool,
+    violent: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct EffectTally {
+    buffs: u32,
+    debuffs: u32,
+}
+
+/// Per-round caches, each built on first use: most rounds a mob's rules
+/// fail the cheap checks and none of this is ever touched.
+#[derive(Default)]
+struct RoundCtx {
+    abilities: Option<HashMap<i32, AbilityInfo>>,
+    /// victim -> everything with `Fighting(victim)`.
+    attackers: Option<HashMap<Entity, Vec<Entity>>>,
+    /// room -> mobs standing in it.
+    room_mobs: Option<HashMap<Entity, Vec<Entity>>>,
+    /// entity -> beneficial / harmful spell effects on it.
+    tally: Option<HashMap<Entity, EffectTally>>,
+}
+
+impl RoundCtx {
+    fn ability(&mut self, world: &World, id: i32) -> Option<AbilityInfo> {
+        let map = self.abilities.get_or_insert_with(|| {
+            let Some(catalog) = world.get_resource::<mud_world::AbilityCatalog>() else {
+                return HashMap::new();
+            };
+            catalog
+                .by_name
+                .values()
+                .map(|d| {
+                    (
+                        d.id,
+                        AbilityInfo {
+                            key: d.plain_name.to_ascii_lowercase(),
+                            display: d.name.clone(),
+                            hostile: crate::commands::ability_is_hostile(world, d),
+                            violent: d.violent,
+                        },
+                    )
+                })
+                .collect()
+        });
+        map.get(&id).cloned()
+    }
+
+    fn attackers_of(&mut self, world: &mut World, victim: Entity) -> Vec<Entity> {
+        let map = self.attackers.get_or_insert_with(|| {
+            let mut map: HashMap<Entity, Vec<Entity>> = HashMap::new();
+            let mut q = world.query::<(Entity, &mud_world::Fighting)>();
+            for (e, f) in q.iter(world) {
+                map.entry(f.0).or_default().push(e);
+            }
+            map
+        });
+        map.get(&victim).cloned().unwrap_or_default()
+    }
+
+    fn mobs_in(&mut self, world: &mut World, room: Entity) -> Vec<Entity> {
+        let map = self.room_mobs.get_or_insert_with(|| {
+            let mut map: HashMap<Entity, Vec<Entity>> = HashMap::new();
+            let mut q = world.query_filtered::<(Entity, &Located), With<mud_world::Mob>>();
+            for (e, l) in q.iter(world) {
+                map.entry(l.0).or_default().push(e);
+            }
+            map
+        });
+        map.get(&room).cloned().unwrap_or_default()
+    }
+
+    fn effects_on(&mut self, world: &mut World, entity: Entity) -> EffectTally {
+        if self.tally.is_none() {
+            // Building the tally needs the ability table; do that first.
+            let violent: HashMap<i32, bool> = self
+                .abilities
+                .get_or_insert_with(HashMap::new)
+                .iter()
+                .map(|(id, a)| (*id, a.violent))
+                .collect();
+            let violent = if violent.is_empty() {
+                world
+                    .get_resource::<mud_world::AbilityCatalog>()
+                    .map(|c| c.by_name.values().map(|d| (d.id, d.violent)).collect())
+                    .unwrap_or_default()
+            } else {
+                violent
+            };
+            let mut map: HashMap<Entity, EffectTally> = HashMap::new();
+            let mut q = world.query::<(&mud_world::EffectInstance, &mud_world::AppliedTo)>();
+            for (eff, on) in q.iter(world) {
+                let Some(&is_violent) = eff.ability_id.and_then(|id| violent.get(&id)) else {
+                    continue;
+                };
+                let t = map.entry(on.0).or_default();
+                if is_violent {
+                    t.debuffs += 1;
+                } else {
+                    t.buffs += 1;
+                }
+            }
+            self.tally = Some(map);
+        }
+        self.tally
+            .as_ref()
+            .and_then(|m| m.get(&entity).copied())
+            .unwrap_or_default()
+    }
+}
+
+/// Alive, in `room`, and a legal thing to fight or heal.
+fn in_room_alive(world: &World, e: Entity, room: Entity) -> bool {
+    world.get::<Located>(e).map(|l| l.0) == Some(room) && combat_target_alive(world, e)
+}
+
+fn combat_target_alive(world: &World, e: Entity) -> bool {
+    world.get::<mud_world::Health>(e).is_some_and(|h| h.hp > 0)
+        && world.get::<mud_world::Ghost>(e).is_none()
+        && world.get::<crate::login::Retiring>(e).is_none()
+}
+
+fn hp_pct(world: &World, e: Entity) -> i64 {
+    world.get::<mud_world::Health>(e).map_or(100, |h| {
+        i64::from(h.hp.max(0)) * 100 / i64::from(h.max.max(1))
+    })
+}
+
+/// A chance roll: `chance_pct` scaled by `mob_ai.scale`, capped at 100.
+fn chance_passes(chance_pct: u8, scale: f64) -> bool {
+    let eff = (f64::from(chance_pct) * scale).clamp(0.0, 100.0);
+    rand::random_range(0.0..100.0) < eff
+}
+
+fn needs_target(c: AiCondition) -> bool {
+    matches!(
+        c,
+        AiCondition::TargetHpBelow(_)
+            | AiCondition::TargetCasting
+            | AiCondition::TargetHasBuff
+            | AiCondition::TargetLifeforce(_)
+    )
+}
+
+/// Everything a rule's conditions read about the mob's surroundings.
+struct Scene<'a> {
+    mob: Entity,
+    room: Entity,
+    /// Live enemies: whoever fights the mob, plus the one it fights.
+    foes: &'a [Entity],
+}
+
+fn allies_of(world: &mut World, ctx: &mut RoundCtx, scene: &Scene<'_>) -> Vec<Entity> {
+    ctx.mobs_in(world, scene.room)
+        .into_iter()
+        .filter(|&e| {
+            e != scene.mob
+                && in_room_alive(world, e, scene.room)
+                && !scene.foes.contains(&e)
+                && !crate::commands::is_servant(world, e)
+        })
+        .collect()
+}
+
+/// Whether one condition holds. `subject` is the chosen target; the
+/// target-side conditions are only asked once there is one.
+fn condition_holds(
+    world: &mut World,
+    ctx: &mut RoundCtx,
+    scene: &Scene<'_>,
+    subject: Option<Entity>,
+    cond: AiCondition,
+) -> bool {
+    let target = subject.unwrap_or(scene.mob);
+    match cond {
+        AiCondition::InCombat | AiCondition::Telegraph => true,
+        AiCondition::OutOfCombat => false,
+        AiCondition::SelfHpBelow(p) => hp_pct(world, scene.mob) < i64::from(p),
+        AiCondition::TargetHpBelow(p) => hp_pct(world, target) < i64::from(p),
+        AiCondition::AllyHpBelow(p) => allies_of(world, ctx, scene)
+            .into_iter()
+            .any(|a| hp_pct(world, a) < i64::from(p)),
+        AiCondition::GroupedTargets(n) => scene.foes.len() >= usize::from(n),
+        AiCondition::TargetCasting => world.get::<mud_world::Casting>(target).is_some(),
+        AiCondition::TargetHasBuff => ctx.effects_on(world, target).buffs > 0,
+        AiCondition::SelfHasDebuff => ctx.effects_on(world, scene.mob).debuffs > 0,
+        AiCondition::TargetLifeforce(lf) => {
+            world.get::<mud_world::LifeForceTag>(target).map(|t| t.0) == Some(lf)
+                || (lf == mud_db::enums::LifeForce::Life
+                    && world.get::<mud_world::LifeForceTag>(target).is_none())
+        }
+        AiCondition::Align(band) => {
+            let a = world
+                .get::<mud_world::CombatStats>(scene.mob)
+                .map_or(0, |c| c.alignment);
+            match band {
+                mud_world::AiAlign::Good => a >= 350,
+                mud_world::AiAlign::Evil => a <= -350,
+                mud_world::AiAlign::Neutral => a > -350 && a < 350,
+            }
+        }
+    }
+}
+
+/// Resolve a rule's selector to `(forced target, subject for conditions)`.
+/// `None` when nobody qualifies. A `Room` rule forces no target: the
+/// ability fans out over the room itself.
+fn pick_target(
+    world: &mut World,
+    ctx: &mut RoundCtx,
+    scene: &Scene<'_>,
+    selector: AiTarget,
+    hostile: bool,
+) -> Option<(Option<Entity>, Entity)> {
+    let tank = || -> Option<Entity> {
+        world
+            .get::<mud_world::Fighting>(scene.mob)
+            .map(|f| f.0)
+            .filter(|t| scene.foes.contains(t))
+            .or_else(|| scene.foes.first().copied())
+    };
+    let selector = match selector {
+        AiTarget::Auto if hostile => AiTarget::Tank,
+        AiTarget::Auto => AiTarget::SelfTarget,
+        other => other,
+    };
+    let pick = match selector {
+        AiTarget::SelfTarget => return Some((Some(scene.mob), scene.mob)),
+        AiTarget::Auto | AiTarget::Tank => tank()?,
+        AiTarget::Room => return tank().map(|t| (None, t)),
+        AiTarget::WeakestAttacker => scene
+            .foes
+            .iter()
+            .copied()
+            .min_by_key(|&e| world.get::<mud_world::Health>(e).map_or(i32::MAX, |h| h.hp))?,
+        AiTarget::Caster => scene
+            .foes
+            .iter()
+            .copied()
+            .find(|&e| world.get::<mud_world::Casting>(e).is_some())?,
+        AiTarget::MostBuffed => {
+            let best = scene
+                .foes
+                .iter()
+                .copied()
+                .map(|e| (ctx.effects_on(world, e).buffs, e))
+                .max_by_key(|(n, _)| *n)?;
+            if best.0 == 0 {
+                return None;
+            }
+            best.1
+        }
+        AiTarget::LowestAlly => allies_of(world, ctx, scene)
+            .into_iter()
+            .filter(|&a| hp_pct(world, a) < 100)
+            .min_by_key(|&a| hp_pct(world, a))?,
+    };
+    Some((Some(pick), pick))
+}
+
+fn ability_kind(kind: AiKind) -> (AbilityKind, &'static str) {
+    match kind {
+        AiKind::Spell => (AbilityKind::Spell, "cast"),
+        AiKind::Skill => (AbilityKind::Skill, "use"),
+        AiKind::Song => (AbilityKind::Song, "perform"),
+        AiKind::Chant => (AbilityKind::Chant, "chant"),
+    }
+}
+
+/// Live enemies of `mob` in `room`: whatever fights it, plus the one it fights.
+fn foes_of(world: &mut World, ctx: &mut RoundCtx, mob: Entity, room: Entity) -> Vec<Entity> {
+    let mut v = ctx.attackers_of(world, mob);
+    if let Some(f) = world.get::<mud_world::Fighting>(mob).map(|f| f.0)
+        && !v.contains(&f)
+    {
+        v.push(f);
+    }
+    v.retain(|&e| in_room_alive(world, e, room));
+    v
+}
+
+/// Whether a rule that passed its roll can actually fire right now: its
+/// conditions hold, it has a target, and a silenced mob is not asked to
+/// speak a spell. Returns the ability and the forced target for the core.
+fn plan_rule(
+    world: &mut World,
+    ctx: &mut RoundCtx,
+    scene: &Scene<'_>,
+    rule: &AiRule,
+) -> Option<(AbilityInfo, Option<Entity>)> {
+    if !rule
+        .when
+        .iter()
+        .filter(|c| !needs_target(**c))
+        .all(|c| condition_holds(world, ctx, scene, None, *c))
+    {
+        return None;
+    }
+    let info = ctx.ability(world, rule.ability_id)?;
+    let (forced, subject) = pick_target(world, ctx, scene, rule.target, info.hostile)?;
+    if !rule
+        .when
+        .iter()
+        .filter(|c| needs_target(**c))
+        .all(|c| condition_holds(world, ctx, scene, Some(subject), *c))
+    {
+        return None;
+    }
+    let verbal = !matches!(rule.kind, AiKind::Skill);
+    if verbal
+        && (crate::commands::effect_prevents(world, scene.mob, crate::commands::Prevent::Speaking)
+            || crate::commands::effect_prevents(
+                world,
+                scene.mob,
+                crate::commands::Prevent::Casting,
+            ))
+    {
+        return None;
+    }
+    Some((info, forced))
+}
+
+/// Run one mob's rules for this combat round. True when it used an ability
+/// (a cast begun, or an instant one landed): its melee swing is skipped.
+fn run_mob_rules(
+    world: &mut World,
+    ctx: &mut RoundCtx,
+    mob: Entity,
+    tick: u64,
+    scale: f64,
+) -> bool {
+    use mud_world::Health;
+
+    if !mob_can_swing(world, mob)
+        || world.get::<Health>(mob).is_none_or(|h| h.hp <= 0)
+        || crate::fear::is_feared(world, mob)
+    {
+        return false;
+    }
+    let Some(room) = world.get::<Located>(mob).map(|l| l.0) else {
+        return false;
+    };
+    let Some(rules) = world
+        .get::<MobAi>(mob)
+        .map(|a| std::sync::Arc::clone(&a.rules))
+    else {
+        return false;
+    };
+    let level = mud_world::effective_level(world, mob);
+    let no_magic = world.get::<mud_world::NoMagicRoom>(room).is_some();
+    let mut foes: Option<Vec<Entity>> = None;
+    let mut evals = 0;
+    for (idx, rule) in rules.iter().enumerate() {
+        if evals >= MAX_RULE_EVALS {
+            break;
+        }
+        if rule.min_level.is_some_and(|min| level < min) {
+            continue;
+        }
+        let (last, warned_at) = world
+            .get::<MobAi>(mob)
+            .map_or((None, None), |a| (a.last_used(idx), a.warned_at(idx)));
+        if last
+            .is_some_and(|t| tick.saturating_sub(t) < u64::from(rule.cooldown_s) * TICKS_PER_SECOND)
+        {
+            continue;
+        }
+        let verbal = !matches!(rule.kind, AiKind::Skill);
+        if verbal && no_magic {
+            continue;
+        }
+        evals += 1;
+        let telegraphed = rule.when.contains(&AiCondition::Telegraph);
+        // A telegraphed rule that warned last round follows through now,
+        // without a fresh roll.
+        let follow_through = telegraphed
+            && tick
+                .checked_sub(crate::combat::COMBAT_PERIOD_TICKS)
+                .is_some_and(|prev| warned_at == Some(prev));
+        if !follow_through && !chance_passes(rule.chance_pct, scale) {
+            continue;
+        }
+        let foes = foes.get_or_insert_with(|| foes_of(world, ctx, mob, room));
+        let scene = Scene {
+            mob,
+            room,
+            foes: foes.as_slice(),
+        };
+        let Some((info, forced)) = plan_rule(world, ctx, &scene, rule) else {
+            continue;
+        };
+        if telegraphed && !follow_through {
+            telegraph(world, mob, room, &info.display);
+            if let Some(mut ai) = world.get_mut::<MobAi>(mob) {
+                ai.mark_warned(idx, tick);
+            }
+            continue;
+        }
+        if let Some(mut ai) = world.get_mut::<MobAi>(mob) {
+            ai.clear_warned(idx);
+        }
+        if use_rule(world, mob, rule, &info, forced) {
+            if let Some(mut ai) = world.get_mut::<MobAi>(mob) {
+                ai.mark_used(idx, tick);
+            }
+            tracing::debug!(
+                mob = ?mob,
+                rule = idx,
+                ability = info.key.as_str(),
+                target = ?forced,
+                "mob AI used an ability"
+            );
+            return true;
+        }
+    }
+    false
+}
+
+/// The room's one-round warning before a telegraphed ability.
+fn telegraph(world: &mut World, mob: Entity, room: Entity, ability: &str) {
+    let name = crate::commands::cap_sentence_start(&crate::commands::name_of(world, mob));
+    crate::commands::broadcast_room_except_rendered(
+        world,
+        room,
+        &[],
+        &format!("<red>{name} gathers its power for {ability}!</>\r\n"),
+    );
+}
+
+/// Invoke the rule's ability through the player pipeline. True when it took
+/// effect: it began winding up or it landed.
+fn use_rule(
+    world: &mut World,
+    mob: Entity,
+    rule: &AiRule,
+    info: &AbilityInfo,
+    forced: Option<Entity>,
+) -> bool {
+    let (kind, verb) = ability_kind(rule.kind);
+    crate::commands::reset_cast_landed();
+    crate::commands::invoke_ability_core(
+        world,
+        mob,
+        &format!("'{}'", info.key),
+        kind,
+        verb,
+        false,
+        false,
+        false,
+        forced,
+        false,
+    );
+    let began = world
+        .get::<mud_world::Casting>(mob)
+        .is_some_and(|c| c.ability_id == rule.ability_id);
+    began || crate::commands::cast_landed()
+}
+
+/// One combat round of mob spell / skill AI. Returns the mobs that used an
+/// ability and so skip their melee swing this round. Call only when
+/// `mob_ai.enabled` is on; it does nothing otherwise.
+pub(crate) fn mob_combat_ai_tick(world: &mut World) -> HashSet<Entity> {
+    let mut acted = HashSet::new();
+    if !mud_world::mob_ai_enabled(world) {
+        return acted;
+    }
+    let mobs: Vec<Entity> = {
+        let mut q = world.query_filtered::<
+            Entity,
+            (
+                With<mud_world::Mob>,
+                With<MobAi>,
+                With<mud_world::Fighting>,
+            ),
+        >();
+        q.iter(world).collect()
+    };
+    if mobs.is_empty() {
+        return acted;
+    }
+    let tick = world.resource::<crate::TickCount>().0;
+    let scale = world
+        .get_resource::<RuntimeConfig>()
+        .map_or(1.0, |c| c.get_f64("mob_ai", "scale", 1.0));
+    let mut ctx = RoundCtx::default();
+    for mob in mobs {
+        if world.get_entity(mob).is_ok() && run_mob_rules(world, &mut ctx, mob, tick, scale) {
+            acted.insert(mob);
+        }
+    }
+    acted
 }
 
 #[cfg(test)]

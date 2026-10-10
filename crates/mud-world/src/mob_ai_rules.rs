@@ -23,6 +23,11 @@
 //! | `self_has_debuff`  | `true`                 | `SelfHasDebuff`               |
 //! | `target_lifeforce` | `LifeForce` name       | `TargetLifeforce`             |
 //! | `align`            | good / neutral / evil  | `Align`                       |
+//! | `telegraph`        | `true`                 | `Telegraph`                   |
+//!
+//! `telegraph` is a flag, not a test: the engine warns the room one combat
+//! round before the rule's cast and fires it the round after (breath, area
+//! attacks). Off unless the rule sets it.
 //!
 //! A `false` value on the `true`-only keys means "no constraint". An unknown
 //! key is ignored (and logged once per load); a known key with an unusable
@@ -130,6 +135,9 @@ pub enum AiCondition {
     AllyHpBelow(u8),
     TargetLifeforce(LifeForce),
     Align(AiAlign),
+    /// The rule warns the room one round before it fires (not a test the
+    /// engine evaluates; it changes how the rule is carried out).
+    Telegraph,
 }
 
 /// One mob AI rule, parsed and validated. Lists are kept in priority order
@@ -158,6 +166,9 @@ pub struct MobAi {
     /// `(rule index in `rules`, tick of last use)`. Only rules that have fired
     /// appear, so a mob that never casts carries no heap data.
     pub last_use: SmallVec<[(u16, u64); 4]>,
+    /// `(rule index, tick)` of a `Telegraph` warning already given. It holds
+    /// only for the very next combat round; an older entry is stale.
+    pub warned: SmallVec<[(u16, u64); 2]>,
 }
 
 impl MobAi {
@@ -166,6 +177,32 @@ impl MobAi {
         Self {
             rules,
             last_use: SmallVec::new(),
+            warned: SmallVec::new(),
+        }
+    }
+
+    /// Tick at which rule `idx` last gave its `Telegraph` warning.
+    #[must_use]
+    pub fn warned_at(&self, idx: usize) -> Option<u64> {
+        let idx = u16::try_from(idx).ok()?;
+        self.warned.iter().find(|(i, _)| *i == idx).map(|(_, t)| *t)
+    }
+
+    /// Record a `Telegraph` warning for rule `idx` at `tick`.
+    pub fn mark_warned(&mut self, idx: usize, tick: u64) {
+        let Ok(idx) = u16::try_from(idx) else {
+            return;
+        };
+        match self.warned.iter_mut().find(|(i, _)| *i == idx) {
+            Some(slot) => slot.1 = tick,
+            None => self.warned.push((idx, tick)),
+        }
+    }
+
+    /// Forget rule `idx`'s warning (the cast it announced happened or fizzled).
+    pub fn clear_warned(&mut self, idx: usize) {
+        if let Ok(idx) = u16::try_from(idx) {
+            self.warned.retain(|(i, _)| *i != idx);
         }
     }
 
@@ -304,10 +341,11 @@ pub fn parse_conditions(value: Option<&serde_json::Value>) -> ParsedConditions {
                 )),
                 _ => bad("expected a count of at least 1, or true"),
             },
-            "target_casting" | "target_has_buff" | "self_has_debuff" => match flag {
+            "target_casting" | "target_has_buff" | "self_has_debuff" | "telegraph" => match flag {
                 Some(true) => out.when.push(match key.as_str() {
                     "target_casting" => AiCondition::TargetCasting,
                     "target_has_buff" => AiCondition::TargetHasBuff,
+                    "telegraph" => AiCondition::Telegraph,
                     _ => AiCondition::SelfHasDebuff,
                 }),
                 Some(false) => {}
@@ -429,7 +467,7 @@ mod tests {
             "in_combat": true, "self_hp_below": 60, "target_hp_below": 30,
             "ally_hp_below": 40, "grouped_targets": true, "target_casting": true,
             "target_has_buff": true, "self_has_debuff": true,
-            "target_lifeforce": "undead", "align": "Evil",
+            "target_lifeforce": "undead", "align": "Evil", "telegraph": true,
         });
         let p = parse_conditions(Some(&v));
         assert!(p.unknown_keys.is_empty() && p.bad_values.is_empty());
@@ -444,10 +482,11 @@ mod tests {
             AiCondition::SelfHasDebuff,
             AiCondition::TargetLifeforce(LifeForce::Undead),
             AiCondition::Align(AiAlign::Evil),
+            AiCondition::Telegraph,
         ] {
             assert!(p.when.contains(&c), "missing {c:?}");
         }
-        assert_eq!(p.when.len(), 10);
+        assert_eq!(p.when.len(), 11);
     }
 
     #[test]
