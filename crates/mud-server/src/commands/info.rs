@@ -3583,7 +3583,7 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
             out.push_str(&appearance_line(
                 &prof.gender,
                 &def.default_size,
-                def.default_composition,
+                actor_composition(world, target),
             ));
         }
         if let Some(bm) = world.get::<mud_world::BodyMetrics>(target).copied() {
@@ -3687,7 +3687,7 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
         out.push_str(&appearance_line(
             &proto.gender,
             size.label(),
-            mob_composition(world, proto),
+            actor_composition(world, target),
         ));
     }
     // LifeForce: only surface non-LIFE (the default). UNDEAD gets a
@@ -4383,6 +4383,28 @@ pub(super) fn mob_composition(
     world
         .get_resource::<mud_world::RaceCatalog>()
         .and_then(|c| c.get(&proto.race))
+        .map_or(Composition::Flesh, |r| r.default_composition)
+}
+
+/// Composition `target` has right now (legacy `GET_COMPOSITION`): a live
+/// Waterform / Vaporform override, else the mob proto's own, else the
+/// race default. Players carry no composition of their own.
+pub(crate) fn actor_composition(world: &World, target: Entity) -> mud_db::enums::Composition {
+    use mud_db::enums::Composition;
+    if let Some(over) = world.get::<mud_world::CompositionOverride>(target) {
+        return over.0;
+    }
+    if world.get::<Mob>(target).is_some()
+        && let Some(key) = world.get::<WorldKey>(target).copied()
+        && let Some(proto) = world
+            .get_resource::<MobPrototypes>()
+            .and_then(|p| p.by_key.get(&(key.zone, key.id)))
+    {
+        return mob_composition(world, proto);
+    }
+    world
+        .get::<Profile>(target)
+        .and_then(|p| world.get_resource::<mud_world::RaceCatalog>()?.get(&p.race))
         .map_or(Composition::Flesh, |r| r.default_composition)
 }
 
@@ -5628,6 +5650,34 @@ fn scan_room_actors(
     actors.len()
 }
 
+/// How many rooms out `scan` reaches (legacy `do_scan` `maxdis`): staff 3,
+/// everyone else 1. Farsee adds one, and a further one for each of two
+/// Sphere of Divination rolls the skill beats (`roll(33, 75) <= skill`,
+/// `roll(75, 150) <= skill`), so only real casters see far. `roll(lo, hi)`
+/// is an inclusive random draw, injected for tests.
+pub(crate) fn scan_max_distance(
+    world: &World,
+    player: Entity,
+    roll: &mut dyn FnMut(i32, i32) -> i32,
+) -> usize {
+    let mut maxdis = if crate::commands::is_staff(world, player) {
+        3
+    } else {
+        1
+    };
+    if world.get::<mud_world::Farsee>(player).is_some() {
+        maxdis += 1;
+        let divination = crate::hiding::skill_pct(world, player, "sphere_divination");
+        if roll(33, 75) <= divination {
+            maxdis += 1;
+        }
+        if roll(75, 150) <= divination {
+            maxdis += 1;
+        }
+    }
+    maxdis
+}
+
 pub(crate) fn cmd_scan(world: &mut World, player: Entity, _args: &str) {
     if refuse_if_blind(world, player) {
         return;
@@ -5662,17 +5712,13 @@ pub(crate) fn cmd_scan(world: &mut World, player: Entity, _args: &str) {
         send_to(world, player, "It is pitch black; you can see nothing.\r\n");
         return;
     }
-    // Legacy maxdis: rogues/assassins/staff get 3, everyone else 1.
-    // We don't carry a class-name string on the runtime side yet
+    // Legacy maxdis: rogues/assassins/staff get 3, everyone else 1, plus
+    // Farsee. We don't carry a class-name string on the runtime side yet
     // (class is an i32 catalog id), so for now staff get the long
     // scan and everyone else gets one room. Future: extend by
     // checking Profile.class_id against a "stealth-leaning"
     // catalog flag.
-    let maxdis = if crate::commands::is_staff(world, player) {
-        3
-    } else {
-        1
-    };
+    let maxdis = scan_max_distance(world, player, &mut |lo, hi| rand::random_range(lo..=hi));
 
     let mut out = String::from("\r\nYou scan the area, and see:\r\n");
     // Current room first (dis=0 gets "right here").

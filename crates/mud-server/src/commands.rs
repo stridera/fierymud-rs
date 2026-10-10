@@ -555,6 +555,9 @@ mod expand_tests;
 #[path = "commands/flag_behaviour_tests.rs"]
 mod flag_behaviour_tests;
 #[cfg(test)]
+#[path = "commands/form_spell_tests.rs"]
+mod form_spell_tests;
+#[cfg(test)]
 #[path = "commands/god_zone_tests.rs"]
 mod god_zone_tests;
 #[cfg(test)]
@@ -12227,6 +12230,100 @@ pub(crate) fn look_direction(world: &mut World, player: Entity, dir: Direction) 
         out.push_str("\r\n");
     }
     send_to(world, player, out);
+    if world.get::<mud_world::Farsee>(player).is_some() {
+        farsee_onward(world, player, target_room, dir, &mut |lo, hi| {
+            rand::random_range(lo..=hi)
+        });
+    }
+}
+
+/// Legacy `do_farsee`: with `EFF_FARSEE`, `look <dir>` keeps going down the
+/// exit after the neighbouring room, up to four more rooms. It stops at a
+/// closed or hidden exit, a wall, a dark room ("It is too dark to see!") or
+/// a room out of bounds, and after each room it goes on only while
+/// `roll(1, 125) <= Sphere of Divination` ("You can't see any farther.").
+/// `first` is the room already shown; `roll(lo, hi)` is an inclusive draw.
+fn farsee_onward(
+    world: &mut World,
+    player: Entity,
+    first: Entity,
+    dir: Direction,
+    roll: &mut dyn FnMut(i32, i32) -> i32,
+) {
+    const DESC: [&str; 5] = [
+        "far beyond reason ",
+        "ridiculously far ",
+        "even farther ",
+        "farther ",
+        "",
+    ];
+    let divination = crate::hiding::skill_pct(world, player, "sphere_divination");
+    let mode = color_mode_for(world, player);
+    let mut at = first;
+    // The neighbour was legacy's first step (distance 4); four remain.
+    for distance in (0..4).rev() {
+        if roll(1, 125) > divination {
+            send_to(world, player, "You can't see any farther.\r\n");
+            return;
+        }
+        let Some(ed) = world.get::<Exits>(at).and_then(|e| e.0.get(&dir).cloned()) else {
+            return;
+        };
+        let walled = world
+            .get::<mud_world::RoomBlockedExits>(at)
+            .and_then(|b| b.by_direction.get(&dir))
+            .is_some_and(|w| matches!(w.traversal, mud_world::WallTraversal::Block));
+        let Some(next) = ed.to else {
+            return;
+        };
+        if ed.state != ExitState::Open
+            || walled
+            || exit_is_hidden_to(world, player, at, dir, &ed)
+            || !crate::room_access::room_visible_to(world, player, next)
+        {
+            return;
+        }
+        at = next;
+        if room_is_dark(world, at)
+            && !room_has_light(world, at)
+            && !player_can_see_in_dark(world, player)
+        {
+            send_to(
+                world,
+                player,
+                render_color_tags("<b:black>It is too dark to see!</>\r\n", mode),
+            );
+            return;
+        }
+        let name = render_color_tags(
+            &colorize_default(&name_or(world, at, "(unknown)"), "<b:cyan>"),
+            mode,
+        );
+        let desc = world
+            .get::<Description>(at)
+            .map(|d| render_color_tags(&d.0, mode))
+            .unwrap_or_default();
+        let toward = if matches!(dir, Direction::Up | Direction::Down) {
+            format!("{}wards", direction_name(dir))
+        } else {
+            format!("to the {}", direction_name(dir))
+        };
+        let mut out = render_color_tags(
+            &format!(
+                "\r\n<cyan>You extend your vision {}{toward}.</>\r\n",
+                DESC[distance]
+            ),
+            mode,
+        );
+        out.push_str(&format!("  {name}\r\n"));
+        if !desc.trim().is_empty() {
+            out.push_str("  ");
+            out.push_str(desc.trim_end());
+            out.push_str("\r\n");
+        }
+        send_to(world, player, out);
+    }
+    send_to(world, player, "You can't see any farther.\r\n");
 }
 
 pub(crate) fn direction_order(d: mud_db::enums::Direction) -> u8 {
@@ -18981,6 +19078,21 @@ pub(crate) fn invoke_ability_with(
                         format!("{victim} is immune to blindness.\r\n"),
                     );
                     applied_msgs.push(format!("{pretty} (immune to blindness)"));
+                    continue;
+                }
+                // Legacy `SPELL_WATERFORM` / `SPELL_VAPORFORM`: only a body of
+                // flesh can take the change (a stone golem, an already-liquid
+                // caster, ... cannot).
+                if matches!(flag.as_str(), "waterform" | "vaporform")
+                    && info::actor_composition(world, target_entity)
+                        != mud_db::enums::Composition::Flesh
+                {
+                    send_to(
+                        world,
+                        target_entity,
+                        "Your body cannot sustain this change.\r\n",
+                    );
+                    applied_msgs.push(format!("{pretty} (body cannot change)"));
                     continue;
                 }
                 let mut dur_secs = resolve_effect_duration(

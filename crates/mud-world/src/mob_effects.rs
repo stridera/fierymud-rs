@@ -174,6 +174,44 @@ const FLAG_MARKERS: &[FlagMarker] = &[
         }),
         tag_backed: None,
     },
+    // Legacy `EFF_FARSEE`: longer `scan`, `look <dir>` down the exit.
+    FlagMarker {
+        flags: &["farsee"],
+        insert: |e| {
+            e.insert(crate::components::Farsee);
+        },
+        remove: Some(|e| {
+            e.remove::<crate::components::Farsee>();
+        }),
+        tag_backed: None,
+    },
+    // Waterform / Vaporform: legacy `APPLY_COMPOSITION` (`COMP_WATER` /
+    // `COMP_MIST`). The override sits over the base composition, which is
+    // restored by removing it.
+    FlagMarker {
+        flags: &["waterform"],
+        insert: |e| {
+            e.insert(crate::components::CompositionOverride(
+                mud_db::enums::Composition::Water,
+            ));
+        },
+        remove: Some(|e| {
+            e.remove::<crate::components::CompositionOverride>();
+        }),
+        tag_backed: None,
+    },
+    FlagMarker {
+        flags: &["vaporform"],
+        insert: |e| {
+            e.insert(crate::components::CompositionOverride(
+                mud_db::enums::Composition::Mist,
+            ));
+        },
+        remove: Some(|e| {
+            e.remove::<crate::components::CompositionOverride>();
+        }),
+        tag_backed: None,
+    },
     FlagMarker {
         flags: &["blur"],
         insert: |e| {
@@ -599,6 +637,13 @@ mod tests {
             ("blur", |w, e| w.get::<Blur>(e).is_some()),
             ("familiarity", |w, e| w.get::<Familiar>(e).is_some()),
             ("waterwalk", |w, e| w.get::<WaterWalk>(e).is_some()),
+            ("farsee", |w, e| w.get::<Farsee>(e).is_some()),
+            ("waterform", |w, e| {
+                w.get::<CompositionOverride>(e).is_some()
+            }),
+            ("vaporform", |w, e| {
+                w.get::<CompositionOverride>(e).is_some()
+            }),
             ("blinded", |w, e| w.get::<Blinded>(e).is_some()),
             ("blind", |w, e| w.get::<Blinded>(e).is_some()),
             ("blindness", |w, e| w.get::<Blinded>(e).is_some()),

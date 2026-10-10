@@ -5,7 +5,7 @@
 
 use bevy_ecs::prelude::{Entity, World};
 use mud_db::enums::Composition;
-use mud_world::{BodyMetrics, LifeForceTag, Mob, MobPrototypes, Profile, RaceCatalog};
+use mud_world::{BodyMetrics, LifeForceTag, Profile, RaceCatalog};
 
 use crate::commands::{format_age, send_rendered};
 
@@ -71,18 +71,7 @@ fn state_weight(pounds: i32) -> String {
 }
 
 fn composition_of(world: &World, target: Entity) -> Composition {
-    if world.get::<Mob>(target).is_some()
-        && let Some(key) = world.get::<mud_world::WorldKey>(target).copied()
-        && let Some(proto) = world
-            .get_resource::<MobPrototypes>()
-            .and_then(|p| p.by_key.get(&(key.zone, key.id)))
-    {
-        return crate::commands::info::mob_composition(world, proto);
-    }
-    world
-        .get::<Profile>(target)
-        .and_then(|p| world.get_resource::<RaceCatalog>()?.get(&p.race))
-        .map_or(Composition::Flesh, |r| r.default_composition)
+    crate::commands::info::actor_composition(world, target)
 }
 
 fn life_force_of(world: &World, target: Entity) -> mud_db::enums::LifeForce {

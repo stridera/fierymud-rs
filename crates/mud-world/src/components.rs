@@ -1708,6 +1708,20 @@ pub struct Flying;
 #[derive(Component, Debug, Clone, Copy)]
 pub struct WaterWalk;
 
+/// Marker: the `farsee` effect flag (Farsee spell, a ranger-style mob's
+/// default effect; legacy `EFF_FARSEE`). Lengthens `scan` and lets
+/// `look <direction>` see several rooms down the exit.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Farsee;
+
+/// A temporary body composition that replaces the actor's own (legacy
+/// `APPLY_COMPOSITION`: Waterform is `WATER`, Vaporform `MIST`). Installed
+/// and removed with the `waterform` / `vaporform` effect flags through the
+/// flag-marker table; the actor's base composition (the mob proto's or the
+/// race's) is never touched, so removing the component restores it exactly.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct CompositionOverride(pub mud_db::enums::Composition);
+
 /// Marker: an actor stands in an air room with nothing holding it up and is
 /// falling through the down exits (legacy `EVENT_GRAVITY`). Inserted by
 /// [`crate::movement::begin_fall_if_unsupported`] on entering an air room and

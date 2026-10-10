@@ -24,12 +24,12 @@ use crate::room_access::{
 
 const GOD_ONLY: &str = "return actor:is_god()";
 
-struct Fx {
-    world: World,
+pub(super) struct Fx {
+    pub(super) world: World,
 }
 
 impl Fx {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let mut world = World::new();
         world.insert_resource(mud_script::LuaHost::default());
         world.insert_resource(WorldKeyIndex::default());
@@ -40,7 +40,7 @@ impl Fx {
         Self { world }
     }
 
-    fn zone(&mut self, id: i32, god: bool) -> Entity {
+    pub(super) fn zone(&mut self, id: i32, god: bool) -> Entity {
         let z = self
             .world
             .spawn((
@@ -61,7 +61,7 @@ impl Fx {
         z
     }
 
-    fn room(&mut self, zone: Entity, zone_id: i32, id: i32) -> Entity {
+    pub(super) fn room(&mut self, zone: Entity, zone_id: i32, id: i32) -> Entity {
         let r = self
             .world
             .spawn((
@@ -81,7 +81,7 @@ impl Fx {
         r
     }
 
-    fn link(&mut self, from: Entity, dir: Direction, to: Entity) {
+    pub(super) fn link(&mut self, from: Entity, dir: Direction, to: Entity) {
         self.world.get_mut::<Exits>(from).unwrap().0.insert(
             dir,
             ExitData {
@@ -100,7 +100,7 @@ impl Fx {
 
     /// A player the way `login::spawn_player` builds one: cached rank from
     /// (level, website role).
-    fn person(&mut self, name: &str, level: i32, room: Entity) -> (Entity, Rx) {
+    pub(super) fn person(&mut self, name: &str, level: i32, room: Entity) -> (Entity, Rx) {
         let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
         let e = self
             .world
@@ -131,7 +131,7 @@ impl Fx {
         (e, rx)
     }
 
-    fn room_of(&self, e: Entity) -> Entity {
+    pub(super) fn room_of(&self, e: Entity) -> Entity {
         self.world.get::<Located>(e).unwrap().0
     }
 }
@@ -1284,6 +1284,37 @@ fn dimension_door_stays_in_the_zone_and_refuses_the_next_zone_over() {
         None,
         "no resting after a dimension door"
     );
+}
+
+#[test]
+fn dimension_door_refuses_npcs_and_staff_without_moving() {
+    let mut fx = Fx::new();
+    let zone = fx.zone(30, false);
+    let here = fx.room(zone, 30, 0);
+    let there = fx.room(zone, 30, 1);
+    let (caster, mut rx) = fx.person("Mage", 30, here);
+    let (_god, _grx) = fx.person("Chinok", 105, there);
+    fx.world.spawn((
+        mud_world::Mob,
+        Named {
+            name: "a goblin".into(),
+        },
+        mud_world::Keywords(vec!["goblin".into()]),
+        Located(here),
+    ));
+    travel_fixture(
+        &mut fx,
+        "Dimension Door",
+        serde_json::json!({"type": "self", "destination": "target", "scope": "self", "range": "zone"}),
+    );
+    cast_at(&mut fx, caster, "'dimension door' goblin");
+    let out = drain(&mut rx);
+    assert!(out.contains("You failed."), "NPC target: {out}");
+    assert_eq!(fx.room_of(caster), here);
+    cast_at(&mut fx, caster, "'dimension door' chinok");
+    let out = drain(&mut rx);
+    assert!(out.contains("You failed."), "immortal target: {out}");
+    assert_eq!(fx.room_of(caster), here);
 }
 
 #[test]
