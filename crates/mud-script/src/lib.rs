@@ -7,6 +7,8 @@
 //! unsafe in principle, sound under the invariant that we only call into Lua
 //! while we hold `&mut World` and never re-enter.
 
+mod api_extra;
+
 use std::ptr::NonNull;
 
 use bevy_ecs::prelude::*;
@@ -1002,6 +1004,7 @@ impl LuaHost {
         // `combat.engage(target)` can find the engager without a
         // userdata argument.
         self.lua.set_app_data(SelfEntity(listener));
+        api_extra::note_fire(&self.lua, code);
         // Reset the per-call instruction budget counter. The hook
         // increments by 10_000 per fire and aborts when the running
         // total crosses LUA_MAX_INSTRUCTIONS.
@@ -1550,6 +1553,8 @@ impl LuaHost {
                     get_room(lua, zone, id)
                 })?,
         )?;
+
+        api_extra::bind_globals(&self.lua, globals)?;
 
         // Caller-supplied event-context globals (`speech` for
         // SPEECH triggers, etc.). Cleaned up alongside the
@@ -2504,6 +2509,7 @@ impl UserData for LuaActor {
         // (no field-form refs, but method-form is rare). Both are
         // exposed via __index below.
         // Returns the room name, or nil if the actor isn't in a room.
+        api_extra::add_actor_methods(methods);
         methods.add_method(
             "room_name",
             |lua, this, ()| -> mlua::Result<Option<String>> {
@@ -3992,7 +3998,7 @@ impl UserData for LuaActor {
                         })?;
                         Ok(Value::String(lua.create_string(&s)?))
                     }
-                    _ => Ok(Value::Nil),
+                    other => api_extra::actor_field(lua, this.entity, other),
                 }
             },
         );
@@ -4104,6 +4110,7 @@ pub struct LuaRoom {
 impl UserData for LuaRoom {
     #[allow(clippy::too_many_lines)]
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        api_extra::add_room_methods(methods);
         methods.add_method("send", |lua, this, msg: String| -> mlua::Result<()> {
             world_mut_from_lua(lua, |world| {
                 if !world.contains_resource::<LuaOutbox>() {
