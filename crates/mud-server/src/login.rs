@@ -1357,6 +1357,9 @@ fn despawn_persistent_pets(world: &mut World, owner: Entity) {
 /// Marks a player whose session has ended but who could not be retired yet
 /// because their save turn was busy (see [`retire_player`]). The entity stays
 /// until [`ConnRouter::drain_retiring`] gets the turn; it has no connection.
+/// Such a body is out of play: [`commands::can_see_player`] hides it from
+/// everyone else (so it is in no room listing and no name target), no fight
+/// can start with it, and it is never picked as a world-wide player target.
 #[derive(Component)]
 pub(crate) struct Retiring;
 
@@ -1390,6 +1393,12 @@ fn retire_player(world: &mut World, entity: Entity, pool: &PgPool) -> bool {
         },
         None => None,
     };
+    // The departure below names the player to the room, which an unseen
+    // [`Retiring`] body would not allow; the turn is held, so this one is
+    // going now.
+    if let Ok(mut e) = world.get_entity_mut(entity) {
+        e.remove::<Retiring>();
+    }
     // Broadcast a Room.RemovePlayer diff so other clients in
     // the room update their "who's here" panel. Done before
     // save/despawn so the entity's Located is still valid.
@@ -1674,7 +1683,10 @@ impl ConnRouter {
             commands::send_core_goodbye(world, entity, "See you next time!");
             if !retire_player(world, entity, pool) {
                 // The save turn is busy; `drain_retiring` finishes the job
-                // on a later tick instead of this one waiting for it.
+                // on a later tick instead of this one waiting for it. The
+                // body is already gone as far as the room is concerned:
+                // nobody sees it, targets it or fights it meanwhile.
+                commands::stop_all_combat_with(world, entity);
                 world.entity_mut(entity).insert(Retiring);
             }
         }
@@ -10475,6 +10487,62 @@ mod tests {
         assert!(world.get_entity(player).is_err());
         assert_eq!(c.pending(), 1, "the save is a spawned task");
         assert!(drain(&mut watcher_rx).contains("Busy fades from view"));
+    }
+
+    /// While a retirement is parked on a busy save turn the body is out of
+    /// play: unseen, not a name target, and no fight starts or continues.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_retiring_body_is_invisible_and_cannot_be_fought() {
+        let mut world = World::new();
+        world.insert_resource(mud_world::SocialRegistry::default());
+        world.insert_resource(SaveCoordinator::default());
+        world.insert_resource(crate::TickCount(0));
+        let pool = failing_pool();
+        let mut router = ConnRouter::new();
+        let room = world.spawn(mud_world::Room).id();
+        let (player, _rx) = playing_in(&mut router, &mut world, room, 1, "Busy");
+        let (watcher, _wrx) = playing_in(&mut router, &mut world, room, 2, "Watcher");
+        let mob = world
+            .spawn((
+                mud_world::Mob,
+                mud_world::Named { name: "rat".into() },
+                mud_world::Located(room),
+            ))
+            .id();
+        let c = world.resource::<SaveCoordinator>().clone();
+        assert!(commands::can_see_player(&world, watcher, player));
+        assert_eq!(
+            commands::find_actor_in_room(&mut world, "busy", room, watcher),
+            Some(player)
+        );
+        // A dead player mid-fight does not go linkdead, so it is retired
+        // (here: parked) with the fight still on.
+        world.entity_mut(player).insert(mud_world::Ghost);
+        commands::engage_combat(&mut world, mob, player, room);
+        assert!(world.get::<mud_world::Fighting>(player).is_some());
+
+        let _turn = c.try_begin_ordered("c-Busy").expect("turn is free");
+        router.on_disconnect(&mut world, 1, &pool);
+        assert!(world.get::<Retiring>(player).is_some());
+
+        assert!(!commands::can_see_player(&world, watcher, player));
+        assert!(commands::can_see_player(&world, player, player));
+        assert_eq!(
+            commands::find_actor_in_room(&mut world, "busy", room, watcher),
+            None
+        );
+        assert!(
+            world.get::<mud_world::Fighting>(player).is_none()
+                && world.get::<mud_world::Fighting>(mob).is_none(),
+            "parking the body ends the fight"
+        );
+        commands::engage_combat(&mut world, mob, player, room);
+        assert!(world.get::<mud_world::Fighting>(player).is_none());
+        assert!(world.get::<mud_world::Fighting>(mob).is_none());
+        assert_eq!(
+            commands::find_online_player_anywhere(&mut world, "busy", watcher),
+            None
+        );
     }
 
     /// A relog that lands while the retirement is parked cancels it (and

@@ -780,6 +780,7 @@ pub fn combat_tick(world: &mut World) {
                         world.get::<Located>(**target).map(|l| l.0) == Some(loc.0)
                             && world.get::<Health>(**target).is_some_and(|h| h.hp > 0)
                             && world.get::<Ghost>(**target).is_none()
+                            && world.get::<crate::login::Retiring>(**target).is_none()
                             && world.get::<mud_world::Frozen>(**target).is_none()
                             && world.get::<mud_world::Stunned>(**target).is_none()
                     })
@@ -941,6 +942,7 @@ pub fn combat_tick(world: &mut World) {
         ), (
             Without<Ghost>,
             Without<mud_world::Frozen>,
+            Without<crate::login::Retiring>,
             // Legacy `perform_violence`: `if (CASTING(ch)) continue;` —
             // a caster mid-chant skips its melee rounds.
             Without<mud_world::Casting>,

@@ -11915,7 +11915,15 @@ pub(crate) fn hidden_by_magic_from(world: &World, viewer: Entity, target: Entity
 /// per-observer message goes through this one function.
 #[must_use]
 pub(crate) fn can_see_player(world: &World, viewer: Entity, target: Entity) -> bool {
-    if viewer == target || crate::hiding::same_group(world, viewer, target) {
+    if viewer == target {
+        return true;
+    }
+    // A character whose session is over and whose save is still waiting for
+    // its turn ([`login::Retiring`]) is already gone from the room.
+    if world.get::<crate::login::Retiring>(target).is_some() {
+        return false;
+    }
+    if crate::hiding::same_group(world, viewer, target) {
         return true;
     }
     !senses::is_blind(world, viewer)
@@ -14138,7 +14146,11 @@ pub(crate) fn find_online_player_anywhere(
     if needle.is_empty() {
         return None;
     }
-    let mut q = world.query_filtered::<(Entity, &Named), (With<Player>, With<mud_world::Online>)>();
+    let mut q = world.query_filtered::<(Entity, &Named), (
+        With<Player>,
+        With<mud_world::Online>,
+        Without<crate::login::Retiring>,
+    )>();
     let cands: Vec<(Entity, &str)> = q
         .iter(world)
         .filter(|(e, _)| *e != exclude)
@@ -24620,6 +24632,12 @@ pub(crate) fn engage_combat(world: &mut World, attacker: Entity, defender: Entit
     // come in, matching the "violence simply won't happen here"
     // guard already on cmd_attack.
     if world.get::<mud_world::PeacefulRoom>(room).is_some() {
+        return;
+    }
+    // A retiring body (session over, save pending) takes no part in a fight.
+    if world.get::<crate::login::Retiring>(attacker).is_some()
+        || world.get::<crate::login::Retiring>(defender).is_some()
+    {
         return;
     }
     // A mob that cannot act (asleep, paralysed, mesmerized, stunned) never
