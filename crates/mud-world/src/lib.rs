@@ -41,9 +41,10 @@ pub use components::{
     SkillPoints, Slot, SlotHold, SlotReservation, Sneaking, SnoopedBy, Snooping, SoundproofRoom,
     SpellCooldown, SpellResistanceDelta, SpellSlots, Stamina, StatOverflow, Stealth, Stunned,
     SwitchedFrom, SwitchedInto, SyslogMinLevel, TellLog, Thirst, TimePlayed, Title, Trophy,
-    TrophyEntry, TrophyKind, UiStyle, WallTraversal, WatchingSyslog, WaterWalk, Wealth, WearableIn,
-    WimpyThreshold, WizInvis, WorldKey, Zone, ZoneClimate, ZoneVisits, group_members, group_root,
-    innate_cooldown_key, is_lit, room_in_god_zone, wear_keyword_slot, zone_is_god,
+    TrophyEntry, TrophyKind, UiStyle, UnarmedDamage, WallTraversal, WatchingSyslog, WaterWalk,
+    Wealth, WeaponHitroll, WearableIn, WimpyThreshold, WizInvis, WorldKey, Zone, ZoneClimate,
+    ZoneVisits, group_members, group_root, innate_cooldown_key, is_lit, room_in_god_zone,
+    wear_keyword_slot, zone_is_god,
 };
 pub use loader::{
     LoadStats, ReloadStats, default_weather_for_climate, load_ability_catalog, load_content_tables,

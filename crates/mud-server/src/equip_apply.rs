@@ -451,7 +451,8 @@ fn apply_label(key: &str) -> String {
         "cha" | "cha_bonus" => "charisma".to_string(),
         "max_hp" => "max hit points".to_string(),
         "max_move" | "max_stamina" | "stamina_max" => "max stamina".to_string(),
-        "max_mana" => "max mana".to_string(),
+        "weapon_hitroll" => "hit roll with a wielded weapon".to_string(),
+        "unarmed_damage" => "damage when bare-handed".to_string(),
         "ward" | "ward_pct" => "ward".to_string(),
         other => other.replace('_', " "),
     }
@@ -481,8 +482,11 @@ pub fn describe_item_grants(world: &World, proto: &mud_world::ObjectProto) -> It
                 .modifier_data
                 .get("amount")
                 .and_then(serde_json::Value::as_i64);
+            // `max_mana` is accepted but does nothing (no mana pool), so
+            // identify must not promise it.
             if let (Some(t), Some(a)) = (target, amount)
                 && a != 0
+                && t != "max_mana"
             {
                 out.applies.push(format!("{a:+} to {}{at}", apply_label(t)));
             }
@@ -1020,6 +1024,73 @@ mod tests {
             world.get::<GrantedDeltas>(item).is_none(),
             "GrantedDeltas removed after unapply"
         );
+    }
+
+    /// Gear granting `unarmed_damage`, `weapon_hitroll` and `max_mana`:
+    /// the first two land on their stat components and come off on
+    /// unequip; `max_mana` is accepted without touching anything, and
+    /// none of the three leaks into the persisted-value offsets.
+    #[test]
+    fn unarmed_weapon_hitroll_and_mana_gear_round_trips() {
+        use crate::commands::test_support::object_proto;
+        let mut world = World::new();
+        let modify_id = 3;
+        world.insert_resource(make_catalog_with_modify(modify_id));
+        let mut proto = object_proto(1, 1, mud_db::enums::ObjectType::Armor);
+        proto.granted_effects = [
+            ("unarmed_damage", 6),
+            ("weapon_hitroll", 4),
+            ("max_mana", 75),
+        ]
+        .into_iter()
+        .map(|(target, amount)| ObjectGrantedEffect {
+            effect_id: modify_id,
+            strength: 1,
+            modifier_data: serde_json::json!({"target": target, "amount": amount}),
+            wear_location: None,
+        })
+        .collect();
+        let mut protos = ObjectPrototypes::default();
+        protos.by_key.insert((1, 1), proto);
+        world.insert_resource(protos);
+        let wearer = world
+            .spawn((
+                Named {
+                    name: "Wearer".into(),
+                },
+                Health { hp: 100, max: 100 },
+                Stamina {
+                    current: 100,
+                    max: 100,
+                },
+                CombatStats::default(),
+            ))
+            .id();
+        let item = world
+            .spawn((
+                Item,
+                Named {
+                    name: "test ring".into(),
+                },
+                Located(wearer),
+                WorldKey { zone: 1, id: 1 },
+                mud_world::EquippedSlot(Slot::LeftFinger),
+            ))
+            .id();
+
+        apply_object_to_wearer(&mut world, item, wearer);
+        assert_eq!(world.get::<mud_world::UnarmedDamage>(wearer).unwrap().0, 6);
+        assert_eq!(world.get::<mud_world::WeaponHitroll>(wearer).unwrap().0, 4);
+        assert_eq!(world.get::<Health>(wearer).unwrap().max, 100);
+        assert_eq!(world.get::<Stamina>(wearer).unwrap().max, 100);
+        // Gear is re-applied at login, so none of it may be saved into a
+        // persisted value.
+        assert_eq!(gear_offsets(&world, wearer), GearOffsets::default());
+
+        unapply_object_from_wearer(&mut world, item, wearer);
+        assert_eq!(world.get::<mud_world::UnarmedDamage>(wearer).unwrap().0, 0);
+        assert_eq!(world.get::<mud_world::WeaponHitroll>(wearer).unwrap().0, 0);
+        assert!(world.get::<GrantedDeltas>(item).is_none());
     }
 
     /// Wear-location restriction: a "ring of accuracy" with

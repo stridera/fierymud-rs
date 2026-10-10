@@ -885,6 +885,21 @@ pub struct SavingThrows {
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct Focus(pub i32);
 
+/// Flat damage added to every bare-handed (no wielded weapon) melee swing:
+/// the running total of `unarmed_damage` modify deltas from gear and
+/// buffs. Rolled with the dice, so attack power scales it. Negative totals
+/// count as 0 at the swing. The Barehand skill's passive adds on top of it
+/// at swing time (it is not stored here).
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct UnarmedDamage(pub i32);
+
+/// Accuracy added to melee swings made WHILE wielding a weapon: the running
+/// total of `weapon_hitroll` modify deltas from gear and buffs, in the same
+/// unit as `CombatStats.accuracy`. Never applies bare-handed. Weapon-skill
+/// passives (Bludgeoning Weapons, ...) add on top of it at swing time.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct WeaponHitroll(pub i32);
+
 /// Perception modifier on top of the player base (legacy
 /// `APPLY_PERCEPTION`; a mob's proto `perception` is its whole value).
 /// A viewer sees a hidden character only when this total reaches the

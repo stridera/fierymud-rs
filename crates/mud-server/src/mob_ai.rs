@@ -240,7 +240,7 @@ fn value_apply(target: &str, amount: i32) -> i32 {
         | "constitution" | "con_bonus" | "cha" | "charisma" | "cha_bonus" => 3 * amount,
         // `armor_pct` is legacy AC x 2, so 2 * AC is the amount itself.
         "max_hp" | "max_move" | "max_stamina" | "stamina_max" | "focus" | "armor_pct" => amount,
-        "accuracy" | "attack_power" => 5 * amount,
+        "accuracy" | "attack_power" | "weapon_hitroll" | "unarmed_damage" => 5 * amount,
         "saving_para" | "saving_rod" | "saving_petri" | "saving_breath" | "saving_spell" => -amount,
         "size" => 10 * amount,
         "hit_regen" => 2 * amount,

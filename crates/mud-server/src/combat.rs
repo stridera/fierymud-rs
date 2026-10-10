@@ -333,6 +333,130 @@ fn roll_evasion(world: &World, defender: Entity) -> Option<&'static str> {
     None
 }
 
+/// Weapon-skill family a weapon damage-type label belongs to, matching
+/// the `weapon_type` param of the weapon-proficiency passives (legacy
+/// `weapon_proficiency`: slash/whip/claw, bludgeon/crush/pound/maul,
+/// sting/pierce/stab). Elemental and generic types (hit, fire, blast, ...)
+/// belong to no family. Case-insensitive; `None` when untyped.
+fn weapon_family(damage_type: &str) -> Option<&'static str> {
+    match damage_type.to_ascii_lowercase().as_str() {
+        "slash" | "whip" | "claw" => Some("slashing"),
+        "bludgeon" | "crush" | "pound" | "maul" => Some("bludgeoning"),
+        "sting" | "pierce" | "stab" => Some("piercing"),
+        _ => None,
+    }
+}
+
+/// Sum of the passive-skill `modify` rows of `entity` that target `key`
+/// (`unarmed_damage`, `weapon_hitroll`): the Barehand and weapon-skill
+/// proficiencies. Each row's `amount` formula is evaluated with `skill` set
+/// to the entity's proficiency percent. A row with a `weapon_type` param
+/// counts only when it equals `family` (the wielded weapon's family).
+/// Only abilities tagged `passive` are read here, so an active buff that
+/// targets the same key keeps going through the normal apply/reverse path
+/// and is never counted twice.
+fn passive_skill_bonus(world: &World, entity: Entity, key: &str, family: Option<&str>) -> i32 {
+    let (Some(known), Some(abilities), Some(effects)) = (
+        world.get::<KnownAbilities>(entity),
+        world.get_resource::<mud_world::AbilityCatalog>(),
+        world.get_resource::<mud_world::EffectCatalog>(),
+    ) else {
+        return 0;
+    };
+    let mut total = 0i32;
+    for &(ability_id, prof, is_known) in &known.entries {
+        if !is_known || prof <= 0 {
+            continue;
+        }
+        let Some(rows) = abilities.effects_for.get(&ability_id) else {
+            continue;
+        };
+        for (effect_id, params) in rows {
+            let Some(def) = effects.by_id.get(effect_id) else {
+                continue;
+            };
+            let param = |name: &str| {
+                params
+                    .as_ref()
+                    .and_then(|p| p.get(name))
+                    .or_else(|| def.default_params.get(name))
+                    .and_then(serde_json::Value::as_str)
+            };
+            if def.effect_type != "modify" || param("target").is_none_or(|t| t != key) {
+                continue;
+            }
+            if let Some(want) = param("weapon_type")
+                && !family.is_some_and(|f| f.eq_ignore_ascii_case(want))
+            {
+                continue;
+            }
+            if !abilities
+                .by_name
+                .values()
+                .any(|d| d.id == ability_id && d.passive)
+            {
+                continue;
+            }
+            let ctx = crate::commands::caster_formula_ctx(world, entity, ability_id);
+            if let Some(amount) = crate::commands::resolve_effect_amount(
+                params.as_ref(),
+                Some(&def.default_params),
+                &ctx,
+            ) {
+                total = total.saturating_add(amount);
+            }
+        }
+    }
+    total
+}
+
+/// Flat damage a BARE-HANDED swing adds to its dice roll: `unarmed_damage`
+/// from gear and buffs plus the Barehand passive, floored at 0. Callers
+/// only ask when the attacker wields no dice weapon.
+fn unarmed_damage_bonus(world: &World, attacker: Entity) -> i32 {
+    world
+        .get::<mud_world::UnarmedDamage>(attacker)
+        .map_or(0, |u| u.0)
+        .saturating_add(passive_skill_bonus(world, attacker, "unarmed_damage", None))
+        .max(0)
+}
+
+/// Accuracy a swing gains from `weapon_hitroll`: gear and buffs plus the
+/// weapon-skill passive for the wielded weapon's family. 0 when the
+/// attacker wields no dice weapon (the same test the damage roll uses).
+/// Added to `CombatStats.accuracy`, the one hit-roll stat, so it cannot
+/// double-count with the `accuracy` key.
+fn weapon_hitroll_bonus(world: &mut World, attacker: Entity) -> i32 {
+    let wielded_key = {
+        let mut q = world.query::<(&Located, &EquippedSlot, &WorldKey)>();
+        q.iter(world).find_map(|(loc, eq, key)| {
+            (loc.0 == attacker && eq.0 == Slot::Wield).then_some((key.zone, key.id))
+        })
+    };
+    let Some(key) = wielded_key else {
+        return 0;
+    };
+    let Some(proto) = world
+        .get_resource::<ObjectPrototypes>()
+        .and_then(|p| p.by_key.get(&key))
+    else {
+        return 0;
+    };
+    if proto.weapon_dice_num <= 0 || proto.weapon_dice_size <= 0 {
+        return 0;
+    }
+    let family = proto.weapon_damage_type.as_deref().and_then(weapon_family);
+    world
+        .get::<mud_world::WeaponHitroll>(attacker)
+        .map_or(0, |w| w.0)
+        .saturating_add(passive_skill_bonus(
+            world,
+            attacker,
+            "weapon_hitroll",
+            family,
+        ))
+}
+
 /// Per-mob memory of the players who've ever swung at them.
 /// Lifetime ties to the mob: dies with the mob, never persisted,
 /// never serialized. Used by the on-entry aggro path so a mob
@@ -1007,6 +1131,13 @@ pub fn combat_tick(world: &mut World) {
                     // unarmed floor — keeps swings non-zero
                     roll_weapon().or_else(roll_natural).unwrap_or(1)
                 };
+                // Bare-handed swings add the unarmed damage bonus to the
+                // roll (before attack power scales it).
+                let weapon_roll = if weapon_dice.contains_key(&attacker) {
+                    weapon_roll
+                } else {
+                    weapon_roll.saturating_add(unarmed_damage_bonus(world, attacker))
+                };
                 let scaled = (weapon_roll.saturating_mul(100 + cs.attack_power)) / 100;
                 let base = scaled.max(1);
                 let damage = if berserk_attackers.contains(&attacker) {
@@ -1233,6 +1364,12 @@ pub(crate) fn engage_swing_now(world: &mut World, attacker: Entity, target: Enti
         // unarmed floor — keeps swings non-zero
         roll_weapon().or_else(roll_natural).unwrap_or(1)
     };
+    // Same bare-handed bonus as `combat_tick`.
+    let weapon_roll = if weapon_dice.is_some() {
+        weapon_roll
+    } else {
+        weapon_roll.saturating_add(unarmed_damage_bonus(world, attacker))
+    };
     let scaled = (weapon_roll.saturating_mul(100 + cs.attack_power)) / 100;
     let base = scaled.max(1);
     // Berserk multiplier — single-attacker scan is fine on engage.
@@ -1374,11 +1511,13 @@ fn apply_swing(world: &mut World, s: &Swing) {
     // Bless: +5 accuracy when the attacker is blessed. Mirrors the
     // legacy +1 hit-roll bump scaled to the modern 100-point band.
     let bless_acc_bonus = i32::from(world.get::<mud_world::Bless>(s.attacker).is_some()) * 5;
+    let weapon_hit_bonus = weapon_hitroll_bonus(world, s.attacker);
     let attacker_accuracy = world
         .get::<CombatStats>(s.attacker)
         .map_or(50, |cs| cs.accuracy)
         + stealth_acc_bonus
-        + bless_acc_bonus;
+        + bless_acc_bonus
+        + weapon_hit_bonus;
     let attacker_crit_chance = world
         .get::<CombatStats>(s.attacker)
         .map_or(5, |cs| cs.crit_chance);
@@ -6478,5 +6617,306 @@ mod tests {
         // Without the rider it would have run (control).
         clear_mount_links(&mut world, mob);
         assert!(mob_flee(&mut world, mob, room_a));
+    }
+    // ---- unarmed_damage / weapon_hitroll / max_mana modify keys ----
+
+    const BAREHAND: i32 = 16;
+    const BLUDGEONING: i32 = 28;
+    const MODIFY_FX: i32 = 3;
+
+    /// Put a dice weapon (`1d1 + bonus`, optional damage type) in `wielder`'s
+    /// Wield slot, registering its prototype.
+    fn wield(world: &mut World, wielder: Entity, bonus: i32, damage_type: Option<&str>) {
+        use crate::commands::test_support::object_proto;
+        let mut proto = object_proto(1, 1, mud_db::enums::ObjectType::Weapon);
+        proto.weapon_dice_num = 1;
+        proto.weapon_dice_size = 1;
+        proto.weapon_dice_bonus = bonus;
+        proto.weapon_damage_type = damage_type.map(str::to_string);
+        if world.get_resource::<ObjectPrototypes>().is_none() {
+            world.insert_resource(ObjectPrototypes::default());
+        }
+        world
+            .resource_mut::<ObjectPrototypes>()
+            .by_key
+            .insert((1, 1), proto);
+        world.spawn((
+            Located(wielder),
+            EquippedSlot(Slot::Wield),
+            WorldKey { zone: 1, id: 1 },
+        ));
+    }
+
+    /// Catalogs holding Barehand (`unarmed_damage`, skill / 10) and
+    /// Bludgeoning Weapons (`weapon_hitroll`, skill / 20, bludgeoning only)
+    /// as passive skills, like the dev data. `passive = false` models the
+    /// same rows on an ACTIVE ability.
+    fn install_passive_skills(world: &mut World, passive: bool) {
+        use crate::commands::test_support::ability_def;
+        let mut abilities = mud_world::AbilityCatalog::default();
+        for (id, name, params) in [
+            (
+                BAREHAND,
+                "Barehand",
+                serde_json::json!({"type": "passive", "amount": "skill / 10", "target": "unarmed_damage"}),
+            ),
+            (
+                BLUDGEONING,
+                "Bludgeoning Weapons",
+                serde_json::json!({"type": "passive", "amount": "skill / 20", "target": "weapon_hitroll", "weapon_type": "bludgeoning"}),
+            ),
+        ] {
+            let mut def = ability_def(id, name, mud_db::abilities::AbilityKind::Skill);
+            def.passive = passive;
+            abilities.by_name.insert(name.to_ascii_lowercase(), def);
+            abilities
+                .effects_for
+                .insert(id, vec![(MODIFY_FX, Some(params))]);
+        }
+        world.insert_resource(abilities);
+        let mut effects = mud_world::EffectCatalog::default();
+        effects.by_id.insert(
+            MODIFY_FX,
+            crate::mob_combat_ai_tests::effect_def(MODIFY_FX, "modify"),
+        );
+        world.insert_resource(effects);
+    }
+
+    /// Run one combat tick with the variance pinned to 0 and crits off, and
+    /// return the HP the target lost.
+    fn damage_of_one_round(world: &mut World, attacker: Entity, target: Entity) -> i32 {
+        world.get_mut::<CombatStats>(attacker).unwrap().crit_chance = 0;
+        FORCED_VARIANCE_DELTA.with(|c| c.set(Some(0)));
+        let before = world.get::<Health>(target).unwrap().hp;
+        run_combat_tick(world);
+        FORCED_VARIANCE_DELTA.with(|c| c.set(None));
+        before - world.get::<Health>(target).unwrap().hp
+    }
+
+    /// A fresh duel: attacker rolls exactly 5 (natural attack) at a 1000 HP target.
+    fn duel() -> (World, Entity, Entity) {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let target = make_target(&mut world, room, 1000);
+        let attacker = make_attacker(&mut world, room, target, 5);
+        (world, attacker, target)
+    }
+
+    #[test]
+    fn unarmed_damage_key_applies_and_reverses_in_any_order() {
+        let mut world = World::new();
+        let e = world.spawn_empty().id();
+        assert!(crate::commands::apply_modify_delta(
+            &mut world,
+            e,
+            "unarmed_damage",
+            4
+        ));
+        assert!(crate::commands::apply_modify_delta(
+            &mut world,
+            e,
+            "unarmed_damage",
+            3
+        ));
+        assert_eq!(world.get::<mud_world::UnarmedDamage>(e).unwrap().0, 7);
+        crate::commands::reverse_modify_delta(&mut world, e, "unarmed_damage", 4);
+        assert_eq!(world.get::<mud_world::UnarmedDamage>(e).unwrap().0, 3);
+        crate::commands::reverse_modify_delta(&mut world, e, "unarmed_damage", 3);
+        assert_eq!(world.get::<mud_world::UnarmedDamage>(e).unwrap().0, 0);
+    }
+
+    #[test]
+    fn weapon_hitroll_key_applies_and_reverses_in_any_order() {
+        let mut world = World::new();
+        let e = world.spawn_empty().id();
+        assert_eq!(
+            crate::commands::apply_modify_delta_recorded(&mut world, e, "weapon_hitroll", 6),
+            Some(6)
+        );
+        crate::commands::apply_modify_delta(&mut world, e, "weapon_hitroll", -2);
+        assert_eq!(world.get::<mud_world::WeaponHitroll>(e).unwrap().0, 4);
+        crate::commands::reverse_modify_delta(&mut world, e, "weapon_hitroll", 6);
+        crate::commands::reverse_modify_delta(&mut world, e, "weapon_hitroll", -2);
+        assert_eq!(world.get::<mud_world::WeaponHitroll>(e).unwrap().0, 0);
+    }
+
+    #[test]
+    fn max_mana_is_accepted_and_changes_nothing() {
+        let mut world = World::new();
+        let e = world
+            .spawn((
+                Health { hp: 50, max: 50 },
+                mud_world::Stamina {
+                    current: 30,
+                    max: 30,
+                },
+            ))
+            .id();
+        assert_eq!(
+            crate::commands::apply_modify_delta_recorded(&mut world, e, "max_mana", 75),
+            Some(75)
+        );
+        crate::commands::reverse_modify_delta(&mut world, e, "max_mana", 75);
+        assert_eq!(world.get::<Health>(e).unwrap().max, 50);
+        assert_eq!(world.get::<mud_world::Stamina>(e).unwrap().max, 30);
+        assert!(world.get::<mud_world::StatOverflow>(e).is_none());
+    }
+
+    #[test]
+    fn unarmed_damage_raises_a_bare_handed_swing() {
+        let (mut world, attacker, target) = duel();
+        assert_eq!(damage_of_one_round(&mut world, attacker, target), 5);
+
+        let (mut world, attacker, target) = duel();
+        crate::commands::apply_modify_delta(&mut world, attacker, "unarmed_damage", 7);
+        assert_eq!(damage_of_one_round(&mut world, attacker, target), 12);
+
+        // Removing the source takes the bonus away again.
+        let (mut world, attacker, target) = duel();
+        crate::commands::apply_modify_delta(&mut world, attacker, "unarmed_damage", 7);
+        crate::commands::reverse_modify_delta(&mut world, attacker, "unarmed_damage", 7);
+        assert_eq!(damage_of_one_round(&mut world, attacker, target), 5);
+
+        // A net-negative total never subtracts from the dice.
+        let (mut world, attacker, target) = duel();
+        crate::commands::apply_modify_delta(&mut world, attacker, "unarmed_damage", -9);
+        assert_eq!(damage_of_one_round(&mut world, attacker, target), 5);
+    }
+
+    #[test]
+    fn unarmed_damage_scales_with_attack_power_like_dice() {
+        let (mut world, attacker, target) = duel();
+        world.get_mut::<CombatStats>(attacker).unwrap().attack_power = 100;
+        crate::commands::apply_modify_delta(&mut world, attacker, "unarmed_damage", 5);
+        assert_eq!(damage_of_one_round(&mut world, attacker, target), 20);
+    }
+
+    #[test]
+    fn unarmed_damage_does_nothing_while_wielding() {
+        let (mut world, attacker, target) = duel();
+        wield(&mut world, attacker, 2, None); // 1d1+2 = 3
+        crate::commands::apply_modify_delta(&mut world, attacker, "unarmed_damage", 7);
+        assert_eq!(damage_of_one_round(&mut world, attacker, target), 3);
+    }
+
+    #[test]
+    fn barehand_passive_adds_unarmed_damage_by_proficiency() {
+        let (mut world, attacker, target) = duel();
+        install_passive_skills(&mut world, true);
+        // 1000 proficiency = 100%: skill / 10 = +10.
+        world.entity_mut(attacker).insert(KnownAbilities {
+            entries: vec![(BAREHAND, 1000, true)],
+        });
+        assert_eq!(unarmed_damage_bonus(&world, attacker), 10);
+        assert_eq!(damage_of_one_round(&mut world, attacker, target), 15);
+
+        // Gear stacks with it; an unlearned skill adds nothing.
+        world
+            .entity_mut(attacker)
+            .insert(mud_world::UnarmedDamage(2));
+        assert_eq!(unarmed_damage_bonus(&world, attacker), 12);
+        world.entity_mut(attacker).insert(KnownAbilities {
+            entries: vec![(BAREHAND, 1000, false)],
+        });
+        assert_eq!(unarmed_damage_bonus(&world, attacker), 2);
+    }
+
+    #[test]
+    fn an_active_ability_with_the_same_key_is_not_read_as_a_passive() {
+        let (mut world, attacker, _) = duel();
+        install_passive_skills(&mut world, false);
+        world.entity_mut(attacker).insert(KnownAbilities {
+            entries: vec![(BAREHAND, 1000, true)],
+        });
+        assert_eq!(unarmed_damage_bonus(&world, attacker), 0);
+    }
+
+    #[test]
+    fn weapon_hitroll_counts_only_while_wielding() {
+        let (mut world, attacker, _) = duel();
+        crate::commands::apply_modify_delta(&mut world, attacker, "weapon_hitroll", 20);
+        assert_eq!(weapon_hitroll_bonus(&mut world, attacker), 0, "bare-handed");
+        wield(&mut world, attacker, 0, Some("SLASH"));
+        assert_eq!(weapon_hitroll_bonus(&mut world, attacker), 20);
+        crate::commands::reverse_modify_delta(&mut world, attacker, "weapon_hitroll", 20);
+        assert_eq!(weapon_hitroll_bonus(&mut world, attacker), 0);
+    }
+
+    /// Pin the d100 hit roll to `roll`, run one combat tick, report whether
+    /// the target lost HP. Attacker accuracy 0 vs evasion 50 = 25% to hit.
+    fn lands_at_roll(world: &mut World, attacker: Entity, target: Entity, roll: i32) -> bool {
+        world.get_mut::<CombatStats>(attacker).unwrap().accuracy = 0;
+        world.insert_resource(TickCount(COMBAT_PERIOD_TICKS));
+        FORCED_HIT_ROLL.with(|c| c.set(Some(roll)));
+        let before = world.get::<Health>(target).unwrap().hp;
+        combat_tick(world);
+        FORCED_HIT_ROLL.with(|c| c.set(None));
+        world.get::<Health>(target).unwrap().hp < before
+    }
+
+    #[test]
+    fn weapon_hitroll_moves_the_hit_chance_only_with_a_weapon() {
+        // Roll 30 vs a 25% base chance misses; +20 accuracy makes it 35%.
+        let (mut world, attacker, target) = duel();
+        assert!(!lands_at_roll(&mut world, attacker, target, 30), "control");
+
+        let (mut world, attacker, target) = duel();
+        crate::commands::apply_modify_delta(&mut world, attacker, "weapon_hitroll", 20);
+        assert!(
+            !lands_at_roll(&mut world, attacker, target, 30),
+            "unarmed: weapon_hitroll has no effect"
+        );
+
+        let (mut world, attacker, target) = duel();
+        wield(&mut world, attacker, 4, None);
+        assert!(
+            !lands_at_roll(&mut world, attacker, target, 30),
+            "armed, no bonus"
+        );
+
+        let (mut world, attacker, target) = duel();
+        wield(&mut world, attacker, 4, None);
+        crate::commands::apply_modify_delta(&mut world, attacker, "weapon_hitroll", 20);
+        assert!(
+            lands_at_roll(&mut world, attacker, target, 30),
+            "armed with +20 weapon_hitroll"
+        );
+
+        // Take the bonus away and the same roll misses again.
+        let (mut world, attacker, target) = duel();
+        wield(&mut world, attacker, 4, None);
+        crate::commands::apply_modify_delta(&mut world, attacker, "weapon_hitroll", 20);
+        crate::commands::reverse_modify_delta(&mut world, attacker, "weapon_hitroll", 20);
+        assert!(!lands_at_roll(&mut world, attacker, target, 30));
+    }
+
+    #[test]
+    fn weapon_skill_passive_applies_to_its_weapon_family_only() {
+        let (mut world, attacker, _) = duel();
+        install_passive_skills(&mut world, true);
+        world.entity_mut(attacker).insert(KnownAbilities {
+            entries: vec![(BLUDGEONING, 1000, true)],
+        });
+        // skill / 20 at 100% = +5, bludgeoning weapons only.
+        assert_eq!(weapon_hitroll_bonus(&mut world, attacker), 0, "bare-handed");
+        wield(&mut world, attacker, 0, Some("CRUSH"));
+        assert_eq!(weapon_hitroll_bonus(&mut world, attacker), 5);
+        wield(&mut world, attacker, 0, Some("SLASH"));
+        assert_eq!(
+            weapon_hitroll_bonus(&mut world, attacker),
+            0,
+            "slashing weapon"
+        );
+    }
+
+    #[test]
+    fn weapon_families_follow_the_legacy_proficiency_table() {
+        assert_eq!(weapon_family("SLASH"), Some("slashing"));
+        assert_eq!(weapon_family("whip"), Some("slashing"));
+        assert_eq!(weapon_family("MAUL"), Some("bludgeoning"));
+        assert_eq!(weapon_family("POUND"), Some("bludgeoning"));
+        assert_eq!(weapon_family("STAB"), Some("piercing"));
+        assert_eq!(weapon_family("FIRE"), None);
+        assert_eq!(weapon_family("HIT"), None);
     }
 }

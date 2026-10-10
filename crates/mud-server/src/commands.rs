@@ -17758,9 +17758,8 @@ pub(crate) fn invoke_ability_core(
                 //   - CombatStats:  hitroll, damroll, ward (lower
                 //                   AC = better; ward+N → ac-=N)
                 //   - Maxes:        max_hp, max_move/max_stamina
-                // Unsupported targets (unarmed_damage, weapon_hitroll,
-                // max_mana, ...) spawn a labeled effect
-                // without applying anything.
+                // Unsupported targets spawn a labeled effect without
+                // applying anything.
                 let mut target_stat = spec
                     .override_params
                     .as_ref()
@@ -21224,6 +21223,43 @@ pub(crate) fn apply_modify_delta(
             // clamped to 0..=1000 (so un-applying after a clamp or after
             // the wearer has acted is not an exact inverse, as in legacy).
             crate::hiding::add_hiddenness(world, target, amount);
+            true
+        }
+        // Flat damage on bare-handed swings (see `mud_world::UnarmedDamage`).
+        // Stored as an unclamped running total, so apply/reverse is exact in
+        // any order; the combat read floors the total at 0. Not persisted:
+        // gear and effects re-apply at login.
+        "unarmed_damage" => {
+            if world.get::<mud_world::UnarmedDamage>(target).is_none() {
+                try_insert(world, target, mud_world::UnarmedDamage::default());
+            }
+            if let Some(mut u) = world.get_mut::<mud_world::UnarmedDamage>(target) {
+                u.0 = u.0.saturating_add(amount);
+            }
+            true
+        }
+        // Accuracy that only counts while a weapon is wielded (see
+        // `mud_world::WeaponHitroll`). Same storage rules as `unarmed_damage`.
+        "weapon_hitroll" => {
+            if world.get::<mud_world::WeaponHitroll>(target).is_none() {
+                try_insert(world, target, mud_world::WeaponHitroll::default());
+            }
+            if let Some(mut w) = world.get_mut::<mud_world::WeaponHitroll>(target) {
+                w.0 = w.0.saturating_add(amount);
+            }
+            true
+        }
+        // Intentionally unsupported: the game has no mana pool. Spells draw
+        // on circle slots (refill speed is `focus`), and stamina is the
+        // movement / skill pool, so folding legacy `APPLY_MANA` into either
+        // would change what the item does. Reported as handled (true) so the
+        // grant is not warned about on every equip; nothing is changed or
+        // recorded beyond the no-op delta.
+        "max_mana" => {
+            tracing::debug!(
+                amount,
+                "max_mana modifier ignored: this game has no mana pool"
+            );
             true
         }
         _ => false,
