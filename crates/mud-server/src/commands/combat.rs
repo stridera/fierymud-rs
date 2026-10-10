@@ -577,10 +577,10 @@ inventory::submit! {
     help: Help {
         usage: "breathe [<target>]",
         summary: "Dragonborn breath weapon — race-typed.",
-        long: "Dispatches one of BREATHE_FIRE / BREATHE_FROST / \
-               BREATHE_ACID / BREATHE_GAS / BREATHE_LIGHTNING \
-               based on your race (only the DRAGONBORN_* races \
-               carry one). Refuses for races with no breath \
+        long: "Dispatches the BREATHE_* ability your race grants \
+               (the DRAGONBORN_* races carry one, per the \
+               RaceAbilities table; 'innate breathe fire' works \
+               too). Refuses for races with no breath \
                weapon. Drains 6 stamina; the actual damage / \
                target gating runs through the data path.",
     },
@@ -2997,22 +2997,24 @@ pub(crate) fn cmd_buck(world: &mut World, player: Entity, args: &str) {
     engage_skill_shim(world, player, args, "buck", 5);
 }
 pub(crate) fn cmd_breathe(world: &mut World, player: Entity, args: &str) {
-    const BREATHE_COST: i32 = 6;
-    let race = world
-        .get::<Profile>(player)
-        .map(|p| p.race.clone())
-        .unwrap_or_default();
-    let ability_name = match race.as_str() {
-        "DRAGONBORN_FIRE" => "breathe_fire",
-        "DRAGONBORN_FROST" => "breathe_frost",
-        "DRAGONBORN_ACID" => "breathe_acid",
-        "DRAGONBORN_GAS" => "breathe_gas",
-        "DRAGONBORN_LIGHTNING" => "breathe_lightning",
-        _ => {
-            send_to(world, player, "You have no breath weapon.\r\n");
-            return;
-        }
+    // Which breath (if any) is the race's data: its `RaceAbilities` rows.
+    let Some(breath) = super::innate::racial_breath(world, player) else {
+        send_to(world, player, "You have no breath weapon.\r\n");
+        return;
     };
+    breathe_with(world, player, &breath, args);
+}
+
+/// Breathe with the racial breath weapon `breath` at `args` (a target).
+/// Shared by `breathe` and `innate breathe ...`.
+pub(crate) fn breathe_with(
+    world: &mut World,
+    player: Entity,
+    breath: &mud_world::AbilityDef,
+    args: &str,
+) {
+    const BREATHE_COST: i32 = 6;
+    let ability_name = breath.plain_name.to_ascii_lowercase();
     if !require_alert_posture(world, player, "breathe") {
         return;
     }
@@ -3023,7 +3025,7 @@ pub(crate) fn cmd_breathe(world: &mut World, player: Entity, args: &str) {
     drain_stamina(world, player, cost);
     let arg = args.trim();
     let dispatched = if arg.is_empty() {
-        ability_name.to_string()
+        ability_name
     } else {
         format!("{ability_name} {arg}")
     };

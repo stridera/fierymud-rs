@@ -463,6 +463,8 @@ mod enter;
 mod feedback;
 #[path = "commands/game.rs"]
 mod game;
+#[path = "commands/innate.rs"]
+pub(crate) mod innate;
 #[path = "commands/input_queue.rs"]
 pub(crate) mod input_queue;
 pub use input_queue::{has_queued_input, run_queued_input};

@@ -18,7 +18,7 @@ inventory::submit! {
             "quests" | "qstat" | "qlist" | "questlog" => Some(Box::pin(cmd_quests(world, player, pool))),
             "abandon" => Some(Box::pin(cmd_abandon(world, player, pool, args))),
             "questinfo" => Some(Box::pin(cmd_questinfo(world, player, pool, args))),
-            "innate" => Some(Box::pin(cmd_innate(world, player, pool))),
+            "innate" => Some(Box::pin(cmd_innate(world, player, pool, args))),
             "qload" => Some(Box::pin(cmd_qload(world, player, pool, args))),
             "qaccept" => Some(Box::pin(cmd_qaccept(world, player, pool, args))),
             "qgive" => Some(Box::pin(cmd_qgive(world, player, pool, args))),
@@ -93,12 +93,15 @@ inventory::submit! {
         required_perm: None,
         category: Category::Magic,
         help: Help {
-            usage: "innate",
-            summary: "List your race's innate abilities.",
-            long: "Reads the 'RaceAbilities' rows for your character's \
-                   race and prints each ability's name, category \
-                   (PRIMARY / SECONDARY / ...), starting bonus, and \
-                   proficiency cap.",
+            usage: "innate [<ability> [target]]",
+            summary: "List or use your race's innate abilities.",
+            long: "Without arguments, reads the 'RaceAbilities' rows for \
+                   your character's race and prints each ability's name, \
+                   category (PRIMARY / SECONDARY / ...), starting bonus, \
+                   and proficiency cap. 'innate <ability> [target]' uses \
+                   one of the active ones, exactly as if you had typed \
+                   its own command (cast, breathe, ...); only abilities \
+                   your race grants can be used this way.",
         },
         run: cmd_mail_stub,
     }
@@ -561,8 +564,18 @@ pub(crate) async fn cmd_qload(
     }
 }
 
-/// `innate`: list the caller race's innate abilities (`RaceAbilities`).
-pub(crate) async fn cmd_innate(world: &mut World, player: Entity, pool: &mud_db::sqlx::PgPool) {
+/// `innate`: list the caller race's innate abilities (`RaceAbilities`);
+/// `innate <ability> [target]` uses one (see `commands::innate`).
+pub(crate) async fn cmd_innate(
+    world: &mut World,
+    player: Entity,
+    pool: &mud_db::sqlx::PgPool,
+    args: &str,
+) {
+    if !args.trim().is_empty() {
+        crate::commands::innate::use_innate(world, player, args);
+        return;
+    }
     let race = world.get::<Profile>(player).map(|p| p.race.clone());
     let Some(race) = race else {
         send_to(world, player, "You have no race assigned.\r\n");
