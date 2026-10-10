@@ -1,3 +1,8 @@
+// The libtest harness lists every test in one `[&TestDescAndFn; N]` array;
+// past 2048 tests that array trips `clippy::large_stack_arrays` (pedantic),
+// at a span-less location in this file.
+#![cfg_attr(test, allow(clippy::large_stack_arrays))]
+
 mod admin;
 mod aggression;
 mod autosave;
@@ -292,6 +297,7 @@ async fn main() {
     world.insert_resource(mud_script::AttackAllExecutor(Some(
         commands::lua_attack_all,
     )));
+    world.insert_resource(commands::lua_script_hooks());
 
     if let Err(e) = mud_world::load_from_db(&mut world, &pool).await {
         error!(error = %e, "world load failed");

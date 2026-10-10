@@ -166,6 +166,33 @@ pub struct SongExecutor(pub Option<fn(&mut World, Entity, &str)>);
 #[derive(Resource, Default, Clone, Copy)]
 pub struct ScriptRunning;
 
+/// `ScriptHooks::damage`: `(world, attacker, target, amount)` -> hit points
+/// actually removed.
+pub type DamageHook = fn(&mut World, Option<Entity>, Entity, i32) -> i32;
+
+/// Server behavior the world-mutating bindings call back into, installed
+/// by mud-server at boot (mud-script cannot depend on mud-server). Each
+/// field is optional so the crate's own tests run without a server; a
+/// missing hook falls back to a plain component edit.
+#[derive(Resource, Default, Clone, Copy)]
+pub struct ScriptHooks {
+    /// `combat.engage`: start a fight `attacker` -> `target` through the
+    /// server's `engage_combat` (peaceful rooms, `attack_ok`, both sides'
+    /// `Fighting`, the announcement).
+    pub engage: Option<fn(&mut World, Entity, Entity)>,
+    /// `actor:damage`: apply `amount` (negative heals) to the target as
+    /// damage from the optional attacker, running death handling on a
+    /// lethal blow. Returns the hit points actually removed (negative when
+    /// healed).
+    pub damage: Option<DamageHook>,
+    /// `room:purge` / `world.destroy` on a mob: the server's `extract_mob`
+    /// (carried items, followers, mounts, reset timer, groups).
+    pub extract_mob: Option<fn(&mut World, Entity)>,
+    /// `world.destroy` on an item: despawn it and what it contains, after
+    /// releasing worn-gear effects.
+    pub destroy_item: Option<fn(&mut World, Entity)>,
+}
+
 /// Hard cap on Lua instructions per resume / per call. Trips a Lua
 /// error that aborts the trigger and surfaces through the existing
 /// error-logging path (`ScriptErrorLog`). Sized so a normal trigger
@@ -1231,23 +1258,19 @@ impl LuaHost {
                     world_find_kind(lua, zone, id, EntityKind::Mob)
                 })?,
         )?;
-        // `world.destroy(actor)` despawns the target entity.
-        // Mobs destroyed mid-trigger are removed cleanly; any
-        // subsequent field access against them returns defaults
-        // (since the components are gone). 344 corpus refs.
-        // `MobResetCatalog` accounting is unaffected — a
-        // reset-spawned mob's reset row will still respawn it
-        // on the next refill cycle.
+        // `world.destroy(actor)` removes a mob or an item through the
+        // server's cleanup (carried items, followers, reset timer; item
+        // contents and worn-gear effects). Players are never destroyed,
+        // and neither are rooms or other fixtures. Anything already gone
+        // is a no-op; later reads against a destroyed entity return
+        // defaults. 344 corpus refs. `MobResetCatalog` accounting runs as
+        // for a death, so a reset-spawned mob respawns on its timer.
         world_tbl.set(
             "destroy",
             self.lua
                 .create_function(|lua, target: AnyUserData| -> mlua::Result<()> {
                     let entity = target.borrow::<LuaActor>()?.entity;
-                    world_mut_from_lua(lua, |world| {
-                        if let Ok(em) = world.get_entity_mut(entity) {
-                            em.despawn();
-                        }
-                    })
+                    world_mut_from_lua(lua, |world| script_destroy(world, entity))
                 })?,
         )?;
         globals.set("world", world_tbl)?;
@@ -1339,53 +1362,46 @@ impl LuaHost {
         // direct Fighting component manipulation; the regular
         // combat tick picks up the new pairing on its next pass.
         let combat_tbl = self.lua.create_table()?;
+        // `combat.engage(target)` / `combat.engage(attacker, target)`:
+        // `target` is an actor or a name looked up in the attacker's room.
+        // With one argument the script's `self` is the attacker.
         combat_tbl.set(
             "engage",
             self.lua
-                .create_function(|lua, target: AnyUserData| -> mlua::Result<()> {
-                    let target_entity = target.borrow::<LuaActor>()?.entity;
-                    world_mut_from_lua(lua, |world| {
-                        // `self` (in trigger context) is the engager;
-                        // we don't have that entity here. The corpus
-                        // calls are always `combat.engage(actor)`
-                        // where `self` triggers the engagement, so
-                        // bind via the Lua-globals `self` lookup.
-                        if let Some(self_ud) = lua.app_data_ref::<SelfEntity>().map(|s| s.0)
-                            && world.get_entity(target_entity).is_ok()
-                            && let Ok(mut em) = world.get_entity_mut(self_ud)
-                        {
-                            em.insert(Fighting(target_entity));
-                        }
-                    })
+                .create_function(|lua, args: MultiValue| -> mlua::Result<()> {
+                    let Some((attacker, target)) = combat_pair(lua, args)? else {
+                        return Ok(());
+                    };
+                    world_mut_from_lua(lua, |world| script_engage(world, attacker, target))
                 })?,
         )?;
+        // `combat.rescue(victim)` / `combat.rescue(rescuer, victim)`: the
+        // first fighter found hitting the victim switches to the rescuer.
         combat_tbl.set(
             "rescue",
             self.lua
-                .create_function(|lua, victim: AnyUserData| -> mlua::Result<()> {
-                    let victim_entity = victim.borrow::<LuaActor>()?.entity;
+                .create_function(|lua, args: MultiValue| -> mlua::Result<()> {
+                    let Some((rescuer, victim)) = combat_pair(lua, args)? else {
+                        return Ok(());
+                    };
                     world_mut_from_lua(lua, |world| {
-                        let Some(self_ent) = lua.app_data_ref::<SelfEntity>().map(|s| s.0) else {
-                            return;
-                        };
-                        // Find any entity attacking the victim — if
-                        // exists, swap them onto `self` (we draw aggro)
-                        // and have us start fighting them.
-                        let mut attackers: Vec<Entity> = Vec::new();
+                        if rescuer == victim
+                            || world.get_entity(rescuer).is_err()
+                            || world.get_entity(victim).is_err()
                         {
-                            let mut q = world.query::<(Entity, &Fighting)>();
-                            for (e, f) in q.iter(world) {
-                                if f.0 == victim_entity {
-                                    attackers.push(e);
-                                }
-                            }
+                            return;
                         }
-                        if let Some(&attacker) = attackers.first()
-                            && world.get_entity(self_ent).is_ok()
+                        let attacker = {
+                            let mut q = world.query::<(Entity, &Fighting)>();
+                            q.iter(world)
+                                .find(|(e, f)| f.0 == victim && *e != rescuer)
+                                .map(|(e, _)| e)
+                        };
+                        if let Some(attacker) = attacker
                             && let Ok(mut em) = world.get_entity_mut(attacker)
                         {
-                            em.insert(Fighting(self_ent));
-                            if let Ok(mut me) = world.get_entity_mut(self_ent) {
+                            em.insert(Fighting(rescuer));
+                            if let Ok(mut me) = world.get_entity_mut(rescuer) {
                                 me.insert(Fighting(attacker));
                             }
                         }
@@ -2001,6 +2017,140 @@ fn actor_emit_with_perspective(
         out.direct.push((actor, self_line));
         out.messages.push((room, room_line, Some(actor)));
     })
+}
+
+/// Resolve the `(actor, other)` pair of `combat.engage` / `combat.rescue`.
+/// The corpus writes both `f(other)` (the script's `self` acts) and
+/// `f(self, other)`; `other` is an actor, or a name looked up in the
+/// acting entity's room (`combat.engage(self, actor.name)`). `None` when
+/// either side cannot be resolved, which makes the call a no-op.
+fn combat_pair(lua: &Lua, args: MultiValue) -> mlua::Result<Option<(Entity, Entity)>> {
+    fn actor_of(v: &Value) -> Option<Entity> {
+        match v {
+            Value::UserData(ud) => ud.borrow::<LuaActor>().ok().map(|a| a.entity),
+            _ => None,
+        }
+    }
+    let mut vals = args.into_iter();
+    let (Some(first), second) = (vals.next(), vals.next()) else {
+        return Ok(None);
+    };
+    let (actor, other) = match second {
+        None => (lua.app_data_ref::<SelfEntity>().map(|s| s.0), first),
+        Some(other) => (actor_of(&first), other),
+    };
+    let Some(actor) = actor else {
+        return Ok(None);
+    };
+    let other = match &other {
+        Value::String(name) => {
+            let needle = name.to_string_lossy().trim().to_ascii_lowercase();
+            if needle.is_empty() {
+                None
+            } else {
+                world_mut_from_lua(lua, |world| find_in_room(world, actor, &needle))?
+            }
+        }
+        v => actor_of(v),
+    };
+    Ok(other.map(|o| (actor, o)))
+}
+
+/// First actor (not item) in `actor`'s room, other than `actor`, whose
+/// name or keywords match `needle`.
+fn find_in_room(world: &mut World, actor: Entity, needle: &str) -> Option<Entity> {
+    let room = world.get::<Located>(actor)?.0;
+    let mut q =
+        world.query_filtered::<(Entity, &Located, &Named, Option<&Keywords>), Without<Item>>();
+    q.iter(world)
+        .find(|(e, l, n, kw)| {
+            *e != actor
+                && l.0 == room
+                && mud_world::targeting::entity_matches(needle, &n.name, kw.map(|k| k.0.as_slice()))
+        })
+        .map(|(e, _, _, _)| e)
+}
+
+/// `combat.engage` body: through the server's `engage_combat` when one is
+/// attached, else a bare `Fighting` link both ways.
+fn script_engage(world: &mut World, attacker: Entity, target: Entity) {
+    if attacker == target
+        || world.get_entity(attacker).is_err()
+        || world.get_entity(target).is_err()
+    {
+        return;
+    }
+    if let Some(f) = world.get_resource::<ScriptHooks>().and_then(|h| h.engage) {
+        f(world, attacker, target);
+        return;
+    }
+    if let Ok(mut em) = world.get_entity_mut(attacker) {
+        em.insert(Fighting(target));
+    }
+    if let Ok(mut em) = world.get_entity_mut(target) {
+        em.insert(Fighting(attacker));
+    }
+}
+
+/// `actor:damage` body. Only a mob `attacker` is passed on (it is the
+/// script's `self`; a script has no other hand to strike with).
+fn script_damage(world: &mut World, attacker: Option<Entity>, target: Entity, amount: i32) -> i32 {
+    if world.get_entity(target).is_err() {
+        return 0;
+    }
+    let attacker = attacker
+        .filter(|&a| a != target && world.get_entity(a).is_ok() && world.get::<Mob>(a).is_some());
+    if let Some(f) = world.get_resource::<ScriptHooks>().and_then(|h| h.damage) {
+        return f(world, attacker, target, amount);
+    }
+    let Some(mut h) = world.get_mut::<Health>(target) else {
+        return 0;
+    };
+    let old = h.hp;
+    h.hp = old.saturating_sub(amount).clamp(0, h.max.max(old));
+    old - h.hp
+}
+
+/// Remove a mob through the server's `extract_mob` when attached, else
+/// just despawn it.
+fn script_extract_mob(world: &mut World, mob: Entity) {
+    if world.get_entity(mob).is_err() {
+        return;
+    }
+    if let Some(f) = world
+        .get_resource::<ScriptHooks>()
+        .and_then(|h| h.extract_mob)
+    {
+        f(world, mob);
+    } else {
+        world.despawn(mob);
+    }
+}
+
+/// `world.destroy` body: mobs and items only, never players.
+fn script_destroy(world: &mut World, entity: Entity) {
+    if world.get_entity(entity).is_err() {
+        return;
+    }
+    if world.get::<Player>(entity).is_some() {
+        tracing::warn!(?entity, "script tried to world.destroy a player; refused");
+    } else if world.get::<Mob>(entity).is_some() {
+        script_extract_mob(world, entity);
+    } else if world.get::<Item>(entity).is_some() {
+        if let Some(f) = world
+            .get_resource::<ScriptHooks>()
+            .and_then(|h| h.destroy_item)
+        {
+            f(world, entity);
+        } else {
+            world.despawn(entity);
+        }
+    } else {
+        tracing::warn!(
+            ?entity,
+            "script tried to world.destroy a non mob / item; refused"
+        );
+    }
 }
 
 /// Walk every non-Item entity in the world and return the first
@@ -2852,17 +3002,18 @@ impl UserData for LuaActor {
             })
         });
 
-        // `actor:damage(amount)` subtracts `amount` from this entity's
-        // `Health.hp`, capped at 0. 157 corpus refs — typically used
-        // by ATTACK / FIGHT triggers to apply scripted damage on top
-        // of the regular combat round. Does not trigger death
-        // handling here; the next combat tick or cmd_lethal_check
-        // picks up `hp <= 0`.
-        methods.add_method("damage", |lua, this, amount: i32| -> mlua::Result<()> {
+        // `actor:damage(amount)` hurts this entity: positive amounts are
+        // damage, negative amounts heal (never past max hp). 157 corpus
+        // refs, typically ATTACK / FIGHT triggers adding scripted damage
+        // to the regular round. A lethal hit runs the server's normal
+        // death handling (corpse, loot, DEATH trigger), crediting the
+        // script's `self` when that is a mob. Returns the hit points
+        // actually removed (negative when healed), which bodies print as
+        // `damage_dealt`.
+        methods.add_method("damage", |lua, this, amount: i32| -> mlua::Result<i32> {
+            let attacker = lua.app_data_ref::<SelfEntity>().map(|s| s.0);
             world_mut_from_lua(lua, |world| {
-                if let Some(mut h) = world.get_mut::<Health>(this.entity) {
-                    h.hp = (h.hp - amount).max(0);
-                }
+                script_damage(world, attacker, this.entity, amount)
             })
         });
 
@@ -4166,9 +4317,7 @@ impl UserData for LuaRoom {
                         .collect()
                 };
                 for e in mobs {
-                    if let Ok(em) = world.get_entity_mut(e) {
-                        em.despawn();
-                    }
+                    script_extract_mob(world, e);
                 }
             })
         });
@@ -6044,3 +6193,6 @@ mod tests {
 
 #[cfg(test)]
 mod despawn_tests;
+
+#[cfg(test)]
+mod script_hooks_tests;

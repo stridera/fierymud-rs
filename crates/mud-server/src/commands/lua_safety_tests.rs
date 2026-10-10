@@ -8,12 +8,13 @@ use bevy_ecs::prelude::*;
 use mud_db::abilities::AbilityKind;
 use mud_db::enums::EntityType;
 use mud_world::{
-    AttachedTriggers, CombatStats, EntityVariableCache, Health, Keywords, KnownAbilities, Located,
-    Mob, Named, TriggerAttach, TriggerCatalog, TriggerDef, TriggerEvent, WorldKey,
+    AttachedTriggers, CombatStats, Corpse, EntityVariableCache, Fighting, Health, Item, Keywords,
+    KnownAbilities, Located, Mob, Named, PeacefulRoom, Player, TriggerAttach, TriggerCatalog,
+    TriggerDef, TriggerEvent, WorldKey,
 };
 
-use super::gmcp_tests::{Fx, fixture};
-use super::test_support::ability_def;
+use super::gmcp_tests::{Fx, fixture, player};
+use super::test_support::{Rx, ability_def};
 
 const SMITE: i32 = 77;
 const ROOM_KEY: (i32, i32) = (550, 18);
@@ -193,4 +194,246 @@ fn trigger_fire_requested_during_a_script_is_queued_then_run_once() {
     assert_eq!(room_log(&fx.world).as_deref(), Some("greet;"));
     crate::commands::drain_lua_outbox(&mut fx.world);
     assert_eq!(room_log(&fx.world).as_deref(), Some("greet;"), "fires once");
+}
+
+// ----- bindings that change the world go through the server's paths -----
+
+/// Run `body` with `self` = `listener` and `actor` = `acting` on the real
+/// host, then flush the outbox (and with it any deferred trigger).
+fn run(fx: &mut Fx, listener: Entity, acting: Entity, body: &str) {
+    install_executors(&mut fx.world);
+    fx.world.insert_resource(super::lua_script_hooks());
+    let result = fx
+        .world
+        .resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
+            host.exec_for_listener_with_extras(world, listener, acting, body, &[])
+        });
+    result.unwrap_or_else(|e| panic!("script failed: {e}"));
+    crate::commands::drain_lua_outbox(&mut fx.world);
+}
+
+fn fighting(world: &World, e: Entity) -> Option<Entity> {
+    world.get::<Fighting>(e).map(|f| f.0)
+}
+
+fn item_on(world: &mut World, holder: Entity, name: &str) -> Entity {
+    world
+        .spawn((
+            Item,
+            Named { name: name.into() },
+            Keywords(vec![name.to_ascii_lowercase()]),
+            Located(holder),
+        ))
+        .id()
+}
+
+struct Arena {
+    fx: Fx,
+    me: Entity,
+    bob: Entity,
+    _rx: Rx,
+}
+
+fn arena() -> Arena {
+    let mut fx = fixture();
+    let a = fx.a;
+    let me = mob(&mut fx.world, a, "Warden", (900, 1), 100);
+    let (bob, rx) = player(&mut fx.world, a, "Bob");
+    fx.world
+        .entity_mut(bob)
+        .insert((Health { hp: 100, max: 100 }, CombatStats::default()));
+    Arena {
+        fx,
+        me,
+        bob,
+        _rx: rx,
+    }
+}
+
+#[test]
+fn engage_attacker_and_target_name_fight_each_other_not_themselves() {
+    // The corpus form: `combat.engage(self, actor.name)`.
+    let mut t = arena();
+    run(&mut t.fx, t.me, t.bob, "combat.engage(self, actor.name)");
+    assert_eq!(fighting(&t.fx.world, t.me), Some(t.bob));
+    assert_eq!(fighting(&t.fx.world, t.bob), Some(t.me));
+}
+
+#[test]
+fn engage_accepts_an_actor_and_the_single_argument_form() {
+    let mut t = arena();
+    run(&mut t.fx, t.me, t.bob, "combat.engage(self, actor)");
+    assert_eq!(fighting(&t.fx.world, t.me), Some(t.bob));
+    assert_eq!(fighting(&t.fx.world, t.bob), Some(t.me));
+
+    let mut t = arena();
+    run(&mut t.fx, t.me, t.bob, "combat.engage(actor)");
+    assert_eq!(fighting(&t.fx.world, t.me), Some(t.bob));
+    assert_eq!(fighting(&t.fx.world, t.bob), Some(t.me));
+}
+
+#[test]
+fn engage_never_pits_the_mob_against_itself() {
+    let mut t = arena();
+    // Nothing named like the mob but the mob itself; and a self target.
+    run(
+        &mut t.fx,
+        t.me,
+        t.bob,
+        "combat.engage(self, self.name)\ncombat.engage(self, self)\ncombat.engage(self, nil)\ncombat.engage(self, 'nobody')",
+    );
+    assert_eq!(fighting(&t.fx.world, t.me), None);
+    assert_eq!(fighting(&t.fx.world, t.bob), None);
+}
+
+#[test]
+fn engage_respects_peaceful_rooms_ghosts_and_distance() {
+    let mut t = arena();
+    let a = t.fx.a;
+    t.fx.world.entity_mut(a).insert(PeacefulRoom);
+    run(&mut t.fx, t.me, t.bob, "combat.engage(self, actor)");
+    assert_eq!(fighting(&t.fx.world, t.me), None, "peaceful room");
+    assert_eq!(fighting(&t.fx.world, t.bob), None);
+
+    let mut t = arena();
+    t.fx.world.entity_mut(t.bob).insert(mud_world::Ghost);
+    run(&mut t.fx, t.me, t.bob, "combat.engage(self, actor)");
+    assert_eq!(fighting(&t.fx.world, t.me), None, "ghost");
+
+    let mut t = arena();
+    let b = t.fx.b;
+    t.fx.world.entity_mut(t.bob).insert(Located(b));
+    run(&mut t.fx, t.me, t.bob, "combat.engage(self, actor)");
+    assert_eq!(fighting(&t.fx.world, t.me), None, "other room");
+}
+
+#[test]
+fn rescue_moves_the_attacker_onto_the_rescuer() {
+    let mut t = arena();
+    let a = t.fx.a;
+    let orc = mob(&mut t.fx.world, a, "orc", (900, 7), 50);
+    t.fx.world.entity_mut(orc).insert(Fighting(t.bob));
+    t.fx.world.entity_mut(t.bob).insert(Fighting(orc));
+    run(&mut t.fx, t.me, t.bob, "combat.rescue(self, actor)");
+    assert_eq!(fighting(&t.fx.world, orc), Some(t.me));
+    assert_eq!(fighting(&t.fx.world, t.me), Some(orc));
+}
+
+#[test]
+fn damage_returns_what_it_dealt_and_lethal_damage_kills_through_handle_death() {
+    let mut t = arena();
+    let a = t.fx.a;
+    let rat = mob(&mut t.fx.world, a, "rat", (900, 5), 30);
+    // Non-lethal: reports the amount, leaves the rat standing.
+    run(
+        &mut t.fx,
+        t.me,
+        rat,
+        "actor:setvar('dealt', actor:damage(12))",
+    );
+    assert_eq!(t.fx.world.get::<Health>(rat).unwrap().hp, 18);
+    let dealt =
+        t.fx.world
+            .resource::<EntityVariableCache>()
+            .get(EntityType::Mob, 900, 5, "dealt")
+            .cloned();
+    assert_eq!(dealt, Some(serde_json::json!(12)));
+
+    // Lethal: the rat is dead for real (corpse, despawn), not left at 0 hp.
+    run(&mut t.fx, t.me, rat, "actor:damage(500)");
+    assert!(t.fx.world.get_entity(rat).is_err(), "rat despawned");
+    let corpses =
+        t.fx.world
+            .query_filtered::<&Located, With<Corpse>>()
+            .iter(&t.fx.world)
+            .filter(|l| l.0 == a)
+            .count();
+    assert_eq!(corpses, 1, "death handling left a corpse");
+}
+
+#[test]
+fn damage_can_kill_a_player_who_is_then_a_ghost() {
+    let mut t = arena();
+    t.fx.world
+        .entity_mut(t.bob)
+        .insert(Health { hp: 10, max: 100 });
+    run(&mut t.fx, t.me, t.bob, "actor:damage(50)");
+    assert!(t.fx.world.get::<mud_world::Ghost>(t.bob).is_some());
+}
+
+#[test]
+fn negative_damage_heals_but_never_past_max() {
+    let mut t = arena();
+    t.fx.world
+        .entity_mut(t.bob)
+        .insert(Health { hp: 40, max: 100 });
+    run(
+        &mut t.fx,
+        t.me,
+        t.bob,
+        "actor:setvar('r', actor:damage(-25))",
+    );
+    assert_eq!(t.fx.world.get::<Health>(t.bob).unwrap().hp, 65);
+    run(
+        &mut t.fx,
+        t.me,
+        t.bob,
+        "actor:setvar('r', actor:damage(-1000))",
+    );
+    assert_eq!(t.fx.world.get::<Health>(t.bob).unwrap().hp, 100);
+}
+
+#[test]
+fn purge_extracts_mobs_with_what_they_carry_and_spares_players_and_floor() {
+    let mut t = arena();
+    let a = t.fx.a;
+    let rat = mob(&mut t.fx.world, a, "rat", (900, 5), 5);
+    let cat = mob(&mut t.fx.world, a, "cat", (900, 6), 5);
+    let loot = item_on(&mut t.fx.world, rat, "fang");
+    let bag = item_on(&mut t.fx.world, cat, "bag");
+    let coin = item_on(&mut t.fx.world, bag, "coin");
+    let floor = item_on(&mut t.fx.world, a, "rock");
+    // `self` is the player Bob so the script survives its own purge.
+    run(&mut t.fx, t.bob, t.bob, "self.room:purge()");
+    for gone in [rat, cat, t.me, loot, bag, coin] {
+        assert!(
+            t.fx.world.get_entity(gone).is_err(),
+            "{gone:?} should be gone"
+        );
+    }
+    assert!(
+        t.fx.world.get_entity(t.bob).is_ok(),
+        "players are not purged"
+    );
+    assert!(t.fx.world.get_entity(floor).is_ok(), "floor items stay");
+}
+
+#[test]
+fn destroy_refuses_players_and_cleans_up_mobs_and_items() {
+    let mut t = arena();
+    let a = t.fx.a;
+    run(&mut t.fx, t.me, t.bob, "world.destroy(actor)");
+    assert!(
+        t.fx.world.get_entity(t.bob).is_ok(),
+        "a player survives world.destroy"
+    );
+    assert!(t.fx.world.get::<Player>(t.bob).is_some());
+
+    let rat = mob(&mut t.fx.world, a, "rat", (900, 5), 5);
+    let fang = item_on(&mut t.fx.world, rat, "fang");
+    run(&mut t.fx, t.me, rat, "world.destroy(actor)");
+    assert!(t.fx.world.get_entity(rat).is_err());
+    assert!(
+        t.fx.world.get_entity(fang).is_err(),
+        "carried item must not leak"
+    );
+
+    let sack = item_on(&mut t.fx.world, a, "sack");
+    let gem = item_on(&mut t.fx.world, sack, "gem");
+    run(&mut t.fx, t.me, sack, "world.destroy(actor)");
+    assert!(t.fx.world.get_entity(sack).is_err());
+    assert!(
+        t.fx.world.get_entity(gem).is_err(),
+        "container contents go too"
+    );
 }

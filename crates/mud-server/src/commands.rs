@@ -14957,6 +14957,80 @@ pub fn lua_attack_all(world: &mut World, attacker: Entity) {
     }
 }
 
+/// Server half of the Lua bindings that change the world (`ScriptHooks`).
+/// Installed once at boot; tests that run scripts through the real
+/// bindings install it the same way.
+#[must_use]
+pub fn lua_script_hooks() -> mud_script::ScriptHooks {
+    mud_script::ScriptHooks {
+        engage: Some(lua_engage),
+        damage: Some(lua_damage),
+        extract_mob: Some(lua_extract_mob),
+        destroy_item: Some(info::despawn_item_tree),
+    }
+}
+
+/// `combat.engage`: `attacker` starts a fight with `target` exactly as a
+/// mob's own aggression would. Both must share a room, `attack_ok` (pets,
+/// peaceful mobs, ghosts, PK) and the peaceful-room guard inside
+/// `engage_combat` apply, and `Fighting` is set on both sides.
+pub fn lua_engage(world: &mut World, attacker: Entity, target: Entity) {
+    let (Some(a_room), Some(t_room)) = (
+        world.get::<Located>(attacker).map(|l| l.0),
+        world.get::<Located>(target).map(|l| l.0),
+    ) else {
+        return;
+    };
+    if a_room != t_room || !attack_ok(world, attacker, target, false) {
+        return;
+    }
+    engage_combat(world, attacker, target, a_room);
+}
+
+/// `actor:damage`: scripted damage takes the same path as any other hit
+/// (`apply_damage_from`, then `handle_death` on a kill); a negative amount
+/// heals, up to max hp. Returns the hit points removed (negative when
+/// healed).
+pub fn lua_damage(world: &mut World, attacker: Option<Entity>, target: Entity, amount: i32) -> i32 {
+    let Some((old, max)) = world.get::<Health>(target).map(|h| (h.hp, h.max)) else {
+        return 0;
+    };
+    if world.get::<mud_world::Ghost>(target).is_some() || amount == 0 {
+        return 0;
+    }
+    if amount < 0 {
+        let new = old.saturating_sub(amount).min(max.max(old));
+        if let Some(mut h) = world.get_mut::<Health>(target) {
+            h.hp = new;
+        }
+        send_char_vitals(world, target);
+        return old - new;
+    }
+    let (dead, threshold_msg) = match attacker {
+        Some(a) => apply_damage_from(world, target, amount, a),
+        None => apply_damage(world, target, amount),
+    };
+    let dealt = old - world.get::<Health>(target).map_or(old, |h| h.hp);
+    if dead {
+        if let Some(room) = world.get::<Located>(target).map(|l| l.0) {
+            let name = name_of(world, target);
+            crate::combat::handle_death(world, target, &name, room);
+        }
+    } else if let Some(line) = threshold_msg {
+        send_to(world, target, line.to_string());
+    }
+    dealt
+}
+
+/// `room:purge` / `world.destroy` on a mob: a scripted removal destroys
+/// what the mob carries (legacy `extract_char` after `extract_objects`)
+/// instead of stranding it, and clears the mob's fights, followers, mount
+/// links and group.
+pub fn lua_extract_mob(world: &mut World, mob: Entity) {
+    let room = world.get::<Located>(mob).map(|l| l.0);
+    extract_mob(world, mob, room, true);
+}
+
 /// Whether `def` is hostile magic for the peaceful-room gate: any
 /// `ENEMY_*` / `AREA_FOES` / `AREA_HOSTILE` targeting. Abilities without an
 /// `AbilityTargeting` row (most of them) fall back to `violent`.
