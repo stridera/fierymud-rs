@@ -316,3 +316,49 @@ fn effect_count_is_singular_for_one_effect() {
     let out = effects_output(&mut world, player, &mut rx);
     assert!(out.contains("2 active effects:"), "{out}");
 }
+
+#[test]
+fn an_ability_with_two_effects_lists_once() {
+    // Issue #14: Statue applies a statue effect and a familiarity effect;
+    // both rows read "Statue" and showed twice.
+    let (mut world, player, mut rx) = setup();
+    catalog_with(&mut world, &[(9, "Statue")]);
+    for (name, delta) in [("statue", None), ("familiarity", Some(10))] {
+        let mut e = world.spawn((
+            EffectInstance {
+                kind: 1,
+                name: name.to_string(),
+                strength: 1,
+                remaining_secs: 750,
+                source: EffectSource::Spell,
+                ability_id: Some(9),
+            },
+            AppliedTo(player),
+        ));
+        if let Some(amount) = delta {
+            e.insert(ModifyDelta {
+                target: name.to_string(),
+                amount,
+            });
+        }
+    }
+    let out = effects_output(&mut world, player, &mut rx);
+    assert_eq!(out.matches("Statue").count(), 1, "{out}");
+    assert!(out.contains("1 active effect:"), "{out}");
+    assert!(out.contains("(+10 Familiarity)"), "{out}");
+    // Two different abilities with the same label are not merged.
+    catalog_with(&mut world, &[(9, "Statue"), (10, "Bless")]);
+    add_effect(&mut world, player, "cha", 750, None);
+    let out = effects_output(&mut world, player, &mut rx);
+    assert!(out.contains("2 active effects:"), "{out}");
+}
+
+#[test]
+fn toggle_list_header_is_available_toggles() {
+    // Issue #15: no shouting "FieryMUD TOGGLES!".
+    let (mut world, player, mut rx) = setup();
+    super::info::cmd_toggle(&mut world, player, "");
+    let out = plain(&drain(&mut rx));
+    assert!(out.contains("Available Toggles"), "{out}");
+    assert!(!out.contains("TOGGLES!"), "{out}");
+}

@@ -25516,6 +25516,12 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         send_to(world, player, crate::room_access::NEED_BOAT);
         return;
     }
+    // "Air, no wings" gate (legacy SECT_AIR): `up` into or out of the sky
+    // needs flight.
+    if crate::room_access::air_blocks(world, player, from_room, target, dir) {
+        send_to(world, player, crate::room_access::NEED_WINGS);
+        return;
+    }
 
     // Stamina pre-flight: cost depends on the target room's sector.
     // Followers along for the ride aren't checked — they go where the leader
@@ -25638,6 +25644,16 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
             }
             // Legacy runs every follower through the deep-water check too:
             // one without a boat, wings or waterwalk stays behind.
+            if crate::room_access::air_blocks(world, f, from_room, target, dir) {
+                send_to(world, f, crate::room_access::NEED_WINGS);
+                let fname = cap_sentence_start(&name_of(world, f));
+                send_msg(
+                    world,
+                    leader,
+                    format!("{fname} can't follow you there.\r\n"),
+                );
+                continue;
+            }
             if crate::room_access::deep_water_blocks(world, f, from_room, target) {
                 send_to(world, f, crate::room_access::NEED_BOAT);
                 // Legacy tells only the follower; the leader would never

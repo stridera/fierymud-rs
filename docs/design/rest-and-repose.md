@@ -215,7 +215,7 @@ If the player triggers a second wake before Refreshed expires (rare — would re
 
 | Command | Behavior |
 |---|---|
-| `rent` | In `isInn` room: list available tiers from `innTiers`. Otherwise: "There's nothing to rent here." |
+| `rent` | In `isInn` room: list available tiers from `innTiers`. Otherwise: "Sorry, you can only do that in an inn!" |
 | `rent <tier-name>` | In `isInn` room: charge fee, set `restSource=INN`, `restTier=<tier of chosen>`. Confirm if tier > 1: "Renting the penthouse for 50gp. Confirm? (y/n)". |
 | `camp` | Existing: 35s setup. On completion: `restSource=CAMP`, `restTier = computeCampTier(no_kit)`. |
 | `camp <kit-name>` | 35s setup. On completion: consume the named kit Object, `restSource=CAMP`, `restTier = computeCampTier(with_kit)`. Kit is NOT consumed if camp is interrupted. |

@@ -313,3 +313,83 @@ fn gmcp_frames_carry_the_same_posture_and_hold_as_the_room_text() {
     let mobs: serde_json::Value = serde_json::from_str(&of(&fr, "Room.Mobs")[0]).unwrap();
     assert_eq!(mobs[0]["posture"], "flying", "{mobs}");
 }
+
+#[test]
+fn a_rider_is_listed_as_mounted_and_the_mount_is_not_listed_apart() {
+    // Issue #118, after legacy `print_char_long_desc_to_char`: "X is here,
+    // mounted upon Y." and the carrying mount gets no line of its own.
+    let (mut world, room, p, mut rx) = setup();
+    let wolf = wolf(&mut world, room);
+    let bob = other_player(&mut world, room, "Bob");
+    world.entity_mut(bob).insert(mud_world::Mounted(wolf));
+    world.entity_mut(wolf).insert(mud_world::RiddenBy(bob));
+    let out = look(&mut world, p, &mut rx);
+    assert!(
+        out.contains("Bob is here, mounted upon a grey wolf.\r\n"),
+        "{out}"
+    );
+    assert!(!out.contains(LONG), "{out}");
+    // A mount whose rider is out of the room is listed as usual.
+    let elsewhere = world
+        .spawn((
+            Room,
+            Named {
+                name: "Away".into(),
+            },
+        ))
+        .id();
+    world.entity_mut(bob).insert(Located(elsewhere));
+    let out = look(&mut world, p, &mut rx);
+    assert!(out.contains(LONG), "{out}");
+    assert!(!out.contains("mounted upon"), "{out}");
+}
+
+#[test]
+fn your_own_mount_is_not_listed_and_riders_name_you_as_the_mount() {
+    let (mut world, room, p, mut rx) = setup();
+    let wolf = wolf(&mut world, room);
+    world.entity_mut(p).insert(mud_world::Mounted(wolf));
+    world.entity_mut(wolf).insert(mud_world::RiddenBy(p));
+    let out = look(&mut world, p, &mut rx);
+    assert!(!out.contains(LONG), "{out}");
+    assert_eq!(
+        super::room_line::mob_line(&mut world, p, wolf, LONG),
+        LONG,
+        "the mount's own line is unchanged"
+    );
+    let bob = other_player(&mut world, room, "Bob");
+    world.entity_mut(bob).insert(mud_world::Mounted(wolf));
+    assert_eq!(
+        super::room_line::player_line(&mut world, p, bob),
+        "Bob is here, mounted upon a grey wolf."
+    );
+}
+
+#[test]
+fn player_lines_get_the_same_default_colour_as_mob_lines() {
+    // Issue #107: mobs were yellow, players uncoloured.
+    let (mut world, room, p, mut rx) = setup();
+    let wolf = wolf(&mut world, room);
+    world
+        .entity_mut(wolf)
+        .insert(Posture(PostureKind::Sleeping));
+    let bob = other_player(&mut world, room, "Bob");
+    world.entity_mut(bob).insert(Posture(PostureKind::Sleeping));
+    dispatch(&mut world, p, "look");
+    let raw = String::from_utf8_lossy(&drain_bytes(&mut rx)).into_owned();
+    let colour_of = |text: &str| {
+        let at = raw
+            .find(text)
+            .unwrap_or_else(|| panic!("{text} in {raw:?}"));
+        let start = raw[..at]
+            .rfind("\u{1b}[")
+            .expect("an escape before the line");
+        let end = start + raw[start..].find('m').unwrap() + 1;
+        raw[start..end].to_string()
+    };
+    assert_eq!(
+        colour_of("Bob is sleeping here."),
+        colour_of("A grey wolf is sleeping here."),
+        "{raw:?}"
+    );
+}

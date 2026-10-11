@@ -3096,6 +3096,10 @@ pub(crate) fn cmd_retreat(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, crate::room_access::NEED_BOAT);
         return;
     }
+    if crate::room_access::air_blocks(world, player, from_room, target, dir) {
+        send_to(world, player, crate::room_access::NEED_WINGS);
+        return;
+    }
     if let Some(label) = hard_wall_label(world, from_room, dir) {
         send_to(world, player, format!("A {label} blocks your path.\r\n"));
         return;

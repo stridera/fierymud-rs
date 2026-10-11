@@ -8537,7 +8537,7 @@ pub(crate) mod tests {
         assert!(world.get_entity(guest).is_ok());
         assert_eq!(router.playing.get(&1), Some(&guest));
         assert!(QUIT_CLOSED.with(|v| v.borrow().is_empty()));
-        assert!(drain(&mut rx).contains("nothing to rent"));
+        assert!(drain(&mut rx).contains("you can only do that in an inn"));
     }
 
     // ---- linkdead (dropped link mid-fight), quit / camp refusals, camp logout ----

@@ -13,7 +13,7 @@
 //!   gold, and either set the `RestSource` to `Inn` immediately (tier 1)
 //!   or stash a `PendingRentConfirm` component and prompt the player to
 //!   confirm (tier > 1). The player then `rent`s (or `quit`s) to leave.
-//! - Anywhere else: "There's nothing to rent here." and nothing happens.
+//! - Anywhere else: "Sorry, you can only do that in an inn!" (legacy) and nothing happens.
 //!
 //! Per ADR 0001 §3 the fee is **flat per tier**, NOT per-night. The
 //! player who returns in a year pays the same as the player who
@@ -114,7 +114,7 @@ pub(crate) fn cmd_rent(world: &mut World, player: Entity, args: &str) {
         if let Some(clerk) = clerk {
             tell_rent_is_free(world, player, clerk);
         } else {
-            send_to(world, player, "There's nothing to rent here.\r\n");
+            send_to(world, player, "Sorry, you can only do that in an inn!\r\n");
         }
         return;
     };
@@ -688,7 +688,7 @@ mod tests {
         let room = world.spawn_empty().id();
         let (player, mut rx) = test_support::player_in(&mut world, room);
         cmd_rent(&mut world, player, "");
-        assert!(drain(&mut rx).contains("nothing to rent"));
+        assert!(drain(&mut rx).contains("you can only do that in an inn"));
         assert!(world.get::<crate::commands::Quitting>(player).is_none());
     }
 

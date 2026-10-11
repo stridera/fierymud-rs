@@ -6602,7 +6602,11 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
         crate::commands::sort_newest_first(world, room, &mut rows, |r| r.0);
         rows.into_iter()
             .map(|(e, ())| {
-                let mut line = room_line::player_line(world, player, e);
+                let body = room_line::player_line(world, player, e);
+                // The same default hue as a mob line, so players and mobs
+                // read alike (issue #107); a title with its own colour
+                // markup is left as written.
+                let mut line = colorize_default(&body, "<yellow>");
                 if let Some(aura) = crate::commands::senses::alignment_aura(world, player, e) {
                     line.push(' ');
                     line.push_str(aura);
@@ -6632,6 +6636,7 @@ pub(crate) fn cmd_look(world: &mut World, player: Entity, args: &str) {
                 .filter(|&e| {
                     world.get::<Mob>(e).is_some()
                         && crate::commands::can_see_player(world, player, e)
+                        && !room_line::is_carrying_visible_rider(world, player, e)
                 })
                 .map(|e| {
                     (
@@ -8525,7 +8530,7 @@ fn resolve_toggle(world: &World, player: Entity, raw: &str) -> Option<PlayerFlag
 fn render_toggle_list(world: &World, player: Entity) -> String {
     let flags = world.get::<PlayerFlags>(player);
     let mut out = String::from(
-        "\r\n             FieryMUD TOGGLES!  (See HELP TOGGLE)\r\n\
+        "\r\n             Available Toggles  (See HELP TOGGLE)\r\n\
          ===============================================================\r\n",
     );
     let mut column = 0;
@@ -13927,11 +13932,43 @@ struct ActiveEffectRow {
     /// The label came from the spawning ability, so a stat change is
     /// worth naming next to it ("Enhance Ability (+4 Charisma)").
     from_ability: bool,
-    /// `(stat, amount)` of the instance's `ModifyDelta`, hidden for
+    /// `(stat, amount)` of each instance's `ModifyDelta`, hidden for
     /// invisibility (its evasion bonus is a modelling detail).
-    delta: Option<(String, i32)>,
+    deltas: Vec<(String, i32)>,
     /// Permanent-effect origin ("racial (Elf)", "from <item>").
     origin: Option<String>,
+    /// The spawning ability, when there is one: an ability that applies
+    /// several effects (Statue: statue plus familiarity) lists as one row.
+    ability_id: Option<i32>,
+}
+
+/// Fold rows that come from the same ability into one (issue #14: Statue
+/// showed twice). The merged row keeps the first row's place, gathers every
+/// stat delta, is permanent if any part is, and otherwise lasts as long as
+/// its longest part.
+fn group_effect_rows(rows: Vec<ActiveEffectRow>) -> Vec<ActiveEffectRow> {
+    let mut out: Vec<ActiveEffectRow> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let same = row.ability_id.and_then(|id| {
+            out.iter()
+                .position(|r| r.ability_id == Some(id) && r.label == row.label)
+        });
+        let Some(i) = same else {
+            out.push(row);
+            continue;
+        };
+        let into = &mut out[i];
+        into.remaining_secs = if into.remaining_secs < 0 || row.remaining_secs < 0 {
+            -1
+        } else {
+            into.remaining_secs.max(row.remaining_secs)
+        };
+        into.deltas.extend(row.deltas);
+        if into.origin.is_none() {
+            into.origin = row.origin;
+        }
+    }
+    out
 }
 
 /// Where a permanent effect comes from, for the `effects` listing:
@@ -13994,22 +14031,28 @@ pub(crate) fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
                         .filter(|_| !invisible)
                         .map(|d| (d.target.clone(), d.amount)),
                     (inst.remaining_secs < 0).then(|| (inst.source.clone(), granted.map(|g| g.0))),
+                    inst.ability_id,
                 )
             })
             .collect();
-        rows.into_iter()
-            .map(|(label, from_ability, remaining_secs, delta, perm)| {
-                let origin =
-                    perm.and_then(|(src, item)| permanent_origin(world, player, &src, item));
-                ActiveEffectRow {
-                    label,
-                    remaining_secs,
-                    from_ability,
-                    delta,
-                    origin,
-                }
-            })
-            .collect()
+        group_effect_rows(
+            rows.into_iter()
+                .map(
+                    |(label, from_ability, remaining_secs, delta, perm, ability_id)| {
+                        let origin = perm
+                            .and_then(|(src, item)| permanent_origin(world, player, &src, item));
+                        ActiveEffectRow {
+                            label,
+                            remaining_secs,
+                            from_ability,
+                            deltas: delta.into_iter().collect(),
+                            origin,
+                            ability_id,
+                        }
+                    },
+                )
+                .collect(),
+        )
     };
     let mut out = if active.is_empty() {
         "\r\nYou have no active effects.\r\n".to_string()
@@ -14029,8 +14072,9 @@ pub(crate) fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
             label: pretty_name,
             remaining_secs: remaining,
             from_ability,
-            delta,
+            deltas,
             origin,
+            ..
         } = row;
         // Source attribution dimmed: only permanent effects carry one
         // now, since a spell is named after its ability.
@@ -14042,18 +14086,21 @@ pub(crate) fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
         // named after its ability the stat is spelled out after the
         // number ("Enhance Ability (+4 Charisma)"); a row already
         // named for its stat just shows the number.
-        let delta_label = delta.map_or(String::new(), |(stat, a)| {
-            let (sign, color) = if a >= 0 {
-                ("+", "<green>")
-            } else {
-                ("", "<red>")
-            };
-            if from_ability {
-                format!(" {color}({sign}{a} {})</>", effect_display_name(&stat))
-            } else {
-                format!(" {color}({sign}{a})</>")
-            }
-        });
+        let delta_label: String = deltas
+            .into_iter()
+            .map(|(stat, a)| {
+                let (sign, color) = if a >= 0 {
+                    ("+", "<green>")
+                } else {
+                    ("", "<red>")
+                };
+                if from_ability {
+                    format!(" {color}({sign}{a} {})</>", effect_display_name(&stat))
+                } else {
+                    format!(" {color}({sign}{a})</>")
+                }
+            })
+            .collect();
         if remaining < 0 {
             // Permanent effects (innate racials, divine boons, etc.)
             // get a bold-cyan tag — they're not on the clock.

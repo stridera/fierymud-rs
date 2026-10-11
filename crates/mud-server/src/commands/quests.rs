@@ -668,12 +668,8 @@ pub(crate) async fn cmd_innate(
         return;
     }
     if mud_world::bypasses_restrictions(world, player) {
-        let actives = crate::commands::innate::racial_actives(world, player);
-        let mut out = format!(
-            "\r\nInnate abilities of every race ({}):\r\n",
-            actives.len()
-        );
-        let names: Vec<String> = actives.iter().map(|d| d.name.clone()).collect();
+        let names = crate::commands::innate::all_race_list_names(world, player);
+        let mut out = format!("\r\nInnate abilities of every race ({}):\r\n", names.len());
         let width = crate::layout::wrap_width(world, player);
         let column_width = names.iter().map(String::len).max().unwrap_or(0) + 2;
         for row in crate::layout::format_grid(&names, column_width, 2, width) {
@@ -688,35 +684,29 @@ pub(crate) async fn cmd_innate(
         send_to(world, player, "You have no race assigned.\r\n");
         return;
     };
+    let passive_ids = world
+        .get_resource::<mud_world::AbilityCatalog>()
+        .map(|c| c.passive_ids.clone())
+        .unwrap_or_default();
     let pool = pool.clone();
     off_tick::run(
         world,
         player,
-        async move { innate_text(&pool, &race).await },
+        async move { innate_text(&pool, &race, &passive_ids).await },
         |world, player, text| send_to(world, player, text),
     )
     .await;
 }
 
-async fn innate_text(pool: &mud_db::sqlx::PgPool, race: &str) -> String {
-    let rows = match mud_db::race_abilities::list_for_race(pool, race).await {
-        Ok(r) => r,
-        Err(e) => return format!("Innate fetch failed: {e}\r\n"),
-    };
-    if rows.is_empty() {
-        return format!("\r\nThe {race} race has no innate abilities.\r\n");
+async fn innate_text(
+    pool: &mud_db::sqlx::PgPool,
+    race: &str,
+    passive_ids: &std::collections::HashSet<i32>,
+) -> String {
+    match mud_db::race_abilities::list_for_race(pool, race).await {
+        Ok(rows) => crate::commands::innate::format_race_list(race, &rows, passive_ids),
+        Err(e) => format!("Innate fetch failed: {e}\r\n"),
     }
-    let mut out = format!("\r\nInnate abilities for {race} ({}):\r\n", rows.len());
-    for r in &rows {
-        out.push_str(&format!(
-            "  {name:<24} {cat:<10} bonus +{bonus:<3} cap {cap}\r\n",
-            name = r.ability_name,
-            cat = r.category,
-            bonus = r.bonus,
-            cap = r.proficiency_cap,
-        ));
-    }
-    out
 }
 
 /// `questinfo <zone> <id>`: read-only catalog view of one quest.

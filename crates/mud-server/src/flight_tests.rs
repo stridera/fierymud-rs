@@ -894,3 +894,55 @@ fn the_flying_marker_does_not_leak_through_look_or_gmcp_for_an_invisible_flier()
         "{players}"
     );
 }
+
+#[test]
+fn going_up_into_the_sky_needs_flight() {
+    // Issue #61, legacy `do_simple_move`: "Try flapping your wings."
+    let mut f = fx();
+    f.world.entity_mut(f.p).insert(Located(f.ground));
+    crate::commands::cmd_move(&mut f.world, f.p, Direction::Up);
+    let out = drain(&mut f.rx);
+    assert!(out.contains("Try flapping your wings."), "{out}");
+    assert_eq!(f.world.get::<Located>(f.p).map(|l| l.0), Some(f.ground));
+    assert!(!is_falling(&mut f.world, f.p));
+
+    // Leaving the sky upward is gated the same way.
+    f.world.entity_mut(f.p).insert(Located(f.sky2));
+    crate::commands::cmd_move(&mut f.world, f.p, Direction::Up);
+    let out = drain(&mut f.rx);
+    assert!(out.contains("Try flapping your wings."), "{out}");
+    assert_eq!(f.world.get::<Located>(f.p).map(|l| l.0), Some(f.sky2));
+
+    // With wings the same step works.
+    f.world.insert_resource(mud_script::LuaHost::default());
+    f.world.insert_resource(mud_world::WorldKeyIndex::default());
+    f.world.insert_resource(mud_world::EffectCatalog::default());
+    f.world.insert_resource(mud_world::RaceCatalog::default());
+    f.world.entity_mut(f.p).insert(Flying);
+    crate::commands::cmd_move(&mut f.world, f.p, Direction::Up);
+    assert_eq!(f.world.get::<Located>(f.p).map(|l| l.0), Some(f.sky1));
+}
+
+#[test]
+fn the_air_gate_only_stops_upward_steps_and_lets_a_flying_mount_carry_its_rider() {
+    use crate::room_access::air_blocks;
+    let mut f = fx();
+    let p = f.p;
+    assert!(!air_blocks(&f.world, p, f.sky1, f.sky2, Direction::Down));
+    assert!(!air_blocks(&f.world, p, f.ground, f.sky2, Direction::North));
+    assert!(air_blocks(&f.world, p, f.ground, f.sky2, Direction::Up));
+    // Ground to ground is not an air step.
+    let hill = room(&mut f.world, "Hill", Sector::Hills);
+    assert!(!air_blocks(&f.world, p, f.ground, hill, Direction::Up));
+    let steed = f
+        .world
+        .spawn((
+            Named {
+                name: "a griffin".into(),
+            },
+            Flying,
+        ))
+        .id();
+    f.world.entity_mut(p).insert(mud_world::Mounted(steed));
+    assert!(!air_blocks(&f.world, p, f.ground, f.sky2, Direction::Up));
+}

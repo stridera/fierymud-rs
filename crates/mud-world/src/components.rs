@@ -1386,7 +1386,7 @@ pub struct GuildhallRoom;
 /// Rest / repose: room is an inn that sells rental rest.
 /// Carries the display name + the available rental tiers from
 /// `Room.inn_tiers`. `cmd_rent` reads this; absent component →
-/// "There's nothing to rent here." The schema's `inn_tiers` is a
+/// "Sorry, you can only do that in an inn!" The schema's `inn_tiers` is a
 /// JSON array of `{name, tier (1..=3), fee (gp)}` records; the
 /// loader normalizes them into the typed `InnTier` Vec at boot so
 /// the command path doesn't re-parse on every invocation.

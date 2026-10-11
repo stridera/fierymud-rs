@@ -19,9 +19,9 @@ use mud_world::{
 
 use crate::commands::{invoke_ability_innate, send_to};
 
-/// The active (non-passive) abilities the caller's race grants, sorted by
-/// name. Empty without a race or without loaded race data.
-pub(crate) fn racial_actives(world: &World, player: Entity) -> Vec<AbilityDef> {
+/// The abilities the caller's race grants that are (`passive`) or are not
+/// passive, sorted by name. Empty without a race or without loaded race data.
+fn racial_grants(world: &World, player: Entity, passive: bool) -> Vec<AbilityDef> {
     // A god has the innate abilities of every race.
     let god = mud_world::bypasses_restrictions(world, player);
     let race = world.get::<Profile>(player).map(|p| p.race.clone());
@@ -38,7 +38,7 @@ pub(crate) fn racial_actives(world: &World, player: Entity) -> Vec<AbilityDef> {
         .by_name
         .values()
         .filter(|d| {
-            !d.passive
+            d.passive == passive
                 && if god {
                     data.granted_by_any(d.id)
                 } else {
@@ -48,6 +48,75 @@ pub(crate) fn racial_actives(world: &World, player: Entity) -> Vec<AbilityDef> {
         .cloned()
         .collect();
     out.sort_by_key(|d| d.plain_name.to_ascii_lowercase());
+    out
+}
+
+/// The active (non-passive) abilities the caller's race grants, sorted by
+/// name. Empty without a race or without loaded race data.
+pub(crate) fn racial_actives(world: &World, player: Entity) -> Vec<AbilityDef> {
+    racial_grants(world, player, false)
+}
+
+/// The passive abilities the caller's race grants (weapon proficiencies and
+/// the like), sorted by name. They are never "used", only listed.
+pub(crate) fn racial_passives(world: &World, player: Entity) -> Vec<AbilityDef> {
+    racial_grants(world, player, true)
+}
+
+/// Marker the `innate` list puts after a passive ability.
+const PASSIVE_MARK: &str = "(passive)";
+
+/// The display names for the god's all-races `innate` list: every racial
+/// active, then every racial passive marked "(passive)".
+pub(crate) fn all_race_list_names(world: &World, player: Entity) -> Vec<String> {
+    racial_actives(world, player)
+        .into_iter()
+        .map(|d| d.name)
+        .chain(
+            racial_passives(world, player)
+                .into_iter()
+                .map(|d| format!("{} {PASSIVE_MARK}", d.name)),
+        )
+        .collect()
+}
+
+/// The `innate` list for one race: actives first, then passives marked
+/// "(passive)", each group by name (`rows` arrive sorted by name).
+/// `passive_ids` are the catalog's passive abilities.
+pub(crate) fn format_race_list(
+    race: &str,
+    rows: &[mud_db::race_abilities::RaceAbilityRow],
+    passive_ids: &std::collections::HashSet<i32>,
+) -> String {
+    if rows.is_empty() {
+        return format!("\r\nThe {race} race has no innate abilities.\r\n");
+    }
+    let mut out = format!("\r\nInnate abilities for {race} ({}):\r\n", rows.len());
+    let (passives, actives): (Vec<_>, Vec<_>) = rows
+        .iter()
+        .partition(|r| passive_ids.contains(&r.ability_id));
+    let label = |r: &mud_db::race_abilities::RaceAbilityRow| {
+        if passive_ids.contains(&r.ability_id) {
+            format!("{} {PASSIVE_MARK}", r.ability_name)
+        } else {
+            r.ability_name.clone()
+        }
+    };
+    let width = rows
+        .iter()
+        .map(|r| label(r).len())
+        .max()
+        .unwrap_or(0)
+        .max(24);
+    for r in actives.into_iter().chain(passives) {
+        out.push_str(&format!(
+            "  {name:<width$} {cat:<10} bonus +{bonus:<3} cap {cap}\r\n",
+            name = label(r),
+            cat = r.category,
+            bonus = r.bonus,
+            cap = r.proficiency_cap,
+        ));
+    }
     out
 }
 
@@ -774,5 +843,60 @@ mod tests {
             assert!(ids.contains(&want), "{want} missing from {ids:?}");
         }
         assert!(!ids.contains(&SLASH), "passive rows are never used");
+    }
+
+    #[test]
+    fn the_list_names_passives_and_marks_them() {
+        let (world, elf, human, _rx) = world_with_races();
+        let passives: Vec<String> = racial_passives(&world, elf)
+            .into_iter()
+            .map(|d| d.plain_name)
+            .collect();
+        assert_eq!(passives, vec!["SLASHING"]);
+        assert!(racial_passives(&world, human).is_empty());
+
+        let row = |id, name: &str| mud_db::race_abilities::RaceAbilityRow {
+            race: "ELF".into(),
+            ability_id: id,
+            ability_name: name.into(),
+            category: "PRIMARY".into(),
+            bonus: 0,
+            proficiency_cap: 100,
+        };
+        let rows = [
+            row(MISSILE, "Magic Missile"),
+            row(SLASH, "Slashing Weapons"),
+            row(SYLL, "Innate Sylvan"),
+        ];
+        let passive_ids = std::collections::HashSet::from([SLASH]);
+        let out = format_race_list("ELF", &rows, &passive_ids);
+        assert!(out.contains("Slashing Weapons (passive)"), "{out}");
+        assert!(!out.contains("Magic Missile (passive)"), "{out}");
+        assert!(!out.contains("Innate Sylvan (passive)"), "{out}");
+        // Actives come first, passives last.
+        assert!(out.find("Innate Sylvan").unwrap() < out.find("Slashing").unwrap());
+        assert!(format_race_list("OGRE", &[], &passive_ids).contains("no innate abilities"));
+    }
+
+    #[test]
+    fn a_god_sees_every_races_passives_marked_too() {
+        let (world, elf, _human, _rx) = world_with_races();
+        let _ = elf;
+        let mut world = world;
+        let room = world.spawn(Room).id();
+        let (god, _grx) = player_in(&mut world, room);
+        world.entity_mut(god).insert(mud_world::Account {
+            user_id: "g".into(),
+            character_id: "g".into(),
+            role: mud_db::enums::UserRole::Immortal,
+            account_role: mud_db::enums::UserRole::Immortal,
+            perms: vec![],
+        });
+        let names = all_race_list_names(&world, god);
+        assert!(
+            names.iter().any(|n| n == "Slashing Weapons (passive)"),
+            "{names:?}"
+        );
+        assert!(names.iter().any(|n| n == "Innate Sylvan"), "{names:?}");
     }
 }

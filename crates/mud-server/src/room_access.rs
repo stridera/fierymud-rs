@@ -16,7 +16,7 @@
 //!   peaceful exclusions, in either zone-limited or whole-world range.
 
 use bevy_ecs::prelude::*;
-use mud_db::enums::{MobTrait, MovementMode, ObjectType, Sector, UserRole};
+use mud_db::enums::{Direction, MobTrait, MovementMode, ObjectType, Sector, UserRole};
 use mud_world::{
     Account, Contents, DeathTrap, EntryRestriction, EquippedSlot, Flying, HouseRoom, HouseSummary,
     Item, Located, Mob, MobTraits, Mounted, MovementModeTag, NoTeleportRoom, ObjectPrototypes,
@@ -229,6 +229,38 @@ pub(crate) fn deep_water_blocks(world: &World, mover: Entity, from: Entity, to: 
     let bodies = std::iter::once(mover).chain(mount);
     !bodies.clone().any(|b| body_can_travel_on_water(world, b))
         && !bodies.clone().any(|b| body_is_flying(world, b))
+}
+
+/// Legacy refusal (act.movement.cpp `do_simple_move`, `SECT_AIR` branch).
+pub(crate) const NEED_WINGS: &str = "Try flapping your wings.\r\n";
+
+/// Legacy "air, no wing" gate (`do_simple_move`): going `up` into, or out
+/// of, an air room needs flight. Walking `down` or sideways between sky
+/// rooms is left to gravity (`flight::gravity_tick`), as in legacy. A rider
+/// and the mount under it share the flight, so either one flying lets the
+/// pair through.
+pub(crate) fn air_blocks(
+    world: &World,
+    mover: Entity,
+    from: Entity,
+    to: Entity,
+    dir: Direction,
+) -> bool {
+    if dir != Direction::Up {
+        return false;
+    }
+    let air = |room: Entity| {
+        world
+            .get::<RoomSector>(room)
+            .is_some_and(|s| s.0 == Sector::Air)
+    };
+    if !air(from) && !air(to) {
+        return false;
+    }
+    let mount = world.get::<Mounted>(mover).map(|m| m.0);
+    !std::iter::once(mover)
+        .chain(mount)
+        .any(|b| body_is_flying(world, b))
 }
 
 /// May `mover` enter `dest`? Rooms without a restriction admit everyone;

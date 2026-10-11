@@ -11,8 +11,8 @@
 
 use bevy_ecs::prelude::*;
 use mud_world::{
-    AppliedTo, EffectInstance, EffectSource, Fighting, Flying, Located, Mob, MobPrototypes, Named,
-    Player, Posture, PostureKind, Stunned, Title, WorldKey,
+    AppliedTo, EffectInstance, EffectSource, Fighting, Flying, Located, Mob, MobPrototypes,
+    Mounted, Named, Player, Posture, PostureKind, RiddenBy, Stunned, Title, WorldKey,
 };
 
 use crate::commands::{cap_sentence_start, seen_name};
@@ -108,9 +108,40 @@ pub(crate) fn posture_word(world: &World, actor: Entity) -> &'static str {
     }
 }
 
-/// The text after the actor's name, with its leading space: held, fighting
-/// or its posture.
+/// True when `mob` is a mount carrying a rider the viewer can see in the
+/// same room. Legacy `list_char_to_char` skips such a mount: the rider's own
+/// line ("is here, mounted upon ...") already names it (issue #118).
+pub(crate) fn is_carrying_visible_rider(world: &World, viewer: Entity, mob: Entity) -> bool {
+    let Some(RiddenBy(rider)) = world.get::<RiddenBy>(mob).copied() else {
+        return false;
+    };
+    world.get::<Located>(rider).map(|l| l.0) == world.get::<Located>(mob).map(|l| l.0)
+        && (rider == viewer || crate::commands::can_see_player(world, viewer, rider))
+}
+
+/// The mount `actor` is riding, when it is in the actor's room.
+fn mount_here(world: &World, actor: Entity) -> Option<Entity> {
+    let Mounted(mount) = world.get::<Mounted>(actor).copied()?;
+    (world.get::<Located>(mount).map(|l| l.0) == world.get::<Located>(actor).map(|l| l.0))
+        .then_some(mount)
+}
+
+/// The text after the actor's name, with its leading space: riding, held,
+/// fighting or its posture.
 fn phrase(world: &mut World, viewer: Entity, actor: Entity) -> String {
+    // Legacy `print_char_long_desc_to_char` checks the saddle before the
+    // paralysis, mesmerize and posture lines.
+    if let Some(mount) = mount_here(world, actor) {
+        let who = if mount == viewer {
+            "you".to_string()
+        } else {
+            let name = world
+                .get::<Named>(mount)
+                .map_or_else(|| "someone".to_string(), |n| n.name.clone());
+            seen_name(world, viewer, mount, &name)
+        };
+        return format!(" is here, mounted upon {who}.");
+    }
     match hold_of(world, actor) {
         Some(Hold::Paralyzed) => return " is standing here, completely motionless.".to_string(),
         Some(Hold::Mesmerized) => {
