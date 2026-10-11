@@ -4557,35 +4557,8 @@ pub(crate) fn cmd_inspect(world: &mut World, player: Entity, args: &str) {
         // on the keeper (not the player, so no inventory/GMCP churn),
         // carries `Identified` so the block shows full detail, and is
         // despawned right after.
-        let mut bundle = world.spawn((
-            Item,
-            Named {
-                name: proto.name.clone(),
-            },
-            Keywords(proto.keywords.clone()),
-            WorldKey {
-                zone: proto.zone_id,
-                id: proto.id,
-            },
-            Located(keeper_entity),
-            mud_world::Identified,
-        ));
-        if let Some(liq) = proto.liquid.clone() {
-            bundle.insert(mud_world::LiquidContainer {
-                liquid: liq.liquid,
-                capacity: liq.capacity,
-                remaining: liq.remaining,
-                poisoned: liq.poisoned,
-            });
-        }
-        if let Some(fuel) = proto.light_fuel {
-            bundle.insert(mud_world::LightFuel {
-                capacity: fuel.capacity,
-                remaining: fuel.remaining,
-            });
-        }
-        let temp = bundle.id();
-        mud_world::attach_proto_charges(world, temp, proto.zone_id, proto.id);
+        let temp = crate::item_spawn::spawn_item_from_proto(world, &proto, keeper_entity);
+        world.entity_mut(temp).insert(mud_world::Identified);
         let block = render_identify_block(world, player, temp);
         world.despawn(temp);
         let Some(block) = block else {
@@ -4752,6 +4725,30 @@ pub(crate) fn cmd_buy(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let price_copper = shop_offer_price(&offer, proto.cost, shop.buy_profit);
+    // A shop never pays the buyer, and never gives wares away.
+    if price_copper <= 0 {
+        send_rendered(
+            world,
+            player,
+            &format!("{keeper_name} shakes their head. \"That isn't for sale.\"\r\n"),
+        );
+        return;
+    }
+    // Encumbrance gate (same rule as `get`), checked before any coin moves.
+    if !crate::commands::is_staff(world, player)
+        && carried_weight(world, player) + proto.weight > carry_capacity(world, player)
+    {
+        send_rendered(
+            world,
+            player,
+            &format!(
+                "{} is too heavy — you'd be encumbered. \
+                 Drop something with 'drop <item>', or train Strength.\r\n",
+                proto.name
+            ),
+        );
+        return;
+    }
     let on_hand = world.get::<Wealth>(player).map_or(0, |w| w.0);
     if on_hand < price_copper {
         let need = price_copper - on_hand;
@@ -4776,41 +4773,7 @@ pub(crate) fn cmd_buy(world: &mut World, player: Entity, args: &str) {
     {
         off.amount = (off.amount - 1).max(0);
     }
-    let primary_slot = mud_world::wear_flags_primary_slot(&proto.wear_flags);
-    let mut bundle = world.spawn((
-        Item,
-        Named {
-            name: proto.name.clone(),
-        },
-        Keywords(proto.keywords.clone()),
-        WorldKey {
-            zone: proto.zone_id,
-            id: proto.id,
-        },
-        Located(player),
-    ));
-    if let Some(desc) = proto.examine_description.clone() {
-        bundle.insert(Description(desc));
-    }
-    if let Some(s) = primary_slot {
-        bundle.insert(WearableIn(s));
-    }
-    if let Some(liq) = proto.liquid.clone() {
-        bundle.insert(mud_world::LiquidContainer {
-            liquid: liq.liquid,
-            capacity: liq.capacity,
-            remaining: liq.remaining,
-            poisoned: liq.poisoned,
-        });
-    }
-    if let Some(fuel) = proto.light_fuel {
-        bundle.insert(mud_world::LightFuel {
-            capacity: fuel.capacity,
-            remaining: fuel.remaining,
-        });
-    }
-    let bought = bundle.id();
-    mud_world::attach_proto_charges(world, bought, proto.zone_id, proto.id);
+    crate::item_spawn::spawn_item_from_proto(world, &proto, player);
     let price_str = format_wealth(price_copper).unwrap_or_else(|| "free".to_string());
     let item_name = proto.name.clone();
     send_rendered(
@@ -11333,6 +11296,10 @@ pub(crate) fn cmd_junk(world: &mut World, player: Entity, args: &str) {
     // Junking destroys only the item itself; a full bag's contents would be
     // orphaned and lost without the player ever choosing that.
     if refuse_nonempty_container(world, player, item, &item_name) {
+        return;
+    }
+    // Destroying an item is letting go of it: NO_DROP / soulbound items stay.
+    if refuse_drop_blocked(world, player, item, &item_name) {
         return;
     }
     crate::equip_apply::despawn_item(world, item);

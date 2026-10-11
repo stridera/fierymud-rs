@@ -596,3 +596,88 @@ fn unclamped_sell_profit_is_still_capped_at_the_asking_price() {
     drain(&mut rx);
     assert!(world.get::<Wealth>(player).unwrap().0 <= 1_000);
 }
+
+fn edit_sword(world: &mut World, f: impl FnOnce(&mut mud_world::ObjectProto)) {
+    let mut objects = world.resource_mut::<ObjectPrototypes>();
+    f(objects.by_key.get_mut(&(30, 7)).unwrap());
+}
+
+fn bought_sword(world: &mut World, player: Entity) -> Entity {
+    let mut q = world.query_filtered::<(Entity, &Located), With<mud_world::Item>>();
+    q.iter(world)
+        .find(|(_, l)| l.0 == player)
+        .map(|(e, _)| e)
+        .expect("player holds the bought sword")
+}
+
+#[test]
+fn bought_item_keeps_flags_restrictions_hidden_state_and_timer() {
+    let (mut world, player, mut rx) = world_with_shop(shop_def(sword_offer(0), Vec::new()), 1_000);
+    edit_sword(&mut world, |p| {
+        p.flags = vec![mud_db::enums::ObjectFlag::Soulbound];
+        p.restrictions = vec![mud_db::enums::ObjectRestriction::NoDrop];
+        p.concealment = 40;
+        p.timer_hours = 2;
+    });
+    cmd_buy(&mut world, player, "sword");
+    assert!(drain(&mut rx).contains("You buy"));
+    let sword = bought_sword(&mut world, player);
+    assert!(world.get::<mud_world::ObjectFlags>(sword).is_some());
+    assert!(world.get::<mud_world::ObjectRestrictions>(sword).is_some());
+    assert_eq!(
+        world.get::<mud_world::Hiddenness>(sword).map(|h| h.0),
+        Some(40)
+    );
+    assert!(world.get::<mud_world::ItemTimer>(sword).is_some());
+}
+
+#[test]
+fn bought_no_drop_item_cannot_be_dropped_or_junked() {
+    let (mut world, player, mut rx) = world_with_shop(shop_def(sword_offer(0), Vec::new()), 1_000);
+    edit_sword(&mut world, |p| {
+        p.restrictions = vec![mud_db::enums::ObjectRestriction::NoDrop];
+    });
+    cmd_buy(&mut world, player, "sword");
+    drain(&mut rx);
+    let sword = bought_sword(&mut world, player);
+    super::info::cmd_drop(&mut world, player, "sword");
+    assert!(drain(&mut rx).contains("let go"));
+    super::info::cmd_junk(&mut world, player, "sword");
+    assert!(drain(&mut rx).contains("let go"));
+    assert!(world.get_entity(sword).is_ok());
+    assert_eq!(world.get::<Located>(sword).unwrap().0, player);
+}
+
+#[test]
+fn buy_refuses_when_the_item_would_overload_the_buyer() {
+    let (mut world, player, mut rx) = world_with_shop(shop_def(sword_offer(0), Vec::new()), 1_000);
+    edit_sword(&mut world, |p| p.weight = 100_000.0);
+    cmd_buy(&mut world, player, "sword");
+    let out = drain(&mut rx);
+    assert!(out.contains("too heavy"), "{out}");
+    assert_eq!(world.get::<Wealth>(player).unwrap().0, 1_000);
+    assert_eq!(carried_swords(&mut world, player), 0);
+}
+
+#[test]
+fn negative_cost_never_pays_the_buyer_or_the_seller() {
+    let (mut world, player, mut rx) = world_with_shop(shop_def(sword_offer(0), Vec::new()), 1_000);
+    edit_sword(&mut world, |p| p.cost = -500);
+    cmd_buy(&mut world, player, "sword");
+    drain(&mut rx);
+    // Clamped to 1 copper: never a payout.
+    assert_eq!(world.get::<Wealth>(player).unwrap().0, 999);
+
+    let mut def = shop_def(sword_offer(0), Vec::new());
+    def.accepts = accepts_weapons();
+    let (mut world, player, mut rx) = world_with_shop(def, 1_000);
+    cmd_buy(&mut world, player, "sword");
+    edit_sword(&mut world, |p| p.cost = -500);
+    drain(&mut rx);
+    let before = world.get::<Wealth>(player).unwrap().0;
+    cmd_sell(&mut world, player, "sword");
+    let out = drain(&mut rx);
+    assert!(out.contains("worthless"), "{out}");
+    assert_eq!(world.get::<Wealth>(player).unwrap().0, before);
+    assert_eq!(carried_swords(&mut world, player), 1);
+}

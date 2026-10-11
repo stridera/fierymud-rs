@@ -10351,7 +10351,9 @@ pub(crate) fn object_type_token(t: mud_db::enums::ObjectType) -> String {
 }
 
 /// Compute the copper price of one shop offering: override wins,
-/// otherwise `proto.cost * shop.buy_profit` rounded.
+/// otherwise `proto.cost * shop.buy_profit` rounded. Clamped to at
+/// least 1 copper so a negative authored cost or markup can never
+/// pay the buyer or give wares away.
 #[allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
@@ -10362,11 +10364,12 @@ pub(crate) fn shop_offer_price(
     base_cost: i32,
     buy_profit: f64,
 ) -> i64 {
-    if offer.price > 0 {
+    let price = if offer.price > 0 {
         i64::from(offer.price)
     } else {
         (f64::from(base_cost) * buy_profit).round() as i64
-    }
+    };
+    price.max(1)
 }
 
 /// Copper a shop pays for one item of base cost `base_cost`. The rate is

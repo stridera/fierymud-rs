@@ -14,9 +14,8 @@ use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
 use mud_world::{
-    AttachedTriggers, Description, Item, Keywords, LiquidContainer, Located, Mob, MobGearCatalog,
-    MobPrototypes, MobResetCatalog, Named, ObjectPrototypes, ObjectResetCatalog, TriggerCatalog,
-    WorldKey, fill_container, object_world_counts, outfit_mob,
+    AttachedTriggers, Item, Mob, MobGearCatalog, MobPrototypes, MobResetCatalog, ObjectPrototypes,
+    ObjectResetCatalog, WorldKey, fill_container, object_world_counts, outfit_mob,
 };
 use mud_world::{FromMobReset, FromObjectReset};
 use tracing::info;
@@ -238,63 +237,10 @@ pub fn respawn_tick(world: &mut World) {
             .get(&proto_key)
             .cloned();
         let Some(proto) = proto else { continue };
-        let trigger_keys = world
-            .resource::<TriggerCatalog>()
-            .object_attachments
-            .get(&proto_key)
-            .cloned();
-        let primary_slot = mud_world::wear_flags_primary_slot(&proto.wear_flags);
-        let mut bundle = world.spawn((
-            Item,
-            Named {
-                name: proto.name.clone(),
-            },
-            Keywords(proto.keywords.clone()),
-            WorldKey {
-                zone: proto.zone_id,
-                id: proto.id,
-            },
-            Located(entry.room_entity),
-            FromObjectReset(entry.reset_id),
-        ));
-        if let Some(desc) = proto.examine_description.clone() {
-            bundle.insert(Description(desc));
-        }
-        if let Some(s) = primary_slot {
-            bundle.insert(mud_world::WearableIn(s));
-        }
-        if let Some(board_id) = proto.board_id {
-            bundle.insert(mud_world::BoardLink(board_id));
-        }
-        if let Some(liq) = proto.liquid.clone() {
-            bundle.insert(LiquidContainer {
-                liquid: liq.liquid,
-                capacity: liq.capacity,
-                remaining: liq.remaining,
-                poisoned: liq.poisoned,
-            });
-        }
-        if let Some(fuel) = proto.light_fuel {
-            bundle.insert(mud_world::LightFuel {
-                capacity: fuel.capacity,
-                remaining: fuel.remaining,
-            });
-        }
-        if let Some(keys) = trigger_keys {
-            bundle.insert(AttachedTriggers(keys));
-        }
-        if !proto.flags.is_empty() {
-            bundle.insert(mud_world::ObjectFlags(proto.flags.clone()));
-        }
-        if !proto.restrictions.is_empty() {
-            bundle.insert(mud_world::ObjectRestrictions(proto.restrictions.clone()));
-        }
-        if let Some(h) = proto.initial_hiddenness() {
-            bundle.insert(h);
-        }
-        let spawned = bundle.id();
-        mud_world::attach_proto_charges(world, spawned, proto.zone_id, proto.id);
-        crate::item_decay::attach_timer_if_decaying(world, spawned, &proto);
+        let spawned = crate::item_spawn::spawn_item_from_proto(world, &proto, entry.room_entity);
+        world
+            .entity_mut(spawned)
+            .insert(FromObjectReset(entry.reset_id));
         // A container that comes back gets its authored contents again,
         // minus any whose world-wide cap is already met. The container
         // is counted first (a container may hold copies of itself) and
@@ -320,6 +266,7 @@ mod tests {
         ContentEntry, LightFuelProto, MobResetEntry, ObjectContentsCatalog, ObjectResetEntry,
         RuntimeConfig, ShopCatalog,
     };
+    use mud_world::{Located, Named, TriggerCatalog};
 
     const MOB_KEY: (i32, i32) = (1, 1);
     const SWORD: i32 = 10;

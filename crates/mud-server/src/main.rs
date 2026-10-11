@@ -28,6 +28,7 @@ mod idle;
 mod item_alter;
 mod item_custom;
 mod item_decay;
+mod item_spawn;
 mod layout;
 mod login;
 mod memorize;
