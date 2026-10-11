@@ -503,17 +503,23 @@ impl Reservation<'_> {
 /// itself be waiting for the turn (a relog's `begin_ordered`) and is also
 /// what drains the queue, so waiting for room while holding the turn would
 /// deadlock. If the queue is full the turn is released and the wait happens
-/// without it, then the turn is taken again and the reservation retried.
+/// without it; the room won there is KEPT while the turn is taken again
+/// (handing it back to re-reserve could starve under heavy queue traffic).
 ///
 /// That release is safe only because nothing has been paid yet: a snapshot
 /// that takes the turn in the gap sees the old balance, and the payment
 /// that follows is relative (`x = x + n`) and supersedes it. Releasing the
 /// turn AFTER paying is what lost rewards. Pay only once this returns, then
 /// hand the updates to [`deliver_under_turn`], which cannot block.
+///
+/// No room is waited for once shutdown has begun (nothing drains the queue
+/// then) or if the queue closes: the result carries no reservation and the
+/// caller pays in the database alone. The reward is stored there, so it is
+/// restored on the next login; only the world-side mirror is skipped.
 pub(crate) async fn reserve_under_turn<'a>(
     coordinator: &crate::autosave::SaveCoordinator,
     character_id: &str,
-    mut ordered: crate::autosave::OrderedSave,
+    ordered: crate::autosave::OrderedSave,
     tx: &'a tokio::sync::mpsc::Sender<PendingPlayerUpdate>,
     n: usize,
 ) -> (crate::autosave::OrderedSave, Reservation<'a>) {
@@ -524,31 +530,45 @@ pub(crate) async fn reserve_under_turn<'a>(
     if n == 0 {
         return (ordered, Reservation::none());
     }
-    loop {
-        match tx.try_reserve_many(n) {
-            Ok(permits) => {
-                return (
-                    ordered,
-                    Reservation {
-                        permits: Some(permits),
-                    },
-                );
-            }
-            Err(TrySendError::Closed(())) => return (ordered, Reservation::none()),
-            Err(TrySendError::Full(())) => {
-                drop(ordered);
-                // Wait for room without the turn; give the room back at once
-                // (the reservation is made again under the turn).
-                if tx.reserve_many(n).await.is_err() {
-                    return (
-                        coordinator.begin_ordered(character_id).await,
-                        Reservation::none(),
-                    );
-                }
-                ordered = coordinator.begin_ordered(character_id).await;
-            }
+    match tx.try_reserve_many(n) {
+        Ok(permits) => {
+            return (
+                ordered,
+                Reservation {
+                    permits: Some(permits),
+                },
+            );
         }
+        Err(TrySendError::Closed(())) => return (ordered, Reservation::none()),
+        Err(TrySendError::Full(())) => {}
     }
+    if coordinator.is_shutting_down() {
+        tracing::warn!(
+            character_id,
+            "update queue full at shutdown: paying without the world update"
+        );
+        return (ordered, Reservation::none());
+    }
+    drop(ordered);
+    // Wait for room without the turn, or for shutdown, whichever is first.
+    let permits = tokio::select! {
+        room = tx.reserve_many(n) => room.ok(),
+        () = coordinator.shutting_down() => None,
+    };
+    let ordered = coordinator.begin_ordered(character_id).await;
+    if let Some(permits) = permits {
+        return (
+            ordered,
+            Reservation {
+                permits: Some(permits),
+            },
+        );
+    }
+    tracing::warn!(
+        character_id,
+        "no update queue room: paying without the world update"
+    );
+    (ordered, Reservation::none())
 }
 
 /// Queue paid-reward `updates` for the tick into the room reserved by
@@ -567,7 +587,10 @@ pub(crate) fn deliver_under_turn(
     }
     ordered.supersede_earlier_snapshots();
     let Some(permits) = reservation.permits.as_mut() else {
-        tracing::error!("quest reward could not be delivered: update queue closed");
+        tracing::warn!(
+            "quest reward paid in the database but not mirrored to the world \
+             (update queue closed or shutting down); it applies at next login"
+        );
         return;
     };
     for update in updates {
@@ -1183,5 +1206,109 @@ mod tests {
         let (turn, reservation) = reserve_under_turn(&coordinator, "c", turn, &tx, 1).await;
         deliver_under_turn(turn, reservation, vec![reply("x")]);
         assert!(coordinator.try_begin_ordered("c").is_some());
+    }
+
+    /// Shutdown with a full queue: nothing drains it, so the payer must not
+    /// wait. No reservation, the turn is still held, and delivery is a
+    /// harmless no-op (the database already has the reward).
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_full_queue_at_shutdown_pays_without_waiting() {
+        let coordinator = crate::autosave::SaveCoordinator::default();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        tx.try_send(reply("filler")).unwrap();
+        coordinator.begin_shutdown();
+        let turn = coordinator.begin_ordered("c").await;
+        let (turn, reservation) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            reserve_under_turn(&coordinator, "c", turn, &tx, 1),
+        )
+        .await
+        .expect("must not wait for room at shutdown");
+        assert!(reservation.permits.is_none());
+        assert!(
+            coordinator.try_begin_ordered("c").is_none(),
+            "the turn is still held while the caller pays"
+        );
+        deliver_under_turn(turn, reservation, vec![reply("lost-mirror")]);
+        assert!(coordinator.try_begin_ordered("c").is_some());
+        let mut who = Vec::new();
+        while let Ok(PendingPlayerUpdate::Reply { character_id, .. }) = rx.try_recv() {
+            who.push(character_id);
+        }
+        assert_eq!(who, ["filler"], "the skipped update was not queued");
+    }
+
+    /// A payer already waiting for room when shutdown begins is released.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_payer_waiting_for_room_is_released_by_shutdown() {
+        let coordinator = crate::autosave::SaveCoordinator::default();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        tx.try_send(reply("filler")).unwrap();
+        let payer = {
+            let (coordinator, tx) = (coordinator.clone(), tx.clone());
+            tokio::spawn(async move {
+                let turn = coordinator.begin_ordered("c").await;
+                let (_turn, reservation) =
+                    reserve_under_turn(&coordinator, "c", turn, &tx, 1).await;
+                reservation.permits.is_none()
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!payer.is_finished(), "waits for room while running");
+        coordinator.begin_shutdown();
+        let skipped = tokio::time::timeout(std::time::Duration::from_secs(5), payer)
+            .await
+            .expect("shutdown must release the payer")
+            .unwrap();
+        assert!(skipped, "no room was reserved");
+    }
+
+    /// Room won while waiting is kept across the wait for the turn, so
+    /// other queue traffic cannot take it in between.
+    #[tokio::test(flavor = "current_thread")]
+    async fn room_won_while_waiting_is_kept_across_the_wait_for_the_turn() {
+        use std::time::Duration;
+        let coordinator = crate::autosave::SaveCoordinator::default();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        tx.try_send(reply("filler")).unwrap();
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let (payer_done, payer_result) = tokio::sync::oneshot::channel::<bool>();
+        let turn = coordinator.begin_ordered("c").await;
+        // Queued behind the payer's turn: gets it the moment the payer lets
+        // go, then sits on it.
+        coordinator.spawn_ordered("c", move |ordered| async move {
+            let _ordered = ordered;
+            let _ = released.await;
+        });
+        {
+            let (coordinator, tx) = (coordinator.clone(), tx.clone());
+            tokio::spawn(async move {
+                let (turn, reservation) = reserve_under_turn(&coordinator, "c", turn, &tx, 1).await;
+                let kept = reservation.permits.is_some();
+                deliver_under_turn(turn, reservation, vec![reply("payer")]);
+                let _ = payer_done.send(kept);
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        // The tick drains the filler: the payer gets the room, but the turn
+        // is held by the blocker.
+        assert!(rx.try_recv().is_ok());
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(
+            tx.try_send(reply("traffic")).is_err(),
+            "the payer's room was handed back while it waited for the turn"
+        );
+        release.send(()).unwrap();
+        let kept = tokio::time::timeout(Duration::from_secs(5), payer_result)
+            .await
+            .expect("payer finishes once the turn frees")
+            .unwrap();
+        assert!(kept);
+        match rx.try_recv() {
+            Ok(PendingPlayerUpdate::Reply { character_id, .. }) => {
+                assert_eq!(character_id, "payer");
+            }
+            other => panic!("expected the payer's update, got {}", other.is_ok()),
+        }
     }
 }

@@ -179,6 +179,10 @@ struct Shared {
     done: Mutex<Vec<Completion>>,
     pending: AtomicUsize,
     idle: Notify,
+    /// Set once shutdown has begun: the tick no longer drains the world's
+    /// update queue, so nothing may wait for room in it.
+    closing: AtomicBool,
+    closing_notify: Notify,
 }
 
 /// Cloneable handle (stored as an ECS resource) to the save machinery.
@@ -318,7 +322,34 @@ impl SaveCoordinator {
             done: Mutex::new(Vec::new()),
             pending: AtomicUsize::new(0),
             idle: Notify::new(),
+            closing: AtomicBool::new(false),
+            closing_notify: Notify::new(),
         }))
+    }
+
+    /// Shutdown has begun. A payer that finds the world's update queue full
+    /// stops waiting for room (nothing drains it any more) and pays in the
+    /// database alone; see `quest_progress::reserve_under_turn`.
+    pub(crate) fn begin_shutdown(&self) {
+        self.0.closing.store(true, Ordering::SeqCst);
+        self.0.closing_notify.notify_waiters();
+    }
+
+    pub(crate) fn is_shutting_down(&self) -> bool {
+        self.0.closing.load(Ordering::SeqCst)
+    }
+
+    /// Resolves once [`Self::begin_shutdown`] has been called.
+    pub(crate) async fn shutting_down(&self) {
+        loop {
+            let notified = self.0.closing_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.is_shutting_down() {
+                return;
+            }
+            notified.await;
+        }
     }
 
     fn slot(&self, character_id: &str) -> Arc<Slot> {

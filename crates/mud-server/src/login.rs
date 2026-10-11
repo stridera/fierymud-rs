@@ -1651,6 +1651,14 @@ impl ConnRouter {
     pub async fn save_all_online(&self, world: &mut World, pool: &PgPool) {
         // Snapshot the (conn_id, entity) pairs so we don't borrow self
         // across `.await` calls — save_player takes &mut World.
+        let coordinator = world
+            .get_resource::<SaveCoordinator>()
+            .cloned()
+            .unwrap_or_default();
+        // The tick has stopped draining the update queue: a reward payer
+        // waiting for room in it would never finish. Tell them to pay in
+        // the database alone (the saves below flush them).
+        coordinator.begin_shutdown();
         let entries = self.online_entities(world);
         for entity in entries {
             // SaveOutcome dropped — broadcast autosave can't surface
@@ -1664,10 +1672,6 @@ impl ConnRouter {
         }
         // Background (autosave / `actor:save()`) writes may still be in
         // flight; the process must not exit until they have landed.
-        let coordinator = world
-            .get_resource::<SaveCoordinator>()
-            .cloned()
-            .unwrap_or_default();
         if !coordinator.flush(world, Duration::from_secs(30)).await {
             error!(
                 character_ids = ?coordinator.unsettled_characters(),

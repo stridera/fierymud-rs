@@ -1255,24 +1255,48 @@ fn reindex_random_triggers(world: &mut World) {
 /// [`mud_world::RandomTriggers`] marker are visited, so the cost tracks
 /// the number of RANDOM-scripted entities, not the size of the world.
 ///
+/// The 13-second checks are staggered by entity index ([`random_slot`]),
+/// like wandering: each tick handles about 1/130 of the scripted entities
+/// instead of all of them in one tick every 130th, so the average rate is
+/// unchanged (one roll per entity per 13 s) but no tick carries the whole
+/// pulse's Lua.
+///
 /// Legacy runs at most one RANDOM trigger per entity per pulse: the first
 /// whose percent passes. Here the percent is read from the body's leading
 /// gate and rolled before any Lua runs, and a trigger that passes runs
 /// with the gate stripped so the chance is not rolled twice.
 pub fn random_trigger_tick(world: &mut World) {
     let tick = world.resource::<crate::TickCount>().0;
-    if tick == 0 || !tick.is_multiple_of(RANDOM_PULSE_TICKS) {
+    if tick == 0 {
         return;
     }
-    run_random_pulse(world);
+    let due: Vec<Entity> = {
+        let mut q = world.query_filtered::<Entity, With<mud_world::RandomTriggers>>();
+        q.iter(world).filter(|&e| random_slot(e, tick)).collect()
+    };
+    run_random_for(world, due);
 }
 
-/// One RANDOM pulse; split out so tests can run it without tick math.
+/// True when `entity` is due its RANDOM roll on `tick`: `(index + tick)` is a
+/// multiple of the pulse length, so consecutive entities land on consecutive
+/// ticks and every entity is due exactly once per [`RANDOM_PULSE_TICKS`].
+fn random_slot(entity: Entity, tick: u64) -> bool {
+    (u64::from(entity.index_u32()) + tick).is_multiple_of(RANDOM_PULSE_TICKS)
+}
+
+/// One whole RANDOM pulse at once (every scripted entity rolls); tests use it
+/// to run the dispatch without tick math.
+#[cfg(test)]
 pub(crate) fn run_random_pulse(world: &mut World) {
     let candidates: Vec<Entity> = {
         let mut q = world.query_filtered::<Entity, With<mud_world::RandomTriggers>>();
         q.iter(world).collect()
     };
+    run_random_for(world, candidates);
+}
+
+/// Roll the RANDOM triggers of `candidates`.
+fn run_random_for(world: &mut World, candidates: Vec<Entity>) {
     if candidates.is_empty() {
         return;
     }
@@ -2058,7 +2082,8 @@ return _return_value"#;
     }
 
     #[test]
-    fn random_pulse_runs_on_the_13_second_boundary_only() {
+    fn random_rolls_are_spread_over_the_13_second_period() {
+        const MOBS: i32 = 260;
         let (mut world, room) = base_world();
         spawn_player(&mut world, room, "Watcher");
         add_trigger(
@@ -2067,15 +2092,36 @@ return _return_value"#;
             vec![TriggerEvent::Random],
             "self:setvar('n', (self:getvar('n') or 0) + 1)",
         );
-        spawn_mob(&mut world, room, 1, vec![(99, 1)]);
-        for tick in [1u64, 129, 131] {
+        for id in 1..=MOBS {
+            spawn_mob(&mut world, room, id, vec![(99, 1)]);
+        }
+        let total = |w: &World| -> i64 {
+            (1..=MOBS)
+                .filter_map(|id| var(w, id, "n").and_then(|v| v.as_i64()))
+                .sum()
+        };
+        // Tick 0 never rolls. Across one full period every mob rolls once,
+        // and no tick runs more than its share of them.
+        let mut seen = 0;
+        let mut busiest = 0;
+        world.insert_resource(crate::TickCount(0));
+        random_trigger_tick(&mut world);
+        assert_eq!(total(&world), 0);
+        for tick in 1..=RANDOM_PULSE_TICKS {
+            world.insert_resource(crate::TickCount(tick));
+            random_trigger_tick(&mut world);
+            let now = total(&world);
+            busiest = busiest.max(now - seen);
+            seen = now;
+        }
+        assert_eq!(seen, i64::from(MOBS), "each mob rolled once in 13 s");
+        assert!(busiest <= 3, "one tick carried {busiest} scripts");
+        // The next period rolls each mob once more.
+        for tick in RANDOM_PULSE_TICKS + 1..=2 * RANDOM_PULSE_TICKS {
             world.insert_resource(crate::TickCount(tick));
             random_trigger_tick(&mut world);
         }
-        assert!(var(&world, 1, "n").is_none());
-        world.insert_resource(crate::TickCount(130));
-        random_trigger_tick(&mut world);
-        assert_eq!(var(&world, 1, "n"), Some(1.into()));
+        assert_eq!(total(&world), 2 * i64::from(MOBS));
     }
 
     /// RANDOM dispatch visits only entities with a RANDOM trigger, so a
@@ -2472,5 +2518,86 @@ return _return_value"#;
         );
         apply_reloaded_catalog(&mut world, TriggerCatalog::default());
         assert!(world.get::<mud_world::RandomTriggers>(mob).is_none());
+    }
+
+    /// Release-mode cost of one RANDOM pulse in which `N` scripted mobs all
+    /// pass their gate (the worst case: on dev ~280 scripted entities fire
+    /// ~105 scripts in the same tick every 13 s). Bodies are the three
+    /// shapes the real RANDOM triggers use: a command/say chatter script
+    /// (30:1 `Drunk_Socail_stunts1`), a room scan (530:1 `spider_rand`) and a people-walk with
+    /// quest-variable lookups (60:27 `thief_subclass_sneak_past`). Prints the time per script
+    /// so the Lua cost is on record; no hard limit.
+    #[test]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    fn random_pulse_cost_per_script_shape() {
+        use std::time::Instant;
+        const N: usize = 100;
+        let bodies: [(&str, &str); 4] = [
+            (
+                "chatter (self:say/emote/command)",
+                "local antic = random(1, 4)\nif antic == 1 then\n self:command('wave')\n self:say('Good day to you.')\nelse\n self:emote('wipes his mouth.')\n self:say('Aaaahhhh')\nend\n",
+            ),
+            (
+                "room scan (spider_rand)",
+                "local actors = self.room.actors\nif #actors == 0 then return true end\nlocal rnd = actors[random(1, #actors)]\nif rnd.is_player and rnd.level < 100 then combat.engage(rnd) end\n",
+            ),
+            (
+                "people walk + quest vars (sneak_past)",
+                "if self.is_fighting then return _return_value end\nlocal person = self.room.people\nwhile person do\n if person:get_quest_var('q:subclass_name') == 'thief' then person:send('x') end\n person = person.next_in_room\nend\n",
+            ),
+            ("trivial", "local x = 1 + 1\n"),
+        ];
+        for (label, body, filler) in bodies
+            .iter()
+            .map(|(l, b)| (*l, *b, 0usize))
+            .chain(bodies.iter().map(|(l, b)| (*l, *b, 5500usize)))
+        {
+            let (mut world, _) = base_world();
+            world.init_resource::<mud_world::SocialRegistry>();
+            // A prod-sized world around the scripted mobs: thousands of
+            // unscripted mobs over thousands of archetypes.
+            let far = spawn_room_in(&mut world, 98, 0);
+            for i in 0..filler {
+                let m = spawn_mob(&mut world, far, 10_000 + i as i32, vec![]);
+                crate::archetype_noise::shape(&mut world, m, i + 1);
+            }
+            let mut rooms = Vec::new();
+            for r in 0..20 {
+                let room = spawn_room_in(&mut world, 99, r);
+                spawn_player(&mut world, room, &format!("P{r}"));
+                rooms.push(room);
+            }
+            add_trigger(&mut world, 1, vec![TriggerEvent::Random], body);
+            for i in 0..N {
+                spawn_mob(
+                    &mut world,
+                    rooms[i % rooms.len()],
+                    i as i32 + 1,
+                    vec![(99, 1)],
+                );
+            }
+            run_random_pulse(&mut world); // warm: compiles and caches the chunk
+            let start = Instant::now();
+            let pulses = 5;
+            for _ in 0..pulses {
+                run_random_pulse(&mut world);
+            }
+            let whole = start.elapsed() / pulses;
+            // The same work as the live tick runs it: one period of ticks.
+            let (mut worst, mut sum) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+            for tick in 1..=RANDOM_PULSE_TICKS {
+                world.insert_resource(crate::TickCount(tick));
+                let start = Instant::now();
+                random_trigger_tick(&mut world);
+                let took = start.elapsed();
+                worst = worst.max(took);
+                sum += took;
+            }
+            eprintln!(
+                "random, {N} mobs, {filler} other mobs, {label}: whole pulse {whole:?} \
+                 ({:?}/script); spread over 130 ticks: worst tick {worst:?}, sum {sum:?}",
+                whole / N as u32
+            );
+        }
     }
 }

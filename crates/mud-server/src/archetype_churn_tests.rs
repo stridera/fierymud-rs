@@ -386,3 +386,114 @@ fn reset_tagged_spawns_keep_every_proto_component() {
         assert!(world.get::<mud_world::MovementModeTag>(m).is_some());
     }
 }
+
+/// The effects sweep with the real-sized effect catalog (30 types on dev).
+/// Each instance's `on_apply` / `on_tick` lookup goes through
+/// `EffectCatalog::find_by_name`; most instance names (status flags such as
+/// "infravision") are not catalog names at all, so each lookup is a miss.
+/// Compares the same sweeps with and without the catalog to isolate that
+/// cost, and times the lookups alone.
+#[test]
+fn effects_tick_catalog_lookup_share_of_the_sweep() {
+    const CATALOG: [&str; 30] = [
+        "damage",
+        "heal",
+        "modify",
+        "status",
+        "cleanse",
+        "dispel",
+        "reveal",
+        "teleport",
+        "extract",
+        "move",
+        "interrupt",
+        "transform",
+        "resurrect",
+        "create",
+        "summon",
+        "enchant",
+        "globe",
+        "room",
+        "inspect",
+        "knockdown",
+        "stun",
+        "dismount",
+        "stop_combat",
+        "drag",
+        "intercept",
+        "portal",
+        "conceal_item",
+        "redirect",
+        "Refreshed",
+        "alter_object",
+    ];
+    let build = |with_catalog: bool| {
+        let mut world = World::new();
+        world.insert_resource(TickCount(10));
+        if with_catalog {
+            let mut catalog = EffectCatalog::default();
+            for (i, name) in CATALOG.iter().enumerate() {
+                let mut def = status_effect(i as i32 + 1);
+                def.name = (*name).into();
+                catalog.by_id.insert(def.id, def);
+            }
+            world.insert_resource(catalog);
+        }
+        let room = world.spawn(Room).id();
+        let mut n = 0usize;
+        for i in 0..2400usize {
+            let mob = world.spawn((Mob, Located(room))).id();
+            for name in FLAGS.iter().take(3 + i % 2) {
+                world.spawn((
+                    EffectInstance {
+                        kind: 4,
+                        name: (*name).into(),
+                        strength: 1,
+                        remaining_secs: -1,
+                        source: EffectSource::Other("mob_default".to_string()),
+                        ability_id: None,
+                    },
+                    AppliedTo(mob),
+                ));
+                n += 1;
+            }
+        }
+        (world, n)
+    };
+    let run = |with_catalog: bool| {
+        let (mut world, n) = build(with_catalog);
+        let mut times = Vec::new();
+        for tick in [10u64, 20, 30, 40, 50] {
+            world.insert_resource(TickCount(tick));
+            let start = Instant::now();
+            crate::effects::effects_tick(&mut world);
+            times.push(start.elapsed());
+        }
+        (n, times)
+    };
+    let (n, with) = run(true);
+    let (_, without) = run(false);
+    let catalog = {
+        let mut c = EffectCatalog::default();
+        for (i, name) in CATALOG.iter().enumerate() {
+            let mut def = status_effect(i as i32 + 1);
+            def.name = (*name).into();
+            c.by_id.insert(def.id, def);
+        }
+        c
+    };
+    let start = Instant::now();
+    let mut hits = 0usize;
+    for i in 0..n {
+        hits += usize::from(catalog.find_by_name(FLAGS[i % FLAGS.len()]).is_some());
+    }
+    let lookups = start.elapsed();
+    eprintln!(
+        "effects_tick {n} instances, 30-type catalog: first/steady with catalog={:?}/{:?} \
+         without={:?}/{:?}; {n} find_by_name misses alone={lookups:?} (hits={hits})",
+        with[0], with[4], without[0], without[4]
+    );
+    if !cfg!(debug_assertions) {
+        assert!(with[4].as_millis() < 5, "effects sweep took {:?}", with[4]);
+    }
+}
