@@ -145,6 +145,13 @@ pub enum PendingPlayerUpdate {
     /// ([`reply_from_task`]): shown to the player as if the command had
     /// printed it.
     Reply { character_id: String, text: String },
+    /// A `house expand` charge settled: the room was added (and paid for in
+    /// the database) or the insert failed. Sent from the task that holds the
+    /// character's write turn, so every snapshot sees the outcome first.
+    HouseExpandDone {
+        character_id: String,
+        done: Box<housing::ExpansionDone>,
+    },
 }
 
 impl PendingPlayerUpdate {
@@ -168,7 +175,8 @@ impl PendingPlayerUpdate {
             | Self::QuestAccepted { character_id, .. }
             | Self::HousePlaceFailed { character_id, .. }
             | Self::DialogueReply { character_id, .. }
-            | Self::Reply { character_id, .. } => character_id,
+            | Self::Reply { character_id, .. }
+            | Self::HouseExpandDone { character_id, .. } => character_id,
         }
     }
 }
@@ -354,7 +362,8 @@ pub fn drain_player_updates(world: &mut World) {
             }
             PendingPlayerUpdate::WealthDelta { amount, .. } => {
                 if let Some(mut w) = world.get_mut::<Wealth>(entity) {
-                    w.0 = w.0.saturating_add(amount);
+                    // Never below zero, whatever a late delta says.
+                    w.0 = w.0.saturating_add(amount).max(0);
                 }
             }
             PendingPlayerUpdate::SkillPointsDelta { amount, .. } => {
@@ -455,6 +464,9 @@ pub fn drain_player_updates(world: &mut World) {
             }
             PendingPlayerUpdate::Reply { text, .. } => {
                 send_to(world, entity, text);
+            }
+            PendingPlayerUpdate::HouseExpandDone { done, .. } => {
+                housing::apply_expansion(world, entity, &done);
             }
             PendingPlayerUpdate::DialogueReply {
                 mob_name,

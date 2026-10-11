@@ -449,29 +449,29 @@ pub async fn add_room(
     Ok(added)
 }
 
-/// [`add_room`] that also writes the character's on-hand wealth, in the same
-/// transaction: the room cannot exist without the copper having been taken,
-/// nor the copper be taken without the room. `new_wealth` is the value after
-/// the charge (the caller checked the balance against the live character, the
-/// source of truth for on-hand coin between saves).
+/// [`add_room`] that also charges the character, in the same transaction:
+/// the room cannot exist without the copper having been taken, nor the copper
+/// be taken without the room. The charge is relative and guarded
+/// (`wealth - cost WHERE wealth >= cost`), because other writers move
+/// `Characters.wealth` outside the character's save (a quest reward adds to
+/// it in SQL), and an absolute write would erase their change. `Ok(None)`
+/// means the stored balance does not cover `cost`: nothing was written.
 #[allow(clippy::too_many_arguments)]
 pub async fn add_room_paid(
     pool: &PgPool,
     character_id: &str,
-    new_wealth: i64,
+    cost: i64,
     house_id: i32,
     from_room_id: i32,
     direction: &str,
     opposite: &str,
     name: &str,
     description: &str,
-) -> sqlx::Result<(i32, i32)> {
+) -> sqlx::Result<Option<(i32, i32)>> {
     let mut tx = pool.begin().await?;
-    sqlx::query(r#"UPDATE "Characters" SET wealth = $1 WHERE id = $2"#)
-        .bind(new_wealth)
-        .bind(character_id)
-        .execute(&mut *tx)
-        .await?;
+    if !debit_wealth(&mut tx, character_id, cost).await? {
+        return Ok(None);
+    }
     let added = insert_room(
         &mut tx,
         house_id,
@@ -483,7 +483,24 @@ pub async fn add_room_paid(
     )
     .await?;
     tx.commit().await?;
-    Ok(added)
+    Ok(Some(added))
+}
+
+/// Take `cost` from the stored on-hand wealth if it covers it. False (and
+/// nothing changed) when it does not.
+pub async fn debit_wealth(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    character_id: &str,
+    cost: i64,
+) -> sqlx::Result<bool> {
+    let res = sqlx::query(
+        r#"UPDATE "Characters" SET wealth = wealth - $1 WHERE id = $2 AND wealth >= $1"#,
+    )
+    .bind(cost)
+    .bind(character_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(res.rows_affected() == 1)
 }
 
 async fn insert_room(
