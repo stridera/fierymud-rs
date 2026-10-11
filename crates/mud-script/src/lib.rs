@@ -2048,8 +2048,23 @@ fn spells_cast_dispatch(lua: &Lua, args: MultiValue) -> mlua::Result<()> {
 /// Names are matched case-insensitively against `AbilityCatalog.by_name`
 /// (the lowercased plain-name index). Unknown names are a no-op so
 /// imported triggers don't crash on data drift.
+///
+/// Only creatures (Mob / Player) can be taught: any other entity is a script
+/// error, so a stray reference can't grow a `KnownAbilities` on a room or an
+/// item. `level` is clamped to the skill range `0..=100`. Players are
+/// deliberately allowed (quest rewards and trainers grant them abilities,
+/// including ones outside their class's own list).
 fn skills_set_level(lua: &Lua, entity: Entity, name: &str, level: i32) -> mlua::Result<()> {
+    let level = level.clamp(0, 100);
     world_mut_from_lua(lua, |world| {
+        if world.get_entity(entity).is_ok()
+            && world.get::<Mob>(entity).is_none()
+            && world.get::<Player>(entity).is_none()
+        {
+            return Err(mlua::Error::external(
+                "skills.set_level: target is not a mob or player",
+            ));
+        }
         let key = name.trim().to_ascii_lowercase();
         let Some(ability_id) = world
             .resource::<AbilityCatalog>()
@@ -2057,18 +2072,18 @@ fn skills_set_level(lua: &Lua, entity: Entity, name: &str, level: i32) -> mlua::
             .get(&key)
             .map(|d| d.id)
         else {
-            return;
+            return Ok(());
         };
         let known = if let Some(existing) = world.get_mut::<KnownAbilities>(entity) {
             existing
         } else {
             // Despawned entity: nothing to teach.
             let Ok(mut em) = world.get_entity_mut(entity) else {
-                return;
+                return Ok(());
             };
             em.insert(KnownAbilities::default());
             let Some(known) = world.get_mut::<KnownAbilities>(entity) else {
-                return;
+                return Ok(());
             };
             known
         };
@@ -2084,7 +2099,8 @@ fn skills_set_level(lua: &Lua, entity: Entity, name: &str, level: i32) -> mlua::
             known.entries.push((ability_id, level, true));
             known.entries.sort_by_key(|(id, _, _)| *id);
         }
-    })
+        Ok(())
+    })?
 }
 
 /// Emit a per-recipient line: the speaker sees `self_line`, every
@@ -5580,6 +5596,77 @@ mod tests {
         // No KnownAbilities component should have been inserted for an
         // unknown ability — the no-op path doesn't create state.
         assert!(world.get::<KnownAbilities>(actor).is_none());
+    }
+
+    fn world_with_ability() -> World {
+        let mut world = World::new();
+        let mut catalog = AbilityCatalog::default();
+        catalog.by_name.insert(
+            "bash".to_string(),
+            mud_world::AbilityDef {
+                id: 7,
+                name: "Bash".to_string(),
+                plain_name: "bash".to_string(),
+                description: None,
+                kind: mud_db::abilities::AbilityKind::Skill,
+                violent: false,
+                combat_ok: true,
+                in_combat_only: false,
+                cast_time_rounds: 1,
+                cooldown_ms: 0,
+                is_area: false,
+                min_position_label: "STANDING".to_string(),
+                min_posture_rank: 9,
+                target_scope: "SINGLE".to_string(),
+                is_magical: false,
+                sphere: None,
+                damage_type: None,
+                memorization_time: 0,
+                passive: false,
+                short_cast: false,
+            },
+        );
+        world.insert_resource(catalog);
+        world
+    }
+
+    #[test]
+    fn skills_set_level_clamps_the_level() {
+        let mut world = world_with_ability();
+        let actor = world.spawn((Player, Named { name: "P".into() })).id();
+        let mut host = LuaHost::new();
+        host.exec_for_actor(&mut world, actor, "skills.set_level(self, 'bash', 9999)")
+            .expect("ok");
+        assert_eq!(
+            world.get::<KnownAbilities>(actor).unwrap().entries[0].1,
+            100
+        );
+        host.exec_for_actor(&mut world, actor, "skills.set_level(self, 'bash', -5)")
+            .expect("ok");
+        assert_eq!(world.get::<KnownAbilities>(actor).unwrap().entries[0].1, 0);
+    }
+
+    #[test]
+    fn skills_set_level_rejects_non_creatures() {
+        let mut world = world_with_ability();
+        // A bare entity (room / item stand-in) with a Named so the actor
+        // binding resolves.
+        let thing = world
+            .spawn(Named {
+                name: "Rock".into(),
+            })
+            .id();
+        let mut host = LuaHost::new();
+        let err = host
+            .exec_for_actor(&mut world, thing, "skills.set_level(self, 'bash', 100)")
+            .expect_err("must be a script error");
+        assert!(err.contains("not a mob or player"), "{err}");
+        assert!(world.get::<KnownAbilities>(thing).is_none());
+        // A mob is fine.
+        let mob = world.spawn((Mob, Named { name: "Orc".into() })).id();
+        host.exec_for_actor(&mut world, mob, "skills.set_level(self, 'bash', 50)")
+            .expect("mob ok");
+        assert_eq!(world.get::<KnownAbilities>(mob).unwrap().entries[0].1, 50);
     }
 
     #[test]

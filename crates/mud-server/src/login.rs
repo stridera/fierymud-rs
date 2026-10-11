@@ -230,6 +230,25 @@ fn send_login_prompt(outbound: &Outbound, world: &World, stage: &str, fallback: 
     send_prompt(outbound, login_message_bytes(world, stage, fallback));
 }
 
+/// [`send_login_prompt`] for a prompt whose answer is a password: first
+/// offer `IAC WILL ECHO`, so the client stops echoing what is typed, then
+/// the prompt. The stage handler ends the mode with [`end_password_echo`]
+/// once the line arrives. A client that answers `DONT ECHO` just keeps its
+/// local echo; nothing breaks, the password is merely visible to the user
+/// typing it. Plain telnet and TLS share this path (the byte stream is the
+/// same once the TLS layer is stripped).
+fn send_password_prompt(outbound: &Outbound, world: &World, stage: &str, fallback: &str) {
+    let _ = outbound.try_send(mud_net::will(mud_net::opt::ECHO));
+    send_login_prompt(outbound, world, stage, fallback);
+}
+
+/// Hand echo back to the client (`IAC WONT ECHO`) after a password line,
+/// plus the line break the client did not echo for the Enter keypress.
+fn end_password_echo(outbound: &Outbound) {
+    let _ = outbound.try_send(mud_net::wont(mud_net::opt::ECHO));
+    let _ = outbound.try_send(b"\r\n".to_vec());
+}
+
 /// The connect banner for a client that can (`ascii == false`) or can't
 /// render UTF-8. Data-driven: a `WELCOME_BANNER` row with variant
 /// `ascii` serves plain clients, the `default` row everyone else (and
@@ -1149,9 +1168,33 @@ pub struct ConnCapabilities {
     /// connection (a client can repeat them without limit).
     hello_logged: bool,
     supports_logged: bool,
+    /// When `Core.Hello` / `Core.Supports.Set` last made the server forget
+    /// its change-gated GMCP cache (see [`ConnCapabilities::resync_due`]).
+    last_gmcp_resync: Option<Instant>,
     /// Shared output capabilities (colour depth, charset) for this
     /// connection. The same handle the writer encodes with.
     pub output: mud_net::OutputHandle,
+}
+
+/// Shortest gap between two `Core.Hello` / `Core.Supports.Set` driven full
+/// GMCP resends on one connection. Each one re-sends every change-gated
+/// package, so a client repeating them would otherwise turn every frame it
+/// sends into a full state push.
+const GMCP_RESYNC_MIN_GAP: Duration = Duration::from_secs(2);
+
+impl ConnCapabilities {
+    /// True when a (re)negotiation message at `now` should reset the GMCP
+    /// cache; false when one already did within [`GMCP_RESYNC_MIN_GAP`].
+    fn resync_due(&mut self, now: Instant) -> bool {
+        if self
+            .last_gmcp_resync
+            .is_some_and(|t| now.saturating_duration_since(t) < GMCP_RESYNC_MIN_GAP)
+        {
+            return false;
+        }
+        self.last_gmcp_resync = Some(now);
+        true
+    }
 }
 
 /// What the identifier prompt's character-name lookups found.
@@ -2033,8 +2076,10 @@ impl ConnRouter {
                 }
                 // A (re)negotiating client has lost whatever we sent
                 // before; forget it so the next prompt re-sends every
-                // change-gated package.
-                if let Some(&entity) = self.playing.get(&conn_id) {
+                // change-gated package. Debounced: a client repeating
+                // this must not force a full resend each time.
+                let due = entry.resync_due(Instant::now());
+                if due && let Some(&entity) = self.playing.get(&conn_id) {
                     commands::clear_gmcp_sent(world, entity);
                 }
             }
@@ -2053,8 +2098,10 @@ impl ConnRouter {
                 }
                 // A (re)negotiating client has lost whatever we sent
                 // before; forget it so the next prompt re-sends every
-                // change-gated package.
-                if let Some(&entity) = self.playing.get(&conn_id) {
+                // change-gated package. Debounced: a client repeating
+                // this must not force a full resend each time.
+                let due = entry.resync_due(Instant::now());
+                if due && let Some(&entity) = self.playing.get(&conn_id) {
                     commands::clear_gmcp_sent(world, entity);
                 }
             }
@@ -2177,6 +2224,17 @@ impl ConnRouter {
         };
         let trimmed = text.trim();
 
+        // The line just typed was a password: stop suppressing client echo
+        // before anything else is said (see `send_password_prompt`).
+        if matches!(
+            ctx.stage,
+            Stage::AwaitingPassword { .. }
+                | Stage::AwaitingNewPassword { .. }
+                | Stage::ConfirmNewPassword { .. }
+        ) {
+            end_password_echo(&ctx.outbound);
+        }
+
         match std::mem::replace(&mut ctx.stage, Stage::AwaitingIdentifier) {
             Stage::AwaitingIdentifier => {
                 // Branch on '@' — emails contain it, character names don't.
@@ -2256,7 +2314,7 @@ impl ConnRouter {
                         identifier,
                         is_email,
                     };
-                    send_login_prompt(
+                    send_password_prompt(
                         &ctx.outbound,
                         world,
                         "CREATE_PASSWORD",
@@ -2303,7 +2361,7 @@ impl ConnRouter {
                         identifier,
                         is_email,
                     };
-                    send_login_prompt(
+                    send_password_prompt(
                         &ctx.outbound,
                         world,
                         "CREATE_PASSWORD",
@@ -2316,7 +2374,7 @@ impl ConnRouter {
                     is_email,
                     first_attempt: trimmed.to_string(),
                 };
-                send_login_prompt(
+                send_password_prompt(
                     &ctx.outbound,
                     world,
                     "CONFIRM_PASSWORD",
@@ -2339,7 +2397,7 @@ impl ConnRouter {
                         identifier,
                         is_email,
                     };
-                    send_login_prompt(
+                    send_password_prompt(
                         &ctx.outbound,
                         world,
                         "CREATE_PASSWORD",
@@ -2386,7 +2444,7 @@ impl ConnRouter {
                 password_plaintext,
             } => {
                 let name = trimmed;
-                if let Err(reason) = validate_new_character_name(name) {
+                if let Err(reason) = check_new_character_name(world, name) {
                     let _ = ctx.outbound.try_send(format!("{reason}\r\n").into_bytes());
                     ctx.stage = Stage::AwaitingCharacterName {
                         email,
@@ -2645,7 +2703,7 @@ impl ConnRouter {
                         preselected,
                         game_hash,
                     };
-                    send_login_prompt(
+                    send_password_prompt(
                         &ctx.outbound,
                         world,
                         "PASSWORD_PROMPT",
@@ -2862,13 +2920,16 @@ impl ConnRouter {
             Ok(id) => id,
             Err(e) => {
                 warn!(conn_id, error = %e, "character create failed");
-                let _ = ctx.outbound.try_send(
-                    format!(
-                        "Couldn't create the character ({e}). The account \
-                         INSERT was rolled back; please try again.\r\n"
-                    )
-                    .into_bytes(),
-                );
+                // Never show the database error to the client. A unique
+                // violation is the `lower(name)` index: someone else took the
+                // name (possibly just now, or differing only in case).
+                let msg: &[u8] = if is_unique_violation(&e) {
+                    b"That name is taken.\r\n"
+                } else {
+                    b"Couldn't create the character. The account was rolled \
+                      back; please try again.\r\n"
+                };
+                let _ = ctx.outbound.try_send(msg.to_vec());
                 drop(tx);
                 ctx.stage = Stage::AwaitingIdentifier;
                 send_login_prompt(&ctx.outbound, world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK);
@@ -2877,13 +2938,13 @@ impl ConnRouter {
         };
         if let Err(e) = tx.commit().await {
             warn!(conn_id, error = %e, "creation tx commit failed");
-            let _ = ctx.outbound.try_send(
-                format!(
-                    "Couldn't finalize creation ({e}). Both rows have been \
-                     rolled back; please try again.\r\n"
-                )
-                .into_bytes(),
-            );
+            let msg: &[u8] = if is_unique_violation(&e) {
+                b"That name is taken.\r\n"
+            } else {
+                b"Couldn't finalize creation. Nothing was saved; please try \
+                  again.\r\n"
+            };
+            let _ = ctx.outbound.try_send(msg.to_vec());
             ctx.stage = Stage::AwaitingIdentifier;
             send_login_prompt(&ctx.outbound, world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK);
             return;
@@ -3377,7 +3438,7 @@ impl ConnRouter {
                 {
                     let _ = ctx.outbound.try_send(msg.into_bytes());
                 }
-                send_login_prompt(
+                send_password_prompt(
                     &ctx.outbound,
                     world,
                     "PASSWORD_PROMPT",
@@ -3400,6 +3461,14 @@ impl ConnRouter {
                             .as_bytes()
                             .to_vec(),
                     );
+                    reprompt_identifier(ctx, world);
+                    return;
+                }
+                // The name will be created as typed if the player says yes;
+                // refuse one that could never be a valid character name
+                // (too short, reserved) here, not several prompts later.
+                if let Err(reason) = check_new_character_name(world, identifier) {
+                    let _ = ctx.outbound.try_send(format!("{reason}\r\n").into_bytes());
                     reprompt_identifier(ctx, world);
                     return;
                 }
@@ -6629,6 +6698,22 @@ fn validate_new_character_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// True when `e` is a Postgres unique-constraint violation (SQLSTATE
+/// 23505). On a character INSERT that means the name is taken, including
+/// by a name differing only in case (`characters_name_lower_key`).
+fn is_unique_violation(e: &mud_db::sqlx::Error) -> bool {
+    e.as_database_error()
+        .is_some_and(mud_db::sqlx::error::DatabaseError::is_unique_violation)
+}
+
+/// Everything a brand-new character name must satisfy: the length and
+/// charset rules, then the reserved words (targeting grammar, staff and
+/// system names, mob prototype names and keywords).
+fn check_new_character_name(world: &World, name: &str) -> Result<(), String> {
+    validate_new_character_name(name)?;
+    crate::reserved_names::check_character_name(world, name)
+}
+
 /// Races a new character may pick: every `Races` row flagged `playable`
 /// in the database, as the `Characters.race` enum text (`HUMAN`,
 /// `HALF_ELF`, ...), sorted by that text so the listing is stable.
@@ -7537,6 +7622,239 @@ mod tests {
             assert_eq!(pair[1], [0xFF, 0xEF]);
         }
         assert_eq!(got[8], b"Password: ");
+    }
+
+    const WILL_ECHO: [u8; 3] = [0xFF, 0xFB, 1];
+    const WONT_ECHO: [u8; 3] = [0xFF, 0xFC, 1];
+
+    #[test]
+    fn password_prompt_offers_will_echo_before_the_prompt() {
+        let world = World::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        send_password_prompt(&tx, &world, "PASSWORD_PROMPT", PASSWORD_PROMPT_FALLBACK);
+        let got = frames(&mut rx);
+        assert_eq!(got.len(), 3, "{got:?}");
+        assert_eq!(got[0], WILL_ECHO);
+        assert_eq!(got[1], b"Password: ");
+        assert_eq!(got[2], [0xFF, 0xEF]);
+        // The ordinary prompts never touch echo.
+        send_login_prompt(&tx, &world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK);
+        assert!(frames(&mut rx).iter().all(|f| f != &WILL_ECHO));
+    }
+
+    /// Park a fresh login connection at `stage`, send it `line`, and return
+    /// the frames it produced.
+    async fn frames_after_line(stage: Stage, tls: bool, line: &str) -> Vec<Vec<u8>> {
+        let mut world = auth_world(0);
+        let pool = lazy_pool();
+        let mut router = ConnRouter::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        router.on_connect(1, tx, None, &world);
+        frames(&mut rx);
+        let ctx = router.login.get_mut(&1).unwrap();
+        ctx.stage = stage;
+        ctx.tls = tls;
+        router.on_line(1, line.to_string(), &pool, &mut world).await;
+        frames(&mut rx)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn password_line_ends_echo_suppression_with_wont_echo_and_a_newline() {
+        for tls in [false, true] {
+            let (user, preselected) = legacy_sentinel();
+            let got = frames_after_line(
+                Stage::AwaitingPassword {
+                    user,
+                    preselected,
+                    game_hash: legacy_hash("hunter2"),
+                },
+                tls,
+                "wrong",
+            )
+            .await;
+            assert_eq!(got[0], WONT_ECHO, "tls={tls}: {got:?}");
+            assert_eq!(got[1], b"\r\n", "tls={tls}: {got:?}");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn new_password_prompts_are_wrapped_in_echo_control() {
+        // Too short: echo handed back, error shown, then the prompt asks
+        // for echo suppression again before re-prompting.
+        let got = frames_after_line(
+            Stage::AwaitingNewPassword {
+                identifier: "Bob".into(),
+                is_email: false,
+            },
+            true,
+            "x",
+        )
+        .await;
+        assert_eq!(got[0], WONT_ECHO, "{got:?}");
+        assert_eq!(got[1], b"\r\n");
+        let will = got.iter().position(|f| f == &WILL_ECHO).expect("WILL ECHO");
+        assert_eq!(got[will + 1], b"Choose a password: ", "{got:?}");
+
+        // Accepted: the confirmation prompt is also echo-suppressed.
+        let got = frames_after_line(
+            Stage::AwaitingNewPassword {
+                identifier: "Bob".into(),
+                is_email: false,
+            },
+            false,
+            "long-enough-password",
+        )
+        .await;
+        assert_eq!(got[0], WONT_ECHO);
+        let will = got.iter().position(|f| f == &WILL_ECHO).expect("WILL ECHO");
+        assert_eq!(got[will + 1], b"Re-enter password to confirm: ", "{got:?}");
+    }
+
+    #[test]
+    fn gmcp_resync_is_debounced() {
+        let mut caps = ConnCapabilities::default();
+        let t0 = Instant::now();
+        assert!(caps.resync_due(t0), "first Hello resyncs");
+        assert!(!caps.resync_due(t0 + Duration::from_millis(100)), "repeat");
+        assert!(!caps.resync_due(t0 + Duration::from_millis(1999)));
+        assert!(caps.resync_due(t0 + GMCP_RESYNC_MIN_GAP), "after the gap");
+        assert!(!caps.resync_due(t0 + GMCP_RESYNC_MIN_GAP + Duration::from_millis(1)));
+    }
+
+    /// Run an unknown name through the identifier prompt's continuation and
+    /// return what the player saw plus the stage it landed in.
+    fn unknown_name_outcome(world: &World, name: &str) -> (String, Stage) {
+        let mut router = ConnRouter::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+        router.on_connect(1, tx, None, world);
+        frames(&mut rx);
+        router.login.get_mut(&1).unwrap().stage = Stage::Authenticating;
+        router.finish_char_lookup(1, name, CharLookup::Unknown, world);
+        let out = frames(&mut rx)
+            .iter()
+            .map(|f| String::from_utf8_lossy(f).into_owned())
+            .collect::<String>();
+        (out, router.login.remove(&1).unwrap().stage)
+    }
+
+    #[test]
+    fn unknown_short_or_reserved_names_never_reach_the_create_offer() {
+        let mut world = auth_world(0);
+        let mut protos = mud_world::MobPrototypes::default();
+        let mut p =
+            crate::commands::test_support::mob_proto(30, 1, mud_db::enums::MobProfession::Trainer);
+        p.name = "a city guard".into();
+        p.keywords = vec!["guard".into(), "cityguard".into()];
+        protos.by_key.insert((30, 1), p);
+        world.insert_resource(protos);
+
+        let (out, stage) = unknown_name_outcome(&world, "Ab");
+        assert!(out.contains("must be"), "{out}");
+        assert!(matches!(stage, Stage::AwaitingIdentifier));
+
+        for name in [
+            "Someone",
+            "SELF",
+            "All",
+            "Here",
+            "Something",
+            "Guard",
+            "CityGuard",
+        ] {
+            let (out, stage) = unknown_name_outcome(&world, name);
+            assert!(out.contains("reserved"), "{name}: {out}");
+            assert!(matches!(stage, Stage::AwaitingIdentifier), "{name}");
+        }
+
+        let (out, stage) = unknown_name_outcome(&world, "Strider");
+        assert!(
+            !out.contains("reserved") && !out.contains("must be"),
+            "{out}"
+        );
+        assert!(matches!(stage, Stage::ConfirmCreate { .. }));
+    }
+
+    #[test]
+    fn new_character_name_check_covers_shape_and_reserved_words() {
+        let world = World::new();
+        assert!(check_new_character_name(&world, "ab").is_err());
+        assert!(check_new_character_name(&world, "Hax0r").is_err());
+        assert!(check_new_character_name(&world, "Everyone").is_err());
+        assert!(check_new_character_name(&world, "Staff").is_err());
+        assert!(check_new_character_name(&world, "Aragorn").is_ok());
+    }
+
+    /// The `lower(name)` unique index turns a case-variant duplicate into a
+    /// unique violation, which the creation flow reports as a taken name.
+    #[tokio::test(flavor = "current_thread")]
+    async fn case_variant_character_name_is_a_unique_violation() {
+        let Some((pool, _db_lock)) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let has_index: bool = mud_db::sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'characters_name_lower_key')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if !has_index {
+            eprintln!("skipping: characters_name_lower_key not applied to this database");
+            return;
+        }
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let name = format!("CaseT{suffix}");
+        let user = mud_db::users::create(
+            &pool,
+            &format!("{}@tmp.invalid", name.to_ascii_lowercase()),
+            &name,
+        )
+        .await
+        .unwrap();
+        let make = |n: String| {
+            let pool = pool.clone();
+            let user = user.clone();
+            async move {
+                mud_db::characters::create(
+                    &pool,
+                    &mud_db::characters::NewCharacter {
+                        user_id: &user,
+                        name: &n,
+                        race: "HUMAN",
+                        gender: "neutral",
+                        class_id: 1,
+                        strength: 13,
+                        intelligence: 13,
+                        wisdom: 13,
+                        dexterity: 13,
+                        constitution: 13,
+                        charisma: 13,
+                        name_approved: true,
+                        password_hash: "",
+                    },
+                )
+                .await
+            }
+        };
+        make(name.clone()).await.unwrap();
+        let err = make(name.to_ascii_lowercase())
+            .await
+            .expect_err("case-variant duplicate must be refused");
+        let unique = is_unique_violation(&err);
+        mud_db::sqlx::query("DELETE FROM \"Characters\" WHERE user_id = $1")
+            .bind(&user)
+            .execute(&pool)
+            .await
+            .unwrap();
+        mud_db::sqlx::query("DELETE FROM \"Users\" WHERE id = $1")
+            .bind(&user)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(unique, "{err}");
     }
 
     #[test]

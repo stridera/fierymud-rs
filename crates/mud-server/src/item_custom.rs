@@ -76,7 +76,7 @@ fn mimics_corpse_label(name: &str) -> bool {
 /// Words the targeting parser or commands give a meaning of their own;
 /// a custom name must not make an item answer to them.
 fn is_reserved_target_word(w: &str) -> bool {
-    if matches!(w, "all" | "self" | "me" | "everyone" | "someone" | "here") {
+    if crate::reserved_names::is_target_word(w) {
         return true;
     }
     let digits = w.trim_end_matches(|c: char| c.is_ascii_alphabetic());

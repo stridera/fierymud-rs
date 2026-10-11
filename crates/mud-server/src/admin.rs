@@ -303,12 +303,56 @@ fn check_auth(state: &AppState, headers: &HeaderMap) -> Result<(), (StatusCode, 
     check_bearer(state.token.as_deref().map(String::as_str), headers)
 }
 
+/// True when the `Host` header names the loopback interface
+/// (`127.0.0.1`, `localhost` or `[::1]`, with an optional port). A web page
+/// on another origin that rebinds its DNS name to 127.0.0.1 still sends its
+/// own name as `Host`, so this rejects DNS-rebinding requests.
+fn host_is_loopback(headers: &HeaderMap) -> bool {
+    let Some(host) = headers.get("host").and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    let name = if let Some(rest) = host.strip_prefix('[') {
+        // Bracketed IPv6 literal: `[::1]` or `[::1]:8080`.
+        match rest.split_once(']') {
+            Some((addr, tail)) if tail.is_empty() || tail.starts_with(':') => {
+                return addr == "::1" && port_ok(tail.strip_prefix(':'));
+            }
+            _ => return false,
+        }
+    } else {
+        match host.split_once(':') {
+            Some((name, port)) => {
+                if !port_ok(Some(port)) {
+                    return false;
+                }
+                name
+            }
+            None => host,
+        }
+    };
+    name == "127.0.0.1" || name.eq_ignore_ascii_case("localhost")
+}
+
+/// An absent port, or a non-empty all-digit one.
+fn port_ok(port: Option<&str>) -> bool {
+    port.is_none_or(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// `expected == None` means no token is configured (loopback-only dev
-/// run): everything passes. A configured-but-blank token can never
-/// authenticate anyone; it is rejected outright.
+/// run): requests pass only when their `Host` header is a loopback name,
+/// so DNS rebinding cannot turn a visitor's browser into an admin client.
+/// A configured-but-blank token can never authenticate anyone; it is
+/// rejected outright.
 fn check_bearer(expected: Option<&str>, headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
     let Some(expected) = expected else {
-        return Ok(());
+        return if host_is_loopback(headers) {
+            Ok(())
+        } else {
+            Err((
+                StatusCode::FORBIDDEN,
+                "admin API without ADMIN_TOKEN only answers to Host 127.0.0.1 or localhost".into(),
+            ))
+        };
     };
     if expected.trim().is_empty() {
         return Err((
@@ -2560,9 +2604,47 @@ mod auth_token_tests {
         assert!(check_bearer(Some("s3cret"), &bearer(Some("Bearer s3cret"))).is_ok());
     }
 
+    fn with_host(host: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("host", host.parse().unwrap());
+        h
+    }
+
     #[test]
-    fn no_token_configured_passes() {
-        assert!(check_bearer(None, &bearer(None)).is_ok());
+    fn no_token_configured_passes_for_loopback_hosts() {
+        for host in [
+            "127.0.0.1",
+            "127.0.0.1:8080",
+            "localhost",
+            "LOCALHOST:8080",
+            "[::1]:8080",
+        ] {
+            assert!(check_bearer(None, &with_host(host)).is_ok(), "{host}");
+        }
+    }
+
+    #[test]
+    fn no_token_configured_rejects_rebinding_hosts() {
+        for host in [
+            "evil.example.com",
+            "evil.example.com:8080",
+            "127.0.0.1.evil.com",
+            "localhost.evil.com:8080",
+            "127.0.0.1:",
+            "127.0.0.1:80x",
+            "0.0.0.0:8080",
+            "[::1]x",
+        ] {
+            assert!(check_bearer(None, &with_host(host)).is_err(), "{host}");
+        }
+        assert!(check_bearer(None, &bearer(None)).is_err(), "missing Host");
+    }
+
+    #[test]
+    fn configured_token_ignores_the_host_header() {
+        let mut h = with_host("admin.internal:8080");
+        h.insert("authorization", "Bearer s3cret".parse().unwrap());
+        assert!(check_bearer(Some("s3cret"), &h).is_ok());
     }
 }
 

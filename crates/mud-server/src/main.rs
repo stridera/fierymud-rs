@@ -47,6 +47,7 @@ mod quest_progress;
 mod quest_triggers;
 mod quest_vars;
 mod regen;
+mod reserved_names;
 mod respawn;
 mod rest;
 mod room_access;

@@ -1152,6 +1152,17 @@ fn pre_login_abuse_streak(burst: u32) -> u32 {
     burst.max(1).saturating_mul(PRE_LOGIN_ABUSE_BURST_MULTIPLE)
 }
 
+/// Sustained rate (frames per second) of client-originated telnet
+/// control frames (GMCP, NAWS, TTYPE subnegotiations) per connection.
+/// They bypass the line bucket, and each GMCP frame can cost the world
+/// loop a JSON parse and a full change-gated resend, so they get their own.
+const CTL_FRAMES_PER_SEC: u32 = 20;
+/// Burst allowance for control frames; covers a client's connect-time
+/// `Core.Hello` / `Core.Supports.Set` / TTYPE cycle with plenty to spare.
+const CTL_FRAME_BURST: u32 = 40;
+/// Consecutive refused control frames at which the connection is dropped.
+const CTL_ABUSE_STREAK: u32 = 500;
+
 /// Token bucket for input lines. `per_sec == 0` disables the limit.
 /// The rate and burst are passed per call so the same bucket follows a
 /// connection from the strict pre-login limits to the relaxed ones once
@@ -1325,6 +1336,7 @@ async fn handle_connection<S>(
     let started = Instant::now();
     let mut last_line = started;
     let mut line_bucket = LineBucket::new(started, limits.pre_login_line_burst);
+    let mut ctl_bucket = LineBucket::new(started, CTL_FRAME_BURST);
     let mut was_authed = false;
     // The greeting waits for the client's capabilities, but not forever
     // (raw TCP clients never answer).
@@ -1401,7 +1413,16 @@ async fn handle_connection<S>(
         // Handle telnet events first so any negotiation reply lands
         // before the line we forward upstream.
         for event in events {
-            if !handle_telnet_event(conn_id, &out_tx, &mut sink, &mut caps, event).await {
+            if !handle_telnet_event(
+                conn_id,
+                &out_tx,
+                &mut sink,
+                &mut caps,
+                &mut ctl_bucket,
+                event,
+            )
+            .await
+            {
                 break 'conn;
             }
         }
@@ -1564,6 +1585,7 @@ async fn handle_telnet_event(
     out_tx: &Outbound,
     sink: &mut Sink<'_>,
     caps: &mut CapsLocal,
+    ctl_bucket: &mut LineBucket,
     event: TelnetEvent,
 ) -> bool {
     match event {
@@ -1571,7 +1593,7 @@ async fn handle_telnet_event(
             handle_negotiate(out_tx, sink, caps, command, option).await
         }
         TelnetEvent::Subneg { option, payload } => {
-            handle_subneg(conn_id, out_tx, sink, caps, option, &payload).await
+            handle_subneg(conn_id, out_tx, sink, caps, ctl_bucket, option, &payload).await
         }
         TelnetEvent::GoAhead | TelnetEvent::EndOfRecord => {
             // Inbound GA / EOR is unusual — modern MUD clients
@@ -1637,7 +1659,11 @@ async fn handle_negotiate(
         //    tracking flag stays false. We don't reply (the protocol
         //    says we could send the opposite but most clients don't
         //    care and Mudlet's negotiation history is already settled).
-        (DO, opt::MSSP) | (DONT | WONT, _) => {}
+        //  * DO ECHO / DONT ECHO — the login server's password mode
+        //    (`WILL ECHO` before a password prompt). A refusing client keeps
+        //    its local echo; the login still works, the password is just
+        //    visible to the person typing it.
+        (DO, opt::MSSP | opt::ECHO) | (DONT | WONT, _) => {}
         (WILL, opt::NEW_ENVIRON) => {
             // Ask for the variables that reveal charset / colour
             // depth; the reply arrives as SB NEW-ENVIRON IS. Once only.
@@ -1711,9 +1737,25 @@ async fn handle_subneg(
     out_tx: &Outbound,
     sink: &mut Sink<'_>,
     caps: &mut CapsLocal,
+    ctl_bucket: &mut LineBucket,
     option: u8,
     payload: &[u8],
 ) -> bool {
+    // GMCP / NAWS / TTYPE frames are not input lines, so the line bucket
+    // never sees them. Charge them to their own bucket: shed the excess,
+    // and drop the connection on a sustained flood.
+    if matches!(option, opt::NAWS | opt::TTYPE | opt::GMCP)
+        && !ctl_bucket.take(Instant::now(), CTL_FRAMES_PER_SEC, CTL_FRAME_BURST)
+    {
+        if ctl_bucket.dropped_streak >= CTL_ABUSE_STREAK {
+            warn!(
+                conn_id,
+                option, "telnet control-frame flood; dropping connection"
+            );
+            return false;
+        }
+        return true;
+    }
     match option {
         opt::NAWS => {
             if let Some((cols, rows)) = parse_naws(payload) {
@@ -2452,6 +2494,156 @@ mod limit_tests {
             in_rx.recv().await.unwrap().kind,
             InboundKind::Gmcp { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn control_frame_flood_is_shed_then_dropped() {
+        let (out_tx, _out_rx) = mpsc::channel::<Vec<u8>>(8);
+        let (in_tx, mut in_rx) = mpsc::channel::<Inbound>(4096);
+        let mut sink = Sink {
+            conn_id: 1,
+            inbound: &in_tx,
+            pending: Vec::new(),
+            pending_bytes: 0,
+            hello: None,
+        };
+        let mut caps = CapsLocal::default();
+        let mut bucket = LineBucket::new(Instant::now(), CTL_FRAME_BURST);
+
+        // A burst of GMCP frames passes; the rest are shed, not forwarded.
+        let mut dropped_at = None;
+        for i in 0..(CTL_FRAME_BURST + CTL_ABUSE_STREAK + 50) {
+            let keep = handle_subneg(
+                1,
+                &out_tx,
+                &mut sink,
+                &mut caps,
+                &mut bucket,
+                opt::GMCP,
+                b"Core.Hello {}",
+            )
+            .await;
+            if !keep {
+                dropped_at = Some(i);
+                break;
+            }
+        }
+        let mut forwarded = 0;
+        while in_rx.try_recv().is_ok() {
+            forwarded += 1;
+        }
+        assert!(
+            (CTL_FRAME_BURST..=CTL_FRAME_BURST + 1).contains(&forwarded),
+            "forwarded {forwarded}"
+        );
+        // Sustained abuse ends the connection (handler returns false).
+        let at = dropped_at.expect("flood must drop the connection");
+        assert!(
+            at >= CTL_FRAME_BURST + CTL_ABUSE_STREAK - 1,
+            "dropped at {at}"
+        );
+
+        // NAWS / TTYPE / GMCP draw from one budget: spend it on NAWS and
+        // the next GMCP frame is shed (handler still true, nothing sent).
+        let mut bucket = LineBucket::new(Instant::now(), CTL_FRAME_BURST);
+        let naws = [0, 80, 0, 24];
+        for _ in 0..CTL_FRAME_BURST {
+            assert!(
+                handle_subneg(
+                    1,
+                    &out_tx,
+                    &mut sink,
+                    &mut caps,
+                    &mut bucket,
+                    opt::NAWS,
+                    &naws
+                )
+                .await
+            );
+        }
+        while in_rx.try_recv().is_ok() {}
+        assert!(
+            handle_subneg(
+                1,
+                &out_tx,
+                &mut sink,
+                &mut caps,
+                &mut bucket,
+                opt::GMCP,
+                b"Core.Ping"
+            )
+            .await
+        );
+        assert!(
+            in_rx.try_recv().is_err(),
+            "GMCP shed after NAWS used the budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn normal_control_traffic_is_not_throttled() {
+        let (out_tx, _out_rx) = mpsc::channel::<Vec<u8>>(8);
+        let (in_tx, mut in_rx) = mpsc::channel::<Inbound>(64);
+        let mut sink = Sink {
+            conn_id: 1,
+            inbound: &in_tx,
+            pending: Vec::new(),
+            pending_bytes: 0,
+            hello: None,
+        };
+        let mut caps = CapsLocal::default();
+        let mut bucket = LineBucket::new(Instant::now(), CTL_FRAME_BURST);
+        let naws = [0, 80, 0, 24];
+        for _ in 0..3 {
+            assert!(
+                handle_subneg(
+                    1,
+                    &out_tx,
+                    &mut sink,
+                    &mut caps,
+                    &mut bucket,
+                    opt::NAWS,
+                    &naws
+                )
+                .await
+            );
+            assert!(
+                handle_subneg(
+                    1,
+                    &out_tx,
+                    &mut sink,
+                    &mut caps,
+                    &mut bucket,
+                    opt::GMCP,
+                    b"Core.Supports.Set []"
+                )
+                .await
+            );
+        }
+        let mut n = 0;
+        while in_rx.try_recv().is_ok() {
+            n += 1;
+        }
+        assert_eq!(n, 6);
+    }
+
+    #[tokio::test]
+    async fn echo_refusal_and_acceptance_are_quiet() {
+        let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(8);
+        let (in_tx, mut in_rx) = mpsc::channel::<Inbound>(8);
+        let mut sink = Sink {
+            conn_id: 1,
+            inbound: &in_tx,
+            pending: Vec::new(),
+            pending_bytes: 0,
+            hello: None,
+        };
+        let mut caps = CapsLocal::default();
+        for cmd in [telnet::DONT, telnet::DO, telnet::WONT] {
+            assert!(handle_negotiate(&out_tx, &mut sink, &mut caps, cmd, opt::ECHO).await);
+        }
+        assert!(out_rx.try_recv().is_err(), "no reply to ECHO answers");
+        assert!(in_rx.try_recv().is_err(), "nothing forwarded");
     }
 
     #[tokio::test]
