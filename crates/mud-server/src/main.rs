@@ -236,6 +236,21 @@ macro_rules! timed {
 #[tokio::main(flavor = "current_thread")]
 #[allow(clippy::too_many_lines)]
 async fn main() {
+    // `--version` / `-V` answers before logging, env or DB are touched, so the
+    // deploy script can run it on the prod host as a cheap "does this binary
+    // load there" check (glibc, linker) without side effects.
+    if std::env::args()
+        .nth(1)
+        .is_some_and(|a| a == "--version" || a == "-V")
+    {
+        println!(
+            "mud-server {} (git {})",
+            env!("CARGO_PKG_VERSION"),
+            env!("FIERYMUD_GIT_SHA")
+        );
+        return;
+    }
+
     // Start from RUST_LOG (or info), then *always* append a clamp on
     // rustls's handshake module to error. A public TLS port gets
     // scanners that send illegal handshakes (IP-as-SNI, corrupt
