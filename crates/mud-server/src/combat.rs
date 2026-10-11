@@ -1423,7 +1423,9 @@ pub(crate) fn engage_swing_now(world: &mut World, attacker: Entity, target: Enti
             })
             .unwrap_or(target)
     };
-    apply_swing(
+    // The opening blow runs the same per-hit script triggers as every later
+    // round (worn ATTACK / DEFEND objects, HIT_PERCENT).
+    swing_with_triggers(
         world,
         &Swing {
             attacker,
@@ -5967,6 +5969,128 @@ mod tests {
         let get = |k: &str| cache.get(mud_db::enums::EntityType::Mob, 1, 1, k).cloned();
         assert_eq!(get("n"), Some(1.into()), "one fire for three attackers");
         assert_eq!(get("foe"), Some("Alpha".into()), "actor = its opponent");
+    }
+
+    /// The "talking" longsword (object 12/40): an ATTACK trigger on a wielded
+    /// weapon. Reduced from the live body; the parts that matter are kept: the
+    /// 20% gate, the `damage` binding, `random`, and the line sent with
+    /// `self.room:send(.. self.shortdesc ..)`. The sword is `Located` in its
+    /// wielder, so `self.room` has to look through the wielder to the room.
+    const TALKING_SWORD_BODY: &str = r#"
+if not percent_chance(20) then
+    return true
+end
+local rndm = random(1, 10)
+if damage == 0 then
+    self.room:send(tostring(self.shortdesc) .. " says, \"Missed again, big surprise.\"")
+else
+    self.room:send(tostring(self.shortdesc) .. " says, \"Booyah! (" .. rndm .. ")\"")
+end
+"#;
+
+    fn talking_sword_catalog() -> mud_world::TriggerCatalog {
+        let mut catalog = mud_world::TriggerCatalog::default();
+        catalog.by_key.insert(
+            (12, 40),
+            mud_world::TriggerDef {
+                zone_id: 12,
+                id: 40,
+                name: "Noisy Weapon".to_string(),
+                attach_type: mud_world::TriggerAttach::Object,
+                commands: TALKING_SWORD_BODY.to_string(),
+                flags: vec![mud_world::TriggerEvent::Attack],
+                arg_list: vec![],
+                num_args: 0,
+            },
+        );
+        catalog
+    }
+
+    fn wield_talking_sword(world: &mut World, wielder: Entity) -> Entity {
+        world
+            .spawn((
+                Item,
+                Named {
+                    name: "a <magenta>TALKING</> steel longsword".to_string(),
+                },
+                mud_world::WorldKey { zone: 12, id: 40 },
+                Located(wielder),
+                mud_world::EquippedSlot(mud_world::Slot::Wield),
+                mud_world::AttachedTriggers(vec![(12, 40)]),
+            ))
+            .id()
+    }
+
+    /// A player wielding the talking sword fights a goblin that cannot die or
+    /// swing back; the sword speaks to the room within a few dozen rounds
+    /// (20% a round, so 200 rounds without a word is a one-in-1e19 fluke).
+    #[test]
+    fn wielded_talking_sword_speaks_during_a_fight() {
+        let mut world = World::new();
+        let room = world.spawn(mud_world::Room).id();
+        let goblin = credit_goblin(&mut world, room, 0, None);
+        world.entity_mut(goblin).insert(Health {
+            hp: 1_000_000,
+            max: 1_000_000,
+        });
+        let player = credit_player(&mut world, room, "Wielder", 0);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4096);
+        world
+            .entity_mut(player)
+            .insert((crate::commands::Connection(tx), Fighting(goblin)));
+        world.insert_resource(talking_sword_catalog());
+        world.insert_resource(mud_script::LuaHost::new());
+        wield_talking_sword(&mut world, player);
+
+        let mut heard = String::new();
+        for _ in 0..200 {
+            run_combat_tick(&mut world);
+            heard = crate::commands::test_support::drain(&mut rx);
+            if heard.contains("says, ") {
+                break;
+            }
+        }
+        assert!(
+            heard.contains("longsword says, \""),
+            "the sword never spoke; last round's output: {heard:?}"
+        );
+        let stats = world.resource::<crate::triggers::TriggerStats>();
+        assert!(stats.by_event["Attack"].fired >= 1);
+        assert_eq!(stats.by_event["Attack"].failed, 0, "the body ran cleanly");
+    }
+
+    /// The same sword reaches a bystander too: the line is a room broadcast.
+    #[test]
+    fn talking_sword_is_heard_by_the_rest_of_the_room() {
+        let mut world = World::new();
+        let room = world.spawn(mud_world::Room).id();
+        let goblin = credit_goblin(&mut world, room, 0, None);
+        world.entity_mut(goblin).insert(Health {
+            hp: 1_000_000,
+            max: 1_000_000,
+        });
+        let player = credit_player(&mut world, room, "Wielder", 0);
+        world.entity_mut(player).insert(Fighting(goblin));
+        let watcher = credit_player(&mut world, room, "Watcher", 0);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4096);
+        world
+            .entity_mut(watcher)
+            .insert(crate::commands::Connection(tx));
+        world.insert_resource(talking_sword_catalog());
+        world.insert_resource(mud_script::LuaHost::new());
+        wield_talking_sword(&mut world, player);
+        let mut heard = String::new();
+        for _ in 0..200 {
+            run_combat_tick(&mut world);
+            heard = crate::commands::test_support::drain(&mut rx);
+            if heard.contains("longsword says, ") {
+                break;
+            }
+        }
+        assert!(
+            heard.contains("longsword says, "),
+            "bystander heard: {heard:?}"
+        );
     }
 
     fn wealth_of(world: &World, e: Entity) -> i64 {

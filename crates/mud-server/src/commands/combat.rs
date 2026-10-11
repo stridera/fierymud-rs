@@ -3820,6 +3820,47 @@ mod attack_while_fighting_tests {
         world.resource_mut::<crate::TickCount>().0 += ticks;
     }
 
+    /// The opening blow of `attack` runs the worn-weapon ATTACK trigger,
+    /// the same as every later round (it used to skip it, so a talking sword
+    /// stayed silent until the second swing).
+    #[test]
+    fn opening_blow_runs_the_wielded_weapons_attack_trigger() {
+        let (mut world, p, _ogre, _rat, _rx) = fresh();
+        world.resource_mut::<TriggerCatalog>().by_key.insert(
+            (99, 2),
+            TriggerDef {
+                zone_id: 99,
+                id: 2,
+                name: "blade".to_string(),
+                attach_type: mud_world::TriggerAttach::Object,
+                commands: "self:setvar('dealt', damage)".to_string(),
+                flags: vec![TriggerEvent::Attack],
+                arg_list: vec![],
+                num_args: 0,
+            },
+        );
+        world.spawn((
+            mud_world::Item,
+            Named {
+                name: "a blade".into(),
+            },
+            mud_world::WorldKey { zone: 99, id: 5 },
+            Located(p),
+            mud_world::EquippedSlot(mud_world::Slot::Wield),
+            AttachedTriggers(vec![(99, 2)]),
+        ));
+        cmd_attack(&mut world, p, "rat");
+        let dealt = world
+            .resource::<mud_world::EntityVariableCache>()
+            .get(mud_db::enums::EntityType::Object, 99, 5, "dealt")
+            .cloned();
+        assert_eq!(
+            dealt,
+            Some(1.into()),
+            "the first swing's damage reaches the blade"
+        );
+    }
+
     #[test]
     fn disengage_then_kill_gets_no_free_round() {
         let (mut world, p, ogre, _rat, _rx) = fresh();

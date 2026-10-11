@@ -2352,6 +2352,99 @@ return _return_value"#;
         let _ = bag;
     }
 
+    /// A player standing in `room` with a connection, for asserting on what
+    /// a script's `room:send` delivers.
+    fn listener_in(
+        world: &mut World,
+        room: Entity,
+        name: &str,
+    ) -> (Entity, crate::commands::test_support::Rx) {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+        let e = spawn_player(world, room, name);
+        world.entity_mut(e).insert(crate::commands::Connection(tx));
+        (e, rx)
+    }
+
+    /// `self.room` of an item is the room it is in, wherever the item is
+    /// held: worn, carried, or in a bag on the floor. (It used to be the
+    /// item's immediate `Located`, the wearer or the bag, so a broadcast
+    /// aimed at it reached nobody.)
+    #[test]
+    fn self_room_of_a_held_item_is_the_room() {
+        use crate::commands::test_support::drain;
+        let (mut world, room) = base_world();
+        add_trigger(
+            &mut world,
+            1,
+            vec![TriggerEvent::Attack],
+            "self.room:send(self.shortdesc .. ' hums.')",
+        );
+        let (holder, mut holder_rx) = listener_in(&mut world, room, "Holder");
+        let (_other, mut other_rx) = listener_in(&mut world, room, "Other");
+        let foe = spawn_mob(&mut world, room, 9, vec![]);
+        let worn = spawn_item(&mut world, holder, 1, vec![(99, 1)]);
+        world
+            .entity_mut(worn)
+            .insert(mud_world::EquippedSlot(mud_world::Slot::Wield));
+        let carried = spawn_item(&mut world, holder, 2, vec![(99, 1)]);
+        let bag = spawn_item(&mut world, room, 3, vec![]);
+        let bagged = spawn_item(&mut world, bag, 4, vec![(99, 1)]);
+        for item in [worn, carried, bagged] {
+            fire_event_with_actor(&mut world, item, foe, TriggerEvent::Attack);
+        }
+        for rx in [&mut holder_rx, &mut other_rx] {
+            let heard = drain(rx).to_ascii_lowercase();
+            assert_eq!(heard.matches("hums.").count(), 3, "heard: {heard:?}");
+            assert!(
+                heard.contains("item1 hums."),
+                "short description is the name"
+            );
+        }
+    }
+
+    #[test]
+    fn random_triggers_fire_on_worn_and_carried_items() {
+        use crate::commands::test_support::drain;
+        let (mut world, room) = base_world();
+        add_trigger(
+            &mut world,
+            1,
+            vec![TriggerEvent::Random],
+            "-- 100% chance to trigger\nif not percent_chance(100) then\n    return true\nend\nself.room:send(self.shortdesc .. ' stirs.')",
+        );
+        let (holder, mut rx) = listener_in(&mut world, room, "Holder");
+        let worn = spawn_item(&mut world, holder, 1, vec![(99, 1)]);
+        world
+            .entity_mut(worn)
+            .insert(mud_world::EquippedSlot(mud_world::Slot::Wield));
+        spawn_item(&mut world, holder, 2, vec![(99, 1)]);
+        run_random_pulse(&mut world);
+        let heard = drain(&mut rx).to_ascii_lowercase();
+        assert!(heard.contains("item1 stirs."), "worn: {heard:?}");
+        assert!(heard.contains("item2 stirs."), "carried: {heard:?}");
+    }
+
+    /// A mob wielding a scripted weapon fires its ATTACK trigger like a
+    /// player does, and a worn item on the victim fires DEFEND.
+    #[test]
+    fn mob_wielded_weapons_fire_attack_triggers() {
+        let (mut world, room) = base_world();
+        add_trigger(
+            &mut world,
+            1,
+            vec![TriggerEvent::Attack],
+            "self:setvar('by', actor.name)",
+        );
+        let ogre = spawn_mob(&mut world, room, 1, vec![]);
+        let victim = spawn_player(&mut world, room, "Vic");
+        let club = spawn_item(&mut world, ogre, 7, vec![(99, 1)]);
+        world
+            .entity_mut(club)
+            .insert(mud_world::EquippedSlot(mud_world::Slot::Wield));
+        fire_weapon_triggers(&mut world, ogre, victim, 3);
+        assert_eq!(obj_var(&world, 7, "by"), Some("mob1".into()));
+    }
+
     #[test]
     fn catalog_reload_reindexes_random_triggers() {
         let (mut world, room) = base_world();

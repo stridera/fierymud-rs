@@ -1678,6 +1678,25 @@ struct WorldPtr(NonNull<World>);
 unsafe impl Send for WorldPtr {}
 unsafe impl Sync for WorldPtr {}
 
+/// The room `entity` is in: itself when it is a room, otherwise the first
+/// room up its `Located` chain. An item worn by a player or carried in a bag
+/// is `Located` in a creature or a container, so a single hop lands on the
+/// wrong entity. Bounded so a corrupt cycle cannot spin.
+fn containing_room(world: &World, entity: Entity) -> Option<Entity> {
+    let mut at = entity;
+    for _ in 0..16 {
+        if world.get::<mud_world::Room>(at).is_some() {
+            return Some(at);
+        }
+        match world.get::<Located>(at) {
+            Some(l) => at = l.0,
+            // The chain tops out at a root that is not tagged `Room`.
+            None => return (at != entity).then_some(at),
+        }
+    }
+    None
+}
+
 fn world_from_lua<R>(lua: &Lua, f: impl FnOnce(&World) -> R) -> mlua::Result<R> {
     let ptr = lua
         .app_data_ref::<WorldPtr>()
@@ -3579,15 +3598,11 @@ impl UserData for LuaActor {
                         // Returning Located(this).0 would give the
                         // zone — wrong. So when `this` already has a
                         // Room component, return self as a LuaRoom.
-                        // Otherwise resolve via Located as usual.
-                        use mud_world::Room;
-                        let room_entity = world_from_lua(lua, |w| {
-                            if w.get::<Room>(this.entity).is_some() {
-                                Some(this.entity)
-                            } else {
-                                w.get::<Located>(this.entity).map(|l| l.0)
-                            }
-                        })?;
+                        // Otherwise walk Located up to the room: an item
+                        // worn, carried or bagged has a creature or a
+                        // container there, not a room, and a
+                        // `self.room:send(..)` aimed at that reaches nobody.
+                        let room_entity = world_from_lua(lua, |w| containing_room(w, this.entity))?;
                         match room_entity {
                             Some(e) => {
                                 Ok(Value::UserData(lua.create_userdata(LuaRoom { entity: e })?))
@@ -3786,8 +3801,14 @@ impl UserData for LuaActor {
                     // the actor's name when missing. 207 corpus refs.
                     "shortdesc" => {
                         let s = world_from_lua(lua, |w| {
-                            w.get::<Description>(this.entity)
-                                .map(|d| d.0.clone())
+                            // An item's `Description` is its long examine
+                            // text; its short description is its name.
+                            let described = if w.get::<Item>(this.entity).is_some() {
+                                None
+                            } else {
+                                w.get::<Description>(this.entity).map(|d| d.0.clone())
+                            };
+                            described
                                 .or_else(|| w.get::<Named>(this.entity).map(|n| n.name.clone()))
                                 .unwrap_or_default()
                         })?;
