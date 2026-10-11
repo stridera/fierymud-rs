@@ -1545,6 +1545,11 @@ fn apply_swing(world: &mut World, s: &Swing) {
     }
     // Legacy `damage()` runs for misses too: the victim fights back either way.
     victim_fights_back(world, s.target, s.attacker);
+    // AUTO_ASSIST followers and groupmates in the room back a player who is
+    // being attacked (a mob starting the fight never goes through cmd_attack).
+    if world.get::<Player>(s.target).is_some() {
+        crate::commands::auto_assist_followers_of(world, s.target, s.attacker, room);
+    }
     let was_sleeping = world.get::<Posture>(s.target).map(|p| p.0) == Some(PostureKind::Sleeping);
     // posture-and-lifestate.md: a defender attacked while RESTING
     // auto-stands on the hit. Sleeping has its own jolt-awake path
@@ -2461,6 +2466,10 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
         // their group. A leader hands it to the next member (or the group
         // disbands when only one other is left), with the legacy notices.
         crate::commands::ungroup(world, victim, true, false);
+        // Legacy `extract_char` -> `die_follower`: the dead stop following
+        // anyone, and their player followers stop following them. Mob
+        // followers (persistent pets) stay attached so they survive a relog.
+        crate::commands::die_follower(world, victim, true);
         // Lines queued behind a cast (an alias chain) must not run after the
         // respawn: the dead player's plans died with them.
         crate::commands::input_queue::clear(world, victim);
@@ -2786,6 +2795,8 @@ fn finish_mob_death(world: &mut World, victim: Entity) {
         }
     }
     crate::commands::ungroup_on_despawn(world, victim);
+    // Legacy `die_follower`: nobody keeps following a dead mob.
+    crate::commands::die_follower(world, victim, false);
     // A dead mount drops its rider (and a dead mounted mob its steed).
     clear_mount_links(world, victim);
     if let Ok(e) = world.get_entity_mut(victim) {
@@ -5993,6 +6004,143 @@ mod tests {
             world.get::<Fighting>(v).is_none(),
             "attacker in another room"
         );
+    }
+
+    fn assist_fixture() -> (World, Entity, Entity, Entity) {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        world.insert_resource(TickCount(0));
+        let leader = credit_player(&mut world, room, "Lead", 0);
+        let mob = make_attacker(&mut world, room, leader, 5);
+        world.entity_mut(mob).insert(Mob);
+        (world, room, leader, mob)
+    }
+
+    fn assister(world: &mut World, room: Entity, name: &str, leader: Entity) -> Entity {
+        let e = credit_player(world, room, name, 0);
+        world.entity_mut(e).insert((
+            mud_world::Follower(leader),
+            PlayerFlags(vec![mud_db::enums::PlayerFlag::AutoAssist]),
+        ));
+        e
+    }
+
+    /// A mob starting the fight against the leader pulls in the leader's
+    /// `AUTO_ASSIST` follower and groupmate in the room.
+    #[test]
+    fn mob_attacking_leader_pulls_in_autoassist_followers_and_groupmates() {
+        let (mut world, room, leader, mob) = assist_fixture();
+        let follower = assister(&mut world, room, "Tag", leader);
+        let mate = credit_player(&mut world, room, "Mate", 0);
+        world.entity_mut(mate).insert((
+            mud_world::GroupMember(leader),
+            PlayerFlags(vec![mud_db::enums::PlayerFlag::AutoAssist]),
+        ));
+        run_combat_tick(&mut world);
+        assert_eq!(world.get::<Fighting>(follower).map(|f| f.0), Some(mob));
+        assert_eq!(world.get::<Fighting>(mate).map(|f| f.0), Some(mob));
+        assert_eq!(world.get::<Fighting>(leader).map(|f| f.0), Some(mob));
+    }
+
+    #[test]
+    fn followers_without_autoassist_or_in_another_room_stay_out() {
+        let (mut world, room, leader, mob) = assist_fixture();
+        let elsewhere = make_room(&mut world);
+        let plain = assister(&mut world, room, "Plain", leader);
+        world.entity_mut(plain).remove::<PlayerFlags>();
+        let far = assister(&mut world, elsewhere, "Far", leader);
+        let asleep = assister(&mut world, room, "Sleepy", leader);
+        world
+            .entity_mut(asleep)
+            .insert(Posture(PostureKind::Sleeping));
+        let stranger = credit_player(&mut world, room, "Stranger", 0);
+        world
+            .entity_mut(stranger)
+            .insert(PlayerFlags(vec![mud_db::enums::PlayerFlag::AutoAssist]));
+        run_combat_tick(&mut world);
+        assert_eq!(world.get::<Fighting>(leader).map(|f| f.0), Some(mob));
+        for (who, e) in [
+            ("no autoassist", plain),
+            ("other room", far),
+            ("asleep", asleep),
+            ("not following or grouped", stranger),
+        ] {
+            assert!(world.get::<Fighting>(e).is_none(), "{who} stays out");
+        }
+    }
+
+    /// Legacy `die_follower`: a dying player stops following their master and
+    /// their player followers stop following them, with the legacy notices;
+    /// a persistent pet stays attached so it survives the relog.
+    #[test]
+    fn player_death_releases_follow_links_but_keeps_pets() {
+        use crate::commands::test_support::drain;
+        let mut fx = crate::commands::gmcp_tests::fixture();
+        let room = fx.a;
+        fx.world.insert_resource(TickCount(0));
+        let (master, mut mrx) = crate::commands::gmcp_tests::player(&mut fx.world, room, "Boss");
+        let (dead, mut drx) = crate::commands::gmcp_tests::player(&mut fx.world, room, "Mort");
+        let (tag, mut trx) = crate::commands::gmcp_tests::player(&mut fx.world, room, "Tag");
+        let pet = fx
+            .world
+            .spawn((
+                Mob,
+                Named {
+                    name: "a wolf".into(),
+                },
+                Located(room),
+                mud_world::Follower(dead),
+                mud_world::PersistentPet,
+            ))
+            .id();
+        fx.world
+            .entity_mut(dead)
+            .insert(mud_world::Follower(master));
+        fx.world.entity_mut(tag).insert(mud_world::Follower(dead));
+        let world = &mut fx.world;
+        handle_death(world, dead, "Mort", room);
+        assert!(world.get::<mud_world::Follower>(dead).is_none());
+        assert!(world.get::<mud_world::Follower>(tag).is_none());
+        assert_eq!(
+            world.get::<mud_world::Follower>(pet).map(|f| f.0),
+            Some(dead),
+            "pets stay attached"
+        );
+        let dead_out = drain(&mut drx);
+        assert!(dead_out.contains("You stop following Boss."), "{dead_out}");
+        assert!(dead_out.contains("Tag stops following you."), "{dead_out}");
+        assert!(drain(&mut mrx).contains("Mort stops following you."));
+        assert!(drain(&mut trx).contains("You stop following Mort."));
+    }
+
+    /// Nobody keeps following a dead mob.
+    #[test]
+    fn mob_death_releases_everyone_following_it() {
+        use crate::commands::test_support::drain;
+        let mut fx = crate::commands::gmcp_tests::fixture();
+        let room = fx.a;
+        fx.world.insert_resource(TickCount(0));
+        let (tag, mut trx) = crate::commands::gmcp_tests::player(&mut fx.world, room, "Tag");
+        let mob = fx
+            .world
+            .spawn((
+                Mob,
+                Named {
+                    name: "a goblin".into(),
+                },
+                Located(room),
+                Health { hp: 0, max: 5 },
+            ))
+            .id();
+        let guard = fx
+            .world
+            .spawn((Mob, Located(room), mud_world::Follower(mob)))
+            .id();
+        fx.world.entity_mut(tag).insert(mud_world::Follower(mob));
+        handle_death(&mut fx.world, mob, "a goblin", room);
+        assert!(fx.world.get::<mud_world::Follower>(tag).is_none());
+        assert!(fx.world.get::<mud_world::Follower>(guard).is_none());
+        assert!(drain(&mut trx).contains("You stop following a goblin."));
     }
 
     /// Spell and skill damage goes through `apply_damage_from`, the legacy

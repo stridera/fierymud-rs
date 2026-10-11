@@ -24844,36 +24844,40 @@ pub(crate) fn mob_assist_pulse(world: &mut World) {
     }
 }
 
-/// When `defender` is attacked, find every entity with
-/// `Follower(defender)` who has the `AUTO_ASSIST` flag, isn't already
-/// fighting, and is in `room`, and engage `attacker`. Used as the
-/// hook on the bottom of `cmd_attack`.
+/// When `defender` is attacked, every player in `room` with `AUTO_ASSIST`
+/// who is free to act, is not already fighting, and either follows
+/// `defender` or shares `defender`'s group, engages `attacker`. Called from
+/// `cmd_attack` (a player starts the fight) and from the combat swing (a
+/// mob, or anything else, hits a player), so followers help whoever starts
+/// it. The legacy source has no player autoassist (only the `PetAssist` pet
+/// pulse), so this keeps the port's own rule: same room only. Cost is the
+/// room's occupants, never a world scan.
 pub(crate) fn auto_assist_followers_of(
     world: &mut World,
     defender: Entity,
     attacker: Entity,
     room: Entity,
 ) {
-    let helpers: Vec<Entity> = {
-        let mut q = world.query_filtered::<(
-            Entity,
-            &Follower,
-            &Located,
-            Option<&PlayerFlags>,
-            Option<&Fighting>,
-        ), With<Player>>();
-        q.iter(world)
-            .filter(|(e, f, l, flags, fighting)| {
-                *e != attacker
-                    && *e != defender
-                    && f.0 == defender
-                    && l.0 == room
-                    && fighting.is_none()
-                    && flags.is_some_and(|pf| pf.has(PlayerFlag::AutoAssist))
-            })
-            .map(|(e, _, _, _, _)| e)
-            .collect()
-    };
+    let defender_root = crate::commands::group_root(world, defender);
+    let helpers: Vec<Entity> = crate::room_index::contents_of(world, room)
+        .filter(|&e| {
+            e != attacker
+                && e != defender
+                && world.get::<Player>(e).is_some()
+                && world.get::<Fighting>(e).is_none()
+                && world.get::<Ghost>(e).is_none()
+                && world.get::<Stunned>(e).is_none()
+                && world.get::<Frozen>(e).is_none()
+                && world
+                    .get::<PlayerFlags>(e)
+                    .is_some_and(|pf| pf.has(PlayerFlag::AutoAssist))
+                && world
+                    .get::<Posture>(e)
+                    .is_none_or(|p| p.0 == PostureKind::Standing)
+                && (world.get::<Follower>(e).is_some_and(|f| f.0 == defender)
+                    || crate::commands::group_root(world, e) == defender_root)
+        })
+        .collect();
 
     // A follower only joins when the PK rule would let them hit the attacker.
     let helpers: Vec<Entity> = helpers
@@ -25089,6 +25093,63 @@ pub(crate) fn ungroup(world: &mut World, ch: Entity, verbose: bool, forceful: bo
         }
         send_msg(world, ch, format!("<green>{to_ch}</>\r\n"));
         send_msg(world, leader, format!("<green>{to_leader}</>\r\n"));
+    }
+}
+
+/// Legacy `die_follower`: when `dead` dies, whoever it was following stops
+/// being followed, and everyone following it stops, with the
+/// `stop_follower` notices ("You stop following X.", "X stops following
+/// you.", and a room line when the pair shares a room). A dying player
+/// keeps its mob followers (`keep_mob_followers`): legacy dissolves a
+/// charm here, but the port's persistent pets are saved by their follow
+/// link, so a pet must stay attached for the owner's release and relog.
+pub(crate) fn die_follower(world: &mut World, dead: Entity, keep_mob_followers: bool) {
+    let mut links: Vec<(Entity, Entity)> = Vec::new(); // (follower, leader)
+    if let Some(Follower(master)) = world.get::<Follower>(dead).copied() {
+        links.push((dead, master));
+    }
+    {
+        let mut q = world.query::<(Entity, &Follower)>();
+        links.extend(
+            q.iter(world)
+                .filter(|(e, f)| {
+                    f.0 == dead && !(keep_mob_followers && world.get::<Mob>(*e).is_some())
+                })
+                .map(|(e, f)| (e, f.0)),
+        );
+    }
+    for (follower, leader) in links {
+        try_remove::<Follower>(world, follower);
+        let follower_is_player = world.get::<Player>(follower).is_some();
+        let leader_is_player = world.get::<Player>(leader).is_some();
+        if !follower_is_player && !leader_is_player {
+            continue;
+        }
+        let follower_name = name_of(world, follower);
+        let leader_name = name_of(world, leader);
+        send_rendered(
+            world,
+            follower,
+            &format!("You stop following {leader_name}.\r\n"),
+        );
+        send_msg(
+            world,
+            leader,
+            format!("{follower_name} stops following you.\r\n"),
+        );
+        if let Some(room) = world.get::<Located>(follower).map(|l| l.0)
+            && world.get::<Located>(leader).map(|l| l.0) == Some(room)
+        {
+            broadcast_room_visual(
+                world,
+                room,
+                follower,
+                &[follower, leader],
+                &cap_sentence_start(&format!(
+                    "{follower_name} stops following {leader_name}.\r\n"
+                )),
+            );
+        }
     }
 }
 

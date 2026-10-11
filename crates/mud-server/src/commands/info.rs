@@ -1889,12 +1889,12 @@ inventory::submit! {
         help: Help {
             usage: "autoassist",
             summary: "Toggle automatically joining fights against the one you follow.",
-            long: "Sets AUTO_ASSIST. While you follow someone and stand in \
-                   the same room, you automatically engage anyone who \
-                   attacks them. Today this fires when the attack is \
-                   started by a player's attack command; a monster that \
-                   starts the fight against your leader does not trigger \
-                   it yet, so 'assist' by hand in that case.",
+            long: "Sets AUTO_ASSIST. While you stand in the same room as \
+                   someone you follow, or a member of your group, you \
+                   automatically engage anyone who attacks them, whether \
+                   a player or a monster starts the fight. You do not \
+                   join when you are already fighting, are asleep or \
+                   resting, or the attacker is not in your room.",
         },
         run: cmd_autoassist,
     }
