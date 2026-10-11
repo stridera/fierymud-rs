@@ -2799,21 +2799,22 @@ fn flush_lua_outbox(world: &mut World) {
         }
     }
     // Room broadcasts: snapshot recipients per room so the inner loop
-    // doesn't re-borrow World mid-send. Script text goes out verbatim
-    // (`send_to`, not `send_msg`): legacy `send`/`echo` never CAP()'d it.
+    // doesn't re-borrow World mid-send. Script lines are built from
+    // `self.name .. " says ..."`, so the first visible character is
+    // capitalised ([`cap_script_line`]) unless the line opens with a URL.
     for (room, msg, except) in messages {
         let recipients: Vec<Entity> = crate::room_index::contents_of(world, room)
             .filter(|&e| Some(e) != except && world.get::<Connection>(e).is_some())
             .collect();
         for r in recipients {
-            send_to(world, r, format!("{msg}\r\n"));
+            send_to(world, r, cap_script_line(&format!("{msg}\r\n")));
         }
     }
     // Direct one-to-one delivery (actor:send). send_to silently no-ops
     // if the target has no Connection (mob targets, disconnected
     // players) — that's the desired behavior.
     for (target, msg) in direct {
-        send_to(world, target, format!("{msg}\r\n"));
+        send_to(world, target, cap_script_line(&format!("{msg}\r\n")));
     }
 
     // Queued `actor:command(text)` invocations. Re-enters dispatch as
@@ -16061,8 +16062,8 @@ fn resolve_and_gate_target(
         };
         let rendered = render_ability_template(
             &refusal,
-            &actor_name,
-            &target_name,
+            (&actor_name, Pronouns::of(world, player)),
+            (&target_name, Pronouns::of(world, target_entity)),
             target_entity == player,
             Viewer::Actor,
         );
@@ -16972,6 +16973,9 @@ pub(crate) fn invoke_ability_core(
     } else {
         name_or(world, target_entity, "(unknown)")
     };
+    // Captured up front: the target can despawn mid-cast.
+    let actor_p_pre = Pronouns::of(world, player);
+    let target_p_pre = Pronouns::of(world, target_entity);
     // Saving-throw resolution. If the ability has a row in
     // AbilitySavingThrow, evaluate the DC against caster's
     // FormulaCtx, roll d20 + target's level (proxy for save bonus
@@ -17076,8 +17080,8 @@ pub(crate) fn invoke_ability_core(
         if let Some(t) = caster_template {
             let rendered = render_ability_template(
                 t,
-                &actor_name_pre,
-                &target_name_pre,
+                (&actor_name_pre, actor_p_pre),
+                (&target_name_pre, target_p_pre),
                 target_entity == player,
                 Viewer::Actor,
             );
@@ -17390,8 +17394,8 @@ pub(crate) fn invoke_ability_core(
                                         .as_ref()
                                         .and_then(|m| m.success_to_room.as_deref())
                                 },
-                                &actor_name_pre,
-                                &target_name_pre,
+                                (&actor_name_pre, actor_p_pre),
+                                (&target_name_pre, target_p_pre),
                             );
                         }
                     }
@@ -17902,8 +17906,8 @@ pub(crate) fn invoke_ability_core(
                         // person; otherwise the line goes to the cured person.
                         let line = render_ability_template(
                             &t,
-                            &actor_name_pre,
-                            &target_name_pre,
+                            (&actor_name_pre, actor_p_pre),
+                            (&target_name_pre, target_p_pre),
                             target_entity == player,
                             if target_entity == player {
                                 Viewer::Actor
@@ -17914,8 +17918,8 @@ pub(crate) fn invoke_ability_core(
                         let room = to_room.map(|r| {
                             render_ability_template(
                                 &r,
-                                &actor_name_pre,
-                                &target_name_pre,
+                                (&actor_name_pre, actor_p_pre),
+                                (&target_name_pre, target_p_pre),
                                 false,
                                 Viewer::Bystander,
                             )
@@ -17933,8 +17937,8 @@ pub(crate) fn invoke_ability_core(
                     ) {
                         let line = render_ability_template(
                             &t,
-                            &actor_name_pre,
-                            &target_name_pre,
+                            (&actor_name_pre, actor_p_pre),
+                            (&target_name_pre, target_p_pre),
                             target_entity == player,
                             Viewer::Actor,
                         );
@@ -20392,7 +20396,13 @@ pub(crate) fn invoke_ability_core(
         let line = if let Some(t) = target_template {
             // success_to_victim is rendered for the *victim* — they're
             // never the actor, so reflexive collapse doesn't apply.
-            render_ability_template(t, &actor_name, &target_name_raw, false, Viewer::Target)
+            render_ability_template(
+                t,
+                (&actor_name, actor_p_pre),
+                (&target_name_raw, target_p_pre),
+                false,
+                Viewer::Target,
+            )
         } else {
             format!(
                 "{} {verb}s {} on you. ({} effect(s))",
@@ -20423,8 +20433,13 @@ pub(crate) fn invoke_ability_core(
         && let Some(located) = world.get::<Located>(player).copied()
     {
         // Bystanders see actor + target as third parties — never reflexive.
-        let rendered =
-            render_ability_template(t, &actor_name, &target_name_raw, false, Viewer::Bystander);
+        let rendered = render_ability_template(
+            t,
+            (&actor_name, actor_p_pre),
+            (&target_name_raw, target_p_pre),
+            false,
+            Viewer::Bystander,
+        );
         let mut except: Vec<Entity> = vec![player];
         if target_entity != player {
             except.push(target_entity);
@@ -20990,20 +21005,31 @@ fn send_hit_templates(
     target_entity: Entity,
     victim_template: Option<&str>,
     room_template: Option<&str>,
-    actor_name: &str,
-    target_name: &str,
+    (actor_name, actor_p): (&str, Pronouns),
+    (target_name, target_p): (&str, Pronouns),
 ) {
     if target_entity != player
         && let Some(t) = victim_template
     {
-        let line = render_ability_template(t, actor_name, target_name, false, Viewer::Target);
+        let line = render_ability_template(
+            t,
+            (actor_name, actor_p),
+            (target_name, target_p),
+            false,
+            Viewer::Target,
+        );
         send_msg(world, target_entity, format!("{line}\r\n"));
     }
     if let Some(t) = room_template
         && let Some(located) = world.get::<Located>(player).copied()
     {
-        let rendered =
-            render_ability_template(t, actor_name, target_name, false, Viewer::Bystander);
+        let rendered = render_ability_template(
+            t,
+            (actor_name, actor_p),
+            (target_name, target_p),
+            false,
+            Viewer::Bystander,
+        );
         let mut except: Vec<Entity> = vec![player];
         let mut actors: Vec<(Entity, &str)> = vec![(player, actor_name)];
         if target_entity != player {
@@ -21036,23 +21062,28 @@ pub(crate) enum Viewer {
 /// Substitute `{actor.X}` / `{target.X}` placeholders in an
 /// `AbilityMessages` template for one [`Viewer`].
 ///
+/// Each party is `(name, pronouns)`; callers pass [`Pronouns::of`] so a
+/// bystander reads "him"/"her"/"it" by the entity's real sex.
+///
 /// The viewer's own side reads in the second person (`{actor.name}` ->
 /// "you", `{actor.pos}` -> "your", `{actor.ref}` -> "yourself"); the other
 /// side keeps the entity's `Named.name` verbatim, with `{..pos}` becoming
 /// "<Name>'s" (bystanders who cannot see that entity get "Someone's" when
-/// the caller runs the line through [`broadcast_room_anonymised`]). Other
-/// pronouns default to gender-neutral they/them/their (entities don't carry
-/// gender yet - Phase E). `reflexive=true` means the target IS the actor
-/// (only meaningful for [`Viewer::Actor`]): target-side placeholders
-/// collapse to `yourself` / `your` so a self-targeted spell without a
-/// `success_to_self` row still reads naturally.
+/// the caller runs the line through [`broadcast_room_anonymised`]).
+/// `{..he}`/`{..she}`/`{..it}` are the subjective pronoun, `{..him}`/
+/// `{..her}` the objective and `{..his}` the possessive. `reflexive=true`
+/// means the target IS the actor (only meaningful for [`Viewer::Actor`]):
+/// target-side placeholders collapse to `yourself` / `your` so a
+/// self-targeted spell without a `success_to_self` row still reads naturally.
 pub(crate) fn render_ability_template(
     template: &str,
-    actor_name: &str,
-    target_name: &str,
+    actor: (&str, Pronouns),
+    target: (&str, Pronouns),
     reflexive: bool,
     viewer: Viewer,
 ) -> String {
+    let (actor_name, actor_p) = actor;
+    let (target_name, target_p) = target;
     let actor_is_viewer = viewer == Viewer::Actor;
     let target_is_viewer = viewer == Viewer::Target || (actor_is_viewer && reflexive);
     let (actor_name_s, actor_subj, actor_obj, actor_his, actor_pos, actor_ref) = if actor_is_viewer
@@ -21068,11 +21099,11 @@ pub(crate) fn render_ability_template(
     } else {
         (
             actor_name.to_string(),
-            "they",
-            "them",
-            "their",
+            actor_p.subjective,
+            actor_p.objective,
+            actor_p.possessive,
             format!("{actor_name}'s"),
-            "themself",
+            actor_p.reflexive,
         )
     };
     let (target_name_s, target_subj, target_obj, target_his, target_pos, target_ref) =
@@ -21088,11 +21119,11 @@ pub(crate) fn render_ability_template(
         } else {
             (
                 target_name.to_string(),
-                "they",
-                "them",
-                "their",
+                target_p.subjective,
+                target_p.objective,
+                target_p.possessive,
                 format!("{target_name}'s"),
-                "themself",
+                target_p.reflexive,
             )
         };
     let rendered = template
@@ -23245,6 +23276,42 @@ pub(crate) fn cap_sentence_start(s: &str) -> String {
         }
     }
     out
+}
+
+/// [`cap_sentence_start`] for a line a Lua script sent (`send`, `echo`,
+/// `echo_around`, `zone_echo`, ...). Scripts concatenate mob names into
+/// the line ("the Knight Templar says ..."), so the first visible
+/// character is capitalised. A line whose first visible token is a URL
+/// (`http://`, `https://`, `www.`) is left alone.
+pub(crate) fn cap_script_line(s: &str) -> String {
+    let mut rest = s;
+    // Skip the same leading run `cap_sentence_start` skips.
+    loop {
+        let t = rest.trim_start();
+        if t.starts_with('<') {
+            match t.find('>') {
+                Some(i) => rest = &t[i + 1..],
+                None => break,
+            }
+        } else if t.starts_with('\x1b') {
+            match t.find(|c: char| ('\u{40}'..='\u{7e}').contains(&c) && c != '[') {
+                Some(i) => rest = &t[i + 1..],
+                None => break,
+            }
+        } else {
+            rest = t;
+            break;
+        }
+    }
+    let head: String = rest
+        .chars()
+        .take(8)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if head.starts_with("http://") || head.starts_with("https://") || head.starts_with("www.") {
+        return s.to_string();
+    }
+    cap_sentence_start(s)
 }
 
 pub(crate) fn capitalize(s: &str) -> String {

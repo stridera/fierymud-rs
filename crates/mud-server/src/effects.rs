@@ -746,6 +746,7 @@ pub fn effects_tick(world: &mut World) {
                     })
                     .unwrap_or((None, None));
                 let target_name = name_of(world, target);
+                let target_p = crate::commands::Pronouns::of(world, target);
                 // Wear-off has no separate caster on hand: the effect's
                 // bearer stands in for `{actor.*}` and `{target.*}` alike.
                 // The bearer reads their own line in the second person
@@ -755,8 +756,8 @@ pub fn effects_tick(world: &mut World) {
                     |t| {
                         let line = crate::commands::render_ability_template(
                             t,
-                            &target_name,
-                            &target_name,
+                            (&target_name, target_p),
+                            (&target_name, target_p),
                             true,
                             crate::commands::Viewer::Actor,
                         );
@@ -769,8 +770,8 @@ pub fn effects_tick(world: &mut World) {
                 {
                     let rendered = crate::commands::render_ability_template(
                         line,
-                        &target_name,
-                        &target_name,
+                        (&target_name, target_p),
+                        (&target_name, target_p),
                         false,
                         crate::commands::Viewer::Bystander,
                     );

@@ -12,8 +12,8 @@ use super::blindness_tests::{DAMAGE, cast, caster_with_spells};
 use super::gmcp_tests::{fixture, player};
 use super::test_support::drain;
 use super::{
-    Viewer, broadcast_room_except_rendered, cap_sentence_start, dispatch, format_effect_duration,
-    render_ability_template, substitute, unknown_template_tokens,
+    Pronouns, Viewer, broadcast_room_except_rendered, cap_script_line, cap_sentence_start,
+    dispatch, format_effect_duration, render_ability_template, substitute, unknown_template_tokens,
 };
 
 #[test]
@@ -168,8 +168,8 @@ fn no_known_template_token_survives_rendering() {
             for t in ability_tokens {
                 let out = render_ability_template(
                     &format!("x {{{t}}} y"),
-                    "Ann",
-                    "Bob",
+                    ("Ann", Pronouns::MALE),
+                    ("Bob", Pronouns::FEMALE),
                     reflexive,
                     viewer,
                 );
@@ -198,8 +198,8 @@ fn no_known_template_token_survives_rendering() {
 fn unknown_tokens_are_detected() {
     let out = render_ability_template(
         "{actor.bogus} waves {target.name}.",
-        "Ann",
-        "Bob",
+        ("Ann", Pronouns::THEY),
+        ("Bob", Pronouns::THEY),
         false,
         Viewer::Bystander,
     );
@@ -344,8 +344,15 @@ fn wearoff_renders_per_viewer_including_the_possessive() {
 
 #[test]
 fn possessive_and_pronoun_tokens_render_per_viewer() {
-    let r =
-        |t: &str, reflexive, viewer| render_ability_template(t, "Ann", "Bob", reflexive, viewer);
+    let r = |t: &str, reflexive, viewer| {
+        render_ability_template(
+            t,
+            ("Ann", Pronouns::THEY),
+            ("Bob", Pronouns::THEY),
+            reflexive,
+            viewer,
+        )
+    };
     // The actor reads "your" (capitalised at sentence start), others the name.
     assert_eq!(
         r("{actor.pos} aura fades.", false, Viewer::Actor),
@@ -408,8 +415,8 @@ fn bystander_possessive_becomes_someones_when_the_actor_is_unseen() {
     fx.world.entity_mut(blind).insert(mud_world::Blinded);
     let line = render_ability_template(
         "{actor.pos} aura fades.",
-        "Ann",
-        "Ann",
+        ("Ann", Pronouns::THEY),
+        ("Ann", Pronouns::THEY),
         false,
         Viewer::Bystander,
     );
@@ -431,4 +438,88 @@ fn permanent_and_long_durations_read_naturally() {
     assert_eq!(format_effect_duration(2 * 3600), "2h");
     assert_eq!(format_effect_duration(26 * 3600 + 30 * 60), "1d 2h");
     assert!(!format_effect_duration(-1).contains("-1"));
+}
+
+#[test]
+fn ability_pronouns_follow_the_entities_sex() {
+    let r = |t: &str, tp: Pronouns, viewer| {
+        render_ability_template(t, ("Ann", Pronouns::FEMALE), ("Bob", tp), false, viewer)
+    };
+    let t = "{actor.name} hits {target.him} with {actor.his} fist; {target.he} reels.";
+    assert_eq!(
+        r(t, Pronouns::MALE, Viewer::Bystander),
+        "Ann hits him with her fist; he reels."
+    );
+    assert_eq!(
+        r(t, Pronouns::FEMALE, Viewer::Bystander),
+        "Ann hits her with her fist; she reels."
+    );
+    assert_eq!(
+        r(t, Pronouns::IT, Viewer::Bystander),
+        "Ann hits it with her fist; it reels."
+    );
+    assert_eq!(
+        r(t, Pronouns::THEY, Viewer::Bystander),
+        "Ann hits them with her fist; they reels."
+    );
+    // The target reads itself as "you"; the actor reads "your".
+    assert_eq!(
+        r(t, Pronouns::MALE, Viewer::Target),
+        "Ann hits you with her fist; you reels."
+    );
+    assert_eq!(
+        r(t, Pronouns::MALE, Viewer::Actor),
+        "You hits him with your fist; he reels."
+    );
+}
+
+#[test]
+fn script_lines_are_capitalised_except_urls() {
+    assert_eq!(
+        cap_script_line("the Knight Templar says hi\r\n"),
+        "The Knight Templar says hi\r\n"
+    );
+    assert_eq!(
+        cap_script_line("<b:cyan>the Knight</> says hi"),
+        "<b:cyan>The Knight</> says hi"
+    );
+    assert_eq!(
+        cap_script_line("\x1b[1;31mthe Knight\x1b[0m"),
+        "\x1b[1;31mThe Knight\x1b[0m"
+    );
+    for url in [
+        "https://example.com/x",
+        "http://example.com",
+        "www.fierymud.org is up",
+        "<b:cyan>https://example.com</>",
+        "  WWW.fierymud.org",
+    ] {
+        assert_eq!(cap_script_line(url), url);
+    }
+    assert_eq!(cap_script_line("wwwx says hi"), "Wwwx says hi");
+}
+
+/// The Lua outbox (`send`, `echo`, `actor:send`) capitalises the line a
+/// script built from a lower-case mob name, but leaves a URL alone.
+#[test]
+fn lua_outbox_capitalises_room_and_direct_lines() {
+    let mut fx = fixture();
+    let room = fx.a;
+    let (p, mut rx) = player(&mut fx.world, room, "Ann");
+    let _ = drain(&mut rx);
+    {
+        let mut out = fx
+            .world
+            .get_resource_or_insert_with(mud_world::LuaOutbox::default);
+        out.messages
+            .push((room, "the Knight Templar says hi".to_string(), None));
+        out.messages
+            .push((room, "https://fierymud.org rocks".to_string(), None));
+        out.direct.push((p, "the knight nods".to_string()));
+    }
+    super::flush_lua_outbox(&mut fx.world);
+    let seen = drain(&mut rx);
+    assert!(seen.contains("The Knight Templar says hi"), "{seen}");
+    assert!(seen.contains("https://fierymud.org rocks"), "{seen}");
+    assert!(seen.contains("The knight nods"), "{seen}");
 }
