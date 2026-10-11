@@ -50,8 +50,8 @@ pub use components::{
 pub use item_spawn::{SECS_PER_MUD_HOUR, attach_timer_if_decaying, spawn_item_from_proto};
 pub use loader::{
     LoadStats, ReloadStats, default_weather_for_climate, load_ability_catalog, load_content_tables,
-    load_effect_catalog, load_from_db, load_mob_ai_data, load_trigger_catalog, merge_prototypes,
-    reload_zones, wear_flags_primary_slot, wear_flags_slots,
+    load_effect_catalog, load_from_db, load_gear_contents, load_mob_ai_data, load_trigger_catalog,
+    merge_prototypes, reload_zones, wear_flags_primary_slot, wear_flags_slots,
 };
 pub use mob_ai_rules::{
     AiAlign, AiCondition, AiKind, AiRule, AiTarget, AlignMask, MobAi, MobAiData, parse_conditions,

@@ -120,6 +120,22 @@ fn rows_or_empty_with_fix<T>(
     }
 }
 
+/// `MobResetEquipmentContents` rows (items inside containers mobs carry or
+/// wear). The table is created by the muditor schema / the prod SQL, possibly
+/// after the deploy, so a missing one boots with no rows and an ERROR naming
+/// the fix instead of failing the boot.
+pub async fn load_gear_contents(
+    pool: &PgPool,
+) -> sqlx::Result<Vec<mud_db::mob_reset_equipment::MobResetEquipmentContent>> {
+    rows_or_empty_with_fix(
+        mob_reset_equipment::list_contents(pool).await,
+        "table \"MobResetEquipmentContents\"",
+        "deploy the muditor schema (prisma db push, or muditor/deploy/prod/sql/080-mob-reset-equipment-contents.sql) \
+         and apply fierylib/data/sql/2026-10-11-mob-gear-contents.sql",
+        "mobs spawn without the items inside the containers they carry or wear, e.g. the key in the cocoon",
+    )
+}
+
 /// Load the small content tables that used to be hard-coded arrays: status flag
 /// AI values, spell chant syllables, `SystemMessage` text pools, the `%d`
 /// prompt cooldown letters and the reserved character names. They are created
@@ -1505,8 +1521,12 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     // are walked in reset-row order so a capped (unique) item goes to
     // the first reset that lists it, deterministically.
     let equipment_rows = mob_reset_equipment::list_all(pool).await?;
-    let (gear_by_reset, gear_unresolved) =
-        build_gear_entries(&equipment_rows, world.resource::<ObjectPrototypes>());
+    let gear_content_rows = load_gear_contents(pool).await?;
+    let (gear_by_reset, gear_unresolved) = build_gear_entries(
+        &equipment_rows,
+        &gear_content_rows,
+        world.resource::<ObjectPrototypes>(),
+    );
     stats.mob_equipment_skipped += gear_unresolved;
     world.insert_resource(MobGearCatalog {
         by_reset: gear_by_reset,
@@ -2700,6 +2720,7 @@ pub async fn reload_zones(
     let mob_reset_rows = mob_resets::list_all(pool).await?;
     let object_reset_rows = object_resets::list_all(pool).await?;
     let equipment_rows = mob_reset_equipment::list_all(pool).await?;
+    let gear_content_rows = load_gear_contents(pool).await?;
     let content_rows = object_reset_contents::list_all(pool).await?;
     let fresh_wake = crate::load_wake_effect_catalog(pool).await?;
     let fresh_mob_effects = load_mob_default_effect_catalog(pool).await?;
@@ -3028,8 +3049,16 @@ pub async fn reload_zones(
             .into_iter()
             .filter(|e| mob_reset_ids.contains(&e.reset_id))
             .collect();
-        let (fresh_gear, _) =
-            build_gear_entries(&scoped_equipment, world.resource::<ObjectPrototypes>());
+        let scoped_equipment_ids: HashSet<i32> = scoped_equipment.iter().map(|e| e.id).collect();
+        let scoped_gear_contents: Vec<_> = gear_content_rows
+            .into_iter()
+            .filter(|c| scoped_equipment_ids.contains(&c.equipment_id))
+            .collect();
+        let (fresh_gear, _) = build_gear_entries(
+            &scoped_equipment,
+            &scoped_gear_contents,
+            world.resource::<ObjectPrototypes>(),
+        );
         let mut gear = world.get_resource_or_insert_with(MobGearCatalog::default);
         gear.by_reset.retain(|id, _| !mob_reset_ids.contains(id));
         gear.by_reset.extend(fresh_gear);

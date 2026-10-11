@@ -1,5 +1,6 @@
-//! Reset-time gear: the single place that turns `MobResetEquipment`
-//! and `ObjectResetContents` rows into live item entities.
+//! Reset-time gear: the single place that turns `MobResetEquipment`,
+//! `MobResetEquipmentContents` and `ObjectResetContents` rows into live
+//! item entities.
 //!
 //! Both the boot loader and the runtime respawn tick call into here,
 //! so a mob that dies and respawns comes back wearing and carrying
@@ -18,7 +19,10 @@
 use std::collections::{HashMap, HashSet};
 
 use bevy_ecs::prelude::*;
-use mud_db::{mob_reset_equipment::MobResetEquipment, object_reset_contents::ObjectResetContent};
+use mud_db::{
+    mob_reset_equipment::{MobResetEquipment, MobResetEquipmentContent},
+    object_reset_contents::ObjectResetContent,
+};
 
 use crate::components::{
     AttachedTriggers, Description, EquippedSlot, Item, Keywords, LightFuel, Located, Named, Slot,
@@ -29,12 +33,18 @@ use crate::resources::{ObjectProto, ObjectPrototypes, TriggerCatalog};
 /// One piece of gear a reset-spawned mob receives.
 #[derive(Debug, Clone)]
 pub struct MobGearEntry {
+    /// `MobResetEquipment.id` of the row this entry came from.
+    pub equipment_id: i32,
     pub object_zone_id: i32,
     pub object_id: i32,
     /// Worn slot; `None` means the item goes in the mob's inventory.
     pub slot: Option<Slot>,
     /// World-wide cap on live copies of this object (legacy `max`).
     pub cap: i32,
+    /// Items that spawn inside this one when it is a container the mob
+    /// carries or wears (`MobResetEquipmentContents`; legacy `P` after `G` /
+    /// `E`). Same row shape and cap rules as `ObjectContentsCatalog`.
+    pub contents: Vec<ContentEntry>,
 }
 
 /// Gear per `MobResets.id`, in `MobResetEquipment.id` order.
@@ -77,14 +87,30 @@ pub fn gear_cap(probability: f64) -> i32 {
     pct.max(1)
 }
 
-/// Fold equipment rows into catalog entries. Rows with a non-positive
+/// Fold equipment rows (and the `content_rows` nested inside the ones that
+/// are containers) into catalog entries. Rows with a non-positive
 /// probability are disabled; rows pointing at an unknown prototype are
 /// dropped (returned count lets the loader report them).
 #[must_use]
 pub fn build_gear_entries(
     rows: &[MobResetEquipment],
+    content_rows: &[MobResetEquipmentContent],
     protos: &ObjectPrototypes,
 ) -> (HashMap<i32, Vec<MobGearEntry>>, usize) {
+    let mut contents_by_equipment: HashMap<i32, Vec<ContentEntry>> = HashMap::new();
+    for c in content_rows {
+        contents_by_equipment
+            .entry(c.equipment_id)
+            .or_default()
+            .push(ContentEntry {
+                id: c.id,
+                parent_content_id: c.parent_content_id,
+                object_zone_id: c.object_zone_id,
+                object_id: c.object_id,
+                quantity: c.quantity,
+                cap: c.max_instances.max(1),
+            });
+    }
     let mut by_reset: HashMap<i32, Vec<MobGearEntry>> = HashMap::new();
     let mut skipped = 0usize;
     for eq in rows {
@@ -99,10 +125,12 @@ pub fn build_gear_entries(
             continue;
         }
         by_reset.entry(eq.reset_id).or_default().push(MobGearEntry {
+            equipment_id: eq.id,
             object_zone_id: eq.object_zone_id,
             object_id: eq.object_id,
             slot: eq.wear_location.as_deref().and_then(Slot::from_label_warn),
             cap: gear_cap(eq.probability),
+            contents: contents_by_equipment.remove(&eq.id).unwrap_or_default(),
         });
     }
     (by_reset, skipped)
@@ -263,20 +291,27 @@ pub fn outfit_mob(
             .get_resource::<ObjectPrototypes>()
             .and_then(|p| p.by_key.get(&key).cloned());
         let Some(proto) = proto else {
-            stats.skipped += 1;
+            stats.skipped += 1 + entry.contents.len();
             continue;
         };
         if counts.get(&key).copied().unwrap_or(0) >= entry.cap {
-            stats.skipped += 1;
+            stats.skipped += 1 + entry.contents.len();
             continue;
         }
         let slot = entry.slot.and_then(|s| s.first_free(|c| worn.contains(&c)));
         if let Some(slot) = slot {
             worn.insert(slot);
         }
-        spawn_item(world, &proto, mob, slot);
+        let item = spawn_item(world, &proto, mob, slot);
         *counts.entry(key).or_insert(0) += 1;
         stats.spawned += 1;
+        // A carried/worn container brings its contents along (legacy `P`
+        // after `G` / `E`): nested inside the item, to any depth.
+        if !entry.contents.is_empty() {
+            let inner = fill_from_rows(world, &[item], &entry.contents, counts);
+            stats.spawned += inner.spawned;
+            stats.skipped += inner.skipped;
+        }
     }
     stats
 }
@@ -296,13 +331,28 @@ pub fn fill_container(
     reset_id: i32,
     counts: &mut HashMap<(i32, i32), i32>,
 ) -> GearStats {
-    let mut stats = GearStats::default();
     let Some(rows) = world
         .get_resource::<ObjectContentsCatalog>()
         .and_then(|c| c.by_reset.get(&reset_id).cloned())
     else {
-        return stats;
+        return GearStats::default();
     };
+    fill_from_rows(world, containers, &rows, counts)
+}
+
+/// Spawn `rows` (a content tree: `parent_content_id` `None` = directly in
+/// each of `containers`) through the shared
+/// [`spawn_item_from_proto`](crate::item_spawn::spawn_item_from_proto).
+/// The engine behind [`fill_container`] and the contents of a mob's
+/// carried/worn containers in [`outfit_mob`].
+#[allow(clippy::implicit_hasher)]
+fn fill_from_rows(
+    world: &mut World,
+    containers: &[Entity],
+    rows: &[ContentEntry],
+    counts: &mut HashMap<(i32, i32), i32>,
+) -> GearStats {
+    let mut stats = GearStats::default();
     let mut spawned_by_content: HashMap<i32, Vec<Entity>> = HashMap::with_capacity(rows.len());
     let mut pending: Vec<&ContentEntry> = rows.iter().collect();
     while !pending.is_empty() {
@@ -335,7 +385,9 @@ pub fn fill_container(
                         stats.skipped += 1;
                         continue;
                     }
-                    made.push(spawn_item(world, &proto, parent, None));
+                    made.push(crate::item_spawn::spawn_item_from_proto(
+                        world, &proto, parent,
+                    ));
                     *counts.entry(key).or_insert(0) += 1;
                     stats.spawned += 1;
                 }

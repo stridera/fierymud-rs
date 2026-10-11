@@ -46,3 +46,43 @@ pub async fn list_all(pool: &PgPool) -> sqlx::Result<Vec<MobResetEquipment>> {
     .fetch_all(pool)
     .await
 }
+
+/// One item nested inside a container a mob carries or wears (legacy `G` /
+/// `E` followed by `P`). Hangs off a [`MobResetEquipment`] row and nests
+/// through `parent_content_id` exactly like
+/// [`crate::object_reset_contents::ObjectResetContent`] does for room
+/// containers. Table `MobResetEquipmentContents`; created by the Muditor schema
+/// / `fierylib/data/sql/2026-10-11-mob-gear-contents.sql`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MobResetEquipmentContent {
+    pub id: i32,
+    /// FK to `MobResetEquipment.id` — the carried/worn container.
+    pub equipment_id: i32,
+    /// FK to another content row when nested deeper than the equipment item.
+    pub parent_content_id: Option<i32>,
+    pub object_zone_id: i32,
+    pub object_id: i32,
+    pub quantity: i32,
+    /// Legacy `P` max: world-wide cap on live copies of this object.
+    pub max_instances: i32,
+}
+
+pub async fn list_contents(pool: &PgPool) -> sqlx::Result<Vec<MobResetEquipmentContent>> {
+    sqlx::query_as!(
+        MobResetEquipmentContent,
+        r#"
+        SELECT
+            id,
+            equipment_id,
+            parent_content_id,
+            object_zone_id,
+            object_id,
+            quantity,
+            max_instances
+        FROM "MobResetEquipmentContents"
+        ORDER BY id
+        "#
+    )
+    .fetch_all(pool)
+    .await
+}

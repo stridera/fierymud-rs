@@ -364,7 +364,7 @@ mod tests {
     use super::*;
     use crate::commands::test_support::{mob_proto, object_proto};
     use mud_db::enums::{MobProfession, ObjectType};
-    use mud_db::mob_reset_equipment::MobResetEquipment;
+    use mud_db::mob_reset_equipment::{MobResetEquipment, MobResetEquipmentContent};
     use mud_db::object_reset_contents::ObjectResetContent;
     use mud_world::{
         ContentEntry, LightFuelProto, MobResetEntry, ObjectContentsCatalog, ObjectResetEntry,
@@ -380,6 +380,7 @@ mod tests {
     const CHEST: i32 = 20;
     const POUCH: i32 = 21;
     const GEM: i32 = 22;
+    const KEY: i32 = 23;
 
     fn eq_row(
         id: i32,
@@ -413,7 +414,7 @@ mod tests {
             .insert(MOB_KEY, mob_proto(1, 1, MobProfession::Trainer));
         world.insert_resource(mobs);
         let mut objs = ObjectPrototypes::default();
-        for id in [SWORD, HELM, BREAD, TORCH, CHEST, POUCH, GEM] {
+        for id in [SWORD, HELM, BREAD, TORCH, CHEST, POUCH, GEM, KEY] {
             let mut p = object_proto(1, id, ObjectType::Other);
             p.name = format!("object {id}");
             if id == TORCH {
@@ -435,6 +436,16 @@ mod tests {
     }
 
     fn add_mob_reset(world: &mut World, room: Entity, reset_id: i32, rows: &[MobResetEquipment]) {
+        add_mob_reset_with_contents(world, room, reset_id, rows, &[]);
+    }
+
+    fn add_mob_reset_with_contents(
+        world: &mut World,
+        room: Entity,
+        reset_id: i32,
+        rows: &[MobResetEquipment],
+        gear_contents: &[MobResetEquipmentContent],
+    ) {
         world
             .resource_mut::<MobResetCatalog>()
             .entries
@@ -445,8 +456,11 @@ mod tests {
                 room_entity: room,
                 max_instances: 10,
             });
-        let (fresh, _) =
-            mud_world::reset_gear::build_gear_entries(rows, world.resource::<ObjectPrototypes>());
+        let (fresh, _) = mud_world::reset_gear::build_gear_entries(
+            rows,
+            gear_contents,
+            world.resource::<ObjectPrototypes>(),
+        );
         world
             .resource_mut::<MobGearCatalog>()
             .by_reset
@@ -809,6 +823,118 @@ mod tests {
             vec![Some(3), Some(3)],
             "container contents"
         );
+    }
+
+    fn gear_content(
+        id: i32,
+        equipment_id: i32,
+        parent: Option<i32>,
+        obj: i32,
+        quantity: i32,
+        max: i32,
+    ) -> MobResetEquipmentContent {
+        MobResetEquipmentContent {
+            id,
+            equipment_id,
+            parent_content_id: parent,
+            object_zone_id: 1,
+            object_id: obj,
+            quantity,
+            max_instances: max,
+        }
+    }
+
+    /// Sorted object ids sitting directly inside `parent`.
+    fn items_inside(world: &mut World, parent: Entity) -> Vec<i32> {
+        let mut q = world.query_filtered::<(&WorldKey, &Located), With<Item>>();
+        let mut v: Vec<i32> = q
+            .iter(world)
+            .filter(|(_, l)| l.0 == parent)
+            .map(|(k, _)| k.id)
+            .collect();
+        v.sort_unstable();
+        v
+    }
+
+    /// The carried (unworn) item of prototype `obj` held by `mob`.
+    fn carried_item(world: &mut World, mob: Entity, obj: i32) -> Entity {
+        let mut q = world.query_filtered::<(Entity, &WorldKey, &Located), With<Item>>();
+        q.iter(world)
+            .find(|(_, k, l)| k.id == obj && l.0 == mob)
+            .map_or_else(|| panic!("mob carries no object {obj}"), |(e, _, _)| e)
+    }
+
+    /// Legacy `M`, `G chest`, `P key chest` (and a pouch of gems in the
+    /// chest): the mob carries the chest with the key inside, to any depth.
+    #[test]
+    fn mob_spawns_carrying_a_container_with_its_contents_nested_inside() {
+        let (mut world, room) = base_world();
+        add_mob_reset_with_contents(
+            &mut world,
+            room,
+            1,
+            &[eq_row(1, 1, CHEST, None, 0.99)],
+            &[
+                gear_content(1, 1, None, KEY, 1, 3),
+                gear_content(2, 1, None, POUCH, 1, 99),
+                gear_content(3, 1, Some(2), GEM, 2, 99),
+            ],
+        );
+        let mob = boot_mob(&mut world, room, 1);
+        // Only the chest is on the mob; the key and pouch are inside it.
+        assert_eq!(gear_of(&mut world, mob), vec![(CHEST, None)]);
+        let chest = carried_item(&mut world, mob, CHEST);
+        assert_eq!(items_inside(&mut world, chest), vec![POUCH, KEY]);
+        let pouch = {
+            let mut q = world.query_filtered::<(Entity, &WorldKey, &Located), With<Item>>();
+            q.iter(&world)
+                .find(|(_, k, l)| k.id == POUCH && l.0 == chest)
+                .map(|(e, _, _)| e)
+                .unwrap()
+        };
+        assert_eq!(items_inside(&mut world, pouch), vec![GEM, GEM]);
+
+        // Dies and respawns: the new mob comes back with the same nesting.
+        kill(&mut world, mob, room);
+        run_respawn(&mut world, 6000);
+        let reborn = mob_of(&mut world, 1).expect("mob respawned");
+        assert_ne!(reborn, mob);
+        let chest = carried_item(&mut world, reborn, CHEST);
+        assert_eq!(items_inside(&mut world, chest), vec![POUCH, KEY]);
+    }
+
+    /// Legacy `P` max: the key's world cap is shared by every carrier, and a
+    /// carrier whose chest is skipped by the chest's own cap gets no key.
+    #[test]
+    fn mob_gear_contents_honour_the_world_cap() {
+        let (mut world, room) = base_world();
+        let contents = [gear_content(1, 1, None, KEY, 1, 1)];
+        add_mob_reset_with_contents(
+            &mut world,
+            room,
+            1,
+            &[eq_row(1, 1, CHEST, None, 0.99)],
+            &contents,
+        );
+        add_mob_reset_with_contents(
+            &mut world,
+            room,
+            2,
+            &[eq_row(2, 2, CHEST, None, 0.99)],
+            &[gear_content(2, 2, None, KEY, 1, 1)],
+        );
+        let first = boot_mob(&mut world, room, 1);
+        let second = boot_mob(&mut world, room, 2);
+        let chest1 = carried_item(&mut world, first, CHEST);
+        let chest2 = carried_item(&mut world, second, CHEST);
+        assert_eq!(items_inside(&mut world, chest1), vec![KEY]);
+        assert_eq!(
+            items_inside(&mut world, chest2),
+            Vec::<i32>::new(),
+            "P max 1 already met"
+        );
+        let keys = *object_world_counts(&mut world).get(&(1, KEY)).unwrap_or(&0);
+        assert_eq!(keys, 1);
     }
 
     #[test]

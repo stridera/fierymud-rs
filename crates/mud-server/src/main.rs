@@ -41,6 +41,8 @@ mod mob_ai_idle_tests;
 mod mob_ai_loader_tests;
 #[cfg(test)]
 mod mob_combat_ai_tests;
+#[cfg(test)]
+mod mob_gear_contents_tests;
 mod prompt;
 mod quest_dialogue;
 mod quest_progress;
