@@ -333,7 +333,7 @@ fn bare_toggle_lists_every_toggle_with_state() {
     drain(&mut rx);
     dispatch(&mut world, p, "toggle");
     let out = drain(&mut rx);
-    assert!(out.contains("TOGGLES"), "{out}");
+    assert!(out.contains("Available Toggles"), "{out}");
     for name in [
         "NoSummon",
         "Brief",
