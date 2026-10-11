@@ -1094,13 +1094,22 @@ async fn try_dispatch_async_gated(
     }
 
     // Same frozen / ghost gates and room COMMAND triggers the sync
-    // dispatcher applies, before any async handler can claim the line.
+    // dispatcher applies, before any async handler can claim the line. They
+    // apply to the character actually acting: a switched immortal's line
+    // runs as the mob it controls (see [`switch_target`]).
+    let mut acting = player;
     {
         let split_line = split_symbol_command(trimmed);
         let lower = split_line.to_ascii_lowercase();
         let tokens: Vec<&str> = lower.split_whitespace().collect();
         if !tokens.is_empty() {
-            if pre_gate(world, player, &tokens, split_line.as_ref(), true) {
+            acting = switch_target(world, player, tokens[0]);
+            // A `y` / `n` answering a pending rent prompt belongs to the
+            // sync dispatcher, ahead of every gate and room trigger.
+            if rent_answer_pending(world, acting, tokens[0]) {
+                return false;
+            }
+            if pre_gate(world, acting, &tokens, split_line.as_ref(), true) {
                 return true;
             }
             *pre_gated = true;
@@ -1151,11 +1160,11 @@ async fn try_dispatch_async_gated(
             send_to(world, player, "You can't do that.\r\n");
             return true;
         }
-        if hold_gate(world, player, cmd) {
+        if hold_gate(world, acting, cmd) {
             return true;
         }
-        if casting_blocks(world, player, cmd) {
-            send_to(world, player, CASTING_BUSY_MSG);
+        if casting_blocks(world, acting, cmd) {
+            send_to(world, acting, CASTING_BUSY_MSG);
             return true;
         }
     }
@@ -1291,6 +1300,28 @@ fn dispatch_async_line<'a>(
     })
 }
 
+/// The entity a typed line acts as: the mob a `switch`ed immortal is
+/// puppeteering, else `player`. `return` and `switch` are the escape hatch
+/// and always act as the immortal themself.
+fn switch_target(world: &World, player: Entity, first_token: &str) -> Entity {
+    if matches!(first_token, "return" | "switch") {
+        return player;
+    }
+    world
+        .get::<mud_world::SwitchedInto>(player)
+        .map_or(player, |s| s.0)
+}
+
+/// True when `actor` has a rent prompt pending ([`PendingRentConfirm`]) and
+/// the typed line starts with one of its answers (`y`, `yes`, `n`, `no`).
+/// Only a typed (Direct) line may answer: a script `actor:command("yes")`
+/// or a forced `yes` must not spend a player's gold.
+fn rent_answer_pending(world: &World, actor: Entity, first_token: &str) -> bool {
+    COMMAND_ORIGIN.with(std::cell::Cell::get) == CommandOrigin::Direct
+        && matches!(first_token, "y" | "yes" | "n" | "no")
+        && world.get::<PendingRentConfirm>(actor).is_some()
+}
+
 /// Gates every typed line passes before a command is resolved, shared by the
 /// sync and async dispatchers: the frozen refusal, the ghost allow-list and
 /// (when `fire_triggers`) the room's COMMAND-flagged triggers. Returns true
@@ -1342,16 +1373,83 @@ fn pre_gate(
     false
 }
 
-/// Commands a paralysed character may still run: legacy flags only `look`,
-/// `say` and `return` `CMD_MINOR_PARA` (`return` also `CMD_MAJOR_PARA`).
-/// Rust has a single `paralyzed` effect, so it takes the minor list.
-const PARALYSIS_ALLOWED: &[&str] = &["look", "say", "return"];
+/// Commands a paralysed character may still run, built from the legacy
+/// command table (`interpreter.cpp`): every entry carrying `CMD_MINOR_PARA`
+/// (directly, or through `CMD_ANY`, which includes both paralysis bits) at
+/// a mortal level. Rust has a single `paralyzed` effect, so it takes the
+/// minor list. Names with no Rust command yet (`info`, `wizlist`) are
+/// harmless entries kept for fidelity to the table.
+const PARALYSIS_ALLOWED: &[&str] = &[
+    "abort",
+    "bug",
+    "clear",
+    "cls",
+    "color",
+    "commands",
+    "credits",
+    "ctell",
+    "date",
+    "display",
+    "equipment",
+    "experience",
+    "greport",
+    "gsay",
+    "gtell",
+    "help",
+    "inventory",
+    "idea",
+    "innate",
+    "ignore",
+    "info",
+    "look",
+    "lasttells",
+    "lastgos",
+    "level",
+    "motd",
+    "music",
+    "news",
+    "petition",
+    "policy",
+    "prompt",
+    "quest",
+    "quit",
+    "qsay",
+    "reply",
+    "return",
+    "say",
+    "'",
+    "score",
+    "skills",
+    "songs",
+    "socials",
+    "spells",
+    "tell",
+    "title",
+    "time",
+    "toggle",
+    "trophy",
+    "typo",
+    "uptime",
+    "version",
+    "weather",
+    "who",
+    "whoami",
+    "wizlist",
+    "world",
+];
 
 /// Legacy `command_interpreter` paralysis / mesmerize gate: a paralysed
-/// character may run only [`PARALYSIS_ALLOWED`]; a mesmerized one (below
-/// level 100) nothing at all. Sends the refusal and returns true when the
-/// command is blocked.
+/// character may run only [`PARALYSIS_ALLOWED`] (staff commands are never
+/// blocked, like [`casting_blocks`]); a mesmerized one (below level 100)
+/// nothing at all. Sends the refusal and returns true when the command is
+/// blocked.
 fn hold_gate(world: &mut World, player: Entity, cmd: &Command) -> bool {
+    // The `Stunned` marker follows stun + paralysis + mesmerize instances
+    // (`sync_stunned`), so a character without it is neither paralysed nor
+    // mesmerized and the effect scan is skipped on the common path.
+    if world.get::<Stunned>(player).is_none() {
+        return false;
+    }
     let (mut paralyzed, mut mesmerized) = (false, false);
     {
         let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
@@ -1366,7 +1464,10 @@ fn hold_gate(world: &mut World, player: Entity, cmd: &Command) -> bool {
             }
         }
     }
-    if paralyzed && !cmd.names.iter().any(|n| PARALYSIS_ALLOWED.contains(n)) {
+    if paralyzed
+        && cmd.min_role == UserRole::Player
+        && !cmd.names.iter().any(|n| PARALYSIS_ALLOWED.contains(n))
+    {
         send_to(world, player, "You're paralyzed to the bone!\r\n");
         return true;
     }
@@ -1543,15 +1644,7 @@ fn dispatch_line(world: &mut World, player: Entity, line: &str, run: &mut AliasR
         .next()
         .unwrap_or("")
         .to_ascii_lowercase();
-    let is_escape_hatch = matches!(lower_first.as_str(), "return" | "switch");
-    let player = if !is_escape_hatch
-        && let Some(mud_world::SwitchedInto(mob)) =
-            world.get::<mud_world::SwitchedInto>(player).copied()
-    {
-        mob
-    } else {
-        player
-    };
+    let player = switch_target(world, player, &lower_first);
 
     // Lower-case the input so the registry (which is case-sensitive) matches
     // however the player typed it.
@@ -1571,8 +1664,9 @@ fn dispatch_line(world: &mut World, player: Entity, line: &str, run: &mut AliasR
     // Only a typed (Direct) line may answer: a script `actor:command("yes")`
     // or a forced `yes` must not spend a player's gold. Non-direct lines
     // skip the prompt and run as ordinary commands.
-    let typed = COMMAND_ORIGIN.with(std::cell::Cell::get) == CommandOrigin::Direct;
-    if typed && let Some(pending) = world.get::<PendingRentConfirm>(player).cloned() {
+    if rent_answer_pending(world, player, tokens[0])
+        && let Some(pending) = world.get::<PendingRentConfirm>(player).cloned()
+    {
         match tokens[0] {
             "y" | "yes" => {
                 if let Ok(mut em) = world.get_entity_mut(player) {
@@ -21678,8 +21772,6 @@ fn flag_prevents(flag: &str, kind: Prevent) -> bool {
                 | "mesmerized"
                 | "held"
                 | "hold_person"
-                | "webbed"
-                | "entangled"
         ),
         Prevent::Speaking => matches!(
             f.as_str(),
@@ -23585,37 +23677,51 @@ pub(crate) fn drain_stamina(world: &mut World, player: Entity, cost: i32) {
     }
 }
 
+/// Stand `player` up from a sitting, kneeling or resting posture, with the
+/// usual announcements. Does nothing in any other posture.
+pub(crate) fn auto_stand(world: &mut World, player: Entity) {
+    let posture = world.get::<Posture>(player).copied();
+    if matches!(
+        posture.map(|p| p.0),
+        Some(PostureKind::Sitting | PostureKind::Kneeling | PostureKind::Resting)
+    ) {
+        try_insert(world, player, Posture(PostureKind::Standing));
+        send_to(world, player, "You stand up.\r\n");
+        if let Some(located) = world.get::<Located>(player).copied() {
+            let mover_name = name_of(world, player);
+            broadcast_room_except_players_rendered(
+                world,
+                located.0,
+                &[player],
+                &format!("{mover_name} stands up.\r\n"),
+            );
+        }
+    }
+}
+
+/// Send the "can't while sleeping" refusal and return true when `player`
+/// is asleep.
+fn refuse_if_sleeping(world: &mut World, player: Entity, action: &str) -> bool {
+    if world.get::<Posture>(player).map(|p| p.0) == Some(PostureKind::Sleeping) {
+        send_to(
+            world,
+            player,
+            format!("You can't {action} while sleeping.\r\n"),
+        );
+        return true;
+    }
+    false
+}
+
 /// Refuse the action if the entity is sleeping; auto-rise from a sitting or
 /// resting posture (with announcements). Returns false if the action should
 /// be aborted.
 pub(crate) fn require_alert_posture(world: &mut World, player: Entity, action: &str) -> bool {
-    let posture = world.get::<Posture>(player).copied();
-    match posture.map(|p| p.0) {
-        Some(PostureKind::Sleeping) => {
-            send_to(
-                world,
-                player,
-                format!("You can't {action} while sleeping.\r\n"),
-            );
-            false
-        }
-        Some(PostureKind::Sitting | PostureKind::Kneeling | PostureKind::Resting) => {
-            // Auto-stand.
-            try_insert(world, player, Posture(PostureKind::Standing));
-            send_to(world, player, "You stand up.\r\n");
-            if let Some(located) = world.get::<Located>(player).copied() {
-                let mover_name = name_of(world, player);
-                broadcast_room_except_players_rendered(
-                    world,
-                    located.0,
-                    &[player],
-                    &format!("{mover_name} stands up.\r\n"),
-                );
-            }
-            true
-        }
-        _ => true,
+    if refuse_if_sleeping(world, player, action) {
+        return false;
     }
+    auto_stand(world, player);
+    true
 }
 
 /// Refusals shared by every self-teleport (`recall`, `enter <portal>`,
@@ -23651,7 +23757,7 @@ pub(crate) fn refuse_teleport(world: &mut World, player: Entity, action: &str) -
         send_to(world, player, "You can't move right now.\r\n");
         return true;
     }
-    !require_alert_posture(world, player, action)
+    refuse_if_sleeping(world, player, action)
 }
 
 thread_local! {

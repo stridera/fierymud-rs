@@ -143,6 +143,8 @@ fn cmd_enter(world: &mut World, player: Entity, args: &str) {
     if crate::room_access::refuse_entry(world, player, dest) {
         return;
     }
+    // Every refusal is behind us: only now does a sitter stand up.
+    crate::commands::auto_stand(world, player);
     let mover_name = name_of(world, player);
     let mover_capped = crate::commands::cap_sentence_start(&mover_name);
     let portal_name = proto.name.clone();

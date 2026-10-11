@@ -90,6 +90,8 @@ fn cmd_recall(world: &mut World, player: Entity, _args: &str) {
     if crate::room_access::refuse_entry(world, player, target) {
         return;
     }
+    // Every refusal is behind us: only now does a sitter stand up.
+    crate::commands::auto_stand(world, player);
 
     let mover_name = name_of(world, player);
     let mover_capped = crate::commands::cap_sentence_start(&mover_name);

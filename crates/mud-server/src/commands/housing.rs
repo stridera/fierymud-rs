@@ -204,6 +204,8 @@ async fn cmd_visit(world: &mut World, player: Entity, pool: &mud_db::sqlx::PgPoo
     if crate::room_access::refuse_entry(world, player, foyer_entity) {
         return;
     }
+    // Every refusal is behind us: only now does a sitter stand up.
+    crate::commands::auto_stand(world, player);
     crate::combat::relocate(world, player, foyer_entity);
     send_to(
         world,
