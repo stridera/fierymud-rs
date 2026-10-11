@@ -12210,34 +12210,62 @@ pub(crate) fn resolve_exit_arg(world: &World, player: Entity, arg: &str) -> Opti
     let needle = trimmed.to_ascii_lowercase();
     let room = world.get::<Located>(player)?.0;
     let exits = world.get::<Exits>(room)?;
-    for (dir, ed) in &exits.0 {
-        if exit_is_hidden_to(world, player, room, *dir, ed) {
+    // `open door north`: the last word is a direction, the rest must name
+    // that exit (legacy `find_door`). An exit with no keywords of its own
+    // still answers to the plain word "door". This runs before the free
+    // keyword scan so `open door w` can't be captured by another exit whose
+    // keyword merely starts with "w" ("wooden").
+    if let Some((keyword, last)) = trimmed.rsplit_once(char::is_whitespace)
+        && let Some(dir) = parse_direction(last.trim())
+        && let Some(ed) = exits.0.get(&dir)
+    {
+        let keyword = keyword.trim();
+        if !keyword.is_empty() && !exit_is_hidden_to(world, player, room, dir, ed) {
+            let names_exit = if ed.keywords.is_empty() {
+                keyword.eq_ignore_ascii_case("door")
+            } else {
+                mud_world::targeting::names_match(
+                    &keyword.to_ascii_lowercase(),
+                    ed.keywords.iter().map(String::as_str),
+                )
+            };
+            if names_exit {
+                return Some(dir);
+            }
+        }
+    }
+    // Free keyword scan in a fixed order (legacy: n e s w u d, then the
+    // diagonals / in / out) so a keyword shared by several exits resolves
+    // the same way every time instead of by hash order.
+    for dir in EXIT_SCAN_ORDER {
+        let Some(ed) = exits.0.get(&dir) else {
+            continue;
+        };
+        if exit_is_hidden_to(world, player, room, dir, ed) {
             continue;
         }
         if mud_world::targeting::names_match(&needle, ed.keywords.iter().map(String::as_str)) {
-            return Some(*dir);
+            return Some(dir);
         }
     }
-    // `open door north`: the last word is a direction, the rest must name
-    // that exit (legacy `find_door`). An exit with no keywords of its own
-    // still answers to the plain word "door".
-    let (keyword, last) = trimmed.rsplit_once(char::is_whitespace)?;
-    let keyword = keyword.trim();
-    let dir = parse_direction(last.trim())?;
-    let ed = exits.0.get(&dir)?;
-    if keyword.is_empty() || exit_is_hidden_to(world, player, room, dir, ed) {
-        return None;
-    }
-    let names_exit = if ed.keywords.is_empty() {
-        keyword.eq_ignore_ascii_case("door")
-    } else {
-        mud_world::targeting::names_match(
-            &keyword.to_ascii_lowercase(),
-            ed.keywords.iter().map(String::as_str),
-        )
-    };
-    names_exit.then_some(dir)
+    None
 }
+
+/// Deterministic exit order for keyword lookups: legacy's n e s w u d first.
+const EXIT_SCAN_ORDER: [Direction; 12] = [
+    Direction::North,
+    Direction::East,
+    Direction::South,
+    Direction::West,
+    Direction::Up,
+    Direction::Down,
+    Direction::Northeast,
+    Direction::Northwest,
+    Direction::Southeast,
+    Direction::Southwest,
+    Direction::In,
+    Direction::Out,
+];
 
 /// True when the player's room is currently dark enough that
 /// nothing can be seen without a light source. Cases: sector is
@@ -16817,7 +16845,8 @@ pub(crate) fn invoke_ability_core(
         );
         return;
     }
-    if !def.combat_ok && caster_in_combat {
+    // Staff above mortal rank ignore the combat_ok gate (legacy).
+    if !def.combat_ok && caster_in_combat && !mud_world::bypasses_restrictions(world, player) {
         send_to(
             world,
             player,

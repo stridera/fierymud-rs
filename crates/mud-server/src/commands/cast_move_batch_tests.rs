@@ -412,6 +412,78 @@ fn a_named_exit_is_found_by_its_keyword_and_direction() {
 }
 
 #[test]
+fn keyword_plus_direction_beats_a_keyword_that_starts_with_the_direction_letter() {
+    let mut fx = fixture();
+    let (a, b) = (fx.a, fx.b);
+    // North answers to "wooden door"; west is a keywordless door.
+    fx.world.get_mut::<Exits>(a).unwrap().0.insert(
+        Direction::North,
+        exit(b, ExitState::Closed, false, &["wooden", "door"]),
+    );
+    fx.world
+        .get_mut::<Exits>(a)
+        .unwrap()
+        .0
+        .insert(Direction::West, exit(b, ExitState::Closed, false, &[]));
+    let (p, _rx) = player(&mut fx.world, a, "Opener");
+    let w = &fx.world;
+    assert_eq!(resolve_exit_arg(w, p, "door w"), Some(Direction::West));
+    assert_eq!(resolve_exit_arg(w, p, "door west"), Some(Direction::West));
+    assert_eq!(resolve_exit_arg(w, p, "door n"), Some(Direction::North));
+    assert_eq!(resolve_exit_arg(w, p, "wooden"), Some(Direction::North));
+}
+
+#[test]
+fn a_keyword_shared_by_several_exits_resolves_in_legacy_direction_order() {
+    let mut fx = fixture();
+    let (a, b) = (fx.a, fx.b);
+    for dir in [
+        Direction::Down,
+        Direction::Up,
+        Direction::West,
+        Direction::South,
+        Direction::East,
+        Direction::North,
+    ] {
+        fx.world
+            .get_mut::<Exits>(a)
+            .unwrap()
+            .0
+            .insert(dir, exit(b, ExitState::Closed, false, &["gate"]));
+    }
+    let (p, _rx) = player(&mut fx.world, a, "Opener");
+    for _ in 0..20 {
+        assert_eq!(
+            resolve_exit_arg(&fx.world, p, "gate"),
+            Some(Direction::North)
+        );
+    }
+    fx.world
+        .get_mut::<Exits>(a)
+        .unwrap()
+        .0
+        .remove(&Direction::North);
+    assert_eq!(
+        resolve_exit_arg(&fx.world, p, "gate"),
+        Some(Direction::East)
+    );
+    fx.world
+        .get_mut::<Exits>(a)
+        .unwrap()
+        .0
+        .remove(&Direction::East);
+    fx.world
+        .get_mut::<Exits>(a)
+        .unwrap()
+        .0
+        .remove(&Direction::South);
+    assert_eq!(
+        resolve_exit_arg(&fx.world, p, "gate"),
+        Some(Direction::West)
+    );
+}
+
+#[test]
 fn a_hidden_exit_cannot_be_probed_with_keyword_and_direction() {
     let mut fx = fixture();
     let (a, b) = (fx.a, fx.b);

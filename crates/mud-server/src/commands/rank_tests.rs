@@ -455,6 +455,129 @@ fn force_respects_level() {
     assert_eq!(posture_of(&world, low), mud_world::PostureKind::Sitting);
 }
 
+fn frozen(world: &World, e: Entity) -> bool {
+    world.get::<mud_world::Frozen>(e).is_some()
+}
+
+#[test]
+fn freeze_respects_level_and_thaw_does_too() {
+    let mut world = World::new();
+    let builder = spawn(&mut world, "Builder", 102, UserRole::Player);
+    let peer = spawn(&mut world, "Peer", 102, UserRole::Player);
+    let boss = spawn(&mut world, "Boss", 105, UserRole::Player);
+    let mortal = spawn(&mut world, "Mortal", 10, UserRole::Player);
+    // A Builder can't freeze an Implementor or a peer.
+    dispatch(&mut world, builder, "freeze Boss");
+    dispatch(&mut world, builder, "freeze Peer");
+    assert!(!frozen(&world, boss));
+    assert!(!frozen(&world, peer));
+    assert!(force_audited(&world, "freeze_denied"));
+    // A mortal below them is fine, and thawing works for the same rank.
+    dispatch(&mut world, builder, "freeze Mortal");
+    assert!(frozen(&world, mortal));
+    dispatch(&mut world, builder, "freeze Mortal");
+    assert!(!frozen(&world, mortal));
+    // The Implementor can freeze the Builder; the Builder can't undo it
+    // by toggling a peer-or-higher.
+    dispatch(&mut world, boss, "freeze Builder");
+    assert!(frozen(&world, builder));
+}
+
+#[test]
+fn dc_respects_level() {
+    use crate::commands::Connection;
+    let mut world = World::new();
+    let builder = spawn(&mut world, "Builder", 102, UserRole::Player);
+    let boss = spawn(&mut world, "Boss", 105, UserRole::Player);
+    let mortal = spawn(&mut world, "Mortal", 10, UserRole::Player);
+    let mut rxs = Vec::new();
+    for e in [boss, mortal] {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
+        rxs.push(rx);
+        world.entity_mut(e).insert(Connection(tx));
+    }
+    dispatch(&mut world, builder, "dc Boss");
+    assert!(world.get::<Connection>(boss).is_some());
+    assert!(force_audited(&world, "dc_denied"));
+    dispatch(&mut world, builder, "dc Mortal");
+    assert!(world.get::<Connection>(mortal).is_none());
+}
+
+#[test]
+fn reroll_respects_level_and_uses_the_creation_roller() {
+    let mut world = World::new();
+    let builder = spawn(&mut world, "Builder", 102, UserRole::Player);
+    let boss = spawn(&mut world, "Boss", 105, UserRole::Player);
+    let mortal = spawn(&mut world, "Mortal", 10, UserRole::Player);
+    let marker = mud_world::CoreStats {
+        strength: 99,
+        dexterity: 99,
+        constitution: 99,
+        intelligence: 99,
+        wisdom: 99,
+        charisma: 99,
+    };
+    world.entity_mut(boss).insert(marker);
+    world.entity_mut(mortal).insert(marker);
+    dispatch(&mut world, builder, "reroll Boss");
+    assert_eq!(
+        world.get::<mud_world::CoreStats>(boss).unwrap().strength,
+        99
+    );
+    assert!(force_audited(&world, "reroll_denied"));
+    dispatch(&mut world, builder, "reroll Mortal");
+    let cs = *world.get::<mud_world::CoreStats>(mortal).unwrap();
+    assert!(
+        [
+            cs.strength,
+            cs.dexterity,
+            cs.constitution,
+            cs.intelligence,
+            cs.wisdom,
+            cs.charisma
+        ]
+        .iter()
+        .all(|v| (3..=18).contains(v)),
+        "creation roller is 3d6 per stat: {cs:?}"
+    );
+}
+
+#[test]
+fn set_level_and_xp_need_coder_and_players_must_be_outranked() {
+    let mut world = World::new();
+    world.insert_resource(DevMode(true));
+    world.insert_resource(level_table(110));
+    let room = world.spawn_empty().id();
+    let builder = spawn(&mut world, "Builder", 102, UserRole::Player);
+    let coder = spawn(&mut world, "Coder", 104, UserRole::Player);
+    let mortal = spawn(&mut world, "Mortal", 10, UserRole::Player);
+    let boss = spawn(&mut world, "Boss", 105, UserRole::Player);
+    for e in [builder, coder, mortal, boss] {
+        world.entity_mut(e).insert(mud_world::Located(room));
+    }
+    // A Builder can't mint a level-101 mortal, or give XP, to anyone.
+    dispatch(&mut world, builder, "set Mortal level 101");
+    assert_eq!(level_of(&world, mortal), 10);
+    dispatch(&mut world, builder, "set Mortal xp 5000");
+    assert_eq!(world.get::<Profile>(mortal).unwrap().experience, 0);
+    dispatch(&mut world, builder, "set me level 50");
+    assert_eq!(level_of(&world, builder), 102);
+    assert!(force_audited(&world, "set_denied"));
+    // Other fields still work on a lower player, but not on a higher one.
+    dispatch(&mut world, builder, "set Mortal align 100");
+    assert_eq!(world.get::<Profile>(mortal).unwrap().experience, 0);
+    world
+        .entity_mut(boss)
+        .insert(mud_world::Health { hp: 10, max: 10 });
+    dispatch(&mut world, builder, "set Boss hp 1");
+    assert_eq!(world.get::<mud_world::Health>(boss).unwrap().hp, 10);
+    // A Coder can set level, still strictly below their own.
+    dispatch(&mut world, coder, "set Mortal level 50");
+    assert_eq!(level_of(&world, mortal), 50);
+    dispatch(&mut world, coder, "set Mortal level 104");
+    assert_eq!(level_of(&world, mortal), 50);
+}
+
 #[test]
 fn non_typed_yes_does_not_confirm_rent() {
     use crate::commands::{CommandOrigin, PendingRentConfirm, with_command_origin};

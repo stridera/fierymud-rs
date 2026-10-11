@@ -1752,6 +1752,32 @@ pub(crate) fn cmd_inctime(world: &mut World, player: Entity, args: &str) {
     );
 }
 
+/// Rank rule shared by the staff commands that act on another player
+/// (`dc`, `freeze`, `reroll`; legacy `do_wizutil` / `do_dc`): the target's
+/// character level must be strictly below the caller's. Self is exempt.
+/// Refusals are written to the admin audit log as `denied_verb` and the
+/// caller sees legacy's "you'd better not" line. Returns `true` when the
+/// action may proceed.
+pub(crate) fn target_is_below_caller(
+    world: &mut World,
+    player: Entity,
+    target: Entity,
+    denied_verb: &'static str,
+    args: &str,
+) -> bool {
+    if target == player {
+        return true;
+    }
+    let actor_level = world.get::<Profile>(player).map_or(0, |p| p.level);
+    let target_level = world.get::<Profile>(target).map_or(0, |p| p.level);
+    if target_level < actor_level {
+        return true;
+    }
+    record_admin_action(world, player, denied_verb, args);
+    send_to(world, player, "Hmmm...you'd better not.\r\n");
+    false
+}
+
 pub(crate) fn cmd_dc(world: &mut World, player: Entity, args: &str) {
     use crate::commands::Connection;
     record_admin_action(world, player, "dc", args);
@@ -1772,6 +1798,9 @@ pub(crate) fn cmd_dc(world: &mut World, player: Entity, args: &str) {
     };
     if target == player {
         send_to(world, player, "Disconnecting yourself is silly.\r\n");
+        return;
+    }
+    if !target_is_below_caller(world, player, target, "dc_denied", args) {
         return;
     }
     let target_name = name_of(world, target);
@@ -2143,15 +2172,21 @@ pub(crate) fn cmd_reroll(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, format!("'{arg}' isn't online.\r\n"));
         return;
     };
-    let roll_3d6 =
-        || rand::random_range(1..=6) + rand::random_range(1..=6) + rand::random_range(1..=6);
-    let new_stats = mud_world::CoreStats {
-        strength: roll_3d6(),
-        dexterity: roll_3d6(),
-        constitution: roll_3d6(),
-        intelligence: roll_3d6(),
-        wisdom: roll_3d6(),
-        charisma: roll_3d6(),
+    if !target_is_below_caller(world, player, target, "reroll_denied", args) {
+        return;
+    }
+    // Same roller as character creation (3d6 per stat, clamped to the
+    // race's per-stat caps).
+    let race = world
+        .get::<Profile>(target)
+        .map(|p| p.race.clone())
+        .unwrap_or_default();
+    let new_stats = {
+        let empty = mud_world::RaceCatalog::default();
+        let catalog = world
+            .get_resource::<mud_world::RaceCatalog>()
+            .unwrap_or(&empty);
+        crate::login::roll_starting_stats(catalog, &race)
     };
     if let Some(mut cs) = world.get_mut::<mud_world::CoreStats>(target) {
         *cs = new_stats;
@@ -2576,6 +2611,11 @@ pub(crate) fn cmd_freeze(world: &mut World, player: Entity, args: &str) {
     };
     if target == player {
         send_to(world, player, "Freezing yourself would be unwise.\r\n");
+        return;
+    }
+    // Freeze and thaw both honor the rank rule: a Builder can neither
+    // freeze an Implementor nor undo a freeze on someone above them.
+    if !target_is_below_caller(world, player, target, "freeze_denied", args) {
         return;
     }
     let admin_name = name_of(world, player);

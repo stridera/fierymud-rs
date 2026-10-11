@@ -37,11 +37,9 @@ fn idle_kick_secs(world: &World) -> u64 {
     // GameConfig row wins so operators can re-tune at runtime
     // without restart. A non-positive value falls through to the
     // env var / hardcoded default.
-    let cfg_secs = world.resource::<mud_world::RuntimeConfig>().get_i32(
-        "server",
-        "connection_timeout_seconds",
-        0,
-    );
+    let cfg_secs = world
+        .get_resource::<mud_world::RuntimeConfig>()
+        .map_or(0, |c| c.get_i32("server", "connection_timeout_seconds", 0));
     if cfg_secs > 0 {
         return u64::try_from(cfg_secs).unwrap_or(DEFAULT_IDLE_KICK_SECS);
     }
@@ -79,6 +77,28 @@ pub struct IdleWarned;
 /// from the pre-fight keystroke.
 #[derive(Component)]
 pub struct IdleCombatSeen(pub std::time::Instant);
+
+/// Combat counts as activity only up to this many idle windows since the
+/// player last typed. Without a cap, an AFK character in a room of
+/// respawning aggressive mobs fights forever and never times out.
+const COMBAT_IDLE_CAP_WINDOWS: u32 = 3;
+
+/// Time since the player last typed (or logged in, if they never have).
+fn since_last_input(world: &World, entity: Entity) -> Duration {
+    world
+        .get::<LastInputAt>(entity)
+        .map(|l| l.0.elapsed())
+        .or_else(|| world.get::<LoggedInAt>(entity).map(|l| l.0.elapsed()))
+        .unwrap_or(Duration::ZERO)
+}
+
+/// True when `entity` is fighting and has typed recently enough
+/// (within [`COMBAT_IDLE_CAP_WINDOWS`] idle windows) for the fight to
+/// count as activity.
+fn combat_keeps_alive(world: &mut World, entity: Entity, threshold: Duration) -> bool {
+    crate::commands::in_combat(world, entity)
+        && since_last_input(world, entity) <= threshold * COMBAT_IDLE_CAP_WINDOWS
+}
 
 fn warning_text(remaining: Duration) -> String {
     let secs = remaining.as_secs().max(1);
@@ -139,14 +159,21 @@ pub fn idle_kick_tick(world: &mut World) {
             .collect()
     };
     for (entity, elapsed) in candidates {
-        // Fighting is activity: never warn or kick mid-fight.
-        if crate::commands::in_combat(world, entity) {
+        // Fighting is activity: never warn or kick mid-fight, unless the
+        // player has been silent for the whole combat-idle cap.
+        if combat_keeps_alive(world, entity, threshold) {
             if let Ok(mut e) = world.get_entity_mut(entity) {
                 e.insert(IdleCombatSeen(std::time::Instant::now()));
                 e.remove::<(IdleWarned, IdleKickPending)>();
             }
             continue;
         }
+        // Past the cap the fight no longer counts: judge by keystrokes only.
+        let elapsed = if crate::commands::in_combat(world, entity) {
+            since_last_input(world, entity)
+        } else {
+            elapsed
+        };
         if elapsed > threshold {
             if let Ok(mut e) = world.get_entity_mut(entity) {
                 e.insert(IdleKickPending);
@@ -196,10 +223,12 @@ pub fn drain_idle_kicks(
         let mut q = world.query_filtered::<Entity, With<IdleKickPending>>();
         q.iter(world).collect()
     };
+    let threshold = Duration::from_secs(idle_kick_secs(world));
     for entity in pending {
         // Marked before a fight broke out: kicking now would leave a
-        // linkdead character still swinging. Let them stay.
-        if crate::commands::in_combat(world, entity) {
+        // linkdead character still swinging. Let them stay, unless they
+        // have been silent past the combat-idle cap.
+        if combat_keeps_alive(world, entity, threshold) {
             if let Ok(mut e) = world.get_entity_mut(entity) {
                 e.remove::<IdleKickPending>();
             }
@@ -315,13 +344,15 @@ mod tests {
     fn fighting_players_are_not_kicked_and_get_a_fresh_clock() {
         let mut world = timed_world();
         let fighter = spawn_idle(&mut world, 10, UserRole::Player);
+        // Typed 700s ago: past the 600s window, inside the combat cap.
+        idle_for(&mut world, fighter, 700);
         let foe = world.spawn_empty().id();
         world.entity_mut(fighter).insert(mud_world::Fighting(foe));
         idle_kick_tick(&mut world);
         assert!(world.get::<IdleKickPending>(fighter).is_none());
         assert!(world.get::<IdleWarned>(fighter).is_none());
         // Fight over: the idle clock restarted at the end of the fight
-        // instead of resuming from the day-old login.
+        // instead of resuming from the 700s-old keystroke.
         world.entity_mut(fighter).remove::<mud_world::Fighting>();
         idle_kick_tick(&mut world);
         assert!(world.get::<IdleKickPending>(fighter).is_none());
@@ -331,12 +362,36 @@ mod tests {
     fn stale_kick_marker_is_dropped_when_a_fight_starts() {
         let mut world = timed_world();
         let p = spawn_idle(&mut world, 10, UserRole::Player);
+        idle_for(&mut world, p, 700);
         idle_kick_tick(&mut world);
         assert!(world.get::<IdleKickPending>(p).is_some());
         let foe = world.spawn_empty().id();
         world.entity_mut(p).insert(mud_world::Fighting(foe));
         idle_kick_tick(&mut world);
         assert!(world.get::<IdleKickPending>(p).is_none());
+    }
+
+    #[test]
+    fn combat_stops_counting_as_activity_after_three_idle_windows() {
+        let mut world = timed_world();
+        let afk = spawn_idle(&mut world, 10, UserRole::Player);
+        let foe = world.spawn_empty().id();
+        world.entity_mut(afk).insert(mud_world::Fighting(foe));
+        // 3 windows = 1800s. Silent for 1900s while a respawning mob keeps
+        // them "in combat": kicked anyway.
+        idle_for(&mut world, afk, 1900);
+        // A prior fight tick bumped the combat clock to "just now".
+        world
+            .entity_mut(afk)
+            .insert(IdleCombatSeen(std::time::Instant::now()));
+        idle_kick_tick(&mut world);
+        assert!(world.get::<IdleKickPending>(afk).is_some());
+        // Same fight, but they typed 1700s ago (inside the cap): spared.
+        let active = spawn_idle(&mut world, 10, UserRole::Player);
+        world.entity_mut(active).insert(mud_world::Fighting(foe));
+        idle_for(&mut world, active, 1700);
+        idle_kick_tick(&mut world);
+        assert!(world.get::<IdleKickPending>(active).is_none());
     }
 
     #[test]

@@ -1301,6 +1301,28 @@ mod tests {
     }
 
     #[test]
+    fn staff_ignore_the_combat_ok_gate() {
+        let (mut world, room, _) = slot_world(1);
+        let (caster, mut rx) = slot_caster(&mut world, room, 1);
+        let (bob, _b) = bob_in(&mut world, room);
+        world
+            .resource_mut::<AbilityCatalog>()
+            .by_name
+            .get_mut("mend")
+            .unwrap()
+            .combat_ok = false;
+        world.entity_mut(caster).insert(Fighting(bob));
+        make_staff(
+            &mut world,
+            caster,
+            105,
+            mud_db::enums::UserRole::Implementor,
+        );
+        start_mend(&mut world, caster);
+        assert!(!drain(&mut rx).contains("while fighting"));
+    }
+
+    #[test]
     fn refused_before_the_cast_starts_spends_nothing() {
         let (mut world, room, _) = slot_world(1);
         let (caster, mut rx) = slot_caster(&mut world, room, 1);

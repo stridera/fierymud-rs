@@ -1717,11 +1717,11 @@ pub(crate) fn cmd_setweather(world: &mut World, player: Entity, args: &str) {
 /// rendered by `set fields` so the help is always in sync with
 /// the match arms below.
 const SET_FIELDS: &[(&str, &[&str], &str)] = &[
-    ("level", &[], "Profile.level (clamped >= 1)"),
+    ("level", &[], "Profile.level (clamped >= 1; Coder+ only)"),
     (
         "xp",
         &["exp", "experience"],
-        "Profile.experience (clamped >= 0)",
+        "Profile.experience (clamped >= 0; Coder+ only)",
     ),
     ("hp", &[], "Health.hp (clamped 0..=max)"),
     ("maxhp", &[], "Health.max (current hp pinned to new max)"),
@@ -1738,6 +1738,11 @@ const SET_FIELDS: &[(&str, &[&str], &str)] = &[
     ),
     ("alignment", &["align"], "CombatStats.alignment (signed)"),
 ];
+
+/// Level at which the legacy-ADMIN `set` fields open up (Coder, 104).
+const SET_CODER_LEVEL: i32 = 104;
+/// `set` fields legacy gated at `LVL_ADMIN` (104): `level`, `experience`.
+const SET_CODER_FIELDS: &[&str] = &["level", "xp", "exp", "experience"];
 
 #[allow(clippy::too_many_lines)]
 pub(crate) fn cmd_set(world: &mut World, player: Entity, args: &str) {
@@ -1793,6 +1798,36 @@ pub(crate) fn cmd_set(world: &mut World, player: Entity, args: &str) {
         t
     };
     let target_name = name_of(world, target);
+
+    // Legacy `do_set`: a field's own level gate (`level` and `experience`
+    // were ADMIN = 104), and you can't edit a player at or above your own
+    // level unless you are 104+ (or it's yourself). Keyed on character
+    // level, not `min_role`, so DevMode can't waive it.
+    let actor_level = world.get::<Profile>(player).map_or(0, |p| p.level);
+    if SET_CODER_FIELDS.contains(&field.as_str()) && actor_level < SET_CODER_LEVEL {
+        crate::commands::record_admin_action(
+            world,
+            player,
+            "set_denied",
+            &format!("{target_name} {field}"),
+        );
+        send_to(world, player, "You are not godly enough for that!\r\n");
+        return;
+    }
+    if target != player
+        && actor_level < SET_CODER_LEVEL
+        && world.get::<mud_world::Player>(target).is_some()
+        && world.get::<Profile>(target).map_or(0, |p| p.level) >= actor_level
+    {
+        crate::commands::record_admin_action(
+            world,
+            player,
+            "set_denied",
+            &format!("{target_name} {field}"),
+        );
+        send_to(world, player, "Maybe that's not such a great idea...\r\n");
+        return;
+    }
 
     // All supported fields are integer-typed for now.
     let Ok(value_i32) = value_word.parse::<i32>() else {

@@ -6891,7 +6891,7 @@ fn match_playable_gender(input: &str) -> Option<&'static str> {
 /// cap (e.g. low-INT brutes capped at 12) will see freshly-rolled
 /// stats respect the schema authoring. Returns six stats in the
 /// canonical order STR / INT / WIS / DEX / CON / CHA.
-fn roll_starting_stats(race_catalog: &mud_world::RaceCatalog, race: &str) -> CoreStats {
+pub(crate) fn roll_starting_stats(race_catalog: &mud_world::RaceCatalog, race: &str) -> CoreStats {
     let roll = || -> i32 {
         (0..3)
             .map(|_| i32::try_from(rand::random_range(1u32..=6)).unwrap_or(1))
