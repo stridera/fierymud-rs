@@ -2802,19 +2802,27 @@ fn flush_lua_outbox(world: &mut World) {
     // doesn't re-borrow World mid-send. Script lines are built from
     // `self.name .. " says ..."`, so the first visible character is
     // capitalised ([`cap_script_line`]) unless the line opens with a URL.
+    // Scripts often send one paragraph as several lines, so a line is only
+    // capitalised where a sentence starts: the first line a recipient gets
+    // from this flush, or after a line that ended a sentence
+    // ([`script_line_ends_sentence`]).
+    let mut sentence_start: HashMap<Entity, bool> = HashMap::new();
+    let mut direct_sentence_start: HashMap<Entity, bool> = HashMap::new();
     for (room, msg, except) in messages {
         let recipients: Vec<Entity> = crate::room_index::contents_of(world, room)
             .filter(|&e| Some(e) != except && world.get::<Connection>(e).is_some())
             .collect();
         for r in recipients {
-            send_to(world, r, cap_script_line(&format!("{msg}\r\n")));
+            let line = script_line_for(&mut sentence_start, r, &msg);
+            send_to(world, r, line);
         }
     }
     // Direct one-to-one delivery (actor:send). send_to silently no-ops
     // if the target has no Connection (mob targets, disconnected
     // players) — that's the desired behavior.
     for (target, msg) in direct {
-        send_to(world, target, cap_script_line(&format!("{msg}\r\n")));
+        let line = script_line_for(&mut direct_sentence_start, target, &msg);
+        send_to(world, target, line);
     }
 
     // Queued `actor:command(text)` invocations. Re-enters dispatch as
@@ -14705,6 +14713,86 @@ pub(crate) fn invoke_ability(
     invoke_ability_with(world, player, args, kind, verb, false, false, false, None);
 }
 
+/// The mortal SKILL gate of [`invoke_ability_core`]: the refusal line when
+/// `player` may not use the skill `def` (wrong class, too low a level, not
+/// practiced), `None` when allowed. Callers skip it for staff and mobs.
+fn mortal_skill_refusal(
+    world: &World,
+    player: Entity,
+    def: &mud_world::AbilityDef,
+    verb: &str,
+) -> Option<String> {
+    // Mortal SKILL gate: check ClassSkills if the caster has
+    // a class. The class's row sets the minimum level
+    // required; missing row = wrong class for this skill.
+    // Classless mortals still fall through to the legacy
+    // "empty KnownAbilities bypass" so they can try anything
+    // — once Profile.class_id is enforced non-NULL by login,
+    // this branch goes away.
+    let profile_data = world.get::<Profile>(player).map(|p| (p.class_id, p.level));
+    if let Some((Some(class_id), level)) = profile_data {
+        let csd = world.resource::<mud_world::ClassSkillsData>();
+        // Defensive: a class with zero ClassSkills rows means
+        // content hasn't authored its kit yet. Bypass rather
+        // than refuse every skill — once data lands the gate
+        // engages naturally.
+        if csd.class_skill_count(class_id) > 0 {
+            match csd.min_level_for(class_id, def.id) {
+                Some(min_level) if min_level <= level => {
+                    // Allowed by class. Layer the per-character
+                    // KnownAbilities rule on top: if the player
+                    // has trained anything at all, restrict to
+                    // their practiced list. Empty list still
+                    // bypasses so brand-new characters keep
+                    // their starter kit.
+                    if let Some(known) = world.get::<KnownAbilities>(player)
+                        && !known.entries.is_empty()
+                        && !known.has_any(def.id)
+                    {
+                        return Some(format!("You haven't practiced {} yet.\r\n", def.name));
+                    }
+                }
+                Some(min_level) => {
+                    return Some(format!(
+                        "You must reach level {min_level} before you can use {}.\r\n",
+                        def.name
+                    ));
+                }
+                None => {
+                    return Some(format!("Your class can't use {}.\r\n", def.name));
+                }
+            }
+        }
+    } else if let Some(known) = world.get::<KnownAbilities>(player)
+        && !known.entries.is_empty()
+        && !known.has_any(def.id)
+    {
+        // Classless mortal with practiced kit: enforce the
+        // explicit-entry rule.
+        return Some(format!("You don't know how to {} {}.\r\n", verb, def.name));
+    }
+    None
+}
+
+/// [`mortal_skill_refusal`] for a command that must settle whether the
+/// actor may use the skill `name` BEFORE it spends stamina or starts a
+/// fight (`kick`). Staff and mobs always pass; an unknown skill name passes
+/// too (the invoke reports "No skill matching").
+pub(crate) fn skill_use_refusal(world: &World, player: Entity, name: &str) -> Option<String> {
+    if mud_world::bypasses_restrictions(world, player) || world.get::<Mob>(player).is_some() {
+        return None;
+    }
+    let def = world
+        .get_resource::<AbilityCatalog>()?
+        .find_by_prefix(
+            name,
+            Some(mud_db::abilities::AbilityKind::Skill),
+            world.get::<KnownAbilities>(player),
+        )?
+        .clone();
+    mortal_skill_refusal(world, player, &def, "use")
+}
+
 /// [`invoke_ability`] against a target the caller already resolved. The
 /// entity is locked in, so the dispatcher never re-looks it up by display
 /// name (which fails for names like "a rat" and can hit the wrong one of two
@@ -16334,76 +16422,12 @@ pub(crate) fn invoke_ability_core(
             );
             return;
         }
-    } else if !bypass_known_check && matches!(kind, mud_db::abilities::AbilityKind::Skill) {
-        // Mortal SKILL gate: check ClassSkills if the caster has
-        // a class. The class's row sets the minimum level
-        // required; missing row = wrong class for this skill.
-        // Classless mortals still fall through to the legacy
-        // "empty KnownAbilities bypass" so they can try anything
-        // — once Profile.class_id is enforced non-NULL by login,
-        // this branch goes away.
-        let profile_data = world.get::<Profile>(player).map(|p| (p.class_id, p.level));
-        if let Some((Some(class_id), level)) = profile_data {
-            let csd = world.resource::<mud_world::ClassSkillsData>();
-            // Defensive: a class with zero ClassSkills rows means
-            // content hasn't authored its kit yet. Bypass rather
-            // than refuse every skill — once data lands the gate
-            // engages naturally.
-            if csd.class_skill_count(class_id) > 0 {
-                match csd.min_level_for(class_id, def.id) {
-                    Some(min_level) if min_level <= level => {
-                        // Allowed by class. Layer the per-character
-                        // KnownAbilities rule on top: if the player
-                        // has trained anything at all, restrict to
-                        // their practiced list. Empty list still
-                        // bypasses so brand-new characters keep
-                        // their starter kit.
-                        if let Some(known) = world.get::<KnownAbilities>(player)
-                            && !known.entries.is_empty()
-                            && !known.has_any(def.id)
-                        {
-                            send_to(
-                                world,
-                                player,
-                                format!("You haven't practiced {} yet.\r\n", def.name),
-                            );
-                            return;
-                        }
-                    }
-                    Some(min_level) => {
-                        send_to(
-                            world,
-                            player,
-                            format!(
-                                "You must reach level {min_level} before you can use {}.\r\n",
-                                def.name
-                            ),
-                        );
-                        return;
-                    }
-                    None => {
-                        send_to(
-                            world,
-                            player,
-                            format!("Your class can't use {}.\r\n", def.name),
-                        );
-                        return;
-                    }
-                }
-            }
-        } else if let Some(known) = world.get::<KnownAbilities>(player)
-            && !known.entries.is_empty()
-            && !known.has_any(def.id)
-        {
-            // Classless mortal with practiced kit: enforce the
-            // explicit-entry rule.
-            send_to(
-                world,
-                player,
-                format!("You don't know how to {} {}.\r\n", verb, def.name),
-            );
-            return;
-        }
+    } else if !bypass_known_check
+        && matches!(kind, mud_db::abilities::AbilityKind::Skill)
+        && let Some(refusal) = mortal_skill_refusal(world, player, &def, verb)
+    {
+        send_to(world, player, refusal);
+        return;
     }
 
     // Wind-up pre-flight: a player-typed cast that will queue resolves
@@ -23283,7 +23307,59 @@ pub(crate) fn cap_sentence_start(s: &str) -> String {
 /// the line ("the Knight Templar says ..."), so the first visible
 /// character is capitalised. A line whose first visible token is a URL
 /// (`http://`, `https://`, `www.`) is left alone.
+#[cfg(test)]
 pub(crate) fn cap_script_line(s: &str) -> String {
+    cap_script_line_at(s, true)
+}
+
+/// The `\r\n`-terminated line to deliver to `recipient`: `msg`
+/// capitalised only when it opens a sentence for that recipient (see
+/// [`cap_script_line_at`]); records whether `msg` ended one.
+fn script_line_for(
+    sentence_start: &mut HashMap<Entity, bool>,
+    recipient: Entity,
+    msg: &str,
+) -> String {
+    let at_start = sentence_start.get(&recipient).copied().unwrap_or(true);
+    let line = format!("{msg}\r\n");
+    if !msg.trim().is_empty() {
+        sentence_start.insert(recipient, script_line_ends_sentence(&line));
+    }
+    cap_script_line_at(&line, at_start)
+}
+
+/// True when `s`, ignoring trailing whitespace and colour tags (XML-Lite
+/// `<...>` or ANSI `ESC[..m`), ends in `.`, `!` or `?`, optionally followed
+/// by closing quotes.
+fn script_line_ends_sentence(s: &str) -> bool {
+    let mut t = s.trim_end();
+    loop {
+        if t.ends_with('>')
+            && let Some(i) = t.rfind('<')
+        {
+            t = t[..i].trim_end();
+        } else if t.ends_with('m')
+            && let Some(i) = t.rfind('\x1b')
+            && t[i + 1..].starts_with('[')
+            && t[i + 2..t.len() - 1]
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == ';')
+        {
+            t = t[..i].trim_end();
+        } else {
+            break;
+        }
+    }
+    let t = t.trim_end_matches(['"', '\'', '\u{201d}', '\u{2019}']);
+    t.ends_with(['.', '!', '?'])
+}
+
+/// [`cap_script_line`] that only capitalises when `at_sentence_start`
+/// (a continuation line of a multi-line paragraph stays as written).
+fn cap_script_line_at(s: &str, at_sentence_start: bool) -> String {
+    if !at_sentence_start {
+        return s.to_string();
+    }
     let mut rest = s;
     // Skip the same leading run `cap_sentence_start` skips.
     loop {

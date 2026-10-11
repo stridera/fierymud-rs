@@ -271,3 +271,49 @@ fn entering_a_portal_while_mounted_takes_the_mount_along() {
         "the mount came too"
     );
 }
+
+#[test]
+fn a_lethal_kick_leaves_no_fight_behind() {
+    let (mut fx, p, mut rx) = arena();
+    let a = fx.a;
+    let r = rat(&mut fx.world, a);
+    fx.world.get_mut::<Health>(r).unwrap().hp = 1;
+    dispatch(&mut fx.world, p, "kick rat");
+    let out = drain(&mut rx);
+    assert!(
+        fx.world.get_entity(r).is_err() || hp(&fx.world, r) <= 0,
+        "the rat died: {out}"
+    );
+    assert!(fx.world.get::<Fighting>(p).is_none(), "{out}");
+}
+
+#[test]
+fn kicking_without_knowing_kick_starts_no_fight_and_costs_no_stamina() {
+    let (mut fx, p, mut rx) = arena();
+    let a = fx.a;
+    let r = rat(&mut fx.world, a);
+    fx.world.entity_mut(p).insert(KnownAbilities {
+        entries: vec![(TAME, 500, true)],
+    });
+    dispatch(&mut fx.world, p, "kick rat");
+    let out = drain(&mut rx);
+    assert!(out.contains("don't know how to use Kick"), "{out}");
+    assert!(fx.world.get::<Fighting>(p).is_none(), "{out}");
+    assert!(fx.world.get::<Fighting>(r).is_none(), "{out}");
+    assert_eq!(fx.world.get::<Stamina>(p).unwrap().current, 100, "{out}");
+    assert_eq!(hp(&fx.world, r), 100, "{out}");
+}
+
+#[test]
+fn kicking_a_new_victim_engages_and_breaks_invisibility() {
+    let (mut fx, p, mut rx) = arena();
+    let a = fx.a;
+    let r = rat(&mut fx.world, a);
+    fx.world.entity_mut(p).insert(mud_world::Invisible);
+    dispatch(&mut fx.world, p, "kick rat");
+    let out = drain(&mut rx);
+    assert!(fx.world.get::<mud_world::Invisible>(p).is_none(), "{out}");
+    assert_eq!(fx.world.get::<Fighting>(p).map(|f| f.0), Some(r), "{out}");
+    assert_eq!(fx.world.get::<Fighting>(r).map(|f| f.0), Some(p), "{out}");
+    assert!(fx.world.get::<Stamina>(p).unwrap().current < 100, "{out}");
+}

@@ -1165,6 +1165,41 @@ pub(crate) fn cmd_kill(world: &mut World, player: Entity, args: &str) {
     crate::combat::handle_death(world, target, &target_name, located.0);
 }
 
+/// The shared engage step of `attack` and `kick`: open the re-engage
+/// window, set `Fighting` both ways (first-attacker priority), spend `cost`
+/// stamina and break the attacker's invisibility. Callers run the
+/// already-fighting / Switch gate ([`try_switch_opponent`]) first and
+/// [`rally_allies`] once their own attack lines are out.
+fn engage_target(world: &mut World, player: Entity, target: Entity, cost: i32) {
+    stamp_reengage(world, player, Some(target));
+    try_insert(world, player, Fighting(target));
+    // First-attacker priority: don't steal aggro from whoever's
+    // already engaged with this target. Players joining a tanked
+    // fight push to the hate list (via apply_swing) but the active
+    // Fighting target stays the original puller. `rescue` is the
+    // explicit aggro-redirect path.
+    if world.get::<Fighting>(target).is_none()
+        && world.get::<CombatStats>(target).is_some()
+        && let Ok(mut e) = world.get_entity_mut(target)
+    {
+        e.insert(Fighting(player));
+    }
+    drain_stamina(world, player, cost);
+    // Attacking breaks the attacker's invisibility (legacy
+    // `aggro_lose_spells` -> `appear`) before the attack lines go out,
+    // so they name the attacker.
+    crate::commands::break_invisibility(world, player);
+}
+
+/// Allies join an engagement: followers of `target` with `AUTO_ASSIST` set
+/// (same room, not already fighting) engage `player`, and `Helper` mobs in
+/// the room (other than the two) join in against the attacker. Same
+/// room-mismatch auto-disengage as any other combat enrollment.
+fn rally_allies(world: &mut World, player: Entity, target: Entity, room: Entity) {
+    auto_assist_followers_of(world, target, player, room);
+    mob_helpers_engage(world, target, player, room);
+}
+
 pub(crate) fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
     attack_with_switch_roll(world, player, target_name, rand::random_range(1..=101));
 }
@@ -1292,28 +1327,9 @@ fn attack_with_switch_roll(world: &mut World, player: Entity, target_name: &str,
     // Only a fresh engage (no open lag window) gets the instant swing
     // and the ATTACK trigger.
     let fresh = lag.is_none();
-    stamp_reengage(world, player, Some(target));
+    engage_target(world, player, target, cost);
     let actual_name = name_of(world, target);
     let player_name = name_of(world, player);
-
-    try_insert(world, player, Fighting(target));
-    // First-attacker priority: don't steal aggro from whoever's
-    // already engaged with this target. Players joining a tanked
-    // fight push to the hate list (via apply_swing) but the active
-    // Fighting target stays the original puller. `rescue` is the
-    // explicit aggro-redirect path.
-    if world.get::<Fighting>(target).is_none()
-        && world.get::<CombatStats>(target).is_some()
-        && let Ok(mut e) = world.get_entity_mut(target)
-    {
-        e.insert(Fighting(player));
-    }
-    drain_stamina(world, player, cost);
-
-    // Attacking breaks the attacker's invisibility (legacy
-    // `aggro_lose_spells` -> `appear`) before the attack lines go out,
-    // so they name the attacker.
-    crate::commands::break_invisibility(world, player);
     send_to(world, player, format!("You attack {actual_name}!\r\n"));
     send_msg(world, target, format!("{player_name} attacks you!\r\n"));
     crate::commands::broadcast_room_anonymised(
@@ -1324,15 +1340,7 @@ fn attack_with_switch_roll(world: &mut World, player: Entity, target_name: &str,
         &format!("{player_name} attacks {actual_name}.\r\n"),
     );
 
-    // Auto-assist: anyone following `target` with AUTO_ASSIST set, in
-    // the same room, not already fighting — they engage `player`.
-    auto_assist_followers_of(world, target, player, located.0);
-
-    // Mob HELPER behavior: any mob in the room (other than the
-    // attacker / defender) with the `Helper` flag joins in and
-    // engages the attacker. Same room-mismatch auto-disengage as
-    // any other combat enrollment if the attacker leaves.
-    mob_helpers_engage(world, target, player, located.0);
+    rally_allies(world, player, target, located.0);
 
     // Fire ATTACK trigger on the target. Bodies typically run
     // initial-aggression flavor or counter-attacks. `self` = target,
@@ -2028,6 +2036,12 @@ pub(crate) fn cmd_kick(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "kick") {
         return;
     }
+    // A kicker who may not use the skill is refused before any stamina is
+    // spent or fight started.
+    if let Some(refusal) = crate::commands::skill_use_refusal(world, player, "kick") {
+        send_to(world, player, refusal);
+        return;
+    }
     let arg = args.trim();
     let target = if arg.is_empty() {
         let Some(fighting) = world.get::<Fighting>(player).copied() else {
@@ -2064,7 +2078,36 @@ pub(crate) fn cmd_kick(world: &mut World, player: Entity, args: &str) {
     if !check_stamina(world, player, cost, "kick") {
         return;
     }
-    drain_stamina(world, player, cost);
+    // Engage BEFORE the kick lands, as `attack` does: a lethal kick then
+    // ends the fight through the death path instead of this command
+    // re-attaching `Fighting` to a corpse afterwards. A kick at the current
+    // opponent just spends the stamina.
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let current = world
+        .get::<Fighting>(player)
+        .map(|f| f.0)
+        .filter(|&c| world.get::<Located>(c).is_some_and(|l| l.0 == located.0));
+    if current == Some(target) {
+        drain_stamina(world, player, cost);
+    } else {
+        let lag = active_reengage_lag(world, player);
+        let switching_from = current.or_else(|| {
+            lag.and_then(|l| l.last_opponent).filter(|&o| {
+                o != target
+                    && world.get::<Located>(o).is_some_and(|l| l.0 == located.0)
+                    && world.get::<Health>(o).is_some_and(|h| h.hp > 0)
+            })
+        });
+        if let Some(old) = switching_from
+            && !try_switch_opponent(world, player, old, rand::random_range(1..=101))
+        {
+            return;
+        }
+        engage_target(world, player, target, cost);
+        rally_allies(world, player, target, located.0);
+    }
     invoke_ability_targeting(
         world,
         player,
@@ -2073,19 +2116,6 @@ pub(crate) fn cmd_kick(world: &mut World, player: Entity, args: &str) {
         "use",
         Some(target),
     );
-    // Start the fight when the kick opened it (first-attacker priority, as
-    // in backstab/bash: never steal a mob's existing target).
-    if !arg.is_empty() && world.get_entity(target).is_ok() {
-        if world.get::<Fighting>(player).is_none() {
-            try_insert(world, player, Fighting(target));
-        }
-        if world.get::<Fighting>(target).is_none()
-            && world.get::<CombatStats>(target).is_some()
-            && let Ok(mut e) = world.get_entity_mut(target)
-        {
-            e.insert(Fighting(player));
-        }
-    }
 }
 pub(crate) fn cmd_berserk(world: &mut World, player: Entity, _args: &str) {
     if !require_alert_posture(world, player, "berserk") {

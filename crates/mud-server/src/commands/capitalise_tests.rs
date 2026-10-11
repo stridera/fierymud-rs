@@ -523,3 +523,63 @@ fn lua_outbox_capitalises_room_and_direct_lines() {
     assert!(seen.contains("https://fierymud.org rocks"), "{seen}");
     assert!(seen.contains("The knight nods"), "{seen}");
 }
+
+/// Several `send` lines make one paragraph (kerristone travel echo): only
+/// the line that opens a sentence is capitalised, continuations are left
+/// as the script wrote them, and each sentence start is capitalised.
+#[test]
+fn lua_outbox_capitalises_only_sentence_starts() {
+    let mut fx = fixture();
+    let room = fx.a;
+    let (p, mut rx) = player(&mut fx.world, room, "Ann");
+    let _ = drain(&mut rx);
+    {
+        let mut out = fx
+            .world
+            .get_resource_or_insert_with(mud_world::LuaOutbox::default);
+        for line in [
+            "the Knight Templar leads you north along a trail that winds",
+            "between the rocks and down into",
+            "the valley below.",
+            "a second sentence follows, then it says \"stop.\"",
+            "the third begins here!<reset>  ",
+            "and a fourth?",
+        ] {
+            out.messages.push((room, line.to_string(), None));
+        }
+        out.direct.push((p, "a lone direct line".to_string()));
+        out.direct.push((p, "continues without a stop".to_string()));
+        out.direct.push((p, "and ends. ".to_string()));
+        out.direct.push((p, "then restarts".to_string()));
+    }
+    super::flush_lua_outbox(&mut fx.world);
+    let seen = drain(&mut rx);
+    let lines: Vec<&str> = seen.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "The Knight Templar leads you north along a trail that winds",
+            "between the rocks and down into",
+            "the valley below.",
+            "A second sentence follows, then it says \"stop.\"",
+            "The third begins here!<reset>  ",
+            "And a fourth?",
+            "A lone direct line",
+            "continues without a stop",
+            "and ends. ",
+            "Then restarts",
+        ],
+        "{seen}"
+    );
+}
+
+#[test]
+fn sentence_end_ignores_trailing_tags_whitespace_and_closing_quotes() {
+    use super::script_line_ends_sentence as ends;
+    assert!(ends("done.\r\n"));
+    assert!(ends("<red>done!</>\r\n"));
+    assert!(ends("\x1b[1;31mdone?\x1b[0m\r\n"));
+    assert!(ends("he said \"done.\"\r\n"));
+    assert!(!ends("done,\r\n"));
+    assert!(!ends("and then\r\n"));
+}

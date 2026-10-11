@@ -10805,10 +10805,10 @@ fn give_coins(world: &mut World, player: Entity, copper: i64, rest: &str) {
         return;
     }
     if !staff && let Some(mut w) = world.get_mut::<Wealth>(player) {
-        w.0 -= copper;
+        w.0 = w.0.saturating_sub(copper);
     }
     if let Some(mut w) = world.get_mut::<Wealth>(target) {
-        w.0 += copper;
+        w.0 = w.0.saturating_add(copper);
     } else {
         world.entity_mut(target).insert(Wealth(copper));
     }
