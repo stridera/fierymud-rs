@@ -1647,6 +1647,14 @@ impl LuaHost {
 
         api_extra::bind_globals(&self.lua, globals)?;
 
+        // `speech` is the SPEECH event's text. A trigger flagged for both
+        // SPEECH and another type (RANDOM, say) runs the same body for the
+        // non-speech fires, so `speech` defaults to "" rather than nil and
+        // `speech:find(...)` / `speech == "..."` just don't match. A resumed
+        // thread keeps whatever its body already set.
+        if globals.raw_get::<Value>("speech")?.is_nil() {
+            globals.set("speech", "")?;
+        }
         // Caller-supplied event-context globals (`speech` for
         // SPEECH triggers, etc.). Cleaned up alongside the
         // built-ins below.

@@ -87,3 +87,21 @@ fn damage_without_a_server_clamps_and_reports() {
         "heal stops at max"
     );
 }
+
+/// A trigger flagged for SPEECH plus another type runs the same body for the
+/// non-speech fires, so `speech` is "" there (never nil), and a real speech
+/// fire still passes its text.
+#[test]
+fn speech_defaults_to_empty_text_for_non_speech_fires() {
+    let (mut world, _room, me, bob) = world();
+    let body = "if speech:find('hello') then print('heard') else print('quiet:' .. speech) end";
+    let mut host = LuaHost::new();
+    let out = host
+        .exec_for_listener_with_extras(&mut world, me, bob, body, &[])
+        .unwrap();
+    assert_eq!(out, "quiet:\r\n");
+    let out = host
+        .exec_for_listener_with_extras(&mut world, me, bob, body, &[("speech", "hello there")])
+        .unwrap();
+    assert_eq!(out, "heard\r\n");
+}

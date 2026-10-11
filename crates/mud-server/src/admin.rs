@@ -2102,6 +2102,11 @@ async fn run_command(
             format!("no virtual session for '{executor}'; create one first"),
         ));
     };
+    // Anything already queued for the session (mob arrivals, combat rounds,
+    // channel chatter since the last command) is not this command's output.
+    // Take it out first and hand it back separately as `pending_output`, so
+    // the caller never reads the previous command's tail as this one's.
+    let pending_output = drain_session_output(world, executor);
     // Run the command through the telnet input path so async-only
     // commands work and the gates / room triggers fire exactly once. Any
     // send_to / send_rendered the dispatch performs flows through the
@@ -2113,20 +2118,9 @@ async fn run_command(
     )
     .await
     .is_err();
-    // Drain whatever bytes accumulated. The mpsc is unbounded and
-    // sends are sync, so by this point everything the command wrote
-    // is sitting in the receiver.
-    let mut buf = Vec::<u8>::new();
-    {
-        let sessions = world.resource::<VirtualSessions>();
-        let mut by_name = sessions.by_name.lock().expect("sessions poisoned");
-        if let Some(session) = by_name.get_mut(executor) {
-            while let Ok(bytes) = session.rx.try_recv() {
-                buf.extend_from_slice(&bytes);
-            }
-        }
-    }
-    let output = String::from_utf8_lossy(&buf).to_string();
+    // Sends are synchronous, so by now everything the command wrote is
+    // sitting in the receiver.
+    let output = drain_session_output(world, executor);
     if timed_out {
         return Err((
             StatusCode::GATEWAY_TIMEOUT,
@@ -2139,8 +2133,22 @@ async fn run_command(
     Ok(json!({
         "success": true,
         "command": command_line,
+        "pending_output": pending_output,
         "output": output,
     }))
+}
+
+/// Everything the virtual session's receiver has accumulated, decoded.
+fn drain_session_output(world: &World, executor: &str) -> String {
+    let mut buf = Vec::<u8>::new();
+    let sessions = world.resource::<VirtualSessions>();
+    let mut by_name = sessions.by_name.lock().expect("sessions poisoned");
+    if let Some(session) = by_name.get_mut(executor) {
+        while let Ok(bytes) = session.rx.try_recv() {
+            buf.extend_from_slice(&bytes);
+        }
+    }
+    String::from_utf8_lossy(&buf).to_string()
 }
 
 /// Move an actor (player or mob) by name to the given room. Does not
@@ -2745,6 +2753,26 @@ mod command_dispatch_tests {
         let (mut world, _player) = world_with_session();
         let out = output(run_command(&mut world, &pool(), "Tester", "look").await);
         assert!(out.contains("A quiet hall"), "{out}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn earlier_output_comes_back_as_pending_not_as_this_commands() {
+        let (mut world, player) = world_with_session();
+        // Queued between commands: a mob arrival, say.
+        commands::send_to(&world, player, "A rat arrives.\r\n");
+        let resp = run_command(&mut world, &pool(), "Tester", "look")
+            .await
+            .expect("command ok");
+        let pending = resp["pending_output"].as_str().unwrap();
+        let out = resp["output"].as_str().unwrap();
+        assert!(pending.contains("A rat arrives."), "{pending}");
+        assert!(!out.contains("A rat arrives."), "{out}");
+        assert!(out.contains("A quiet hall"), "{out}");
+        // The next command has nothing pending.
+        let resp = run_command(&mut world, &pool(), "Tester", "look")
+            .await
+            .expect("command ok");
+        assert_eq!(resp["pending_output"].as_str().unwrap(), "");
     }
 
     #[tokio::test(flavor = "current_thread")]

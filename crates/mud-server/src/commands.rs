@@ -605,6 +605,9 @@ mod item_spawn_sites_tests;
 #[path = "commands/lua_safety_tests.rs"]
 mod lua_safety_tests;
 #[cfg(test)]
+#[path = "commands/playtest_b1_tests.rs"]
+mod playtest_b1_tests;
+#[cfg(test)]
 #[path = "commands/violent_cast_tests.rs"]
 mod violent_cast_tests;
 #[cfg(test)]
@@ -7305,7 +7308,7 @@ mod tests {
         };
         assert_eq!(
             format_rest_line(rest),
-            "Logged out (no pool yet); 500 XP banked",
+            "Rested while logged out; 500 XP banked",
         );
         // No source but residual pool — common after consuming a
         // rest source via XP gain.
@@ -10457,17 +10460,69 @@ pub(crate) fn require_profession_in_room(
     present
 }
 
+/// Copper value of a bank amount: `all` (the whole `pool`), `<n>` (copper),
+/// or `<n> <unit>` / `<n><unit>` with unit copper/silver/gold/platinum (or
+/// its three-letter or one-letter short form). `None` when it does not
+/// parse; `Some(0)` when `all` meets an empty pool.
+pub(crate) fn parse_bank_amount(args: &str, pool: i64) -> Option<i64> {
+    let args = args.trim();
+    if args.eq_ignore_ascii_case("all") {
+        return Some(pool.max(0));
+    }
+    let mut tokens = args.split_whitespace();
+    let first = tokens.next()?;
+    let digits_end = first
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(first.len());
+    let (num, attached) = first.split_at(digits_end);
+    let count: i64 = num.parse().ok()?;
+    let unit = match (attached, tokens.next()) {
+        ("", None) => "copper",
+        ("", Some(u)) | (u, None) => u,
+        _ => return None,
+    };
+    if tokens.next().is_some() {
+        return None;
+    }
+    let scale = match unit.to_ascii_lowercase().as_str() {
+        "copper" | "cop" | "c" => 1,
+        "silver" | "sil" | "s" => 10,
+        "gold" | "gol" | "g" => 100,
+        "platinum" | "plat" | "p" => 1000,
+        _ => return None,
+    };
+    let total = count.checked_mul(scale)?;
+    (total > 0).then_some(total)
+}
+
 /// Shared body for `deposit` / `withdraw`. `direction` is "deposit"
 /// or "withdraw"; the function picks the source / destination
 /// component and refusal text accordingly.
 pub(crate) fn bank_transfer(world: &mut World, player: Entity, args: &str, direction: &str) {
-    let amount = match args.trim().parse::<i64>() {
-        Ok(n) if n > 0 => n,
-        _ => {
+    let pool = if direction == "deposit" {
+        world.get::<Wealth>(player).map_or(0, |w| w.0)
+    } else {
+        world.get::<BankWealth>(player).map_or(0, |b| b.0)
+    };
+    let amount = match parse_bank_amount(args, pool) {
+        Some(n) if n > 0 => n,
+        Some(_) => {
+            let msg = if direction == "deposit" {
+                "You have nothing to deposit.\r\n"
+            } else {
+                "You have nothing in the bank to withdraw.\r\n"
+            };
+            send_to(world, player, msg);
+            return;
+        }
+        None => {
             send_to(
                 world,
                 player,
-                format!("Usage: {direction} <amount of copper>\r\n").as_str(),
+                format!(
+                    "Usage: {direction} <amount> [copper|silver|gold|platinum], or {direction} all\r\n"
+                )
+                .as_str(),
             );
             return;
         }
@@ -11283,7 +11338,7 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
 /// label / box framing. Examples:
 ///   `"Rented Inn tier 2 (resting); 1,200 XP banked"`
 ///   `"Camped tier 1; 320 XP banked"`
-///   `"Logged out (no pool yet); 480 XP banked"`
+///   `"Rested while logged out; 480 XP banked"`
 ///   `"320 XP banked"` (no pending source, just accrued pool)
 /// The pool number stays the source of truth; sources are
 /// human-rendered through their `label()` shape.
@@ -11294,7 +11349,7 @@ pub(crate) fn format_rest_line(rest: RestStateDisplay) -> String {
         RestSource::Inn => Some(format!("Rented Inn tier {} (resting)", rest.tier.max(1))),
         RestSource::Camp => Some(format!("Camped tier {} (resting)", rest.tier.max(1))),
         RestSource::House => Some("At home (resting)".to_string()),
-        RestSource::Quit => Some("Logged out (no pool yet)".to_string()),
+        RestSource::Quit => Some("Rested while logged out".to_string()),
     };
     // `1,234 XP banked` — thousands separator for legibility on
     // long-running characters. `0 XP` collapses to nothing so
@@ -12538,7 +12593,7 @@ pub(crate) fn look_in_container(world: &mut World, player: Entity, target_word: 
         send_msg(world, player, format!("{container_name} is empty.\r\n"));
         return;
     }
-    let mut out = format!("{container_name} contains:\r\n");
+    let mut out = format!("{} contains:\r\n", cap_sentence_start(&container_name));
     if let Some(amount) = coin
         && amount > 0
         && let Some(formatted) = crate::commands::format_wealth(amount)
@@ -12650,11 +12705,7 @@ pub(crate) fn look_direction(world: &mut World, player: Entity, dir: Direction) 
     // matters most.
     let mode_pre = color_mode_for(world, player);
     if let Some(desc) = ed.description.as_ref() {
-        send_to(
-            world,
-            player,
-            format!("\r\n{}\r\n", render_color_tags(desc.trim_end(), mode_pre)),
-        );
+        send_prose(world, player, format!("\r\n{}\r\n", desc.trim_end()));
         if matches!(
             ed.state,
             mud_db::enums::ExitState::Closed | mud_db::enums::ExitState::Locked
@@ -12736,18 +12787,17 @@ pub(crate) fn look_direction(world: &mut World, player: Entity, dir: Direction) 
         return;
     }
     let name = name_or(world, target_room, "(unknown)");
-    let mode = color_mode_for(world, player);
     // Default-cyan for plain target room names; authored colors win.
-    let name = render_color_tags(&colorize_default(&name, "<b:cyan>"), mode);
+    let name = colorize_default(&name, "<b:cyan>");
     let desc = world
         .get::<Description>(target_room)
-        .map(|d| render_color_tags(&d.0, mode))
+        .map(|d| d.0.clone())
         .unwrap_or_default();
     // Mirror the cmd_look [peaceful] tag for the destination so a
     // player previewing a sanctuary doesn't get surprised when they
     // step in and find combat refused.
     let peaceful_tag = if world.get::<mud_world::PeacefulRoom>(target_room).is_some() {
-        render_color_tags("  <green>[peaceful]</>", mode)
+        "  <green>[peaceful]</>".to_string()
     } else {
         String::new()
     };
@@ -12760,7 +12810,7 @@ pub(crate) fn look_direction(world: &mut World, player: Entity, dir: Direction) 
         out.push_str(desc.trim_end());
         out.push_str("\r\n");
     }
-    send_to(world, player, out);
+    send_prose(world, player, out);
     if world.get::<mud_world::Farsee>(player).is_some() {
         farsee_onward(world, player, target_room, dir, &mut |lo, hi| {
             rand::random_range(lo..=hi)
@@ -13450,15 +13500,9 @@ pub(crate) fn drink_amount(world: &mut World, player: Entity, args: &str, units:
         .cloned()
         .unwrap_or_else(|| world.resource::<mud_world::LiquidCatalog>().fallback());
     let identified = world.get::<mud_world::Identified>(item).is_some();
-    // Identified container shows the real liquid name; unidentified
-    // shows the color description. Matches legacy CircleMUD's
-    // "you drink some clear liquid" / "you drink some water"
-    // disambiguation.
-    let render_label = if identified {
-        liquid_def.name.to_ascii_lowercase()
-    } else {
-        liquid_def.color_desc.to_ascii_lowercase()
-    };
+    // Legacy `do_drink` (act.item.cpp) names the liquid itself ("You drink
+    // some water"); the colour description is only for `look`/`examine`.
+    let render_label = liquid_def.name.to_ascii_lowercase();
     if !is_fountain && let Some(mut lc) = world.get_mut::<mud_world::LiquidContainer>(item) {
         lc.remaining -= drank;
     }
@@ -13964,7 +14008,12 @@ pub(crate) fn wear_into(
     force_slot: Option<Slot>,
 ) {
     if target_word.is_empty() {
-        send_to(world, player, "Wear what?\r\n");
+        let verb = match force_slot {
+            Some(Slot::Wield) => "Wield",
+            Some(Slot::Hold) => "Hold",
+            _ => "Wear",
+        };
+        send_to(world, player, format!("{verb} what?\r\n"));
         return;
     }
     let Some(item) = find_item(world, player, target_word, ItemClass::Inventory) else {
@@ -15036,6 +15085,19 @@ pub(crate) fn spell_slot_open(world: &World, caster: Entity, ability_id: i32) ->
     !matches!(pick_spell_slot(world, caster, ability_id), Some(Err(_)))
 }
 
+/// Refusal for a circle with no free slot. A circle the caster has no slots
+/// in at all (`max == 0`) is not yet reachable; waiting would never help.
+pub(crate) fn spent_slots_message(circle: i32, used: i32, max: i32) -> String {
+    if max == 0 {
+        format!("You can't cast circle {circle} spells yet.\r\n")
+    } else {
+        format!(
+            "Your circle {circle} slots are spent ({used}/{max}). \
+             Wait for one to recover.\r\n"
+        )
+    }
+}
+
 /// Take a slot for a spell that is about to start, when the caster's
 /// class gives it a circle: refuse (message sent, `Err`) if every slot
 /// of that circle is spent or reserved, otherwise hold one and return
@@ -15051,14 +15113,7 @@ fn reserve_spell_slot(
         None => return Ok(None),
         Some(Ok(pair)) => pair,
         Some(Err((native, used, max))) => {
-            send_to(
-                world,
-                player,
-                format!(
-                    "Your circle {native} slots are spent ({used}/{max}). \
-                     Wait for one to recover.\r\n"
-                ),
-            );
+            send_to(world, player, spent_slots_message(native, used, max));
             return Err(());
         }
     };
@@ -15798,7 +15853,9 @@ fn resolve_and_gate_target(
     // Hostile abilities (any ENEMY_* / AREA_FOES targeting) refuse
     // in PeacefulRoom — same contract cmd_attack and engage_combat
     // honor. Beneficial casts (FRIEND_PC / SELF / etc.) still work
-    // so a healer can patch up a party in a sanctuary.
+    // so a healer can patch up a party in a sanctuary. The refusal is
+    // issued once the target is resolved (legacy `cast_spell`), so a
+    // missing target reports "You don't see ..." rather than a peace lecture.
     //
     // Only 9/408 abilities currently carry an AbilityTargeting row,
     // so when valid_targets is empty we fall back to `def.violent`
@@ -15807,17 +15864,6 @@ fn resolve_and_gate_target(
     // the no-target gate below silently routes the cast onto the
     // caster — instant suicide. See G2.1 / G2.2 in remaining-work.md.
     let is_hostile_ability = ability_is_hostile(world, def);
-    if is_hostile_ability
-        && let Some(located) = world.get::<Located>(player)
-        && world.get::<mud_world::PeacefulRoom>(located.0).is_some()
-    {
-        send_to(
-            world,
-            player,
-            "A peaceful aura forbids hostile magic here.\r\n",
-        );
-        return None;
-    }
     // Self-name detection: the AOE dispatcher passes per-target
     // *names* and re-resolves through this branch. RoomAllies /
     // RoomAll include the caster, so a per-target call may carry
@@ -15967,6 +16013,18 @@ fn resolve_and_gate_target(
     };
     // (The "target: X" line was part of the removed descriptor box —
     // the success message already names the target.)
+    // Dispel magic stays violent here (legacy), even aimed at oneself.
+    if is_hostile_ability
+        && let Some(located) = world.get::<Located>(player)
+        && world.get::<mud_world::PeacefulRoom>(located.0).is_some()
+    {
+        send_to(
+            world,
+            player,
+            "A peaceful aura forbids hostile magic here.\r\n",
+        );
+        return None;
+    }
     // AbilityTargeting gate: refuse if the resolved target doesn't
     // match the schema's `valid_targets` list. Only enforces the
     // recognized types (ENEMY_PC, ENEMY_NPC); CORPSE / RIDER /
@@ -23254,12 +23312,13 @@ pub(crate) fn run_social(world: &mut World, player: Entity, social: &SocialDef, 
 
     if target_word.is_empty() {
         // No-arg path.
+        let actor_p = Pronouns::of(world, player);
         if let Some(line) = social.char_no_arg.as_ref() {
-            let s = substitute(line, &actor_name, None);
+            let s = substitute_for(line, Viewer::Actor, (&actor_name, actor_p), None);
             send_msg(world, player, format!("{s}\r\n"));
         }
         if let Some(line) = social.others_no_arg.as_ref() {
-            let s = substitute(line, &actor_name, None);
+            let s = substitute_for(line, Viewer::Bystander, (&actor_name, actor_p), None);
             broadcast_room_except_rendered(world, room, &[player], &format!("{s}\r\n"));
         }
         return;
@@ -23268,12 +23327,14 @@ pub(crate) fn run_social(world: &mut World, player: Entity, social: &SocialDef, 
     // Self-target?
     let self_target = matches_self(&actor_name, target_word);
     if self_target {
+        let actor_p = Pronouns::of(world, player);
+        let me = (actor_name.as_str(), actor_p);
         if let Some(line) = social.char_auto.as_ref() {
-            let s = substitute(line, &actor_name, Some(&actor_name));
+            let s = substitute_for(line, Viewer::Actor, me, Some(me));
             send_msg(world, player, format!("{s}\r\n"));
         }
         if let Some(line) = social.others_auto.as_ref() {
-            let s = substitute(line, &actor_name, Some(&actor_name));
+            let s = substitute_for(line, Viewer::Bystander, me, Some(me));
             broadcast_room_except_rendered(world, room, &[player], &format!("{s}\r\n"));
         }
         return;
@@ -23291,17 +23352,27 @@ pub(crate) fn run_social(world: &mut World, player: Entity, social: &SocialDef, 
     };
 
     let target_name = name_of(world, target);
+    let actor_p = Pronouns::of(world, player);
+    let target_p = Pronouns::of(world, target);
+    let render = |line: &str, viewer: Viewer| {
+        substitute_for(
+            line,
+            viewer,
+            (&actor_name, actor_p),
+            Some((&target_name, target_p)),
+        )
+    };
 
     if let Some(line) = social.char_found.as_ref() {
-        let s = substitute(line, &actor_name, Some(&target_name));
+        let s = render(line, Viewer::Actor);
         send_msg(world, player, format!("{s}\r\n"));
     }
     if let Some(line) = social.vict_found.as_ref() {
-        let s = substitute(line, &actor_name, Some(&target_name));
+        let s = render(line, Viewer::Target);
         send_msg(world, target, format!("{s}\r\n"));
     }
     if let Some(line) = social.others_found.as_ref() {
-        let s = substitute(line, &actor_name, Some(&target_name));
+        let s = render(line, Viewer::Bystander);
         broadcast_room_except_rendered(world, room, &[player, target], &format!("{s}\r\n"));
     }
 }
@@ -23332,6 +23403,106 @@ pub(crate) fn substitute(template: &str, actor_name: &str, target_name: Option<&
         .replace("{target.pronoun.possessive}", "their");
     warn_unknown_template_tokens(&rendered);
     rendered
+}
+
+/// A character's pronoun set, for second- and third-person message lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Pronouns {
+    pub subjective: &'static str,
+    pub objective: &'static str,
+    pub possessive: &'static str,
+    pub reflexive: &'static str,
+}
+
+impl Pronouns {
+    pub(crate) const MALE: Self = Self {
+        subjective: "he",
+        objective: "him",
+        possessive: "his",
+        reflexive: "himself",
+    };
+    pub(crate) const FEMALE: Self = Self {
+        subjective: "she",
+        objective: "her",
+        possessive: "her",
+        reflexive: "herself",
+    };
+    /// Mobs and things without a sex.
+    pub(crate) const IT: Self = Self {
+        subjective: "it",
+        objective: "it",
+        possessive: "its",
+        reflexive: "itself",
+    };
+    /// Players who picked no gender.
+    pub(crate) const THEY: Self = Self {
+        subjective: "they",
+        objective: "them",
+        possessive: "their",
+        reflexive: "themself",
+    };
+
+    /// The real pronouns of `e`: its sex (player profile or mob prototype),
+    /// "it" for a sexless mob, "they" for a sexless player.
+    pub(crate) fn of(world: &World, e: Entity) -> Self {
+        match look_auras::target_gender(world, e)
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "male" => Self::MALE,
+            "female" => Self::FEMALE,
+            _ if world.get::<Profile>(e).is_some() => Self::THEY,
+            _ => Self::IT,
+        }
+    }
+
+    /// What `viewer` reads for themself: "you", "your", "yourself".
+    const SECOND_PERSON: Self = Self {
+        subjective: "you",
+        objective: "you",
+        possessive: "your",
+        reflexive: "yourself",
+    };
+}
+
+/// Render a social line for one [`Viewer`]. `{actor.pronoun.*}` and
+/// `{target.pronoun.*}` use each side's real pronouns, except that the
+/// viewer reads themself as "you"/"your"/"yourself"; `{target.name}` reads
+/// "you" for the target viewer.
+pub(crate) fn substitute_for(
+    template: &str,
+    viewer: Viewer,
+    actor: (&str, Pronouns),
+    target: Option<(&str, Pronouns)>,
+) -> String {
+    let (actor_name, actor_p) = actor;
+    let (target_name, target_p) = target.unwrap_or(("someone", Pronouns::IT));
+    let actor_p = if viewer == Viewer::Actor {
+        Pronouns::SECOND_PERSON
+    } else {
+        actor_p
+    };
+    let (target_name, target_p) = if viewer == Viewer::Target {
+        ("you", Pronouns::SECOND_PERSON)
+    } else {
+        (target_name, target_p)
+    };
+    let mut rendered = template
+        .replace("{actor.name}", actor_name)
+        .replace("{target.name}", target_name);
+    for (who, p) in [("actor", actor_p), ("target", target_p)] {
+        rendered = rendered
+            .replace(
+                &format!("{{{who}.pronoun.Subjective}}"),
+                &cap_sentence_start(p.subjective),
+            )
+            .replace(&format!("{{{who}.pronoun.subjective}}"), p.subjective)
+            .replace(&format!("{{{who}.pronoun.objective}}"), p.objective)
+            .replace(&format!("{{{who}.pronoun.possessive}}"), p.possessive)
+            .replace(&format!("{{{who}.pronoun.reflexive}}"), p.reflexive);
+    }
+    warn_unknown_template_tokens(&rendered);
+    cap_sentence_start(&rendered)
 }
 
 /// Single-recipient companion to `broadcast_room_except_rendered`.
@@ -23974,7 +24145,7 @@ pub(crate) fn apply_damage(
 }
 
 /// Find every entity Fighting `target`, remove their Fighting component,
-/// and send "Your target falls." to each. Used by both the natural
+/// silently. Used by both the natural
 /// death path (`combat::handle_death`'s mob branch) and the admin `slay`
 /// command — anywhere a target stops existing as a combatant and we
 /// need everyone gunning for them to disengage cleanly.
@@ -23989,7 +24160,6 @@ pub(crate) fn disengage_attackers_of(world: &mut World, target: Entity) {
     for a in attackers {
         try_remove::<Fighting>(world, a);
         try_remove::<combat_commands::ReengageLag>(world, a);
-        send_to(world, a, "Your target falls.\r\n");
     }
 }
 
@@ -25455,7 +25625,7 @@ pub(crate) fn engage_combat(world: &mut World, attacker: Entity, defender: Entit
     broadcast_room_anonymised(
         world,
         room,
-        &[defender],
+        &[attacker, defender],
         &[(attacker, &attacker_name), (defender, &defender_name)],
         &format!(
             "{} sees {defender_name} and attacks!\r\n",

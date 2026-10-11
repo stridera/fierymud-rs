@@ -475,3 +475,13 @@ fn a_non_container_item_falls_through_to_the_door_code() {
     ));
     assert_eq!(fx.out(), "", "no `You can't open that.`");
 }
+
+#[test]
+fn contents_header_opens_with_a_capital() {
+    let mut fx = Fx::new();
+    fx.chest(62, "a canvas sack", "sack");
+    look_in_container(&mut fx.world, fx.player, "sack");
+    let out = fx.out();
+    assert!(out.contains("A canvas sack contains:"), "{out}");
+    assert!(!out.contains("\na canvas sack contains"), "{out}");
+}
