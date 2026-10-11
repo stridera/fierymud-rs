@@ -307,15 +307,9 @@ pub fn respawn_tick(world: &mut World) {
     // their own slot. `max_instances` is still enforced as the
     // global ceiling on this proto's world count, so a "unique
     // dagger" (cap=1) won't multiply across rows.
-    let mut object_world_counts: std::collections::HashMap<(i32, i32), i32> =
-        std::collections::HashMap::new();
+    // Staff-held copies (and their containers' contents) are not counted.
+    let mut object_world_counts = object_world_counts(world);
     let mut reset_id_alive: std::collections::HashSet<i32> = std::collections::HashSet::new();
-    {
-        let mut q = world.query_filtered::<&WorldKey, With<Item>>();
-        for wk in q.iter(world) {
-            *object_world_counts.entry((wk.zone, wk.id)).or_insert(0) += 1;
-        }
-    }
     {
         let mut q = world.query_filtered::<&FromObjectReset, With<Item>>();
         for fr in q.iter(world) {
@@ -933,6 +927,63 @@ mod tests {
         );
         let keys = *object_world_counts(&mut world).get(&(1, KEY)).unwrap_or(&0);
         assert_eq!(keys, 1);
+    }
+
+    /// Issue #121: a limited item held by staff (directly or inside their
+    /// containers) does not use up the world cap; one held by a mortal does.
+    #[test]
+    fn staff_held_copies_do_not_block_object_respawn() {
+        use mud_db::enums::UserRole;
+        use mud_world::Account;
+        let holder = |role: UserRole| Account {
+            user_id: String::new(),
+            character_id: "c".into(),
+            role,
+            account_role: role,
+            perms: vec![],
+        };
+        let keys_on_floor = |world: &mut World, room: Entity| {
+            let mut q = world.query_filtered::<(&WorldKey, &Located), With<Item>>();
+            q.iter(world)
+                .filter(|(k, l)| k.id == KEY && l.0 == room)
+                .count()
+        };
+        let entry = |room| ObjectResetEntry {
+            reset_id: 9,
+            object_zone_id: 1,
+            object_id: KEY,
+            room_entity: room,
+            max_instances: 1,
+        };
+
+        // Staff holds the only key, inside a sack in their inventory.
+        let (mut world, room) = base_world();
+        let imm = world
+            .spawn((Player, holder(UserRole::Immortal), Located(room)))
+            .id();
+        let sack = world
+            .spawn((Item, WorldKey { zone: 1, id: 900 }, Located(imm)))
+            .id();
+        world.spawn((Item, WorldKey { zone: 1, id: KEY }, Located(sack)));
+        world
+            .resource_mut::<ObjectResetCatalog>()
+            .entries
+            .push(entry(room));
+        run_respawn(&mut world, 6000);
+        assert_eq!(keys_on_floor(&mut world, room), 1, "staff copy ignored");
+
+        // A mortal holding it still blocks the spawn.
+        let (mut world, room) = base_world();
+        let mortal = world
+            .spawn((Player, holder(UserRole::Player), Located(room)))
+            .id();
+        world.spawn((Item, WorldKey { zone: 1, id: KEY }, Located(mortal)));
+        world
+            .resource_mut::<ObjectResetCatalog>()
+            .entries
+            .push(entry(room));
+        run_respawn(&mut world, 6000);
+        assert_eq!(keys_on_floor(&mut world, room), 0, "mortal copy counts");
     }
 
     #[test]

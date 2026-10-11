@@ -211,13 +211,13 @@ inventory::submit! {
 inventory::submit! {
     Command {
         names: &["set"],
-        min_role: UserRole::Implementor,
+        min_role: UserRole::Builder,
         required_perm: None,
         category: Category::Admin,
         help: Help {
             usage: "set <player> <field> <value>  |  set fields",
             summary: "Mutate a player field directly.",
-            long: "Implementor-only. Run 'set fields' to list every \
+            long: "Builder+ (level 101+) only. Run 'set fields' to list every \
                    writable field with its aliases. 'stat <player>' \
                    dumps the full read-only component state — pair \
                    the two when poking at a character.",

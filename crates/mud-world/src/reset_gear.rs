@@ -155,15 +155,42 @@ pub fn build_content_entries(rows: &[ObjectResetContent]) -> HashMap<i32, Vec<Co
 
 /// Live copies of every object prototype currently in the world
 /// (loose, carried, worn, in containers, in corpses). The `E` / `G`
-/// cap check reads this; callers keep it current across a batch of
-/// [`outfit_mob`] calls instead of re-scanning per mob.
+/// cap check and the object respawn cap read this; callers keep it
+/// current across a batch of [`outfit_mob`] calls instead of
+/// re-scanning per mob.
+///
+/// Items held by staff (Immortal+, see [`crate::bypasses_restrictions`]),
+/// directly or through any chain of containers, do not count: an imm
+/// hoarding a limited key or quest item must not block it from spawning.
 pub fn object_world_counts(world: &mut World) -> HashMap<(i32, i32), i32> {
     let mut counts: HashMap<(i32, i32), i32> = HashMap::new();
-    let mut q = world.query_filtered::<&WorldKey, With<Item>>();
-    for wk in q.iter(world) {
-        *counts.entry((wk.zone, wk.id)).or_insert(0) += 1;
+    let mut q = world.query_filtered::<(Entity, &WorldKey), With<Item>>();
+    let items: Vec<(Entity, i32, i32)> = q.iter(world).map(|(e, wk)| (e, wk.zone, wk.id)).collect();
+    for (entity, zone, id) in items {
+        if held_by_staff(world, entity) {
+            continue;
+        }
+        *counts.entry((zone, id)).or_insert(0) += 1;
     }
     counts
+}
+
+/// Whether the top-level holder of `item` (following `Located` up through
+/// containers until a non-item) is a staff character.
+fn held_by_staff(world: &World, item: Entity) -> bool {
+    let mut cur = item;
+    // Bounded walk: a malformed containment cycle must not hang the tick.
+    for _ in 0..64 {
+        let Some(parent) = world.get::<Located>(cur).map(|l| l.0) else {
+            return false;
+        };
+        if world.get::<Item>(parent).is_some() {
+            cur = parent;
+            continue;
+        }
+        return crate::bypasses_restrictions(world, parent);
+    }
+    false
 }
 
 /// The finite charge count a fresh instance of object prototype

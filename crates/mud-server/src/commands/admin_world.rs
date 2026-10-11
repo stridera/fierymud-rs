@@ -116,13 +116,13 @@ inventory::submit! {
 inventory::submit! {
     Command {
         names: &["force"],
-        min_role: UserRole::Implementor,
+        min_role: UserRole::Builder,
         required_perm: None,
         category: Category::Admin,
         help: Help {
             usage: "force <player> <command>",
             summary: "Make a player run a command as themselves.",
-            long: "Implementor-only. Dispatches <command> with <player> \
+            long: "Builder+ (level 101+) only. Dispatches <command> with <player> \
                    as the actor — exactly as if they had typed it.",
         },
         run: cmd_force,
@@ -189,13 +189,13 @@ inventory::submit! {
 inventory::submit! {
     Command {
         names: &["rpain"],
-        min_role: UserRole::Implementor,
+        min_role: UserRole::HeadBuilder,
         required_perm: None,
         category: Category::Admin,
         help: Help {
             usage: "rpain [<message>]",
             summary: "Cosmetic divine pain across the realm.",
-            long: "Implementor-only. Same as 'pain' but reaches \
+            long: "HeadBuilder+ (level 103+) only. Same as 'pain' but reaches \
                    every online player. Pure flavor — no stat \
                    change. Optional <message> overrides the default \
                    line. Players see your line; the caster sees a \
@@ -208,13 +208,13 @@ inventory::submit! {
 inventory::submit! {
     Command {
         names: &["rrestore"],
-        min_role: UserRole::Implementor,
+        min_role: UserRole::Immortal,
         required_perm: None,
         category: Category::Admin,
         help: Help {
             usage: "rrestore [<message>]",
             summary: "Heal every online player + strip every effect.",
-            long: "Implementor-only. Restores HP / stamina to max \
+            long: "Immortal+ (level 100+) only. Restores HP / stamina to max \
                    and clears every active EffectInstance for every \
                    online player. Optional <message> overrides the \
                    default flavor line. The realm-wide counterpart \
@@ -262,13 +262,13 @@ inventory::submit! {
 inventory::submit! {
     Command {
         names: &["inctime"],
-        min_role: UserRole::Implementor,
+        min_role: UserRole::Coder,
         required_perm: None,
         category: Category::Admin,
         help: Help {
             usage: "inctime <hours>",
             summary: "Force-advance the in-game clock.",
-            long: "Implementor-only. Adds <hours> to 'MudClock.hour' \
+            long: "Coder+ (level 104+) only. Adds <hours> to 'MudClock.hour' \
                    modulo 24 — useful for testing day/night triggers \
                    and dawn/dusk weather transitions without \
                    waiting for real time.",
@@ -280,13 +280,13 @@ inventory::submit! {
 inventory::submit! {
     Command {
         names: &["dc"],
-        min_role: UserRole::Implementor,
+        min_role: UserRole::Builder,
         required_perm: None,
         category: Category::Admin,
         help: Help {
             usage: "dc <player>",
             summary: "Disconnect a player by name.",
-            long: "Implementor-only. Drops the player's Connection \
+            long: "Builder+ (level 101+) only. Drops the player's Connection \
                    so the network task closes the socket cleanly. \
                    The autosave path runs on disconnect, so progress \
                    is preserved.",
@@ -298,13 +298,13 @@ inventory::submit! {
 inventory::submit! {
     Command {
         names: &["send"],
-        min_role: UserRole::Implementor,
+        min_role: UserRole::Builder,
         required_perm: None,
         category: Category::Admin,
         help: Help {
             usage: "send <player> <text>",
             summary: "Send raw text to a player's connection.",
-            long: "Implementor-only. Skips the rendering pipeline \
+            long: "Builder+ (level 101+) only. Skips the rendering pipeline \
                    entirely — bytes go straight to the descriptor. \
                    Used to surface diagnostic output that already \
                    carries ANSI escapes.",
@@ -388,13 +388,13 @@ inventory::submit! {
 inventory::submit! {
     Command {
         names: &["advance"],
-        min_role: UserRole::Implementor,
+        min_role: UserRole::Coder,
         required_perm: None,
         category: Category::Admin,
         help: Help {
             usage: "advance <player> <level>",
             summary: "Set a player's level (admin level-up).",
-            long: "Implementor-only. Bumps the target's XP to the \
+            long: "Coder+ (level 104+) only. Bumps the target's XP to the \
                    threshold for <level> and runs the standard \
                    level-up loop, so HP/stamina max + practice \
                    points scale through the normal path. Refuses \
@@ -428,13 +428,13 @@ inventory::submit! {
 inventory::submit! {
     Command {
         names: &["reroll"],
-        min_role: UserRole::Implementor,
+        min_role: UserRole::Builder,
         required_perm: None,
         category: Category::Admin,
         help: Help {
             usage: "reroll <player>",
             summary: "Reroll a player's six core stats (3d6 each).",
-            long: "Implementor-only. Wipes CoreStats and rolls 3d6 \
+            long: "Builder+ (level 101+) only. Wipes CoreStats and rolls 3d6 \
                    per axis (STR / DEX / CON / INT / WIS / CHA). \
                    Sends the new roll to the target so they can \
                    verify it.",
@@ -584,13 +584,13 @@ inventory::submit! {
 inventory::submit! {
     Command {
         names: &["freeze"],
-        min_role: UserRole::Implementor,
+        min_role: UserRole::Builder,
         required_perm: None,
         category: Category::Admin,
         help: Help {
             usage: "freeze <player>",
             summary: "Toggle a player's frozen state.",
-            long: "Implementor-only. Frozen players can't input commands.",
+            long: "Builder+ (level 101+) only. Frozen players can't input commands.",
         },
         run: cmd_freeze,
     }
@@ -631,13 +631,13 @@ inventory::submit! {
 inventory::submit! {
     Command {
         names: &["restore"],
-        min_role: UserRole::Implementor,
+        min_role: UserRole::HeadBuilder,
         required_perm: None,
         category: Category::Admin,
         help: Help {
             usage: "restore <player>",
             summary: "Refill a player's HP and stamina to max.",
-            long: "Implementor-only. No-op for offline players.",
+            long: "HeadBuilder+ (level 103+) only. No-op for offline players.",
         },
         run: cmd_restore,
     }
@@ -662,13 +662,13 @@ inventory::submit! {
 inventory::submit! {
     Command {
         names: &["purge"],
-        min_role: UserRole::Implementor,
+        min_role: UserRole::HeadBuilder,
         required_perm: None,
         category: Category::Admin,
         help: Help {
             usage: "purge [target]",
             summary: "Despawn the named target — or every non-player in the room.",
-            long: "Implementor-only. With no arg, removes every mob / \
+            long: "HeadBuilder+ (level 103+) only. With no arg, removes every mob / \
                    item in your current room. With a name, despawns \
                    that one entity.",
         },
@@ -3442,5 +3442,52 @@ mod skillset_tests {
             let known = world.get::<KnownAbilities>(target).unwrap();
             assert_eq!(known.entries, vec![(2, 1000, true)], "{args}");
         }
+    }
+}
+
+/// Wiz command gates follow the legacy level table through the role ladder
+/// (`UserRole::from_level`): 100 Immortal, 101-102 Builder, 103 `HeadBuilder`,
+/// 104 Coder, 105 Implementor. Issues #4 (`set`) and #129 (`purge`).
+#[cfg(test)]
+mod legacy_level_gate_tests {
+    use mud_db::enums::UserRole;
+
+    #[test]
+    fn staff_commands_match_their_legacy_levels() {
+        // (command, legacy level from fierymud_legacy interpreter.cpp)
+        let table = [
+            ("set", 101),
+            ("purge", 103),
+            ("force", 102),
+            ("advance", 104),
+            ("dc", 102),
+            ("inctime", 104),
+            ("send", 102),
+            ("reroll", 102),
+            ("freeze", 102),
+            ("rpain", 103),
+            ("restore", 103),
+            ("rrestore", 100),
+            ("teleport", 101),
+            ("transfer", 101),
+            ("switch", 101),
+            ("gecho", 101),
+        ];
+        for (name, level) in table {
+            let cmd = crate::commands::all_commands()
+                .find(|c| c.names.contains(&name))
+                .unwrap_or_else(|| panic!("command {name} not registered"));
+            assert_eq!(
+                cmd.min_role,
+                UserRole::from_level(level),
+                "{name} should need legacy level {level}"
+            );
+        }
+        // A level-103 character can purge; a level-102 one cannot.
+        let purge = crate::commands::all_commands()
+            .find(|c| c.names.contains(&"purge"))
+            .unwrap();
+        assert!(UserRole::from_level(103).at_least(purge.min_role));
+        assert!(!UserRole::from_level(102).at_least(purge.min_role));
     }
 }

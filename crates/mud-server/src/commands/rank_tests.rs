@@ -91,11 +91,11 @@ fn unlinked_l104_is_coder_not_implementor() {
         "Coder cmd"
     );
     assert!(command_permitted(&world, coder, cmd("goto")), "Builder cmd");
-    // `set` and `advance` are Implementor-only.
-    assert!(!command_permitted(&world, coder, cmd("set")));
-    assert!(!command_permitted(&world, coder, cmd("advance")));
-    dispatch(&mut world, coder, "set me xp 77");
-    assert_eq!(world.get::<Profile>(coder).unwrap().experience, 0);
+    // `slay` and `apply` are Implementor-only; `set` (legacy 101) is not.
+    assert!(!command_permitted(&world, coder, cmd("slay")));
+    assert!(!command_permitted(&world, coder, cmd("apply")));
+    assert!(command_permitted(&world, coder, cmd("set")));
+    assert!(command_permitted(&world, coder, cmd("advance")));
 }
 
 #[test]

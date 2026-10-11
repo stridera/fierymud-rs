@@ -4149,6 +4149,17 @@ impl ConnRouter {
         world
             .entity_mut(entity)
             .remove::<(Retiring, commands::Quitting, commands::Camped)>();
+        // Reconnecting is activity: restart the idle clock and drop any
+        // pending kick / warning left over from before the drop, or the
+        // very next idle scan would kick the player again.
+        world.entity_mut(entity).remove::<(
+            crate::idle::IdleKickPending,
+            crate::idle::IdleWarned,
+            crate::idle::IdleCombatSeen,
+        )>();
+        world
+            .entity_mut(entity)
+            .insert(mud_world::LastInputAt(std::time::Instant::now()));
         let _ = outbound.try_send(if was_linkdead {
             b"Reconnecting.\r\n".to_vec()
         } else {
@@ -11154,6 +11165,34 @@ pub(crate) mod tests {
         ConnRouter::drain_retiring(&mut world, &pool);
         assert!(world.get_entity(player).is_ok());
         assert_eq!(router.find_conn(player), Some(2));
+    }
+
+    /// Issue #130: a reconnect (takeover) drops the idle-kick marker and
+    /// restarts the idle clock, so the next scan does not kick them again.
+    #[tokio::test(flavor = "current_thread")]
+    async fn takeover_clears_pending_idle_kick() {
+        let mut world = World::new();
+        world.insert_resource(mud_world::SocialRegistry::default());
+        world.insert_resource(SaveCoordinator::default());
+        world.insert_resource(crate::TickCount(0));
+        let mut router = ConnRouter::new();
+        let room = world.spawn(mud_world::Room).id();
+        let (player, _rx) = playing_in(&mut router, &mut world, room, 1, "Idle");
+        let stale = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(86_400))
+            .expect("monotonic clock has > 1 day of uptime");
+        world.entity_mut(player).insert((
+            crate::idle::IdleKickPending,
+            crate::idle::IdleWarned,
+            mud_world::LastInputAt(stale),
+        ));
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+        router.on_connect(2, tx, None, &world);
+        assert!(router.try_takeover(&mut world, 2, "c-Idle"));
+        assert!(world.get::<crate::idle::IdleKickPending>(player).is_none());
+        assert!(world.get::<crate::idle::IdleWarned>(player).is_none());
+        let last = world.get::<mud_world::LastInputAt>(player).unwrap();
+        assert!(last.0.elapsed() < std::time::Duration::from_secs(60));
     }
 
     /// A final save that fails (unreachable database) is handed to the retry

@@ -66,33 +66,30 @@ fn a_grant_lets_a_builder_use_a_command_and_a_revoke_removes_it() {
     let (boss, mut boss_rx) = person(&mut w, room, "Boss", 105);
     let (bob, mut bob_rx) = person(&mut w, room, "Bob", 101);
 
-    // `send` is Implementor-only: a builder is refused.
-    dispatch(&mut w, bob, "send boss hello");
+    // `slay` is Implementor-only: a builder is refused.
+    dispatch(&mut w, bob, "slay nobody");
     assert!(drain(&mut bob_rx).contains("You can't do that."));
-    assert!(!drain(&mut boss_rx).contains("hello"));
 
-    dispatch(&mut w, boss, "grant bob command send");
+    dispatch(&mut w, boss, "grant bob command slay");
     let out = drain(&mut boss_rx);
-    assert!(out.contains("Granted send to Bob at level 105."), "{out}");
+    assert!(out.contains("Granted slay to Bob at level 105."), "{out}");
     assert_eq!(grants_of(&w, bob).grants.len(), 1);
 
-    dispatch(&mut w, bob, "send boss hello");
+    dispatch(&mut w, bob, "slay nobody");
     assert!(!drain(&mut bob_rx).contains("You can't do that."));
-    assert!(drain(&mut boss_rx).contains("hello"));
 
     // Revoke takes it away again, and records the revoke instead.
-    dispatch(&mut w, boss, "revoke bob command send");
+    dispatch(&mut w, boss, "revoke bob command slay");
     let out = drain(&mut boss_rx);
-    assert!(out.contains("Revoked send from Bob at level 105."), "{out}");
+    assert!(out.contains("Revoked slay from Bob at level 105."), "{out}");
     let g = grants_of(&w, bob);
     assert!(g.grants.is_empty());
     assert_eq!(g.revokes.len(), 1);
-    dispatch(&mut w, bob, "send boss again");
+    dispatch(&mut w, bob, "slay nobody");
     assert!(drain(&mut bob_rx).contains("You can't do that."));
-    assert!(!drain(&mut boss_rx).contains("again"));
 
     // Ungrant clears the entry; the component goes with it.
-    dispatch(&mut w, boss, "ungrant bob command send");
+    dispatch(&mut w, boss, "ungrant bob command slay");
     assert!(w.get::<CommandGrants>(bob).is_none());
 }
 
@@ -274,10 +271,10 @@ fn the_delegation_commands_cannot_be_granted() {
 #[test]
 fn you_cannot_grant_a_command_you_cannot_use() {
     let (mut w, room) = world();
-    // A coder cannot use the implementor-only `send`.
+    // A coder cannot use the implementor-only `slay`.
     let (coder, mut rx) = person(&mut w, room, "Coder", 104);
     let (bob, _bob_rx) = person(&mut w, room, "Bob", 101);
-    dispatch(&mut w, coder, "grant bob command send");
+    dispatch(&mut w, coder, "grant bob command slay");
     assert!(drain(&mut rx).contains("cannot grant or revoke a command you yourself cannot use"));
     assert!(w.get::<CommandGrants>(bob).is_none());
 }
@@ -336,13 +333,13 @@ fn list_and_clear() {
     let (mut w, room) = world();
     let (boss, mut rx) = person(&mut w, room, "Boss", 105);
     let (bob, _bob_rx) = person(&mut w, room, "Bob", 101);
-    dispatch(&mut w, boss, "grant bob command send");
+    dispatch(&mut w, boss, "grant bob command slay");
     dispatch(&mut w, boss, "revoke bob command goto");
     drain(&mut rx);
     dispatch(&mut w, boss, "grant bob list");
     let out = drain(&mut rx);
     assert!(
-        out.contains("Bob's grants:") && out.contains("send Boss (105)"),
+        out.contains("Bob's grants:") && out.contains("slay Boss (105)"),
         "{out}"
     );
     assert!(
@@ -359,7 +356,7 @@ fn grants_round_trip_through_json() {
     let (mut w, room) = world();
     let (boss, _rx) = person(&mut w, room, "Boss", 105);
     let (bob, _bob_rx) = person(&mut w, room, "Bob", 101);
-    dispatch(&mut w, boss, "grant bob command send");
+    dispatch(&mut w, boss, "grant bob command slay");
     dispatch(&mut w, boss, "revoke bob command goto");
     let g = grants_of(&w, bob);
     let json = serde_json::to_value(&g).unwrap();
@@ -370,7 +367,7 @@ fn grants_round_trip_through_json() {
 fn abbreviations_honour_grants() {
     let g = CommandGrants {
         grants: vec![mud_world::GrantEntry {
-            command: "send".into(),
+            command: "slay".into(),
             grantor: "Boss".into(),
             level: 105,
         }],
@@ -378,8 +375,8 @@ fn abbreviations_honour_grants() {
     };
     let hit = |grants: Option<&CommandGrants>| {
         matches!(
-            resolve_abbrev("sen", UserRole::Builder, &[], grants, &[], None),
-            Some(Abbrev::Command(c)) if c.names[0] == "send"
+            resolve_abbrev("sla", UserRole::Builder, &[], grants, &[], None),
+            Some(Abbrev::Command(c)) if c.names[0] == "slay"
         )
     };
     assert!(hit(Some(&g)));
