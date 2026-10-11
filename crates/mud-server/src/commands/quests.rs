@@ -389,38 +389,76 @@ pub(crate) async fn cmd_qaccept(
         send_to(world, player, "No account info.\r\n");
         return;
     };
-    // Availability Lua gate (Wave 4.4): if the quest's
-    // `availability_requirement` is non-null, evaluate it against
-    // this player before consulting the DB. The DB layer can't do
-    // this because it needs the live world. Quest row is re-read
-    // there anyway, so the double-fetch cost is negligible.
-    if let Ok(Some(qrow)) = mud_db::quests::get_quest(pool, zone, id).await
-        && let Some(expr) = qrow
-            .availability_requirement
-            .as_ref()
-            .filter(|s| !s.trim().is_empty())
-        && !eval_quest_availability(
-            world,
-            player,
-            expr,
-            &format!("quest ({zone}, {id}) availability requirement"),
-        )
-    {
-        send_to(
-            world,
-            player,
-            "You can't take that quest — you don't meet the requirements.\r\n",
-        );
-        return;
-    }
-    let outcome =
-        match mud_db::quests::accept_for_player(pool, &character_id, level, zone, id).await {
-            Ok(o) => o,
-            Err(e) => {
-                send_to(world, player, format!("DB error: {e}\r\n"));
-                return;
+    // Two stages, both off the tick, with the Lua gate on it between them:
+    //  1. read the quest's availability requirement;
+    //  2. (the gate passed) accept it. `accept_for_player` refuses a quest
+    //     already held, so a stage that is cut off by the watchdog after it
+    //     committed cannot accept twice.
+    let chain = off_tick::Chain::default();
+    let (read_pool, accept_pool) = (pool.clone(), pool.clone());
+    let read_gate = async move {
+        // Availability Lua gate (Wave 4.4): if the quest's
+        // `availability_requirement` is non-null, evaluate it against
+        // this player before consulting the DB. The DB layer can't do
+        // this because it needs the live world. A failed read is left for
+        // `accept_for_player` to report.
+        mud_db::quests::get_quest(&read_pool, zone, id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|q| q.availability_requirement)
+            .filter(|expr| !expr.trim().is_empty())
+    };
+    let next = chain.clone();
+    off_tick::run(world, player, read_gate, move |world, player, gate| {
+        if let Some(expr) = gate
+            && !eval_quest_availability(
+                world,
+                player,
+                &expr,
+                &format!("quest ({zone}, {id}) availability requirement"),
+            )
+        {
+            send_to(
+                world,
+                player,
+                "You can't take that quest — you don't meet the requirements.\r\n",
+            );
+            return;
+        }
+        let accept = {
+            let character_id = character_id.clone();
+            async move {
+                mud_db::quests::accept_for_player(&accept_pool, &character_id, level, zone, id)
+                    .await
+                    .map_err(|e| e.to_string())
             }
         };
+        next.next(world, player, accept, move |world, player, outcome| {
+            finish_accept(world, player, &character_id, zone, id, outcome);
+        });
+    })
+    .await;
+    chain.settle(world).await;
+}
+
+/// The tick-side half of `qaccept`: say how it went and, when the quest
+/// was taken, tell the objectives tracker.
+fn finish_accept(
+    world: &mut World,
+    player: Entity,
+    character_id: &str,
+    zone: i32,
+    id: i32,
+    outcome: Result<mud_db::quests::AcceptOutcome, String>,
+) {
+    let outcome = match outcome {
+        Ok(o) => o,
+        Err(e) => {
+            send_to(world, player, format!("DB error: {e}\r\n"));
+            return;
+        }
+    };
     let accepted = outcome == mud_db::quests::AcceptOutcome::Accepted;
     let line = match outcome {
         mud_db::quests::AcceptOutcome::Accepted => {
@@ -470,7 +508,7 @@ pub(crate) async fn cmd_qaccept(
     if accepted {
         // The row's variables were reset; items already in the pack
         // count towards a first-phase COLLECT objective.
-        crate::quest_progress::on_quest_accepted(world, player, &character_id, zone, id);
+        crate::quest_progress::on_quest_accepted(world, player, character_id, zone, id);
     }
 }
 
@@ -616,10 +654,11 @@ pub(crate) async fn cmd_innate(
         return;
     };
     let pool = pool.clone();
-    reply_from_task(
+    off_tick::run(
         world,
         player,
         async move { innate_text(&pool, &race).await },
+        |world, player, text| send_to(world, player, text),
     )
     .await;
 }
@@ -671,9 +710,12 @@ pub(crate) async fn cmd_questinfo(
         .get::<Account>(player)
         .map_or(UserRole::Player, |a| a.role);
     let pool = pool.clone();
-    reply_from_task(world, player, async move {
-        questinfo_text(&pool, zone, id, viewer_role).await
-    })
+    off_tick::run(
+        world,
+        player,
+        async move { questinfo_text(&pool, zone, id, viewer_role).await },
+        |world, player, text| send_to(world, player, text),
+    )
     .await;
 }
 
@@ -863,72 +905,167 @@ pub(crate) async fn cmd_qcomplete(
         send_to(world, player, "No account info; can't fetch quests.\r\n");
         return;
     };
-    let rows = match mud_db::quests::list_for_character(pool, &character_id).await {
-        Ok(r) => r,
-        Err(e) => {
-            send_to(world, player, format!("Quest fetch failed: {e}\r\n"));
-            return;
-        }
-    };
-    let active: Vec<&mud_db::quests::CharacterQuestRow> =
-        rows.iter().filter(|r| r.status == "IN_PROGRESS").collect();
-    let Some(target) = active.get(slot - 1) else {
-        send_to(
-            world,
-            player,
-            format!("No in-progress quest at slot {slot}.\r\n"),
-        );
-        return;
-    };
     let pays = has_quest_admin_rank(world, player);
     let me = name_of(world, player);
-    record_admin_action(
-        world,
-        player,
-        "qcomplete",
-        &format!(
-            "{me} {}:{} rewards={}",
-            target.quest_zone_id,
-            target.quest_id,
-            if pays { "paid" } else { "withheld" }
-        ),
-    );
-    match mud_db::quests::admin_complete(pool, &target.id).await {
-        Ok(0) => {
-            send_to(
-                world,
-                player,
-                "That quest isn't in-progress; nothing to complete.\r\n",
-            );
-        }
-        Ok(_) => {
-            send_to(
-                world,
-                player,
-                format!("Force-completed quest: {}.\r\n", target.quest_name),
-            );
-            // Same payout as finishing the last objective - for ranks
-            // trusted with it.
-            if !pays {
-                send_to(
-                    world,
-                    player,
-                    "Rewards withheld: paying quest rewards by hand needs coder rank.\r\n",
-                );
-            } else if let Some(notify) = crate::quest_progress::Notifier::for_player(world, player)
-            {
-                crate::quest_progress::grant_completion_rewards(
-                    pool,
-                    &notify,
-                    target.quest_zone_id,
-                    target.quest_id,
-                )
-                .await;
+    // Two stages: read the quest at the slot (off the tick), then on the
+    // tick audit it and start the completion (see `start_completion`).
+    let chain = off_tick::Chain::default();
+    let read_pool = pool.clone();
+    let write_pool = pool.clone();
+    let read_cid = character_id.clone();
+    let find = async move { in_progress_at(&read_pool, &read_cid, slot).await };
+    let next = chain.clone();
+    off_tick::run(world, player, find, move |world, player, found| {
+        let target = match found {
+            Ok(t) => t,
+            Err(line) => {
+                send_to(world, player, line);
+                return;
             }
-        }
-        Err(e) => {
-            send_to(world, player, format!("Complete failed: {e}\r\n"));
-        }
+        };
+        record_admin_action(
+            world,
+            player,
+            "qcomplete",
+            &format!(
+                "{me} {}:{} rewards={}",
+                target.quest_zone_id,
+                target.quest_id,
+                if pays { "paid" } else { "withheld" }
+            ),
+        );
+        let done = start_completion(
+            world,
+            Completion {
+                pool: write_pool,
+                character_id,
+                row_id: target.id,
+                zone: target.quest_zone_id,
+                quest: target.quest_id,
+                name: target.quest_name,
+                pays,
+            },
+        );
+        next.next(world, player, done, |world, player, text| {
+            send_to(world, player, text);
+        });
+    })
+    .await;
+    chain.settle(world).await;
+}
+
+/// The `slot`th in-progress quest of `character_id`, numbered as the
+/// `quests` listing numbers them; the error is the line to show.
+async fn in_progress_at(
+    pool: &mud_db::sqlx::PgPool,
+    character_id: &str,
+    slot: usize,
+) -> Result<mud_db::quests::CharacterQuestRow, String> {
+    let rows = mud_db::quests::list_for_character(pool, character_id)
+        .await
+        .map_err(|e| format!("Quest fetch failed: {e}\r\n"))?;
+    rows.into_iter()
+        .filter(|r| r.status == "IN_PROGRESS")
+        .nth(slot - 1)
+        .ok_or_else(|| format!("No in-progress quest at slot {slot}.\r\n"))
+}
+
+/// Everything a forced completion needs, owned.
+struct Completion {
+    pool: mud_db::sqlx::PgPool,
+    character_id: String,
+    row_id: String,
+    zone: i32,
+    quest: i32,
+    name: String,
+    pays: bool,
+}
+
+/// Force-complete the quest and pay its rewards, exactly once, from a task
+/// of its own that holds the character's write turn
+/// ([`SaveCoordinator::spawn_ordered`]). The returned future resolves to the
+/// text for the player; it is only the command's wait, not the work, so the
+/// watchdog cutting the command off cannot stop the work between the
+/// completion and the reward.
+///
+/// Exactly once:
+/// * the status flip (`IN_PROGRESS` -> `COMPLETED`) is guarded, so a repeat
+///   command finds nothing to complete and pays nothing;
+/// * each numeric reward is a relative SQL update (`wealth = wealth + n`),
+///   so it adds to whatever else changed the row, instead of writing an
+///   absolute balance that a snapshot could have made stale;
+/// * the matching in-memory deltas are queued while the turn is still held
+///   (after `supersede_earlier_snapshots`), so no snapshot can write the old
+///   balance over the reward and the next autosave carries it as ordinary
+///   state, never a second time;
+/// * items are spawned by the tick from the same queue and saved by the
+///   normal save.
+fn start_completion(
+    world: &World,
+    c: Completion,
+) -> impl std::future::Future<Output = String> + Send + 'static + use<> {
+    let (done, wait) = tokio::sync::oneshot::channel::<String>();
+    let coordinator = world
+        .get_resource::<crate::autosave::SaveCoordinator>()
+        .cloned()
+        .unwrap_or_default();
+    let update_tx = world.get_resource::<PlayerUpdateTx>().map(|t| t.0.clone());
+    let character_id = c.character_id.clone();
+    coordinator.spawn_ordered(&character_id, move |mut ordered| async move {
+        let text = match mud_db::quests::admin_complete(&c.pool, &c.row_id).await {
+            Ok(0) => "That quest isn't in-progress; nothing to complete.\r\n".to_string(),
+            Err(e) => format!("Complete failed: {e}\r\n"),
+            Ok(_) => {
+                let mut text = format!("Force-completed quest: {}.\r\n", c.name);
+                if c.pays {
+                    // Same payout as finishing the last objective - for ranks
+                    // trusted with it.
+                    let payout = crate::quest_progress::pay_completion_rewards(
+                        &c.pool,
+                        &c.character_id,
+                        c.zone,
+                        c.quest,
+                    )
+                    .await;
+                    text.push_str(&payout.text());
+                    if !payout.updates.is_empty()
+                        && let Some(tx) = &update_tx
+                    {
+                        ordered.supersede_earlier_snapshots();
+                        crate::quest_progress::deliver_under_turn(ordered, tx, payout.updates)
+                            .await;
+                    }
+                } else {
+                    text.push_str(
+                        "Rewards withheld: paying quest rewards by hand needs coder rank.\r\n",
+                    );
+                }
+                text
+            }
+        };
+        report(done, update_tx, c.character_id, text).await;
+    });
+    async move {
+        wait.await
+            .unwrap_or_else(|_| "The completion was interrupted.\r\n".to_string())
+    }
+}
+
+/// Hand the outcome text to the waiting command. If it gave up (the
+/// watchdog released the player), print it through the update channel
+/// instead, so the player still learns what happened.
+pub(crate) async fn report(
+    done: tokio::sync::oneshot::Sender<String>,
+    update_tx: Option<tokio::sync::mpsc::Sender<PendingPlayerUpdate>>,
+    character_id: String,
+    text: String,
+) {
+    if let Err(text) = done.send(text)
+        && let Some(tx) = update_tx
+    {
+        let _ = tx
+            .send(PendingPlayerUpdate::Reply { character_id, text })
+            .await;
     }
 }
 
@@ -1075,42 +1212,24 @@ pub(crate) async fn cmd_abandon(
         send_to(world, player, "No account info; can't fetch quests.\r\n");
         return;
     };
-    let rows = match mud_db::quests::list_for_character(pool, &character_id).await {
-        Ok(r) => r,
-        Err(e) => {
-            send_to(world, player, format!("Quest fetch failed: {e}\r\n"));
-            return;
+    // The flip is guarded on the row still being in progress, so a repeat
+    // after a watchdog cut-off finds nothing to abandon.
+    let pool = pool.clone();
+    let work = async move {
+        let target = match in_progress_at(&pool, &character_id, slot).await {
+            Ok(t) => t,
+            Err(line) => return line,
+        };
+        match mud_db::quests::abandon(&pool, &target.id).await {
+            Ok(0) => "That quest isn't in-progress; nothing to abandon.\r\n".to_string(),
+            Ok(_) => format!("Abandoned quest: {}.\r\n", target.quest_name),
+            Err(e) => format!("Abandon failed: {e}\r\n"),
         }
     };
-    let active: Vec<&mud_db::quests::CharacterQuestRow> =
-        rows.iter().filter(|r| r.status == "IN_PROGRESS").collect();
-    let Some(target) = active.get(slot - 1) else {
-        send_to(
-            world,
-            player,
-            format!("No in-progress quest at slot {slot}.\r\n"),
-        );
-        return;
-    };
-    match mud_db::quests::abandon(pool, &target.id).await {
-        Ok(0) => {
-            send_to(
-                world,
-                player,
-                "That quest isn't in-progress; nothing to abandon.\r\n",
-            );
-        }
-        Ok(_) => {
-            send_to(
-                world,
-                player,
-                format!("Abandoned quest: {}.\r\n", target.quest_name),
-            );
-        }
-        Err(e) => {
-            send_to(world, player, format!("Abandon failed: {e}\r\n"));
-        }
-    }
+    off_tick::run(world, player, work, |world, player, text| {
+        send_to(world, player, text);
+    })
+    .await;
 }
 
 /// `qreward [<zone> <id> [<reward-id>]]` — Wave 4.9 choice-reward
@@ -1136,13 +1255,29 @@ pub(crate) async fn cmd_qreward(
         return;
     };
     match (parts.next(), parts.next(), parts.next()) {
-        (None, _, _) => qreward_list_all(world, player, pool, &character_id).await,
+        (None, _, _) => {
+            let pool = pool.clone();
+            off_tick::run(
+                world,
+                player,
+                async move { qreward_list_all(&pool, &character_id).await },
+                |world, player, text| send_to(world, player, text),
+            )
+            .await;
+        }
         (Some(z), Some(i), None) => {
             let (Ok(zone), Ok(id)) = (z.parse::<i32>(), i.parse::<i32>()) else {
                 send_to(world, player, "Zone and id must be integers.\r\n");
                 return;
             };
-            qreward_list_one(world, player, pool, &character_id, zone, id).await;
+            let pool = pool.clone();
+            off_tick::run(
+                world,
+                player,
+                async move { qreward_list_one(&pool, &character_id, zone, id).await },
+                |world, player, text| send_to(world, player, text),
+            )
+            .await;
         }
         (Some(z), Some(i), Some(r)) => {
             let (Ok(zone), Ok(id), Ok(reward_id)) =
@@ -1186,18 +1321,10 @@ fn claimed_rewards_from(vars: &serde_json::Value) -> Vec<i32> {
 /// completed quests (no `<zone> <id>` filter). Also lists any
 /// conditional (Wave 4.10) rewards that the async grant path
 /// couldn't evaluate inline.
-async fn qreward_list_all(
-    world: &mut World,
-    player: Entity,
-    pool: &mud_db::sqlx::PgPool,
-    character_id: &str,
-) {
+async fn qreward_list_all(pool: &mud_db::sqlx::PgPool, character_id: &str) -> String {
     let quests = match mud_db::quests::list_for_character(pool, character_id).await {
         Ok(r) => r,
-        Err(e) => {
-            send_to(world, player, format!("Quest fetch failed: {e}\r\n"));
-            return;
-        }
+        Err(e) => return format!("Quest fetch failed: {e}\r\n"),
     };
     let mut buf = String::from("\r\nUnclaimed rewards:\r\n");
     let mut printed_any = false;
@@ -1278,35 +1405,26 @@ async fn qreward_list_all(
             "\r\nNo unclaimed rewards. Finish a quest with conditional or \
              choice-group rewards and they'll show up here.\r\n"
         };
-        send_to(world, player, msg);
-        return;
+        return msg.to_string();
     }
-    send_to(world, player, buf);
+    buf
 }
 
 /// List choice groups for one specific quest. Refuses if the
 /// quest isn't COMPLETED for the caller.
 async fn qreward_list_one(
-    world: &mut World,
-    player: Entity,
     pool: &mud_db::sqlx::PgPool,
     character_id: &str,
     zone: i32,
     id: i32,
-) {
+) -> String {
     let Some((_cqid, status, vars)) =
         find_character_quest_with_vars(pool, character_id, zone, id).await
     else {
-        send_to(
-            world,
-            player,
-            format!("You haven't completed quest ({zone}, {id}).\r\n"),
-        );
-        return;
+        return format!("You haven't completed quest ({zone}, {id}).\r\n");
     };
     if status != "COMPLETED" {
-        send_to(world, player, "That quest isn't complete yet.\r\n");
-        return;
+        return "That quest isn't complete yet.\r\n".to_string();
     }
     let choices = mud_db::quest_objectives::list_choice_rewards(pool, zone, id)
         .await
@@ -1315,12 +1433,7 @@ async fn qreward_list_one(
         .await
         .unwrap_or_default();
     if choices.is_empty() && conditionals.is_empty() {
-        send_to(
-            world,
-            player,
-            format!("Quest ({zone}, {id}) has no claimable rewards.\r\n"),
-        );
-        return;
+        return format!("Quest ({zone}, {id}) has no claimable rewards.\r\n");
     }
     let claimed = claimed_rewards_from(&vars);
     let mut buf = format!("\r\nRewards for quest ({zone}, {id}):\r\n");
@@ -1359,7 +1472,7 @@ async fn qreward_list_one(
             ));
         }
     }
-    send_to(world, player, buf);
+    buf
 }
 
 /// Claim a single reward from a choice group. Validates the reward
@@ -1367,6 +1480,10 @@ async fn qreward_list_one(
 /// group hasn't already been claimed, and the reward's `condition`
 /// Lua (if any) is truthy. On success: grants the reward and
 /// stamps `claimed_rewards` in the per-quest variables JSON.
+///
+/// Two stages, both off the tick, with the Lua condition on it between
+/// them: read and check everything the database knows, then claim (see
+/// `start_claim`).
 async fn qreward_claim(
     world: &mut World,
     player: Entity,
@@ -1376,30 +1493,79 @@ async fn qreward_claim(
     id: i32,
     reward_id: i32,
 ) {
+    let chain = off_tick::Chain::default();
+    let (read_pool, claim_pool) = (pool.clone(), pool.clone());
+    let read_cid = character_id.to_string();
+    let plan = async move { plan_claim(&read_pool, &read_cid, zone, id, reward_id).await };
+    let next = chain.clone();
+    let character_id = character_id.to_string();
+    off_tick::run(world, player, plan, move |world, player, planned| {
+        let plan = match planned {
+            Ok(p) => p,
+            Err(line) => {
+                send_to(world, player, line);
+                return;
+            }
+        };
+        // Condition gate (Wave 4.10). Treat empty / missing as truthy.
+        // Echo the actual condition expression on failure so the player
+        // (and any staffer they ask) can see *why* — the legacy "you
+        // don't meet that reward's conditions" was opaque when a player
+        // re-classed and a class-locked reward silently refused.
+        if let Some(expr) = plan.reward.condition.as_deref()
+            && !expr.trim().is_empty()
+            && !eval_quest_availability(
+                world,
+                player,
+                expr,
+                &format!("quest ({zone}, {id}) reward {reward_id} condition"),
+            )
+        {
+            send_to(
+                world,
+                player,
+                format!("You don't currently meet that reward's condition: {expr}\r\n"),
+            );
+            return;
+        }
+        let done = start_claim(world, claim_pool, character_id, zone, id, plan);
+        next.next(world, player, done, |world, player, text| {
+            send_to(world, player, text);
+        });
+    })
+    .await;
+    chain.settle(world).await;
+}
+
+/// What the read stage of a `qreward` claim found: the quest row to lock,
+/// the reward, and the rewards whose prior claim blocks this one.
+pub(crate) struct ClaimPlan {
+    cqid: String,
+    reward: mud_db::quest_objectives::QuestRewardRow,
+    blocking_ids: Vec<i32>,
+    claimed: Vec<i32>,
+}
+
+/// Everything about a claim that needs no world: `Err` is the line to show.
+pub(crate) async fn plan_claim(
+    pool: &mud_db::sqlx::PgPool,
+    character_id: &str,
+    zone: i32,
+    id: i32,
+    reward_id: i32,
+) -> Result<ClaimPlan, String> {
     let Some((cqid, status, vars)) =
         find_character_quest_with_vars(pool, character_id, zone, id).await
     else {
-        send_to(
-            world,
-            player,
-            format!("You haven't completed quest ({zone}, {id}).\r\n"),
-        );
-        return;
+        return Err(format!("You haven't completed quest ({zone}, {id}).\r\n"));
     };
     if status != "COMPLETED" {
-        send_to(world, player, "That quest isn't complete yet.\r\n");
-        return;
+        return Err("That quest isn't complete yet.\r\n".to_string());
     }
     let reward = match mud_db::quest_objectives::get_reward(pool, reward_id).await {
         Ok(Some(r)) => r,
-        Ok(None) => {
-            send_to(world, player, format!("No reward with id {reward_id}.\r\n"));
-            return;
-        }
-        Err(e) => {
-            send_to(world, player, format!("Reward fetch failed: {e}\r\n"));
-            return;
-        }
+        Ok(None) => return Err(format!("No reward with id {reward_id}.\r\n")),
+        Err(e) => return Err(format!("Reward fetch failed: {e}\r\n")),
     };
     // Make sure the reward is from THIS quest (defense against
     // typo'd reward ids that happen to exist on some other quest).
@@ -1414,12 +1580,9 @@ async fn qreward_claim(
     let is_choice = all_choices.iter().any(|r| r.id == reward.id);
     let is_conditional = all_conditionals.iter().any(|r| r.id == reward.id);
     if !is_choice && !is_conditional {
-        send_to(
-            world,
-            player,
-            format!("Reward {reward_id} isn't a claimable reward of quest ({zone}, {id}).\r\n"),
-        );
-        return;
+        return Err(format!(
+            "Reward {reward_id} isn't a claimable reward of quest ({zone}, {id}).\r\n"
+        ));
     }
     let claimed = claimed_rewards_from(&vars);
     // Already-claimed gate. For choice groups, "claimed" means any
@@ -1431,43 +1594,13 @@ async fn qreward_claim(
             .filter(|r| r.choice_group == Some(group))
             .any(|r| claimed.contains(&r.id))
         {
-            send_to(
-                world,
-                player,
-                format!("You've already claimed a reward from group {group}.\r\n"),
-            );
-            return;
+            return Err(format!(
+                "You've already claimed a reward from group {group}.\r\n"
+            ));
         }
     } else if claimed.contains(&reward.id) {
-        send_to(world, player, "You've already claimed that reward.\r\n");
-        return;
+        return Err("You've already claimed that reward.\r\n".to_string());
     }
-    // Condition gate (Wave 4.10). Treat empty / missing as truthy.
-    // Echo the actual condition expression on failure so the player
-    // (and any staffer they ask) can see *why* — the legacy "you
-    // don't meet that reward's conditions" was opaque when a player
-    // re-classed and a class-locked reward silently refused.
-    if let Some(expr) = reward.condition.as_deref()
-        && !expr.trim().is_empty()
-        && !eval_quest_availability(
-            world,
-            player,
-            expr,
-            &format!("quest ({zone}, {id}) reward {reward_id} condition"),
-        )
-    {
-        send_to(
-            world,
-            player,
-            format!("You don't currently meet that reward's condition: {expr}\r\n"),
-        );
-        return;
-    }
-    // Grant the reward and record the claim in ONE transaction (ITEM is
-    // spawned by the update below). Doing them separately let a failed
-    // `claimed_rewards` write leave a granted reward the player could
-    // claim again; the quest row lock inside `claim_reward` also
-    // serializes two simultaneous claims.
     let blocking_ids: Vec<i32> = match reward.choice_group {
         Some(group) => all_choices
             .iter()
@@ -1476,95 +1609,109 @@ async fn qreward_claim(
             .collect(),
         None => vec![reward.id],
     };
-    let outcome = match mud_db::quest_objectives::claim_reward(
-        pool,
-        character_id,
-        &cqid,
-        &reward,
-        &blocking_ids,
-    )
-    .await
-    {
-        Ok(mud_db::quest_objectives::ClaimOutcome::Claimed(o)) => o,
-        Ok(mud_db::quest_objectives::ClaimOutcome::AlreadyClaimed) => {
-            send_to(world, player, "You've already claimed that reward.\r\n");
-            return;
-        }
-        Ok(mud_db::quest_objectives::ClaimOutcome::QuestMissing) => {
-            send_to(
-                world,
-                player,
-                format!("You haven't completed quest ({zone}, {id}).\r\n"),
-            );
-            return;
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "qreward: claim failed");
-            send_to(world, player, format!("Reward grant failed: {e}\r\n"));
-            return;
-        }
-    };
-    // Mirror live ECS state for the running player. SpawnItem only
-    // works for ITEM; the rest update Profile / Wealth / etc.
+    Ok(ClaimPlan {
+        cqid,
+        reward,
+        blocking_ids,
+        claimed,
+    })
+}
+
+/// Grant the reward and record the claim in ONE transaction, then mirror it
+/// to the live character, exactly once, from a task of its own that holds
+/// the character's write turn (see [`start_completion`] for the design; the
+/// claim is `claim_reward`, which locks the quest row, so two simultaneous
+/// claims serialize and only the first wins, and a failed write of the claim
+/// record rolls the grant back). ITEM rewards are spawned by the tick from
+/// the update queue and saved by the normal save.
+pub(crate) fn start_claim(
+    world: &World,
+    pool: mud_db::sqlx::PgPool,
+    character_id: String,
+    zone: i32,
+    id: i32,
+    plan: ClaimPlan,
+) -> impl std::future::Future<Output = String> + Send + 'static + use<> {
+    let (done, wait) = tokio::sync::oneshot::channel::<String>();
+    let coordinator = world
+        .get_resource::<crate::autosave::SaveCoordinator>()
+        .cloned()
+        .unwrap_or_default();
     let update_tx = world.get_resource::<PlayerUpdateTx>().map(|t| t.0.clone());
-    if outcome.house_created {
-        crate::quest_progress::announce_house(pool, character_id, update_tx.as_ref()).await;
-    }
-    if let Some(tx) = update_tx {
-        let upd = match reward.reward_type.as_str() {
-            "EXPERIENCE" => reward.amount.map(|a| PendingPlayerUpdate::ExperienceDelta {
-                character_id: character_id.to_string(),
-                amount: a,
-            }),
-            "GOLD" => reward.amount.map(|a| PendingPlayerUpdate::WealthDelta {
-                character_id: character_id.to_string(),
-                amount: i64::from(a),
-            }),
-            "SKILL_POINTS" => reward
-                .amount
-                .map(|a| PendingPlayerUpdate::SkillPointsDelta {
-                    character_id: character_id.to_string(),
-                    amount: a,
-                }),
-            "ABILITY" => reward
-                .ability_id
-                .map(|aid| PendingPlayerUpdate::AbilityKnown {
-                    character_id: character_id.to_string(),
-                    ability_id: aid,
-                }),
-            "ITEM" => match (reward.object_zone_id, reward.object_id) {
-                (Some(oz), Some(oid)) => Some(PendingPlayerUpdate::SpawnItem {
-                    character_id: character_id.to_string(),
-                    object_zone: oz,
-                    object_id: oid,
-                    quantity: reward.quantity,
-                }),
-                _ => None,
-            },
-            _ => None,
+    let turn_for = character_id.clone();
+    coordinator.spawn_ordered(&turn_for, move |mut ordered| async move {
+        let ClaimPlan {
+            cqid,
+            reward,
+            blocking_ids,
+            claimed,
+        } = plan;
+        let outcome = match mud_db::quest_objectives::claim_reward(
+            &pool,
+            &character_id,
+            &cqid,
+            &reward,
+            &blocking_ids,
+        )
+        .await
+        {
+            Ok(mud_db::quest_objectives::ClaimOutcome::Claimed(o)) => o,
+            other => {
+                drop(ordered);
+                let text = match other {
+                    Ok(mud_db::quest_objectives::ClaimOutcome::AlreadyClaimed) => {
+                        "You've already claimed that reward.\r\n".to_string()
+                    }
+                    Ok(_) => format!("You haven't completed quest ({zone}, {id}).\r\n"),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "qreward: claim failed");
+                        format!("Reward grant failed: {e}\r\n")
+                    }
+                };
+                report(done, update_tx, character_id, text).await;
+                return;
+            }
         };
-        if let Some(u) = upd {
-            let _ = tx.send(u).await;
+        // Mirror live ECS state for the running player. SpawnItem only
+        // works for ITEM; the rest update Profile / Wealth / etc.
+        let mut updates = Vec::new();
+        if outcome.house_created
+            && let Some(granted) =
+                crate::quest_progress::house_granted_update(&pool, &character_id).await
+        {
+            updates.push(granted);
         }
-    }
-    // The claim was recorded by `claim_reward`; mirror it for the tally.
-    let mut new_claimed = claimed;
-    new_claimed.push(reward.id);
-    // Remaining-claims tally across all of this player's completed
-    // quests: unfinished choice groups + unclaimed conditionals.
-    // Cheap-ish (one DB pass per completed quest) but bounded by
-    // content size, which is small relative to a single combat round.
-    let remaining = count_pending_claims(pool, character_id, &new_claimed).await;
-    let mut msg = format!("You claim your reward: {}.\r\n", describe_reward(&reward));
-    if reward.reward_type == "HOUSING" && !outcome.house_created {
-        msg.push_str("You already own a house, so nothing more is added.\r\n");
-    }
-    msg.push_str(&match remaining {
-        0 => "All your conditional / choice rewards are now claimed.\r\n".to_string(),
-        1 => "1 reward still pending — type 'qreward' to view.\r\n".to_string(),
-        n => format!("{n} rewards still pending — type 'qreward' to view.\r\n"),
+        updates.extend(crate::quest_progress::reward_update(&character_id, &reward));
+        match &update_tx {
+            Some(tx) if !updates.is_empty() => {
+                ordered.supersede_earlier_snapshots();
+                crate::quest_progress::deliver_under_turn(ordered, tx, updates).await;
+            }
+            _ => drop(ordered),
+        }
+        // The claim was recorded by `claim_reward`; mirror it for the tally.
+        let mut new_claimed = claimed;
+        new_claimed.push(reward.id);
+        // Remaining-claims tally across all of this player's completed
+        // quests: unfinished choice groups + unclaimed conditionals.
+        // Cheap-ish (one DB pass per completed quest) but bounded by
+        // content size, which is small relative to a single combat round.
+        let remaining = count_pending_claims(&pool, &character_id, &new_claimed).await;
+        let mut msg = format!("You claim your reward: {}.\r\n", describe_reward(&reward));
+        if reward.reward_type == "HOUSING" && !outcome.house_created {
+            msg.push_str("You already own a house, so nothing more is added.\r\n");
+        }
+        msg.push_str(&match remaining {
+            0 => "All your conditional / choice rewards are now claimed.\r\n".to_string(),
+            1 => "1 reward still pending — type 'qreward' to view.\r\n".to_string(),
+            n => format!("{n} rewards still pending — type 'qreward' to view.\r\n"),
+        });
+        report(done, update_tx, character_id, msg).await;
     });
-    send_to(world, player, msg);
+    async move {
+        wait.await
+            .unwrap_or_else(|_| "The claim was interrupted.\r\n".to_string())
+    }
 }
 
 /// Count this character's outstanding qreward claims across every
@@ -1909,5 +2056,86 @@ mod off_tick_tests {
         assert!(drain(&mut rx).contains("Quest fetch failed"));
         assert!(crate::commands::run_queued_input(&mut world, player, &pool).await);
         assert!(drain(&mut rx).contains("A quiet hall"));
+    }
+
+    /// Every listing and quest write that waits on the database answers
+    /// before the line typed after it runs, however many stages it has
+    /// (the two-stage ones hand over on a later tick). The unreachable pool
+    /// fails each stage after 100 ms, which is the slow database here.
+    #[tokio::test(flavor = "current_thread")]
+    async fn listings_and_quest_writes_keep_command_order() {
+        let mut world = World::new();
+        world.init_resource::<CommandJobs>();
+        world.init_resource::<mud_world::SocialRegistry>();
+        let room = world
+            .spawn((
+                Room,
+                Named {
+                    name: "A quiet hall".into(),
+                },
+            ))
+            .id();
+        let (player, mut rx) = player_in(&mut world, room);
+        world.entity_mut(player).insert((
+            Account {
+                user_id: "u".into(),
+                character_id: "c-order".into(),
+                role: UserRole::Builder,
+                account_role: UserRole::Builder,
+                perms: vec![],
+            },
+            Profile {
+                level: 10,
+                class_id: None,
+                race: "ELF".into(),
+                experience: 0,
+                gender: "neutral".into(),
+            },
+        ));
+        let pool = mud_db::sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(100))
+            .connect_lazy("postgres://nobody:nopass@127.0.0.1:1/none")
+            .unwrap();
+        for cmd in [
+            "wizlist",
+            "questinfo 1 1",
+            "innate",
+            "abandon 1",
+            "qaccept 1 1",
+            "qcomplete 1",
+            "qreward",
+            "qreward 1 1",
+            "qreward 1 1 5",
+        ] {
+            // `innate` lists from the catalog for staff; a mortal's list is
+            // read from the database.
+            let role = if cmd == "innate" {
+                UserRole::Player
+            } else {
+                UserRole::Builder
+            };
+            if let Some(mut account) = world.get_mut::<Account>(player) {
+                account.role = role;
+                account.account_role = role;
+            }
+            crate::commands::dispatch_with_async(&mut world, player, &pool, cmd).await;
+            crate::commands::dispatch_with_async(&mut world, player, &pool, "look").await;
+            assert!(is_busy(&world, player), "{cmd}: {}", drain(&mut rx));
+            assert_eq!(drain(&mut rx), "", "{cmd}: look overtook it");
+            let mut out = String::new();
+            for _ in 0..20 {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                drain_command_jobs(&mut world);
+                out.push_str(&drain(&mut rx));
+                if !is_busy(&world, player) {
+                    break;
+                }
+            }
+            assert!(!is_busy(&world, player), "{cmd}: never finished");
+            assert!(!out.is_empty(), "{cmd}: said nothing");
+            assert!(!out.contains("A quiet hall"), "{cmd}: {out}");
+            assert!(crate::commands::run_queued_input(&mut world, player, &pool).await);
+            assert!(drain(&mut rx).contains("A quiet hall"), "{cmd}");
+        }
     }
 }

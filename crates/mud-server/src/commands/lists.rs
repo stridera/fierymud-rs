@@ -20,6 +20,7 @@ use bevy_ecs::prelude::{Entity, With, World};
 use mud_db::enums::{MAX_MORTAL_LEVEL, UserRole, effective_rank};
 use mud_world::*;
 
+use crate::commands::off_tick;
 use crate::commands::*;
 
 inventory::submit! {
@@ -361,7 +362,9 @@ pub(crate) async fn cmd_wizlist(world: &mut World, player: Entity, pool: &mud_db
     };
     let width = crate::layout::wrap_width(world, player);
     let pool = pool.clone();
-    reply_from_task(world, player, async move {
+    // Off the tick, and ordered: whatever the player types next waits for
+    // the list instead of overtaking it.
+    let list = async move {
         match staff_rows(&pool).await {
             Ok(rows) => render_wizlist(&rows, &online, width),
             Err(e) => {
@@ -369,6 +372,9 @@ pub(crate) async fn cmd_wizlist(world: &mut World, player: Entity, pool: &mud_db
                 "The immortals' list can't be read right now.\r\n".to_string()
             }
         }
+    };
+    off_tick::run(world, player, list, |world, player, text| {
+        send_to(world, player, text);
     })
     .await;
 }

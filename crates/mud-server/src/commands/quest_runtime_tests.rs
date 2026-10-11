@@ -1552,3 +1552,273 @@ async fn giver_does_not_offer_hidden_or_unavailable_quests() {
     assert!(!offered(&text, &fx), "hidden: {text:?}");
     fx.end().await;
 }
+
+// ---------------------------------------------------------------------------
+// Off-tick quest writes: rewards land exactly once.
+// ---------------------------------------------------------------------------
+
+/// Run the tick's share of an off-tick command until the player has been sent
+/// `needle`: finish steps, the update drain, and held input. Bounded.
+async fn drive(world: &mut World, rx: &mut Rx, pool: &PgPool, needle: &str) -> String {
+    let mut text = String::new();
+    for _ in 0..300 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        super::off_tick::drain_command_jobs(world);
+        super::drain_player_updates(world);
+        let player = world
+            .query_filtered::<Entity, With<Player>>()
+            .iter(world)
+            .next()
+            .expect("player");
+        super::run_queued_input(world, player, pool).await;
+        while let Ok(bytes) = rx.try_recv() {
+            text.push_str(&String::from_utf8_lossy(&bytes));
+        }
+        if text.contains(needle) {
+            return text;
+        }
+    }
+    panic!("timed out waiting for {needle:?}; got {text:?}");
+}
+
+impl Fx {
+    async fn wealth(&self) -> i64 {
+        self.paid().await.1
+    }
+
+    /// The world a tick would own: job queue, update channel, save turns.
+    fn tick_world(&self, role: UserRole) -> (World, Entity, Rx) {
+        let (mut world, player, _room, rx) = self.world_as(role);
+        Fx::with_updates(&mut world);
+        world.init_resource::<super::off_tick::CommandJobs>();
+        world.init_resource::<mud_world::SocialRegistry>();
+        world.insert_resource(crate::autosave::SaveCoordinator::default());
+        (world, player, rx)
+    }
+}
+
+/// `qcomplete` pays its reward once even when an autosave whose snapshot
+/// predates the reward is queued behind it: the stale write is skipped
+/// instead of putting the old gold back, the in-memory gold moves once, and
+/// a later autosave and a repeat command change nothing.
+#[tokio::test(flavor = "current_thread")]
+async fn qcomplete_pays_once_with_an_autosave_in_flight() {
+    let Some(fx) = fixture().await else { return };
+    fx.visit_objective(1).await;
+    fx.rewards().await;
+    sqlx::query("UPDATE \"Characters\" SET wealth = 100 WHERE id = $1")
+        .bind(&fx.char_id)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    let (mut world, player, mut rx) = fx.tick_world(UserRole::Coder);
+    world.entity_mut(player).insert(mud_world::Wealth(100));
+    fx.accept().await;
+    let coordinator = world.resource::<crate::autosave::SaveCoordinator>().clone();
+
+    assert!(super::try_dispatch_async(&mut world, player, &fx.pool, "qcomplete 1").await);
+    // The tick that starts the completion (it takes the character's write
+    // turn) is followed at once by an autosave whose snapshot still holds
+    // the old gold.
+    for _ in 0..200 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        super::off_tick::drain_command_jobs(&mut world);
+        if coordinator.has_unsettled_saves(&fx.char_id) {
+            break;
+        }
+    }
+    assert!(coordinator.has_unsettled_saves(&fx.char_id));
+    assert!(crate::login::spawn_background_save(
+        &mut world, player, &fx.pool
+    ));
+
+    let out = drive(&mut world, &mut rx, &fx.pool, "+7 gold").await;
+    assert!(out.contains("Force-completed quest"), "{out}");
+    assert!(coordinator.flush(&mut world, Duration::from_secs(10)).await);
+    coordinator.apply_completions(&mut world);
+    super::drain_player_updates(&mut world);
+    assert_eq!(
+        fx.wealth().await,
+        107,
+        "the stale autosave erased the reward"
+    );
+    assert_eq!(world.get::<mud_world::Wealth>(player).unwrap().0, 107);
+
+    // A later autosave writes the in-memory 107, not 107 + 7.
+    assert!(crate::login::spawn_background_save(
+        &mut world, player, &fx.pool
+    ));
+    assert!(coordinator.flush(&mut world, Duration::from_secs(10)).await);
+    coordinator.apply_completions(&mut world);
+    assert_eq!(fx.wealth().await, 107);
+    assert_eq!(world.get::<mud_world::Wealth>(player).unwrap().0, 107);
+
+    // Typing it again completes nothing and pays nothing.
+    assert!(super::try_dispatch_async(&mut world, player, &fx.pool, "qcomplete 1").await);
+    let out = drive(&mut world, &mut rx, &fx.pool, "No in-progress quest").await;
+    assert!(!out.contains("+7 gold"), "{out}");
+    super::drain_player_updates(&mut world);
+    assert_eq!(fx.wealth().await, 107);
+    assert_eq!(world.get::<mud_world::Wealth>(player).unwrap().0, 107);
+    fx.end().await;
+}
+
+/// A choice reward is claimed once however the claims arrive: the second of
+/// two simultaneous claims and a later one are refused, and the gold moves
+/// once in the database and once in memory.
+#[tokio::test(flavor = "current_thread")]
+async fn qreward_claim_pays_once() {
+    let Some(fx) = fixture().await else { return };
+    fx.visit_objective(1).await;
+    let mut ids = Vec::new();
+    for amount in [9, 11] {
+        ids.push(
+            sqlx::query_scalar::<_, i32>(
+                "INSERT INTO \"QuestReward\" \
+                 (quest_zone_id, quest_id, phase_id, reward_type, amount, choice_group) \
+                 VALUES ($1, $2, 1, 'GOLD'::\"QuestRewardType\", $3, 1) RETURNING id",
+            )
+            .bind(fx.zone)
+            .bind(fx.quest)
+            .bind(amount)
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap(),
+        );
+    }
+    sqlx::query("UPDATE \"Characters\" SET wealth = 100 WHERE id = $1")
+        .bind(&fx.char_id)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    let (mut world, player, mut rx) = fx.tick_world(UserRole::Player);
+    world.entity_mut(player).insert(mud_world::Wealth(100));
+    fx.accept().await;
+    let cq = mud_db::quests::find_character_quest(&fx.pool, &fx.char_id, fx.zone, fx.quest)
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+    assert_eq!(
+        mud_db::quests::admin_complete(&fx.pool, &cq).await.unwrap(),
+        1
+    );
+
+    // Two claims at once (two stages each, so both pass the read stage
+    // before either writes): the quest row lock lets one through.
+    let plan = |reward: i32| {
+        let pool = fx.pool.clone();
+        let (cid, zone, quest) = (fx.char_id.clone(), fx.zone, fx.quest);
+        async move { super::quests::plan_claim(&pool, &cid, zone, quest, reward).await }
+    };
+    let (a, b) = tokio::join!(plan(ids[0]), plan(ids[1]));
+    let (a, b) = (a.unwrap(), b.unwrap());
+    let start = |plan| {
+        super::quests::start_claim(
+            &world,
+            fx.pool.clone(),
+            fx.char_id.clone(),
+            fx.zone,
+            fx.quest,
+            plan,
+        )
+    };
+    let (first, second) = (start(a), start(b));
+    let (first, second) = tokio::join!(first, second);
+    let claimed = [&first, &second]
+        .iter()
+        .filter(|t| t.contains("You claim your reward"))
+        .count();
+    assert_eq!(claimed, 1, "{first:?} / {second:?}");
+    assert!(
+        first.contains("already claimed") || second.contains("already claimed"),
+        "{first:?} / {second:?}"
+    );
+    super::drain_player_updates(&mut world);
+    let paid = fx.wealth().await - 100;
+    assert!(paid == 9 || paid == 11, "paid {paid}");
+    assert_eq!(
+        world.get::<mud_world::Wealth>(player).unwrap().0,
+        100 + paid,
+        "memory and database agree"
+    );
+
+    // And through the command, much later: refused, nothing moves.
+    let cmd = format!("qreward {} {} {}", fx.zone, fx.quest, ids[0]);
+    assert!(super::try_dispatch_async(&mut world, player, &fx.pool, &cmd).await);
+    let out = drive(&mut world, &mut rx, &fx.pool, "already claimed").await;
+    assert!(!out.contains("You claim your reward"), "{out}");
+    super::drain_player_updates(&mut world);
+    assert_eq!(fx.wealth().await, 100 + paid);
+    assert_eq!(
+        world.get::<mud_world::Wealth>(player).unwrap().0,
+        100 + paid
+    );
+    fx.end().await;
+}
+
+/// `qaccept` and `abandon` through the job queue: the two-stage accept hands
+/// over on a later tick, and the abandon flips the row once.
+#[tokio::test(flavor = "current_thread")]
+async fn qaccept_and_abandon_run_off_the_tick() {
+    let Some(fx) = fixture().await else { return };
+    fx.visit_objective(1).await;
+    let (mut world, player, mut rx) = fx.tick_world(UserRole::Player);
+    let accept = format!("qaccept {} {}", fx.zone, fx.quest);
+    assert!(super::try_dispatch_async(&mut world, player, &fx.pool, &accept).await);
+    assert_eq!(
+        fx.status().await,
+        "NONE",
+        "nothing is written before the tick"
+    );
+    let out = drive(&mut world, &mut rx, &fx.pool, "accepted").await;
+    assert!(out.contains("accepted"), "{out}");
+    assert_eq!(fx.status().await, "IN_PROGRESS");
+
+    // A repeat (a retry after a watchdog, say) is refused, not re-run.
+    assert!(super::try_dispatch_async(&mut world, player, &fx.pool, &accept).await);
+    let out = drive(&mut world, &mut rx, &fx.pool, "already on that quest").await;
+    assert!(out.contains("already on that quest"), "{out}");
+
+    assert!(super::try_dispatch_async(&mut world, player, &fx.pool, "abandon 1").await);
+    let out = drive(&mut world, &mut rx, &fx.pool, "Abandoned quest").await;
+    assert!(out.contains("Abandoned quest"), "{out}");
+    assert_eq!(fx.status().await, "ABANDONED");
+    assert!(super::try_dispatch_async(&mut world, player, &fx.pool, "abandon 1").await);
+    let out = drive(&mut world, &mut rx, &fx.pool, "No in-progress quest").await;
+    assert!(out.contains("No in-progress quest"), "{out}");
+    fx.end().await;
+}
+
+/// The completion's text is not lost when the command gave up waiting: it
+/// comes through the update channel instead.
+#[tokio::test(flavor = "current_thread")]
+async fn a_late_completion_text_still_reaches_the_player() {
+    let (mut world, player, _room, mut rx) = {
+        let mut world = World::new();
+        let room = world.spawn_empty().id();
+        let (player, rx) = super::test_support::player_in(&mut world, room);
+        world.entity_mut(player).insert(Account {
+            user_id: "u".into(),
+            character_id: "c-late".into(),
+            role: UserRole::Coder,
+            account_role: UserRole::Coder,
+            perms: Vec::new(),
+        });
+        (world, player, room, rx)
+    };
+    Fx::with_updates(&mut world);
+    let tx = world.resource::<super::PlayerUpdateTx>().0.clone();
+    let (done, wait) = tokio::sync::oneshot::channel::<String>();
+    drop(wait);
+    super::quests::report(
+        done,
+        Some(tx),
+        "c-late".to_string(),
+        "Force-completed quest: x.\r\n".to_string(),
+    )
+    .await;
+    super::drain_player_updates(&mut world);
+    assert!(drain(&mut rx).contains("Force-completed quest: x."));
+    let _ = player;
+}

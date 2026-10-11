@@ -353,10 +353,11 @@ pub(crate) async fn cmd_mailbox(world: &mut World, player: Entity, pool: &mud_db
     };
     let user_id = account.user_id;
     let pool = pool.clone();
-    reply_from_task(
+    off_tick::run(
         world,
         player,
         async move { mailbox_text(&pool, &user_id).await },
+        |world, player, text| send_to(world, player, text),
     )
     .await;
 }

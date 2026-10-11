@@ -205,16 +205,40 @@ pub(crate) async fn advance_quest(
     }
 }
 
-/// Pay a finished quest's unconditional rewards: DB writes first, then
-/// the matching ECS mutations so the player sees the gain without
-/// relogging. Conditional rewards are deferred to `qreward`, which can
-/// evaluate the condition on the world thread.
-pub(crate) async fn grant_completion_rewards(
+/// What paying a finished quest's unconditional rewards produced: the
+/// database writes are done, the world side and the text are not.
+#[derive(Default)]
+pub(crate) struct CompletionPayout {
+    /// "Conditional rewards are waiting" line, shown first.
+    pub hint: Option<String>,
+    /// The matching ECS mutations (XP, gold, items, ...), in order.
+    pub updates: Vec<PendingPlayerUpdate>,
+    /// The "Rewards:" block, shown last.
+    pub summary: Option<String>,
+}
+
+impl CompletionPayout {
+    /// Both text parts, for a caller that prints once.
+    pub(crate) fn text(&self) -> String {
+        let mut out = self.hint.clone().unwrap_or_default();
+        out.push_str(self.summary.as_deref().unwrap_or_default());
+        out
+    }
+}
+
+/// Pay a finished quest's unconditional rewards to the database (each
+/// numeric reward is a relative `x = x + n` update in one transaction) and
+/// work out what the world must mirror, without sending anything: the
+/// caller decides how and when the updates reach the tick. Conditional
+/// rewards are deferred to `qreward`, which can evaluate the condition on
+/// the world thread.
+pub(crate) async fn pay_completion_rewards(
     pool: &mud_db::sqlx::PgPool,
-    notify: &Notifier,
+    character_id: &str,
     quest_zone_id: i32,
     quest_id: i32,
-) {
+) -> CompletionPayout {
+    let mut payout = CompletionPayout::default();
     let all_rewards = mud_db::quest_objectives::list_quest_rewards(pool, quest_zone_id, quest_id)
         .await
         .unwrap_or_default();
@@ -222,15 +246,15 @@ pub(crate) async fn grant_completion_rewards(
         .into_iter()
         .partition(|r| r.condition.as_deref().is_some_and(|c| !c.trim().is_empty()));
     if !deferred.is_empty() {
-        notify.say(&format!(
+        payout.hint = Some(format!(
             "Conditional rewards available — \
              type 'qreward {quest_zone_id} {quest_id}' to view and claim.\r\n"
         ));
     }
     if rewards.is_empty() {
-        return;
+        return payout;
     }
-    let cid = &notify.character_id;
+    let cid = character_id;
     let outcome = match mud_db::quest_objectives::grant_simple_rewards(pool, cid, &rewards).await {
         Ok(o) => o,
         Err(e) => {
@@ -238,42 +262,14 @@ pub(crate) async fn grant_completion_rewards(
             mud_db::quest_objectives::GrantOutcome::default()
         }
     };
-    if outcome.house_created {
-        announce_house(pool, cid, notify.update_tx.as_ref()).await;
+    if outcome.house_created
+        && let Some(granted) = house_granted_update(pool, cid).await
+    {
+        payout.updates.push(granted);
     }
     for r in &rewards {
-        let update = match r.reward_type.as_str() {
-            "EXPERIENCE" => r.amount.map(|a| PendingPlayerUpdate::ExperienceDelta {
-                character_id: cid.clone(),
-                amount: a,
-            }),
-            "GOLD" => r.amount.map(|a| PendingPlayerUpdate::WealthDelta {
-                character_id: cid.clone(),
-                amount: i64::from(a),
-            }),
-            "SKILL_POINTS" => r.amount.map(|a| PendingPlayerUpdate::SkillPointsDelta {
-                character_id: cid.clone(),
-                amount: a,
-            }),
-            "ABILITY" => r.ability_id.map(|id| PendingPlayerUpdate::AbilityKnown {
-                character_id: cid.clone(),
-                ability_id: id,
-            }),
-            "ITEM" => match (r.object_zone_id, r.object_id) {
-                (Some(z), Some(id)) => Some(PendingPlayerUpdate::SpawnItem {
-                    character_id: cid.clone(),
-                    object_zone: z,
-                    object_id: id,
-                    quantity: r.quantity,
-                }),
-                _ => None,
-            },
-            _ => None,
-        };
-        if let (Some(u), Some(tx)) = (update, notify.update_tx.as_ref()) {
-            // Bounded channel — await until the tick drains a slot.
-            // Failure means the receiver dropped (shutting down).
-            let _ = tx.send(u).await;
+        if let Some(update) = reward_update(cid, r) {
+            payout.updates.push(update);
         }
     }
     let mut buf = String::from("Rewards:\r\n");
@@ -293,36 +289,134 @@ pub(crate) async fn grant_completion_rewards(
         buf.push_str(&line);
     }
     if buf.len() > "Rewards:\r\n".len() {
-        notify.say(&buf);
+        payout.summary = Some(buf);
+    }
+    payout
+}
+
+/// The ECS mutation that mirrors one paid reward (the database side is
+/// already written), if it has one.
+pub(crate) fn reward_update(
+    character_id: &str,
+    r: &mud_db::quest_objectives::QuestRewardRow,
+) -> Option<PendingPlayerUpdate> {
+    let cid = character_id.to_string();
+    match r.reward_type.as_str() {
+        "EXPERIENCE" => r.amount.map(|a| PendingPlayerUpdate::ExperienceDelta {
+            character_id: cid,
+            amount: a,
+        }),
+        "GOLD" => r.amount.map(|a| PendingPlayerUpdate::WealthDelta {
+            character_id: cid,
+            amount: i64::from(a),
+        }),
+        "SKILL_POINTS" => r.amount.map(|a| PendingPlayerUpdate::SkillPointsDelta {
+            character_id: cid,
+            amount: a,
+        }),
+        "ABILITY" => r.ability_id.map(|id| PendingPlayerUpdate::AbilityKnown {
+            character_id: cid,
+            ability_id: id,
+        }),
+        "ITEM" => match (r.object_zone_id, r.object_id) {
+            (Some(z), Some(id)) => Some(PendingPlayerUpdate::SpawnItem {
+                character_id: cid,
+                object_zone: z,
+                object_id: id,
+                quantity: r.quantity,
+            }),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
-/// Hand the online player the house a HOUSING reward just created:
-/// load the new rows and queue the world-side `HouseSummary` insert.
-pub(crate) async fn announce_house(
+/// Pay a finished quest's unconditional rewards: DB writes first, then
+/// the matching ECS mutations so the player sees the gain without
+/// relogging.
+pub(crate) async fn grant_completion_rewards(
+    pool: &mud_db::sqlx::PgPool,
+    notify: &Notifier,
+    quest_zone_id: i32,
+    quest_id: i32,
+) {
+    let payout = pay_completion_rewards(pool, &notify.character_id, quest_zone_id, quest_id).await;
+    if let Some(hint) = &payout.hint {
+        notify.say(hint);
+    }
+    if let Some(tx) = notify.update_tx.as_ref() {
+        for u in payout.updates {
+            // Bounded channel — await until the tick drains a slot.
+            // Failure means the receiver dropped (shutting down).
+            let _ = tx.send(u).await;
+        }
+    }
+    if let Some(summary) = &payout.summary {
+        notify.say(summary);
+    }
+}
+
+/// The world-side `HouseSummary` insert for the house a HOUSING reward
+/// just created: load the new rows. `None` when there is no house to show.
+pub(crate) async fn house_granted_update(
     pool: &mud_db::sqlx::PgPool,
     character_id: &str,
-    update_tx: Option<&tokio::sync::mpsc::Sender<PendingPlayerUpdate>>,
-) {
-    let Some(tx) = update_tx else { return };
+) -> Option<PendingPlayerUpdate> {
     let house = match mud_db::housing::for_character(pool, character_id).await {
         Ok(Some(h)) => h,
-        Ok(None) => return,
+        Ok(None) => return None,
         Err(e) => {
             tracing::warn!(error = %e, "housing reward: reload failed");
-            return;
+            return None;
         }
     };
     let rooms = mud_db::housing::rooms_for_house(pool, house.id)
         .await
         .unwrap_or_default();
-    let _ = tx
-        .send(PendingPlayerUpdate::HouseGranted {
-            character_id: character_id.to_string(),
-            house,
-            rooms,
-        })
-        .await;
+    Some(PendingPlayerUpdate::HouseGranted {
+        character_id: character_id.to_string(),
+        house,
+        rooms,
+    })
+}
+
+/// Queue paid-reward `updates` for the tick while holding the character's
+/// write turn (`ordered`), so a snapshot taken under the turn drains them
+/// before it writes, and an earlier one is already made stale by the
+/// caller's `supersede_earlier_snapshots`. Same rule as `house expand`: the
+/// queue is tried without waiting while the turn is held (the tick can be
+/// waiting for the turn itself, and is what drains the queue); if it is
+/// full the turn is released first and the rest waits for room, at the price
+/// of a short window in which a snapshot still shows the old balance. The
+/// database already holds the reward, so nothing here can lose it.
+pub(crate) async fn deliver_under_turn(
+    ordered: crate::autosave::OrderedSave,
+    tx: &tokio::sync::mpsc::Sender<PendingPlayerUpdate>,
+    updates: Vec<PendingPlayerUpdate>,
+) {
+    use tokio::sync::mpsc::error::TrySendError;
+    let mut turn = Some(ordered);
+    for update in updates {
+        let update = if turn.is_some() {
+            match tx.try_send(update) {
+                Ok(()) => continue,
+                Err(TrySendError::Full(u)) => {
+                    turn = None;
+                    u
+                }
+                Err(TrySendError::Closed(_)) => {
+                    tracing::error!("quest reward could not be delivered: update queue closed");
+                    return;
+                }
+            }
+        } else {
+            update
+        };
+        if tx.send(update).await.is_err() {
+            tracing::error!("quest reward could not be delivered: update queue closed");
+            return;
+        }
+    }
 }
 
 /// How many of each prototype `holder` carries directly (inventory and

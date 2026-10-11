@@ -23,7 +23,8 @@
 //! once, which is the old behaviour.
 
 use std::future::Future;
-use std::sync::Mutex;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bevy_ecs::prelude::*;
@@ -141,6 +142,50 @@ where
         }
     }
     true
+}
+
+/// A command whose database work comes in stages with a world-side decision
+/// between them (read a quest, run its Lua gate on the tick, then write):
+/// each finish step starts the next stage through [`Chain::next`], and the
+/// command awaits [`Chain::settle`] after its first [`run`].
+///
+/// With a job queue [`Chain::next`] is a plain [`spawn`]. Without one (unit
+/// tests, tools) there is no later tick, so the stage is parked and
+/// `settle` runs it inline, in order, which is what the same command did
+/// before it was split.
+#[derive(Clone, Default)]
+pub(crate) struct Chain(Arc<Mutex<Option<Parked>>>);
+
+type Parked = Pin<Box<dyn Future<Output = Finish> + Send>>;
+
+impl Chain {
+    /// Start the next stage from a finish step.
+    pub(crate) fn next<T, W, F>(&self, world: &mut World, player: Entity, work: W, finish: F)
+    where
+        T: Send + 'static,
+        W: Future<Output = T> + Send + 'static,
+        F: FnOnce(&mut World, Entity, T) + Send + 'static,
+    {
+        if world.contains_resource::<CommandJobs>() {
+            spawn(world, player, work, finish);
+            return;
+        }
+        let parked: Parked = Box::pin(async move {
+            let out = work.await;
+            Box::new(move |world: &mut World| finish(world, player, out)) as Finish
+        });
+        *self.0.lock().expect("chain poisoned") = Some(parked);
+    }
+
+    /// Run any stage parked by [`Self::next`] (none, with a job queue).
+    pub(crate) async fn settle(&self, world: &mut World) {
+        loop {
+            let parked = self.0.lock().expect("chain poisoned").take();
+            let Some(parked) = parked else { return };
+            let finish = parked.await;
+            finish(world);
+        }
+    }
 }
 
 /// Run the finish step of every job whose work has completed. Called at the

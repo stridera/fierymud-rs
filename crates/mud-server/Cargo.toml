@@ -28,5 +28,9 @@ rustls = "0.23"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "registry"] }
 
+[dev-dependencies]
+# `start_paused` lets a test cross the command watchdog without waiting for it.
+tokio = { version = "1.52.1", features = ["test-util"] }
+
 [lints]
 workspace = true
