@@ -17,6 +17,9 @@
 //! The `ItemInstanceFlag` enum has no
 //! curse value and is a DB-schema type owned by the editor, so the delta is
 //! kept in the JSONB column instead.
+//! A container's open/closed/locked state rides in the `Flags` key of
+//! `custom_values` (the layout legacy imports already use); the runtime
+//! writes it once the state differs from the prototype's.
 //! Other columns (`condition`, the rest of `custom_values`, the rest of
 //! `instance_flags`, `liquid_effects`, `liquid_identified`)
 //! aren't yet read or written by any runtime command, so the save path
@@ -72,6 +75,12 @@ pub struct CharacterItemRow {
     /// Raw `curse` key of `custom_values` (see [`ItemAlter`]); read it with
     /// [`CharacterItemRow::alter`].
     pub custom_curse: Option<serde_json::Value>,
+    /// The `Flags` / `Key` keys of `custom_values` as one object (`{}` when
+    /// the row has neither): the container state the instance was saved in,
+    /// in the layout of an `Objects.values` CONTAINER blob. Legacy imports
+    /// write it for every container; the runtime writes it once a container
+    /// has been opened, closed, locked or unlocked.
+    pub custom_container: Option<serde_json::Value>,
 }
 
 impl CharacterItemRow {
@@ -199,6 +208,12 @@ pub struct CharacterItemSnap {
     /// Spell-altered state; `None` when the runtime tracks none for the
     /// item (UPDATE leaves the row's value alone).
     pub alter: Option<ItemAlterSnap>,
+    /// Open/closed/locked/pickproof state of a container the runtime tracks
+    /// per instance, as `Flags` entries (`Closeable`, `Closed`, `Locked`,
+    /// `PickProof`). Written as the `Flags` key of `custom_values`, keeping
+    /// any other entry the row has there. `None` leaves the row's `Flags`
+    /// alone (the instance matches its prototype).
+    pub container_flags: Option<Vec<String>>,
     /// The item sits in the dying owner's corpse (written by the death
     /// transaction): its row keeps `character_id = owner` and gets the
     /// corpse's id. Every other snapshot entry clears `corpse_id`, which
@@ -283,7 +298,10 @@ pub async fn list_for(pool: &PgPool, character_id: &str) -> sqlx::Result<Vec<Cha
             CASE WHEN jsonb_typeof(custom_values -> 'keywords') = 'array'
                  THEN ARRAY(SELECT jsonb_array_elements_text(custom_values -> 'keywords'))
             END AS "custom_keywords?",
-            custom_values -> 'curse' AS "custom_curse?"
+            custom_values -> 'curse' AS "custom_curse?",
+            jsonb_strip_nulls(jsonb_build_object(
+                'Flags', custom_values -> 'Flags',
+                'Key', custom_values -> 'Key')) AS "custom_container?"
         FROM "CharacterItems"
         WHERE character_id = $1 AND corpse_id IS NULL
         ORDER BY updated_at, id
@@ -316,7 +334,10 @@ pub async fn list_for_corpse(pool: &PgPool, corpse_id: i32) -> sqlx::Result<Vec<
             CASE WHEN jsonb_typeof(custom_values -> 'keywords') = 'array'
                  THEN ARRAY(SELECT jsonb_array_elements_text(custom_values -> 'keywords'))
             END AS "custom_keywords?",
-            custom_values -> 'curse' AS "custom_curse?"
+            custom_values -> 'curse' AS "custom_curse?",
+            jsonb_strip_nulls(jsonb_build_object(
+                'Flags', custom_values -> 'Flags',
+                'Key', custom_values -> 'Key')) AS "custom_container?"
         FROM "CharacterItems"
         WHERE corpse_id = $1
         ORDER BY updated_at, id
@@ -465,9 +486,12 @@ pub async fn save_inventory_diff(
         let alter = snap.alter.as_ref().map(|a| &a.state);
         let alter_overwrite = snap.alter.as_ref().is_some_and(|a| a.overwrite);
         let keywords = custom.and_then(|c| c.keywords.as_deref());
+        // The UPDATE merges `Flags` in SQL (it must keep entries it does
+        // not own); only a fresh row takes them from the patch.
         let update_patch =
-            custom_values_patch(snap.lit, keywords, alter.filter(|_| alter_overwrite));
-        let insert_patch = custom_values_patch(snap.lit, keywords, alter);
+            custom_values_patch(snap.lit, keywords, alter.filter(|_| alter_overwrite), None);
+        let insert_patch =
+            custom_values_patch(snap.lit, keywords, alter, snap.container_flags.as_deref());
         if let Some(id) = snap.persisted_id {
             let updated = sqlx::query!(
                 r#"
@@ -485,7 +509,18 @@ pub async fn save_inventory_diff(
                                    THEN custom_values ELSE '{}'::jsonb END) - 'lit'
                         END)
                         - (CASE WHEN $14::boolean THEN 'curse'::text ELSE ''::text END)
-                        || $8::jsonb,
+                        || $8::jsonb
+                        || (CASE WHEN $15::text[] IS NULL THEN '{}'::jsonb ELSE
+                            jsonb_build_object('Flags',
+                                COALESCE((SELECT jsonb_agg(t.f)
+                                          FROM jsonb_array_elements_text(
+                                              CASE WHEN jsonb_typeof(custom_values -> 'Flags') = 'array'
+                                                   THEN custom_values -> 'Flags' ELSE '[]'::jsonb END) AS t(f)
+                                          WHERE lower(trim(t.f)) NOT IN
+                                              ('closeable', 'closed', 'locked', 'pickproof')),
+                                         '[]'::jsonb)
+                                || to_jsonb($15::text[]))
+                            END),
                     custom_name = CASE WHEN $11::boolean THEN $12::text ELSE custom_name END,
                     custom_examine_description =
                         CASE WHEN $11::boolean THEN $13::text ELSE custom_examine_description END,
@@ -517,6 +552,7 @@ pub async fn save_inventory_diff(
                 custom_name,
                 custom_examine,
                 alter_overwrite,
+                snap.container_flags.as_deref(),
             )
             .fetch_optional(&mut *conn)
             .await?;
@@ -568,13 +604,15 @@ pub async fn save_inventory_diff(
 }
 
 /// The `custom_values` keys the runtime owns, as one JSON object: `lit`
-/// (only when set), `keywords` (only when overridden) and `curse` (only when
-/// `alter` is non-empty). The UPDATE strips the owned keys from the row and
-/// merges this over the rest.
+/// (only when set), `keywords` (only when overridden), `curse` (only when
+/// `alter` is non-empty) and `Flags` (only when `container_flags` is given;
+/// an UPDATE merges those in SQL instead). The UPDATE strips the owned keys
+/// from the row and merges this over the rest.
 pub(crate) fn custom_values_patch(
     lit: bool,
     keywords: Option<&[String]>,
     alter: Option<&ItemAlter>,
+    container_flags: Option<&[String]>,
 ) -> serde_json::Value {
     let mut patch = serde_json::Map::new();
     if lit {
@@ -587,6 +625,9 @@ pub(crate) fn custom_values_patch(
         && let Ok(v) = serde_json::to_value(a)
     {
         patch.insert("curse".into(), v);
+    }
+    if let Some(flags) = container_flags {
+        patch.insert("Flags".into(), serde_json::json!(flags));
     }
     serde_json::Value::Object(patch)
 }

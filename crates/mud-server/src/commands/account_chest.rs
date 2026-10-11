@@ -144,6 +144,10 @@ pub(crate) struct ChestItemState {
     /// [`crate::item_alter`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub curse: Option<mud_db::character_items::ItemAlter>,
+    /// Container bits (`Closeable`, `Closed`, `Locked`, `PickProof`) of a
+    /// container whose state differs from its prototype.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_flags: Option<Vec<String>>,
 }
 
 /// Capture the per-instance state of `item` for its chest row.
@@ -158,6 +162,9 @@ pub(crate) fn chest_state_of(world: &World, item: Entity) -> ChestItemState {
         custom_examine: custom.and_then(|c| c.examine.clone()),
         custom_keywords: custom.and_then(|c| c.keywords.clone()),
         curse: Some(crate::item_alter::snapshot(world, item)).filter(|a| !a.is_empty()),
+        container_flags: world
+            .get::<mud_world::ContainerState>(item)
+            .map(mud_world::ContainerState::flag_names),
     }
 }
 
@@ -539,6 +546,9 @@ pub(crate) fn spawn_withdrawn_item(
     if let Some(curse) = &state.curse {
         // `withdraw_to_inventory` wrote the delta into the new row.
         crate::item_alter::restore(world, item_entity, curse, false);
+    }
+    if let Some(flags) = &state.container_flags {
+        crate::commands::containers::restore_saved_flags(world, item_entity, flags);
     }
     let shown = crate::commands::name_of(world, item_entity);
     send_to(
@@ -982,6 +992,7 @@ mod tests {
                 weapon_dice_size: -1,
                 ..Default::default()
             }),
+            container_flags: Some(vec!["Closeable".to_string(), "Locked".to_string()]),
         };
         let json = serde_json::to_value(&state).unwrap();
         let back: ChestItemState = serde_json::from_value(json).unwrap();

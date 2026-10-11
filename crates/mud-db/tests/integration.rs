@@ -178,6 +178,7 @@ async fn round_trips_character_items() {
             lit: true,
             custom: None,
             alter: None,
+            container_flags: None,
             in_corpse: false,
         },
         CharacterItemSnap {
@@ -193,6 +194,7 @@ async fn round_trips_character_items() {
             lit: false,
             custom: None,
             alter: None,
+            container_flags: None,
             in_corpse: false,
         },
     ];
@@ -242,6 +244,7 @@ async fn round_trips_character_items() {
             lit: r.lit,
             custom: None,
             alter: None,
+            container_flags: None,
             in_corpse: false,
         })
         .collect();
@@ -744,6 +747,7 @@ async fn lit_flag_preserves_other_custom_values_keys() {
         lit,
         custom: None,
         alter: None,
+        container_flags: None,
         in_corpse: false,
     };
     // Start from an empty inventory, then insert one unlit item.
@@ -826,6 +830,7 @@ async fn lit_flag_preserves_other_custom_values_keys() {
             lit: r.lit,
             custom: None,
             alter: None,
+            container_flags: None,
             in_corpse: false,
         })
         .collect();
@@ -889,6 +894,7 @@ fn corpse_snap(
         lit: false,
         custom: None,
         alter: None,
+        container_flags: None,
         in_corpse,
     }
 }

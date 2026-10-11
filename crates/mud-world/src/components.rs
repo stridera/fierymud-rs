@@ -2197,8 +2197,11 @@ pub struct PendingSummon {
 /// `VAL_CONTAINER_BITS`). The proto's `values` JSON is the authored
 /// default; `commands::containers::container_state` derives it from there
 /// until `open`/`close`/`lock`/`unlock`/`pick` first change an instance,
-/// which writes this component as that instance's override. A respawned
-/// container is a fresh entity, so it comes back in its authored state.
+/// which writes this component as that instance's override. A carried
+/// container's state is saved in the `Flags` key of its row's
+/// `custom_values` and seeded back at login when it differs from the
+/// proto; a container respawned by the reset pass is a fresh entity and
+/// comes back in its authored state.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(clippy::struct_excessive_bools)] // the four legacy container bits
 pub struct ContainerState {
@@ -2219,33 +2222,63 @@ impl ContainerState {
     /// 1000).
     #[must_use]
     pub fn from_values(values: &serde_json::Value) -> Self {
-        let flag = |name: &str| {
-            values
-                .get("Flags")
-                .and_then(serde_json::Value::as_array)
-                .is_some_and(|flags| {
-                    flags
-                        .iter()
-                        .filter_map(serde_json::Value::as_str)
-                        .any(|f| f.trim().eq_ignore_ascii_case(name))
-                })
-        };
-        let raw_key = values.get("Key").and_then(|v| {
+        Self {
+            closeable: false,
+            closed: false,
+            locked: false,
+            pickproof: false,
+            key: None,
+        }
+        .overlay(values)
+    }
+
+    /// `self` with the container bits and key that `values` carries laid
+    /// over it. `values` has the CONTAINER `values` layout (also the layout
+    /// of a saved instance's `custom_values`): a `Flags` array replaces all
+    /// four bits, a `Key` replaces the key; a missing field leaves `self`
+    /// alone, so an instance row that holds neither reads as its prototype.
+    #[must_use]
+    pub fn overlay(mut self, values: &serde_json::Value) -> Self {
+        if let Some(flags) = values.get("Flags").and_then(serde_json::Value::as_array) {
+            let flag = |name: &str| {
+                flags
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .any(|f| f.trim().eq_ignore_ascii_case(name))
+            };
+            self.closeable = flag("Closeable");
+            self.closed = flag("Closed");
+            self.locked = flag("Locked");
+            self.pickproof = flag("PickProof");
+        }
+        if let Some(raw_key) = values.get("Key").and_then(|v| {
             v.as_i64()
                 .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
-        });
-        let key = raw_key.filter(|k| *k > 0).and_then(|k| {
-            let zone = i32::try_from(k / 100).ok()?;
-            let id = i32::try_from(k % 100).ok()?;
-            Some((if zone == 0 { 1000 } else { zone }, id))
-        });
-        Self {
-            closeable: flag("Closeable"),
-            closed: flag("Closed"),
-            locked: flag("Locked"),
-            pickproof: flag("PickProof"),
-            key,
+        }) {
+            self.key = (raw_key > 0).then_some(raw_key).and_then(|k| {
+                let zone = i32::try_from(k / 100).ok()?;
+                let id = i32::try_from(k % 100).ok()?;
+                Some((if zone == 0 { 1000 } else { zone }, id))
+            });
         }
+        self
+    }
+
+    /// The set container bits as `Flags` entries, in the order the
+    /// importer writes them. Saved with an instance (the `Flags` key of
+    /// its `custom_values`) and read back by [`Self::overlay`].
+    #[must_use]
+    pub fn flag_names(&self) -> Vec<String> {
+        [
+            (self.closeable, "Closeable"),
+            (self.closed, "Closed"),
+            (self.locked, "Locked"),
+            (self.pickproof, "PickProof"),
+        ]
+        .into_iter()
+        .filter(|(on, _)| *on)
+        .map(|(_, name)| name.to_string())
+        .collect()
     }
 }
 

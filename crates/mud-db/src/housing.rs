@@ -89,6 +89,9 @@ pub struct HouseItemCustom {
     /// key `charges`). `None` for items that carry no charge count; those
     /// keep whatever the prototype hands a fresh instance.
     pub charges: Option<i32>,
+    /// Container bits as `Flags` entries (`custom_values` key `Flags`).
+    /// `None` when the container matches its prototype.
+    pub container_flags: Option<Vec<String>>,
 }
 
 impl HouseItemCustom {
@@ -111,19 +114,28 @@ impl HouseItemCustom {
             .get("charges")
             .and_then(serde_json::Value::as_i64)
             .and_then(|c| i32::try_from(c).ok());
+        let container_flags = values
+            .get("Flags")
+            .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok());
         Self {
             name,
             examine,
             keywords,
             alter,
             charges,
+            container_flags,
         }
     }
 
     /// The `custom_values` JSON for these fields (`{}` when there are none).
     #[must_use]
     pub fn values(&self) -> serde_json::Value {
-        let mut values = custom_values_patch(false, self.keywords.as_deref(), self.alter.as_ref());
+        let mut values = custom_values_patch(
+            false,
+            self.keywords.as_deref(),
+            self.alter.as_ref(),
+            self.container_flags.as_deref(),
+        );
         if let (Some(charges), Some(map)) = (self.charges, values.as_object_mut()) {
             map.insert("charges".into(), serde_json::json!(charges));
         }

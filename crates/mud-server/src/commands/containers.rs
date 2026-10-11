@@ -8,9 +8,13 @@
 //! the authored default from the proto's `values` JSON (`Flags` + `Key`),
 //! so every spawn path (zone reset, shop, login, script) gets the right
 //! state without being touched. A container respawned by the object-reset
-//! pass is a fresh entity and so comes back in its authored state. Nothing
-//! persists the state of a carried container: it spawns from its proto at
-//! the next login.
+//! pass is a fresh entity and so comes back in its authored state.
+//!
+//! A carried container's state persists in the `Flags` key of its
+//! `CharacterItems.custom_values` (the layout legacy imports wrote, so a
+//! chest a player left unlocked in legacy stays unlocked). [`restore_saved`]
+//! seeds the component from it at login, `save_player` writes it back, and
+//! a house item or account-chest row carries the same flags.
 //!
 //! The door verbs (`open`, `close`, `lock`, `unlock`, `pick`) call
 //! [`try_container_verb`] first and fall through to the door code when the
@@ -36,18 +40,6 @@ pub(crate) enum Verb {
     Pick,
 }
 
-impl Verb {
-    const fn word(self) -> &'static str {
-        match self {
-            Verb::Open => "open",
-            Verb::Close => "close",
-            Verb::Lock => "lock",
-            Verb::Unlock => "unlock",
-            Verb::Pick => "pick",
-        }
-    }
-}
-
 /// The container state of `item`: its override component, else the proto
 /// default. `None` when `item` is not an `ObjectType::Container` object
 /// (corpses, bags of coins, weapons, ...), which are always open.
@@ -61,6 +53,26 @@ pub(crate) fn container_state(world: &World, item: Entity) -> Option<ContainerSt
         .by_key
         .get(&(key.zone, key.id))?;
     (proto.r#type == ObjectType::Container).then(|| ContainerState::from_values(&proto.values))
+}
+
+/// Seed `item`'s state from a saved row: the proto default with the
+/// `Flags` / `Key` of `saved` (a `custom_values` blob) laid over it. The
+/// component is only attached when that differs from the proto, so an
+/// untouched container keeps following its prototype. Does nothing for a
+/// non-container.
+pub(crate) fn restore_saved(world: &mut World, item: Entity, saved: &serde_json::Value) {
+    let Some(base) = container_state(world, item) else {
+        return;
+    };
+    let seeded = base.overlay(saved);
+    if seeded != base {
+        world.entity_mut(item).insert(seeded);
+    }
+}
+
+/// Seed `item`'s state from saved `Flags` entries (house / chest rows).
+pub(crate) fn restore_saved_flags(world: &mut World, item: Entity, flags: &[String]) {
+    restore_saved(world, item, &serde_json::json!({ "Flags": flags }));
 }
 
 /// `true` (after telling `player`) when `container` is closed. Gate for
@@ -111,26 +123,26 @@ fn set_state(world: &mut World, item: Entity, edit: impl FnOnce(&mut ContainerSt
 }
 
 /// Run `verb` on the container `arg` names. Returns `false` (nothing
-/// sent) when `arg` is empty or names no item, so the caller can treat
-/// it as a door.
+/// sent) when `arg` is empty, a direction, or names no container, so the
+/// caller can treat it as a door.
 pub(crate) fn try_container_verb(world: &mut World, player: Entity, verb: Verb, arg: &str) -> bool {
     let arg = arg.trim();
     if arg.is_empty() {
         return false;
     }
+    // A direction word is the door (`open d`, `unlock s`), even when a
+    // keyword of some item in reach happens to match it.
+    if parse_direction(arg).is_some() {
+        return false;
+    }
     let Some(item) = find_item(world, player, arg, ItemClass::RoomFirst) else {
         return false;
     };
+    // A non-container item that merely shares a keyword with the door
+    // (`open gate` with a gate-shaped trinket in reach) is not what was
+    // meant: the door code answers.
     let Some(state) = container_state(world, item) else {
-        if parse_direction(arg).is_some() {
-            return false;
-        }
-        send_to(
-            world,
-            player,
-            format!("You can't {} that.\r\n", verb.word()),
-        );
-        return true;
+        return false;
     };
     match verb {
         Verb::Open => open(world, player, item, state),

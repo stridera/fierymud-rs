@@ -14,7 +14,6 @@
 //! on bevy resources beyond the channel itself.
 
 use std::collections::HashMap;
-use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -917,24 +916,36 @@ fn json_err((code, msg): (StatusCode, String)) -> (StatusCode, axum::Json<Value>
 }
 
 /// Drain pending admin requests each tick and service them
-/// synchronously. Bounded by [`MAX_PER_TICK`] so a request flood
-/// can't starve gameplay systems.
+/// synchronously. Bounded by [`MAX_PER_TICK`] and by [`DRAIN_BUDGET`] of
+/// wall-clock time, so a request flood (or a run of slow commands) can't
+/// starve gameplay systems: what is left stays in the inbox for the next
+/// tick.
 const MAX_PER_TICK: usize = 32;
 
-#[allow(clippy::needless_pass_by_value)]
+/// Wall-clock a tick may spend on admin requests before it stops taking
+/// more. A request already started runs to completion (a command is
+/// capped by [`COMMAND_TIMEOUT`]), so a tick overshoots by at most that.
+const DRAIN_BUDGET: std::time::Duration = std::time::Duration::from_millis(50);
+
 pub async fn drain_admin_requests(world: &mut World, pool: &PgPool) {
-    let mut pending: VecDeque<AdminCommand> = VecDeque::new();
-    {
-        let inbox = world.resource::<AdminInbox>();
-        let mut rx = inbox.0.lock().expect("admin inbox poisoned");
-        for _ in 0..MAX_PER_TICK {
-            match rx.try_recv() {
-                Ok(cmd) => pending.push_back(cmd),
-                Err(_) => break,
-            }
+    drain_within(world, pool, DRAIN_BUDGET).await;
+}
+
+/// [`drain_admin_requests`] with an explicit budget. Always services at
+/// least one request when any is waiting, so the queue makes progress.
+async fn drain_within(world: &mut World, pool: &PgPool, budget: std::time::Duration) {
+    let started = std::time::Instant::now();
+    for taken in 0..MAX_PER_TICK {
+        if taken > 0 && started.elapsed() >= budget {
+            break;
         }
-    }
-    while let Some(cmd) = pending.pop_front() {
+        // The guard is dropped before the request is serviced (it may await).
+        let next = {
+            let inbox = world.resource::<AdminInbox>();
+            let mut rx = inbox.0.lock().expect("admin inbox poisoned");
+            rx.try_recv()
+        };
+        let Ok(cmd) = next else { break };
         let resp = match cmd.request {
             // Player commands take the same async path as a telnet line
             // (aliases, async-only commands, shared pre-gate).
@@ -2027,7 +2038,7 @@ fn mark_pending_save(world: &mut World, player_name: &str) -> AdminResponse {
 /// with a timeout. Async handlers (DB saves, mail, houses) normally finish
 /// in milliseconds; this only bounds a stuck database call so it can't
 /// hold the tick loop for long.
-const COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 async fn run_command(
     world: &mut World,
@@ -2705,5 +2716,56 @@ mod command_dispatch_tests {
             .await
             .unwrap_err();
         assert_eq!(err.0, StatusCode::NOT_FOUND);
+    }
+}
+
+#[cfg(test)]
+mod drain_budget_tests {
+    use super::*;
+
+    /// Queue `n` pause requests; return the world, the reply receivers and
+    /// the lazy (never connected) pool.
+    fn setup(n: usize) -> (World, Vec<oneshot::Receiver<AdminResponse>>, PgPool) {
+        let (tx, rx) = mpsc::channel(ADMIN_QUEUE_CAP);
+        let mut world = World::new();
+        world.insert_resource(AdminInbox(Mutex::new(rx)));
+        world.insert_resource(WorldPause::default());
+        let replies = (0..n)
+            .map(|_| {
+                let (reply, rx) = oneshot::channel();
+                tx.try_send(AdminCommand {
+                    request: AdminRequest::PauseWorld,
+                    reply,
+                })
+                .ok()
+                .unwrap();
+                rx
+            })
+            .collect();
+        let pool = mud_db::sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://nobody:nopass@127.0.0.1:1/none")
+            .unwrap();
+        (world, replies, pool)
+    }
+
+    fn answered(replies: &mut [oneshot::Receiver<AdminResponse>]) -> usize {
+        replies.iter_mut().filter_map(|r| r.try_recv().ok()).count()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_exhausted_budget_leaves_the_rest_in_the_inbox() {
+        let (mut world, mut replies, pool) = setup(5);
+        drain_within(&mut world, &pool, std::time::Duration::ZERO).await;
+        assert_eq!(answered(&mut replies), 1, "one request always goes through");
+        // The next tick picks the rest up.
+        drain_within(&mut world, &pool, std::time::Duration::from_secs(5)).await;
+        assert_eq!(answered(&mut replies), 4);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_normal_budget_drains_up_to_the_per_tick_cap() {
+        let (mut world, mut replies, pool) = setup(MAX_PER_TICK + 3);
+        drain_admin_requests(&mut world, &pool).await;
+        assert_eq!(answered(&mut replies), MAX_PER_TICK);
     }
 }

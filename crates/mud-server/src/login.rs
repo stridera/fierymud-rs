@@ -5382,6 +5382,9 @@ pub(crate) fn snapshot_player(
                         .get::<mud_world::components::ItemAlterDirty>(*e)
                         .is_some(),
                 }),
+                container_flags: world
+                    .get::<mud_world::ContainerState>(*e)
+                    .map(mud_world::ContainerState::flag_names),
                 in_corpse: *in_corpse,
             });
             ents.push(*e);
@@ -6637,6 +6640,11 @@ pub(crate) fn spawn_inventory(
             }
             if let Some(alter) = row.alter() {
                 crate::item_alter::restore(world, item_entity, &alter, false);
+            }
+            // Open / closed / locked: the state the row was saved in (legacy
+            // imports too), not the proto's authored default.
+            if let Some(saved) = &row.custom_container {
+                crate::commands::containers::restore_saved(world, item_entity, saved);
             }
             spawned.insert(row.id, item_entity);
             made_progress = true;
@@ -10000,6 +10008,134 @@ mod tests {
         assert!(name.is_none() && examine.is_none(), "{name:?} {examine:?}");
         assert!(flags.is_empty(), "{flags:?}");
         assert!(values.get("keywords").is_none(), "{values}");
+
+        mud_db::sqlx::query("DELETE FROM \"CharacterItems\" WHERE character_id = $1")
+            .bind(&c.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        temp_cleanup(&pool, &[], &[&c.id], &[]).await;
+    }
+
+    /// A container's open / locked state is the row's saved state, not the
+    /// proto's: a legacy-imported row (`Flags` in `custom_values`) seeds it
+    /// at login, a changed state is written back by the normal save, and it
+    /// is the same after the next login. Other `custom_values` keys survive.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn container_state_seeds_from_the_row_and_survives_save_and_reload() {
+        use crate::commands::containers::container_state;
+        let Some((pool, _db_lock)) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let object: Option<(i32, i32)> =
+            mud_db::sqlx::query_as("SELECT zone_id, id FROM \"Objects\" LIMIT 1")
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+        let Some((oz, oid)) = object else {
+            eprintln!("skipping: no Objects rows");
+            return;
+        };
+        let (_user, c) = temp_unlinked_char(&pool, "cont").await;
+        let mut protos = mud_world::ObjectPrototypes::default();
+        let mut proto = crate::commands::test_support::object_proto(
+            oz,
+            oid,
+            mud_db::enums::ObjectType::Container,
+        );
+        proto.name = "a strongbox".into();
+        proto.keywords = vec!["strongbox".into()];
+        // Authored: closed and locked, pickproof.
+        proto.values = serde_json::json!({
+            "Key": 3051, "Flags": ["Closeable", "PickProof", "Closed", "Locked"]
+        });
+        protos.by_key.insert((oz, oid), proto);
+        let by_key = protos.by_key.clone();
+        let fresh_world = || {
+            let mut w = World::new();
+            w.insert_resource(SaveCoordinator::default());
+            w.insert_resource(mud_world::ObjectPrototypes {
+                by_key: by_key.clone(),
+            });
+            w.insert_resource(mud_world::TriggerCatalog::default());
+            w.insert_resource(mud_world::ObjectAbilityCatalog::default());
+            w
+        };
+        // What the legacy import left: the player unlocked and opened it.
+        mud_db::sqlx::query(
+            "INSERT INTO \"CharacterItems\" (character_id, object_zone_id, object_id, custom_values, updated_at) \
+             VALUES ($1, $2, $3, $4::jsonb, NOW())",
+        )
+        .bind(&c.id)
+        .bind(oz)
+        .bind(oid)
+        .bind(r#"{"Key": 3051, "Flags": ["Closeable", "PickProof"], "Capacity": 50}"#)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let load = |pool: PgPool, mut world: World, cid: String| async move {
+            let rows = mud_db::character_items::list_for(&pool, &cid)
+                .await
+                .unwrap();
+            let room = world.spawn_empty().id();
+            let player = spawn_player_for(&mut world, &cid, room);
+            assert_eq!(spawn_inventory(&mut world, player, &rows), 1);
+            let item = world
+                .query_filtered::<Entity, With<Item>>()
+                .iter(&world)
+                .next()
+                .unwrap();
+            (world, player, item)
+        };
+
+        // Login 1: the saved (open, unlocked) state wins over the proto.
+        let (mut world, player, item) = load(pool.clone(), fresh_world(), c.id.clone()).await;
+        let s = container_state(&world, item).unwrap();
+        assert!(
+            s.closeable && !s.closed && !s.locked && s.pickproof,
+            "{s:?}"
+        );
+        assert_eq!(s.key, Some((30, 51)));
+
+        // Lock and close it, save.
+        let mut locked = s;
+        locked.closed = true;
+        locked.locked = true;
+        world.entity_mut(item).insert(locked);
+        let out = save_player(&mut world, player, &pool).await;
+        assert!(out.committed, "{:?}", out.error);
+        let pid = world.get::<mud_world::PersistedItemId>(item).unwrap().0;
+        let values: serde_json::Value = mud_db::sqlx::query_scalar(
+            "SELECT custom_values FROM \"CharacterItems\" WHERE id = $1",
+        )
+        .bind(pid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            values["Flags"],
+            serde_json::json!(["Closeable", "Closed", "Locked", "PickProof"]),
+            "{values}"
+        );
+        assert_eq!(values["Capacity"], 50, "other keys survive: {values}");
+
+        // Login 2: still locked. Unlock + open it, save.
+        let (mut world, player, item) = load(pool.clone(), fresh_world(), c.id.clone()).await;
+        let s = container_state(&world, item).unwrap();
+        assert!(s.closed && s.locked, "{s:?}");
+        let mut open = s;
+        open.closed = false;
+        open.locked = false;
+        world.entity_mut(item).insert(open);
+        let out = save_player(&mut world, player, &pool).await;
+        assert!(out.committed, "{:?}", out.error);
+
+        // Login 3: open and unlocked again.
+        let (world3, _player, item3) = load(pool.clone(), fresh_world(), c.id.clone()).await;
+        let s = container_state(&world3, item3).unwrap();
+        assert!(!s.closed && !s.locked, "{s:?}");
 
         mud_db::sqlx::query("DELETE FROM \"CharacterItems\" WHERE character_id = $1")
             .bind(&c.id)

@@ -859,3 +859,38 @@ fn ask_and_whisper_from_an_invisible_player_read_someone() {
     );
     assert!(!out.contains("Ghost"), "{out}");
 }
+
+#[test]
+fn comm_gmcp_frames_to_the_target_do_not_leak_an_invisible_speakers_name() {
+    let mut fx = Fx::new();
+    let mut messages = mud_world::SystemMessages::default();
+    messages
+        .by_key
+        .insert("insult_lines".into(), vec!["Your hat is silly!".into()]);
+    fx.world.insert_resource(messages);
+    dispatch(&mut fx.world, fx.ghost, "ask tester about gold");
+    dispatch(&mut fx.world, fx.ghost, "whisper tester secrets");
+    dispatch(&mut fx.world, fx.ghost, "insult tester");
+    let out = drain(&mut fx.wrx);
+    // The GMCP frames are there (and name the speaker "Someone")...
+    for channel in ["ask", "whisper", "insult"] {
+        assert!(
+            out.contains(&format!("\"channel\":\"{channel}\"")),
+            "{channel} frame: {out}"
+        );
+    }
+    assert!(out.contains("\"talker\":\"Someone\""), "{out}");
+    // ...and the real name is nowhere in the bytes the target received.
+    assert!(!out.contains("Ghost"), "{out}");
+    // The speaker's own frames keep their real name.
+    assert!(drain(&mut fx.grx).contains("\"talker\":\"Ghost\""));
+}
+
+#[test]
+fn comm_gmcp_frames_name_the_speaker_to_a_detecting_target() {
+    let mut fx = Fx::new();
+    fx.world.entity_mut(fx.watcher).insert(DetectInvis);
+    dispatch(&mut fx.world, fx.ghost, "whisper tester secrets");
+    let out = drain(&mut fx.wrx);
+    assert!(out.contains("\"talker\":\"Ghost\""), "{out}");
+}

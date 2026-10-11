@@ -293,9 +293,12 @@ fn cmd_ask(world: &mut World, player: Entity, args: &str) {
     // the speaker and addressee, matching the "asks something"
     // rendering bystanders see in the main window. Target may
     // be a mob (no Connection); the helper no-ops cleanly.
+    // The addressee's frame names the asker as they see them.
     let gmcp_text = format!("{player_name} asks {target_name} about \"{topic}\"");
     send_comm_channel_text(world, player, "ask", &player_name, &gmcp_text);
-    send_comm_channel_text(world, target, "ask", &player_name, &gmcp_text);
+    let heard_from = shown_name(world, target, player, &player_name);
+    let gmcp_to_target = format!("{heard_from} asks {target_name} about \"{topic}\"");
+    send_comm_channel_text(world, target, "ask", &heard_from, &gmcp_to_target);
     crate::triggers::fire_speech_at(world, target, player, topic);
     if world.get::<Mob>(target).is_some()
         && let Some(key) = world.get::<WorldKey>(target).copied()
@@ -371,7 +374,8 @@ fn cmd_whisper(world: &mut World, player: Entity, args: &str) {
     // its intended audience.
     let gmcp_text = format!("{speaker} whispers to {target_name}, \"{message}\"");
     send_comm_channel_text(world, player, "whisper", &speaker, &gmcp_text);
-    send_comm_channel_text(world, target, "whisper", &speaker, &gmcp_text);
+    let gmcp_to_target = format!("{heard_from} whispers to {target_name}, \"{message}\"");
+    send_comm_channel_text(world, target, "whisper", &heard_from, &gmcp_to_target);
 }
 
 fn cmd_insult(world: &mut World, player: Entity, args: &str) {
@@ -439,7 +443,8 @@ fn cmd_insult(world: &mut World, player: Entity, args: &str) {
     // window and don't need it in their chat tab.
     let gmcp_text = format!("{actor_name} insults {target_name}: {line}");
     send_comm_channel_text(world, player, "insult", &actor_name, &gmcp_text);
-    send_comm_channel_text(world, target, "insult", &actor_name, &gmcp_text);
+    let gmcp_to_target = format!("{insulter} insults {target_name}: {line}");
+    send_comm_channel_text(world, target, "insult", &insulter, &gmcp_to_target);
 }
 
 fn cmd_greport(world: &mut World, player: Entity, _args: &str) {

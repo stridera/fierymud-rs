@@ -384,3 +384,94 @@ fn the_state_component_overrides_the_proto() {
     });
     assert!(!container_state(&fx.world, chest).unwrap().closed);
 }
+
+// -- saved per-instance state ------------------------------------------------
+
+#[test]
+fn a_saved_state_overrides_the_proto_and_an_equal_one_does_not() {
+    use super::containers::restore_saved;
+    let mut fx = Fx::new();
+    // Legacy saved the locked chest open and unlocked (60 is closed+locked).
+    let (chest, _) = fx.chest(60, "an iron chest", "chest");
+    restore_saved(
+        &mut fx.world,
+        chest,
+        &serde_json::json!({"Key": 3051, "Flags": ["Closeable"]}),
+    );
+    let s = container_state(&fx.world, chest).unwrap();
+    assert!(s.closeable && !s.closed && !s.locked, "{s:?}");
+    assert_eq!(s.key, Some(KEY));
+    // A row that saved exactly the authored state leaves the proto in charge.
+    let (vault, _) = fx.chest(61, "a vault", "vault");
+    restore_saved(
+        &mut fx.world,
+        vault,
+        &serde_json::json!({"Key": 3051, "Flags": ["Closeable", "PickProof", "Closed", "Locked"]}),
+    );
+    assert!(fx.world.get::<ContainerState>(vault).is_none());
+    // No Flags / Key on the row (new instance): proto default.
+    let (sack, _) = fx.chest(62, "a canvas sack", "sack");
+    restore_saved(&mut fx.world, sack, &serde_json::json!({}));
+    assert!(fx.world.get::<ContainerState>(sack).is_none());
+    // A non-container is ignored.
+    let key = fx.give_key();
+    restore_saved(
+        &mut fx.world,
+        key,
+        &serde_json::json!({"Flags": ["Locked"]}),
+    );
+    assert!(fx.world.get::<ContainerState>(key).is_none());
+}
+
+#[test]
+fn flag_names_round_trip_through_overlay() {
+    let s = ContainerState::from_values(
+        &serde_json::json!({"Key": 3051, "Flags": ["PickProof", "Locked", "Closed", "Closeable"]}),
+    );
+    assert_eq!(
+        s.flag_names(),
+        vec!["Closeable", "Closed", "Locked", "PickProof"]
+    );
+    let blank = ContainerState::from_values(&serde_json::json!({}));
+    let back = blank.overlay(&serde_json::json!({"Flags": s.flag_names()}));
+    assert_eq!(
+        (back.closeable, back.closed, back.locked, back.pickproof),
+        (true, true, true, true)
+    );
+    assert_eq!(back.key, None, "flags alone do not touch the key");
+}
+
+// -- directions beat items --------------------------------------------------
+
+#[test]
+fn a_direction_word_is_never_taken_for_an_item() {
+    use super::containers::{Verb, try_container_verb};
+    let mut fx = Fx::new();
+    // A sack whose keyword is "d" (and one named "s") sits in the room.
+    let (_sack, _) = fx.chest(62, "a canvas sack", "d");
+    let d = try_container_verb(&mut fx.world, fx.player, Verb::Open, "d");
+    assert!(!d, "`open d` is left to the door code");
+    assert_eq!(fx.out(), "", "nothing was said about the sack");
+    // Its full keyword is still a container.
+    let (_sack2, _) = fx.chest(62, "a canvas sack", "satchel");
+    assert!(try_container_verb(
+        &mut fx.world,
+        fx.player,
+        Verb::Open,
+        "satchel"
+    ));
+}
+
+#[test]
+fn a_non_container_item_falls_through_to_the_door_code() {
+    use super::containers::{Verb, try_container_verb};
+    let mut fx = Fx::new();
+    let _key = item_at(&mut fx.world, fx.room, KEY.1, "an iron gate charm", "gate");
+    assert!(!try_container_verb(
+        &mut fx.world,
+        fx.player,
+        Verb::Open,
+        "gate"
+    ));
+    assert_eq!(fx.out(), "", "no `You can't open that.`");
+}

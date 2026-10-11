@@ -14563,6 +14563,9 @@ pub(crate) fn spawn_house_item(
     if let Some(alter) = &custom.alter {
         crate::item_alter::restore(world, item, alter, false);
     }
+    if let Some(flags) = &custom.container_flags {
+        containers::restore_saved_flags(world, item, flags);
+    }
 }
 
 /// The per-instance state of `item` as stored with a placed house item:
@@ -14576,6 +14579,9 @@ pub(crate) fn house_item_custom(world: &World, item: Entity) -> mud_db::housing:
         keywords: custom.and_then(|c| c.keywords.clone()),
         alter: (!alter.is_empty()).then_some(alter),
         charges: world.get::<mud_world::Charges>(item).map(|c| c.0),
+        container_flags: world
+            .get::<mud_world::ContainerState>(item)
+            .map(mud_world::ContainerState::flag_names),
     }
 }
 
