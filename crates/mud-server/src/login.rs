@@ -193,6 +193,12 @@ pub struct WebLogin {
     /// Shown for an email with no account: no database row backs it and
     /// it can never be approved. See [`ConnRouter::begin_decoy_approval`].
     decoy: bool,
+    /// Approval URL (with the code) offered to GMCP clients as a
+    /// clickable `Client.Link`. `None` when it failed validation.
+    link_url: Option<String>,
+    /// True once `Client.Link` went out, so a late GMCP negotiation
+    /// ([`ConnRouter::on_capability`]) sends it exactly once.
+    link_sent: bool,
     _poller: PollGuard,
 }
 
@@ -1906,6 +1912,16 @@ impl ConnRouter {
         }
         if name == "gmcp" && on && !was_gmcp {
             self.send_gmcp_intro_burst(conn_id, world);
+            // GMCP can be confirmed after the login code was shown (slow
+            // client): offer the clickable link now.
+            if let Some(ctx) = self.login.get_mut(&conn_id)
+                && let Stage::AwaitingWebApproval(w) = &mut ctx.stage
+                && !w.link_sent
+                && let Some(frame) = w.link_url.as_deref().and_then(web_approval_link_frame)
+            {
+                w.link_sent = true;
+                let _ = ctx.outbound.try_send(frame);
+            }
         }
     }
 
@@ -2018,6 +2034,32 @@ fn client_gui_payload(version: &str, url: &str) -> String {
 /// `Client.Map` payload (see [`client_gui_payload`]).
 fn client_map_payload(url: &str) -> String {
     serde_json::json!({"url": url}).to_string()
+}
+
+/// `Client.Link` payload: a URL the client can offer as a clickable link.
+/// Only server-built URLs may be passed (never player text); anything that
+/// is not a plain `http(s)://` URL without whitespace or control
+/// characters yields `None`. Built with `serde_json` (see
+/// [`client_gui_payload`]).
+fn client_link_payload(url: &str, label: &str, kind: &str) -> Option<String> {
+    let scheme_ok = url.starts_with("https://") || url.starts_with("http://");
+    if !scheme_ok || url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return None;
+    }
+    Some(serde_json::json!({"url": url, "label": label, "kind": kind}).to_string())
+}
+
+/// Device-code approval URL for the website `/verify` page; `None` when it
+/// would not pass [`client_link_payload`] validation.
+fn web_approval_link_url(website_url: &str, shown_code: &str) -> Option<String> {
+    let url = format!("{website_url}/verify?code={shown_code}");
+    client_link_payload(&url, "", "login").map(|_| url)
+}
+
+/// `Client.Link` frame for a pending device-code login.
+fn web_approval_link_frame(url: &str) -> Option<Vec<u8>> {
+    let payload = client_link_payload(url, "Approve login code", "login")?;
+    Some(mud_net::gmcp_packet("Client.Link", &payload))
 }
 
 /// `External.Discord.Info` payload (see [`client_gui_payload`]).
@@ -3570,6 +3612,7 @@ impl ConnRouter {
     /// already charged the code rate limit), but no `GameLoginCode` row
     /// exists, so nothing can approve it.
     fn begin_decoy_approval(&mut self, conn_id: ConnId, email: String, world: &World) {
+        let gmcp_on = self.caps.get(&conn_id).is_some_and(|c| c.gmcp);
         let Some(ctx) = self.login.get_mut(&conn_id) else {
             return;
         };
@@ -3584,6 +3627,13 @@ impl ConnRouter {
             )
             .into_bytes(),
         );
+        // Same GMCP link as a real code, so the decoy stays indistinguishable.
+        let link_url = web_approval_link_url(&website_url, &shown);
+        let link_sent = gmcp_on
+            && link_url
+                .as_deref()
+                .and_then(web_approval_link_frame)
+                .is_some_and(|f| ctx.outbound.try_send(f).is_ok());
         let _ = ctx.outbound.try_send(mud_net::iac_eor());
         let expires_at = Instant::now() + Duration::from_secs(timeout_secs);
         let poller = {
@@ -3616,6 +3666,8 @@ impl ConnRouter {
             },
             preselected: None,
             decoy: true,
+            link_url,
+            link_sent,
             _poller: poller,
         }));
     }
@@ -3737,6 +3789,7 @@ impl ConnRouter {
         };
         let shown = format_login_code(&code);
         let within = describe_timeout(timeout_secs);
+        let gmcp_on = self.caps.get(&conn_id).is_some_and(|c| c.gmcp);
         let Some(ctx) = self.login.get_mut(&conn_id) else {
             return;
         };
@@ -3755,6 +3808,12 @@ impl ConnRouter {
                     .to_vec(),
             );
         }
+        let link_url = web_approval_link_url(&website_url, &shown);
+        let link_sent = gmcp_on
+            && link_url
+                .as_deref()
+                .and_then(web_approval_link_frame)
+                .is_some_and(|f| ctx.outbound.try_send(f).is_ok());
         let _ = ctx.outbound.try_send(mud_net::iac_eor());
         ctx.stage = Stage::AwaitingWebApproval(Box::new(WebLogin {
             code,
@@ -3764,6 +3823,8 @@ impl ConnRouter {
             user,
             preselected,
             decoy: false,
+            link_url,
+            link_sent,
             _poller: poller,
         }));
     }
@@ -9532,6 +9593,99 @@ mod tests {
             router.login.get(&1).unwrap().stage,
             Stage::AwaitingIdentifier
         ));
+    }
+
+    fn link_frames(rx: &mut tokio::sync::mpsc::Receiver<Vec<u8>>) -> Vec<serde_json::Value> {
+        let bytes = commands::gmcp_tests::drain_bytes(rx);
+        commands::gmcp_tests::frames(&bytes)
+            .into_iter()
+            .filter(|(pkg, _)| pkg == "Client.Link")
+            .map(|(_, json)| serde_json::from_str(&json).expect("valid JSON payload"))
+            .collect()
+    }
+
+    #[test]
+    fn client_link_payload_accepts_http_urls_and_rejects_the_rest() {
+        let ok = client_link_payload("https://x.example/verify?code=AB-CD", "L", "login").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&ok).unwrap();
+        assert_eq!(v["url"], "https://x.example/verify?code=AB-CD");
+        assert_eq!(v["label"], "L");
+        assert_eq!(v["kind"], "login");
+        assert!(client_link_payload("http://localhost:3000/verify", "L", "login").is_some());
+        for bad in [
+            "javascript:alert(1)",
+            "ftp://x.example",
+            "//x.example",
+            "",
+            "https://x.example/a b",
+            "https://x.example/\r\n",
+        ] {
+            assert!(client_link_payload(bad, "L", "login").is_none(), "{bad:?}");
+        }
+        // Hostile label/kind stay valid JSON.
+        let tricky = client_link_payload("https://x.example", "a\"b\\\n", "k").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&tricky).unwrap();
+        assert_eq!(v["label"], "a\"b\\\n");
+    }
+
+    /// The code prompt sends the URL as text and, with GMCP on, as a
+    /// `Client.Link` frame; without GMCP only the text.
+    #[tokio::test(flavor = "current_thread")]
+    async fn login_code_link_is_sent_over_gmcp_only_when_negotiated() {
+        let world = auth_world(0);
+        let mut router = ConnRouter::new();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        router.on_connect(1, tx, None, &world);
+        drain(&mut rx);
+        router.on_capability(1, "gmcp", true, &mut auth_world(0));
+        drain(&mut rx);
+        router.begin_decoy_approval(1, "nobody@example.invalid".into(), &world);
+        let bytes = commands::gmcp_tests::drain_bytes(&mut rx);
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        let Stage::AwaitingWebApproval(w) = &router.login.get(&1).unwrap().stage else {
+            panic!("not awaiting approval");
+        };
+        let code = w.code.clone();
+        let shown = format_login_code(&code);
+        let url = format!("https://muditor.utaboshi.com/verify?code={shown}");
+        assert!(
+            text.contains(&format!("Approve it at {url} within")),
+            "{text}"
+        );
+        let links: Vec<_> = commands::gmcp_tests::frames(&bytes)
+            .into_iter()
+            .filter(|(pkg, _)| pkg == "Client.Link")
+            .map(|(_, j)| serde_json::from_str::<serde_json::Value>(&j).unwrap())
+            .collect();
+        assert_eq!(links.len(), 1, "{links:?}");
+        assert_eq!(links[0]["url"], url);
+        assert_eq!(links[0]["kind"], "login");
+        assert_eq!(links[0]["label"], "Approve login code");
+
+        // GMCP off: text only, no frame.
+        let (tx2, mut rx2) = tokio::sync::mpsc::channel(64);
+        router.on_connect(2, tx2, None, &world);
+        drain(&mut rx2);
+        router.begin_decoy_approval(2, "nobody@example.invalid".into(), &world);
+        let bytes = commands::gmcp_tests::drain_bytes(&mut rx2);
+        assert!(String::from_utf8_lossy(&bytes).contains("Your login code is"));
+        assert!(commands::gmcp_tests::frames(&bytes).is_empty());
+
+        // GMCP confirmed after the code was shown: the link follows, once.
+        let mut w2 = auth_world(0);
+        router.on_capability(2, "gmcp", true, &mut w2);
+        let late = link_frames(&mut rx2);
+        assert_eq!(late.len(), 1, "{late:?}");
+        assert!(
+            late[0]["url"]
+                .as_str()
+                .unwrap()
+                .starts_with("https://muditor.utaboshi.com/verify?code=")
+        );
+        router.on_capability(2, "gmcp", false, &mut w2);
+        router.on_capability(2, "gmcp", true, &mut w2);
+        assert!(link_frames(&mut rx2).is_empty(), "no duplicate link");
     }
 
     /// A peer past its login-code quota is refused before any account
