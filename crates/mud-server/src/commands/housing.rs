@@ -8,7 +8,9 @@ use bevy_ecs::prelude::*;
 use mud_db::enums::UserRole;
 use mud_world::{Account, HouseSummary, HousingIndex, WorldKey};
 
-use crate::commands::{AsyncCommand, Category, Command, Help, cmd_look, cmd_mail_stub, send_to};
+use crate::commands::{
+    AsyncCommand, Category, Command, Help, cmd_look, cmd_mail_stub, send_msg, send_to,
+};
 
 inventory::submit! {
     Command {
@@ -93,7 +95,7 @@ async fn cmd_visit(world: &mut World, player: Entity, pool: &mud_db::sqlx::PgPoo
     let house = match mud_db::housing::for_character(pool, &target.id).await {
         Ok(Some(h)) => h,
         Ok(None) => {
-            send_to(
+            send_msg(
                 world,
                 player,
                 format!("{} doesn't own a house.\r\n", target.name),
@@ -109,7 +111,7 @@ async fn cmd_visit(world: &mut World, player: Entity, pool: &mud_db::sqlx::PgPoo
         .await
         .unwrap_or_default();
     if !is_self && !guests.iter().any(|g| g.character_id == visitor_cid) {
-        send_to(
+        send_msg(
             world,
             player,
             format!("{} hasn't added you to their guest list.\r\n", target.name,),
@@ -120,7 +122,7 @@ async fn cmd_visit(world: &mut World, player: Entity, pool: &mud_db::sqlx::PgPoo
         .await
         .unwrap_or_default();
     if rooms.is_empty() {
-        send_to(
+        send_msg(
             world,
             player,
             format!("{}'s house has no rooms.\r\n", target.name),

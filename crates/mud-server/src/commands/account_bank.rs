@@ -32,7 +32,7 @@ use mud_world::{Account, AccountWealth, BankWealth, Online, Player};
 use crate::autosave::SaveCoordinator;
 use crate::commands::{
     AsyncCommand, Category, Command, Help, cmd_mail_stub, format_amount, format_wealth,
-    require_linked_account, send_to,
+    require_linked_account, send_msg, send_to,
 };
 
 inventory::submit! {
@@ -238,7 +238,7 @@ async fn account_transfer(
         AccountDir::Deposit => "to the account shares",
         AccountDir::Withdraw => "from the account shares",
     };
-    send_to(
+    send_msg(
         world,
         player,
         format!("{verb} {} {suffix}.\r\n", format_amount(amount)),

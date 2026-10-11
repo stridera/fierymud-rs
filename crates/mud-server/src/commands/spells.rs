@@ -12,7 +12,8 @@ use mud_world::{
 
 use crate::commands::{
     Category, Command, Help, broadcast_room_except_players_rendered, direction_name,
-    flip_door_both_sides, invoke_ability, name_of, parse_direction, refuse_hidden_exit, send_to,
+    flip_door_both_sides, invoke_ability, name_of, parse_direction, refuse_hidden_exit, send_msg,
+    send_to,
 };
 
 inventory::submit! {
@@ -530,7 +531,7 @@ pub(crate) fn cmd_study(world: &mut World, player: Entity, args: &str) {
             .ability_circle
             .contains_key(&(class_id, def.id))
     {
-        send_to(
+        send_msg(
             world,
             player,
             format!("{} isn't on your class's list.\r\n", def.name),

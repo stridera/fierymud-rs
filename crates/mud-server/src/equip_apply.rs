@@ -560,10 +560,10 @@ fn drop_belt_items_with_waist(world: &mut World, item: Entity, wearer: Entity, a
         if !announce {
             continue;
         }
-        crate::commands::send_rendered(
+        crate::commands::send_msg(
             world,
             wearer,
-            &format!("{item_name} falls off as you remove your belt.\r\n"),
+            format!("{item_name} falls off as you remove your belt.\r\n"),
         );
         if let Some(located) = world.get::<mud_world::Located>(wearer).copied() {
             let actor_name = crate::commands::name_of(world, wearer);

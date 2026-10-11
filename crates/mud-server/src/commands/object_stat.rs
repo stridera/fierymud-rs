@@ -59,7 +59,10 @@ pub(crate) fn render_object_stat(
         (None, Some(p)) => p.name.clone(),
         (None, None) => "(unknown)".to_string(),
     };
-    out.push_str(&format!("name:          {name}\r\n"));
+    out.push_str(&format!(
+        "name:          {}\r\n",
+        crate::commands::cap_sentence_start(&name)
+    ));
     let keywords: Vec<String> = match (item, proto) {
         (Some(e), _) => world
             .get::<Keywords>(e)
@@ -374,7 +377,10 @@ fn append_instance(world: &mut World, out: &mut String, item: Entity) {
     } else {
         out.push_str(&format!("effects:       {} active\r\n", effects.len()));
         for (n, secs) in &effects {
-            out.push_str(&format!("               {n} ({secs}s)\r\n"));
+            out.push_str(&format!(
+                "               {n} ({})\r\n",
+                crate::commands::format_effect_duration(*secs)
+            ));
         }
     }
 }
@@ -510,5 +516,31 @@ mod tests {
         let stat = strip(&drain(&mut rx));
         assert!(!stat.contains("CURSED!!"), "{stat}");
         assert!(stat.contains("locks:         <none>"), "{stat}");
+    }
+
+    #[test]
+    fn ostat_and_stat_capitalise_the_displayed_name_only() {
+        let (mut world, player, mut rx) = cursed_helm_world();
+        let helm = world
+            .query_filtered::<Entity, With<Item>>()
+            .single(&world)
+            .unwrap();
+        world.entity_mut(helm).insert(Named {
+            name: "a saintly helm".to_string(),
+        });
+        world
+            .resource_mut::<ObjectPrototypes>()
+            .by_key
+            .get_mut(&(30, 7))
+            .unwrap()
+            .name = "a saintly helm".to_string();
+        cmd_ostat(&mut world, player, "30 7");
+        let out = strip(&drain(&mut rx));
+        assert!(out.contains("name:          A saintly helm"), "{out}");
+        cmd_stat(&mut world, player, "helm");
+        let out = strip(&drain(&mut rx));
+        assert!(out.contains("name:          A saintly helm"), "{out}");
+        // Stored data is untouched.
+        assert_eq!(world.get::<Named>(helm).unwrap().name, "a saintly helm");
     }
 }

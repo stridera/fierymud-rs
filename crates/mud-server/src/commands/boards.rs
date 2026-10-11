@@ -235,7 +235,7 @@ pub(crate) async fn compose_board_step(
                 } else {
                     "Posted"
                 };
-                send_to(
+                send_msg(
                     world,
                     player,
                     format!(

@@ -6,7 +6,8 @@ use mud_db::enums::{ObjectType, UserRole};
 use mud_world::{Fighting, Located, ObjectPrototypes, WorldKey, WorldKeyIndex};
 
 use crate::commands::{
-    Category, Command, Help, ItemClass, cmd_look, find_item, name_of, send_rendered, send_to,
+    Category, Command, Help, ItemClass, cmd_look, find_item, name_of, send_msg, send_rendered,
+    send_to,
 };
 
 inventory::submit! {
@@ -103,18 +104,18 @@ fn cmd_enter(world: &mut World, player: Entity, args: &str) {
     };
     if !matches!(proto.r#type, ObjectType::Portal) {
         let portal_name = name_of(world, portal);
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{portal_name} isn't something you can enter.\r\n"),
+            format!("{portal_name} isn't something you can enter.\r\n"),
         );
         return;
     }
     let Some(vnum) = proto.portal_destination_vnum else {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{} leads nowhere right now.\r\n", proto.name),
+            format!("{} leads nowhere right now.\r\n", proto.name),
         );
         return;
     };
@@ -125,10 +126,10 @@ fn cmd_enter(world: &mut World, player: Entity, args: &str) {
         .copied();
     let dest_room = dest_key.and_then(|k| world.resource::<WorldKeyIndex>().rooms.get(&k).copied());
     let Some(dest) = dest_room else {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{} shimmers, but the destination is gone.\r\n", proto.name),
+            format!("{} shimmers, but the destination is gone.\r\n", proto.name),
         );
         return;
     };

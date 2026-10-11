@@ -17,8 +17,8 @@ use crate::commands::{
     cmd_look, consider_verdict_color, direction_name, drain_stamina, engage_skill_shim,
     find_actor_in_room, flip_door_both_sides, hit_chance_color, invoke_ability, invoke_ability_aoe,
     invoke_ability_targeting, mob_helpers_engage, name_of, name_or, opposite, parse_direction,
-    refuse_hidden_exit, remove_effect_named, require_alert_posture, send_rendered, send_to,
-    skill_stamina_cost, try_insert, try_remove,
+    refuse_hidden_exit, remove_effect_named, require_alert_posture, send_msg, send_rendered,
+    send_to, skill_stamina_cost, try_insert, try_remove,
 };
 
 inventory::submit! {
@@ -1248,7 +1248,7 @@ fn attack_with_switch_roll(world: &mut World, player: Entity, target_name: &str,
         .is_some_and(|b| b.has(mud_db::enums::MobBehavior::Peaceful))
     {
         let target_name_owned = name_of(world, target);
-        send_to(
+        send_msg(
             world,
             player,
             crate::commands::cap_sentence_start(&format!(
@@ -1318,7 +1318,7 @@ fn attack_with_switch_roll(world: &mut World, player: Entity, target_name: &str,
     // so they name the attacker.
     crate::commands::break_invisibility(world, player);
     send_to(world, player, format!("You attack {actual_name}!\r\n"));
-    send_rendered(world, target, &format!("{player_name} attacks you!\r\n"));
+    send_msg(world, target, format!("{player_name} attacks you!\r\n"));
     crate::commands::broadcast_room_anonymised(
         world,
         located.0,
@@ -1396,10 +1396,10 @@ pub(crate) fn cmd_consider(world: &mut World, player: Entity, target_word: &str)
     let target_evasion = target_stats.map_or(0, |c| c.evasion);
 
     if target_max_hp == 0 {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &crate::commands::cap_sentence_start(&format!(
+            crate::commands::cap_sentence_start(&format!(
                 "{target_name} doesn't look like a fighter at all.\r\n"
             )),
         );
@@ -1530,7 +1530,7 @@ fn perform_class_strike(
     let target_word = if arg.is_empty() {
         // No arg → attack current combat target if any.
         let Some(f) = world.get::<Fighting>(player).copied() else {
-            send_to(
+            send_msg(
                 world,
                 player,
                 format!("{} whom?\r\n", crate::commands::capitalize(skill_name)),
@@ -1580,10 +1580,10 @@ fn perform_class_strike(
             player,
             &format!("Your {skill_name} misses {target_name}.\r\n"),
         );
-        send_rendered(
+        send_msg(
             world,
             target,
-            &format!("{player_name}'s {skill_name} misses you.\r\n"),
+            format!("{player_name}'s {skill_name} misses you.\r\n"),
         );
     } else {
         send_rendered(
@@ -1591,10 +1591,10 @@ fn perform_class_strike(
             player,
             &format!("You {verb_self} {target_name} for {dam} damage.\r\n"),
         );
-        send_rendered(
+        send_msg(
             world,
             target,
-            &format!("{player_name} {verb_other} you for {dam} damage!\r\n"),
+            format!("{player_name} {verb_other} you for {dam} damage!\r\n"),
         );
         let (dead, _msg) = apply_damage_from(world, target, dam, player);
         if dead && let Some(loc) = world.get::<Located>(target).copied() {
@@ -1755,10 +1755,10 @@ pub(crate) fn cmd_steal(world: &mut World, player: Entity, args: &str) {
             player,
             &player_name,
         ));
-        send_rendered(
+        send_msg(
             world,
             target,
-            &format!("<b:yellow>{thief_seen} tried to steal something from you!</>\r\n"),
+            format!("<b:yellow>{thief_seen} tried to steal something from you!</>\r\n"),
         );
         crate::commands::broadcast_room_anonymised(
             world,
@@ -1783,7 +1783,7 @@ pub(crate) fn cmd_steal(world: &mut World, player: Entity, args: &str) {
         let pool = world.get::<mud_world::Wealth>(target).map_or(0, |w| w.0);
         let take = (pool / 4).min(i64::from(player_level) * 100).max(0);
         if take == 0 {
-            send_to(
+            send_msg(
                 world,
                 player,
                 format!(
@@ -1827,10 +1827,10 @@ pub(crate) fn cmd_steal(world: &mut World, player: Entity, args: &str) {
             .map(|(e, _, n, _, _)| (e, n.name.clone()))
     };
     let Some((item, item_name)) = item_opt else {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!(
+            format!(
                 "{} hasn't got '{what}' on them.\r\n",
                 crate::commands::cap_sentence_start(&target_name)
             ),
@@ -2107,7 +2107,7 @@ pub(crate) fn cmd_stomp(world: &mut World, player: Entity, args: &str) {
     let cur_posture = world.get::<Posture>(target).map(|p| p.0);
     if !matches!(cur_posture, Some(PostureKind::Standing)) {
         let target_name = name_or(world, target, "(unknown)");
-        send_to(
+        send_msg(
             world,
             player,
             format!("{target_name} is already on the ground.\r\n",),
@@ -2143,10 +2143,10 @@ pub(crate) fn cmd_stomp(world: &mut World, player: Entity, args: &str) {
         format!("You stomp on {target_name} for {dmg} damage; they go down!\r\n"),
     );
     if !dead {
-        send_rendered(
+        send_msg(
             world,
             target,
-            &format!("{player_name} stomps you to the ground!\r\n"),
+            format!("{player_name} stomps you to the ground!\r\n"),
         );
     }
     broadcast_room_except_rendered(
@@ -2778,7 +2778,7 @@ pub(crate) fn cmd_disarm(world: &mut World, player: Entity, args: &str) {
     };
     let Some(weapon) = weapon else {
         let target_name = name_or(world, target, "(unknown)");
-        send_to(
+        send_msg(
             world,
             player,
             format!(
@@ -2810,10 +2810,10 @@ pub(crate) fn cmd_disarm(world: &mut World, player: Entity, args: &str) {
         format!("You disarm {target_name}; {weapon_name} clatters to the ground.\r\n"),
     );
     if target != player {
-        send_rendered(
+        send_msg(
             world,
             target,
-            &format!("{player_name} disarms you! {weapon_name} clatters to the ground.\r\n"),
+            format!("{player_name} disarms you! {weapon_name} clatters to the ground.\r\n"),
         );
     }
     broadcast_room_except_rendered(
@@ -2841,10 +2841,10 @@ pub(crate) fn cmd_guard(world: &mut World, player: Entity, args: &str) {
             send_to(world, player, "You stop guarding.\r\n");
             let target_name = name_of(world, target);
             let player_name = name_of(world, player);
-            send_rendered(
+            send_msg(
                 world,
                 target,
-                &format!("{player_name} stops guarding you.\r\n"),
+                format!("{player_name} stops guarding you.\r\n"),
             );
             if let Some(located) = world.get::<Located>(player).copied() {
                 crate::commands::broadcast_room_visual(
@@ -2877,10 +2877,10 @@ pub(crate) fn cmd_guard(world: &mut World, player: Entity, args: &str) {
     let n = name_of(world, target);
     let player_name = name_of(world, player);
     send_to(world, player, format!("You begin guarding {n}.\r\n"));
-    send_rendered(
+    send_msg(
         world,
         target,
-        &format!("{player_name} stands ready to defend you.\r\n"),
+        format!("{player_name} stands ready to defend you.\r\n"),
     );
     // Broadcast to the rest of the room so allies see the formation
     // forming. A "X moves to Y's side" line is more atmospheric than
@@ -2948,7 +2948,7 @@ pub(crate) fn cmd_assist(world: &mut World, player: Entity, args: &str) {
     };
     let Some(Fighting(ally_target)) = world.get::<Fighting>(ally).copied() else {
         let ally_name = name_or(world, ally, "(unknown)");
-        send_to(
+        send_msg(
             world,
             player,
             format!("{ally_name} isn't fighting anyone.\r\n"),
@@ -3322,10 +3322,10 @@ pub(crate) fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
         player,
         &format!("You bash {target_name} for {damage} damage, knocking them down!\r\n"),
     );
-    send_rendered(
+    send_msg(
         world,
         target,
-        &format!("{player_name} bashes you for {damage} damage, knocking you down!\r\n"),
+        format!("{player_name} bashes you for {damage} damage, knocking you down!\r\n"),
     );
     if let Some(m) = threshold_msg {
         send_to(world, target, m);
@@ -3404,7 +3404,7 @@ pub(crate) fn cmd_taunt(world: &mut World, player: Entity, target_word: &str) {
         .is_some_and(|b| b.has(mud_db::enums::MobBehavior::Peaceful))
     {
         let n = name_of(world, target);
-        send_to(
+        send_msg(
             world,
             player,
             format!("{n} simply ignores your provocation.\r\n"),
@@ -3450,10 +3450,10 @@ pub(crate) fn cmd_taunt(world: &mut World, player: Entity, target_word: &str) {
         player,
         format!("You taunt {target_name} into focusing on you!\r\n"),
     );
-    send_rendered(
+    send_msg(
         world,
         target,
-        &format!("{player_name} taunts you into focusing on them!\r\n"),
+        format!("{player_name} taunts you into focusing on them!\r\n"),
     );
     broadcast_room_except_rendered(
         world,

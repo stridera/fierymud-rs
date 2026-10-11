@@ -16,7 +16,7 @@ use mud_world::{
     Named, ObjectFlags, ObjectPrototypes, WorldKey,
 };
 
-use crate::commands::{broadcast_room_except_rendered, cap_sentence_start, send_to};
+use crate::commands::{broadcast_room_except_rendered, cap_sentence_start, send_msg};
 
 pub(crate) use mud_world::SECS_PER_MUD_HOUR;
 
@@ -99,7 +99,7 @@ pub fn item_decay_tick(world: &mut World) {
             .map_or_else(|| String::from("an item"), |n| n.name.clone());
         match holder_kind {
             HolderKind::Player => {
-                send_to(
+                send_msg(
                     world,
                     holder_entity,
                     cap_sentence_start(&format!(

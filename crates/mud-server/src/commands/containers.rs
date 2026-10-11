@@ -27,7 +27,7 @@ use mud_world::{
 };
 
 use super::item_target::{ItemClass, find_item};
-use super::{broadcast_room_anonymised, name_of, parse_direction, send_to};
+use super::{broadcast_room_anonymised, name_of, parse_direction, send_msg, send_to};
 
 /// The five door verbs, applied to a container.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -81,7 +81,7 @@ pub(crate) fn refuse_if_closed(world: &World, player: Entity, container: Entity)
         return false;
     }
     let name = name_of(world, container);
-    send_to(
+    send_msg(
         world,
         player,
         format!("{} is closed.\r\n", capitalize_first(&name)),

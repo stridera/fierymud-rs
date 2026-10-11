@@ -37,8 +37,8 @@ use mud_world::{
 use crate::combat::{mob_flee, remember_attacker};
 use crate::commands::{
     Prevent, broadcast_room_except_rendered, cap_sentence_start, effect_prevents,
-    flee_through_exit, has_effect_named, name_of, name_or, room_is_dark, send_to, try_insert,
-    try_remove,
+    flee_through_exit, has_effect_named, name_of, name_or, room_is_dark, send_msg, send_to,
+    try_insert, try_remove,
 };
 use crate::effects::{FREEZE_SOURCE, sync_stunned};
 
@@ -465,8 +465,8 @@ impl Scene {
     /// built from `(caster name, victim name)`.
     fn act(&self, world: &mut World, lines: (&Line, &Line, &Line)) {
         let (c, v) = (self.caster_name.as_str(), self.victim_name.as_str());
-        send_to(world, self.caster, format!("{}\r\n", lines.0(c, v)));
-        send_to(world, self.victim, format!("{}\r\n", lines.1(c, v)));
+        send_msg(world, self.caster, format!("{}\r\n", lines.0(c, v)));
+        send_msg(world, self.victim, format!("{}\r\n", lines.1(c, v)));
         if let Some(room) = self.room {
             broadcast_room_except_rendered(
                 world,
@@ -613,7 +613,7 @@ pub(crate) fn inflict_fear(
     let scene = Scene::new(world, caster, victim);
     if world.get::<Posture>(victim).map(|p| p.0) == Some(PostureKind::Sleeping) {
         let v = &scene.victim_name;
-        send_to(
+        send_msg(
             world,
             caster,
             format!("{v} is in no condition to notice your illusion.\r\n"),

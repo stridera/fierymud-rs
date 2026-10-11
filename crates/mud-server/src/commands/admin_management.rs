@@ -9,7 +9,7 @@ use mud_world::{Account, Located, WorldKey};
 
 use crate::commands::{
     AsyncCommand, Category, Command, Connection, DbPool, Help, cmd_mail_stub, name_of,
-    record_admin_action, require_linked_account, send_to, try_remove,
+    record_admin_action, require_linked_account, send_msg, send_to, try_remove,
 };
 
 inventory::submit! {
@@ -873,7 +873,7 @@ pub(crate) async fn cmd_hgoto(
     let house = match mud_db::housing::for_character(pool, &target.id).await {
         Ok(Some(h)) => h,
         Ok(None) => {
-            send_to(
+            send_msg(
                 world,
                 player,
                 format!("{} doesn't own a house.\r\n", target.name),
@@ -889,7 +889,7 @@ pub(crate) async fn cmd_hgoto(
         .await
         .unwrap_or_default();
     if rooms.is_empty() {
-        send_to(
+        send_msg(
             world,
             player,
             format!("{}'s house has no rooms.\r\n", target.name),

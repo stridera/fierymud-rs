@@ -36,7 +36,7 @@ use mud_world::{
 };
 
 use crate::commands::{
-    effect_duration_color, group_root, level_progress, render_vital_bar, vital_color_tag,
+    effect_duration_color, group_root, level_progress_for, render_vital_bar, vital_color_tag,
 };
 
 /// Opponent / tank / group-leader snapshot used by `%o %O %t %T %g %G`.
@@ -664,8 +664,8 @@ fn active_cooldowns(world: &World, target: Entity) -> Vec<(char, i64, i64)> {
 }
 
 /// XP position inside the current level for `%e` / `%E`.
-fn exp_state(world: &World, p: &Profile) -> ExpState {
-    let (total, current) = match level_progress(world, p) {
+fn exp_state(world: &World, entity: Entity, p: &Profile) -> ExpState {
+    let (total, current) = match level_progress_for(world, entity, p) {
         Some(lp) => (
             lp.next_level_xp - lp.level_floor_xp,
             i64::from(p.experience) - lp.level_floor_xp,
@@ -723,7 +723,7 @@ pub(crate) fn build_prompt_ctx(world: &mut World, target: Entity) -> PromptCtx {
         })
     });
     let level = profile.map_or(0, |p| p.level);
-    let exp = profile.map_or_else(ExpState::default, |p| exp_state(world, p));
+    let exp = profile.map_or_else(ExpState::default, |p| exp_state(world, target, p));
     let exp_messages = world
         .get_resource::<mud_world::SystemMessages>()
         .map_or_else(Vec::new, |m| m.get("exp_progress").to_vec());

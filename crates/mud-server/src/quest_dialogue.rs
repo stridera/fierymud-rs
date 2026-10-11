@@ -317,7 +317,7 @@ pub(crate) fn say_reply(world: &World, player: Entity, mob_name: &str, open: &Di
     for hint in &open.hints {
         text.push_str(&format!("  - {hint}\r\n"));
     }
-    crate::commands::send_to(world, player, text);
+    crate::commands::send_msg(world, player, text);
 }
 
 /// Deliver an opened conversation: show it and, for a tree, start

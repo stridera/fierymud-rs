@@ -59,7 +59,7 @@ use mud_world::{
 
 use crate::commands::{
     Prevent, can_see_player, effect_prevents, name_of, name_or, room_has_light, room_is_dark,
-    sees_characters_in_dark, send_to, settle_slot,
+    sees_characters_in_dark, send_msg, send_to, settle_slot,
 };
 
 /// One combat round in ticks. Combat round = 4s (per
@@ -525,7 +525,7 @@ pub(crate) fn announce_cast_start(
             _ => String::new(),
         };
         let who = caster_label(world, observer, caster, dark);
-        send_to(
+        send_msg(
             world,
             observer,
             format!("{who} starts {verb}ing <b><yellow>'{spell}'</></>{at}...\r\n"),
@@ -554,7 +554,7 @@ fn announce_cast_complete(world: &mut World, caster: Entity, snap: &Casting) {
     let dark = room_dark_for_all(world, caster);
     for observer in observers(world, caster) {
         let who = caster_label(world, observer, caster, dark);
-        send_to(
+        send_msg(
             world,
             observer,
             format!("{who} completes their {noun}...\r\n"),
@@ -587,7 +587,7 @@ fn announce_cast_complete(world: &mut World, caster: Entity, snap: &Casting) {
                 format!("utters the words, '{spell}'.")
             }
         };
-        send_to(world, observer, format!("{who} {line}\r\n"));
+        send_msg(world, observer, format!("{who} {line}\r\n"));
     }
 }
 
@@ -613,7 +613,7 @@ fn announce_stop(world: &mut World, caster: Entity) {
         } else {
             "Someone".to_string()
         };
-        send_to(
+        send_msg(
             world,
             observer,
             format!("{who} stops chanting abruptly!\r\n"),

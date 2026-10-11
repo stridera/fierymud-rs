@@ -6,7 +6,7 @@ use tracing::{info, warn};
 
 use crate::TickCount;
 use crate::commands::{
-    apply_damage, drain_lua_outbox, name_of, name_or, send_rendered, send_to, try_insert,
+    apply_damage, drain_lua_outbox, name_of, name_or, send_msg, send_rendered, send_to, try_insert,
     try_remove,
 };
 
@@ -534,7 +534,7 @@ fn despawn_summoned_mob(world: &mut World, target: Entity) {
         };
         let msg = format!("{mob_name} fades back to where it was summoned from.\r\n");
         for p in players {
-            send_to(world, p, msg.clone());
+            send_msg(world, p, msg.clone());
         }
     }
     // Legacy `extract_char`: carried and worn items drop to the room, the
@@ -721,7 +721,14 @@ pub fn effects_tick(world: &mut World) {
                 && let Some(located) = world.get::<Located>(target).copied()
             {
                 let target_name = name_of(world, target);
-                let rendered = line.replace("{target.name}", &target_name);
+                // Wear-off has no separate caster on hand: the effect's
+                // bearer stands in for `{actor.*}` and `{target.*}` alike.
+                let rendered = crate::commands::render_ability_template(
+                    line,
+                    &target_name,
+                    &target_name,
+                    false,
+                );
                 crate::commands::broadcast_room_except_rendered(
                     world,
                     located.0,

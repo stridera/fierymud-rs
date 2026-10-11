@@ -247,7 +247,7 @@ fn a_buff_cast_on_another_names_the_target_to_the_caster_and_the_room() {
     cast(&mut world, caster, "buff");
     let caster_out = drain(&mut rx);
     assert!(
-        caster_out.contains("a goblin rises into the air and begins to fly."),
+        caster_out.contains("A goblin rises into the air and begins to fly."),
         "{caster_out}"
     );
     assert!(
@@ -256,7 +256,7 @@ fn a_buff_cast_on_another_names_the_target_to_the_caster_and_the_room() {
     );
     let room_out = drain(&mut wrx);
     assert!(
-        room_out.contains("a goblin rises into the air and begins to fly."),
+        room_out.contains("A goblin rises into the air and begins to fly."),
         "{room_out}"
     );
     assert!(!room_out.contains("Tester rises"), "{room_out}");

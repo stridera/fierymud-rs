@@ -5,7 +5,7 @@ use mud_world::{
 };
 
 use crate::TickCount;
-use crate::commands::{broadcast_room_except_rendered, send_to};
+use crate::commands::{broadcast_room_except_rendered, send_msg, send_to};
 
 /// One regen tick = one second.
 const REGEN_PERIOD_TICKS: u64 = 10;
@@ -252,7 +252,7 @@ pub fn light_fuel_tick(world: &mut World) {
         // Player carriers see a personal line; everyone else in the
         // room sees the third-person broadcast.
         if world.get::<Player>(parent).is_some() {
-            send_to(world, parent, format!("\r\n{line}"));
+            send_msg(world, parent, format!("\r\n{line}"));
             broadcast_room_except_rendered(
                 world,
                 room,

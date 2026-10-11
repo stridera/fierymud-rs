@@ -17,7 +17,7 @@ use crate::TickCount;
 use crate::commands::{
     self, Category, Command, Help, broadcast_room_except_players_rendered, cap_sentence_start,
     cmd_look, find_actor_in_room, matches, matches_self, name_of, name_or, pad_visible,
-    record_admin_action, send_rendered, send_to, try_insert, try_remove,
+    record_admin_action, send_msg, send_rendered, send_to, try_insert, try_remove,
 };
 
 inventory::submit! {
@@ -825,10 +825,10 @@ pub(crate) fn cmd_where(world: &mut World, player: Entity, args: &str) {
     let (zone, id) = world
         .get::<WorldKey>(room)
         .map_or((-1, -1), |k| (k.zone, k.id));
-    send_rendered(
+    send_msg(
         world,
         player,
-        &format!(
+        format!(
             "{} is in: {room_name}  [{zone}:{id}]\r\n",
             cap_sentence_start(&target_name)
         ),
@@ -1045,10 +1045,10 @@ pub(crate) fn cmd_slay(world: &mut World, player: Entity, args: &str) {
         &[player],
         &format!("{admin_name} extends a hand and {target_name} crumbles to dust.\r\n"),
     );
-    send_rendered(
+    send_msg(
         world,
         player,
-        &format!("{target_name} crumbles to dust at your gesture.\r\n"),
+        format!("{target_name} crumbles to dust at your gesture.\r\n"),
     );
 
     // Legacy `do_slay` gives the slayer nothing: mark the death so
@@ -1289,7 +1289,7 @@ pub(crate) fn cmd_purge(world: &mut World, player: Entity, args: &str) {
             " {corpses_left} player corpse(s) left alone (use 'purge <corpse>' to remove one)."
         ));
     }
-    send_to(world, player, format!("{report}\r\n"));
+    send_msg(world, player, format!("{report}\r\n"));
 }
 pub(crate) fn cmd_restore(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
@@ -1320,10 +1320,10 @@ pub(crate) fn cmd_restore(world: &mut World, player: Entity, args: &str) {
     }
     let admin_name = name_of(world, player);
     send_rendered(world, player, &format!("You restore {target_name}.\r\n"));
-    send_rendered(
+    send_msg(
         world,
         target,
-        &format!("{admin_name} restores you. You feel completely refreshed.\r\n"),
+        format!("{admin_name} restores you. You feel completely refreshed.\r\n"),
     );
 }
 pub(crate) fn cmd_apply(world: &mut World, player: Entity, args: &str) {
@@ -1620,10 +1620,10 @@ pub(crate) fn cmd_pain(world: &mut World, player: Entity, args: &str) {
         player,
         &format!("You wreathe {target_name} in divine pain.\r\n"),
     );
-    send_rendered(
+    send_msg(
         world,
         target,
-        &format!(
+        format!(
             "<red>{admin_name} wreathes you in divine pain — your nerves scream with otherworldly fire!</>\r\n"
         ),
     );
@@ -2031,10 +2031,10 @@ pub(crate) fn cmd_advance(world: &mut World, player: Entity, args: &str) {
     // can't carry the target past what the caller authorized.
     crate::combat::level_up_to(world, target, target_level);
     crate::combat::after_level_change(world, target, current_level);
-    send_rendered(
+    send_msg(
         world,
         player,
-        &format!("{target_name} advanced to level {target_level}.\r\n"),
+        format!("{target_name} advanced to level {target_level}.\r\n"),
     );
 }
 
@@ -2494,7 +2494,7 @@ pub(crate) fn cmd_unaffect(world: &mut World, player: Entity, args: &str) {
     let target_name = name_of(world, target);
     let removed = commands::remove_all_effects_on(world, target);
     if removed == 0 {
-        send_to(
+        send_msg(
             world,
             player,
             format!(
@@ -2584,16 +2584,16 @@ pub(crate) fn cmd_freeze(world: &mut World, player: Entity, args: &str) {
     if was_frozen {
         try_remove::<Frozen>(world, target);
         send_rendered(world, player, &format!("You thaw {target_name}.\r\n"));
-        send_rendered(
+        send_msg(
             world,
             target,
-            &format!("{admin_name} thaws you. You can move again.\r\n"),
+            format!("{admin_name} thaws you. You can move again.\r\n"),
         );
         info!(admin = %admin_name, target = %target_name, action = "thaw", "freeze toggle");
     } else {
         try_insert(world, target, Frozen);
         send_rendered(world, player, &format!("You freeze {target_name}.\r\n"));
-        send_to(
+        send_msg(
             world,
             target,
             format!("{admin_name} freezes you in place. You cannot act until thawed.\r\n"),
@@ -2632,7 +2632,7 @@ pub(crate) fn cmd_force(world: &mut World, player: Entity, args: &str) {
         let target_level = world.get::<Profile>(target).map_or(0, |p| p.level);
         if target_level >= actor_level {
             record_admin_action(world, player, "force_denied", args);
-            send_to(
+            send_msg(
                 world,
                 player,
                 format!("{target_name} outranks or equals you; you can't force them.\r\n"),
@@ -2646,10 +2646,10 @@ pub(crate) fn cmd_force(world: &mut World, player: Entity, args: &str) {
         player,
         &format!("You force {target_name} to: {cmd_text}\r\n"),
     );
-    send_rendered(
+    send_msg(
         world,
         target,
-        &format!("{admin_name} forces you to: {cmd_text}\r\n"),
+        format!("{admin_name} forces you to: {cmd_text}\r\n"),
     );
     info!(
         admin = %admin_name,
@@ -2852,10 +2852,10 @@ fn transfer_to_staff_room(world: &mut World, staff: Entity, target: Entity, dest
 
     // Source-room bystanders (everyone but the target).
     for b in players_in_room_except(world, src_loc.0, &[target]) {
-        send_rendered(
+        send_msg(
             world,
             b,
-            &format!("{target_name} vanishes in a puff of smoke.\r\n"),
+            format!("{target_name} vanishes in a puff of smoke.\r\n"),
         );
     }
 
@@ -2864,15 +2864,15 @@ fn transfer_to_staff_room(world: &mut World, staff: Entity, target: Entity, dest
 
     // Destination-room bystanders (everyone but admin and the just-arrived target).
     for b in players_in_room_except(world, dest, &[staff, target]) {
-        send_rendered(
+        send_msg(
             world,
             b,
-            &format!("{target_name} appears, summoned by {admin_name}.\r\n"),
+            format!("{target_name} appears, summoned by {admin_name}.\r\n"),
         );
     }
 
     send_rendered(world, staff, &format!("You summon {target_name}.\r\n"));
-    send_rendered(world, target, &format!("{admin_name} summons you.\r\n"));
+    send_msg(world, target, format!("{admin_name} summons you.\r\n"));
     if world.get::<Player>(target).is_some() {
         cmd_look(world, target, "");
     }
@@ -3010,10 +3010,10 @@ pub(crate) fn cmd_teleport(world: &mut World, player: Entity, args: &str) {
     let target_capped = cap_sentence_start(&target_name);
 
     for b in players_in_room_except(world, src_loc.0, &[target]) {
-        send_rendered(
+        send_msg(
             world,
             b,
-            &format!("{target_capped} vanishes in a puff of smoke.\r\n"),
+            format!("{target_capped} vanishes in a puff of smoke.\r\n"),
         );
     }
 
@@ -3023,10 +3023,10 @@ pub(crate) fn cmd_teleport(world: &mut World, player: Entity, args: &str) {
     }
 
     for b in players_in_room_except(world, dest, &[target]) {
-        send_rendered(
+        send_msg(
             world,
             b,
-            &format!("{target_capped} arrives in a swirl of light.\r\n"),
+            format!("{target_capped} arrives in a swirl of light.\r\n"),
         );
     }
 
@@ -3035,10 +3035,10 @@ pub(crate) fn cmd_teleport(world: &mut World, player: Entity, args: &str) {
         player,
         &format!("You teleport {target_name} to ({zone}, {room_id}).\r\n"),
     );
-    send_rendered(
+    send_msg(
         world,
         target,
-        &format!("{admin_name} teleports you elsewhere.\r\n"),
+        format!("{admin_name} teleports you elsewhere.\r\n"),
     );
     if world.get::<Player>(target).is_some() {
         cmd_look(world, target, "");

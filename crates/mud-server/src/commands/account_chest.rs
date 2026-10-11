@@ -40,7 +40,7 @@ use serde::{Deserialize, Serialize};
 use crate::autosave::SaveCoordinator;
 use crate::commands::{
     AsyncCommand, Category, Command, Help, ItemClass, cmd_mail_stub, find_item, has_object_flag,
-    has_restriction, name_of, send_to,
+    has_restriction, name_of, send_msg, send_to,
 };
 
 inventory::submit! {
@@ -234,7 +234,7 @@ async fn cmd_chest_deposit(
     // SOULBOUND / NO_DROP gates — same shape as drop/give.
     if has_object_flag(world, item, mud_db::enums::ObjectFlag::Soulbound) {
         let item_name = name_of(world, item);
-        send_to(
+        send_msg(
             world,
             player,
             format!("{item_name} is soulbound — it stays with you.\r\n"),
@@ -258,7 +258,7 @@ async fn cmd_chest_deposit(
         .is_some_and(|c| c.iter().next().is_some())
     {
         let item_name = name_of(world, item);
-        send_to(
+        send_msg(
             world,
             player,
             format!("{item_name} still has things in it. Empty it first.\r\n"),

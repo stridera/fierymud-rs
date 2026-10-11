@@ -12,7 +12,7 @@ use crate::commands::{
     Category, Command, Help, ItemClass, broadcast_room_except_players_rendered,
     broadcast_room_player_diff, carry_capacity, cmd_look, cmd_move, direction_name,
     find_actor_in_room, find_item, has_restriction, is_staff, item_weight, name_of,
-    parse_direction, send_room_players_snapshot, send_to,
+    parse_direction, send_msg, send_room_players_snapshot, send_to,
 };
 use crate::room_access::{entry_allowed_following, room_visible_to};
 
@@ -94,7 +94,7 @@ fn check_draggable(
         Dragged::Body(body) => {
             if world.get::<Fighting>(body).is_some() {
                 let name = name_of(world, body);
-                send_to(world, player, format!("{name} is fighting!\r\n"));
+                send_msg(world, player, format!("{name} is fighting!\r\n"));
                 return None;
             }
             let consents = world
@@ -124,7 +124,7 @@ fn check_draggable(
                     .is_none_or(|p| p.0 != PostureKind::Standing && p.0 != PostureKind::Kneeling);
                 if !relaxed {
                     let name = name_of(world, body);
-                    send_to(
+                    send_msg(
                         world,
                         player,
                         format!("{name} isn't quite relaxed enough to be dragged.\r\n"),
@@ -221,7 +221,7 @@ pub(crate) fn cmd_drag(world: &mut World, player: Entity, args: &str) {
         && !body_may_enter(world, player, body, from_room, dir)
     {
         let name = name_of(world, body);
-        send_to(
+        send_msg(
             world,
             player,
             format!("{name} can't be dragged that way.\r\n"),
@@ -293,7 +293,7 @@ pub(crate) fn cmd_drag(world: &mut World, player: Entity, args: &str) {
         let asleep = world
             .get::<Posture>(subject)
             .is_some_and(|p| p.0 == PostureKind::Sleeping);
-        send_to(
+        send_msg(
             world,
             subject,
             format!("{player_name} drags you {dir_label} behind them.\r\n"),

@@ -37,8 +37,8 @@ use mud_db::enums::UserRole;
 use mud_world::{Account, CommandGrants, GrantEntry, Online, PendingSave, Player, Profile};
 
 use crate::commands::{
-    Abbrev, Category, Command, Help, all_commands, record_admin_action, resolve_abbrev, send_to,
-    try_insert, visible_with,
+    Abbrev, Category, Command, Help, all_commands, record_admin_action, resolve_abbrev, send_msg,
+    send_to, try_insert, visible_with,
 };
 
 /// Staff floor and mortal ceiling for grants. A grant is honoured for a
@@ -480,7 +480,7 @@ fn command_change(
     };
 
     if action != Action::Ungrant && in_same.is_some() {
-        send_to(
+        send_msg(
             world,
             player,
             format!("{target_name} already has {typed} {past}.\r\n"),
@@ -543,7 +543,7 @@ fn clear_grants(world: &mut World, player: Entity, target: Entity, mine: i32) {
     grants.revokes.retain(|g| g.level > mine);
     let count = before - (grants.grants.len() + grants.revokes.len());
     store(world, target, grants);
-    send_to(
+    send_msg(
         world,
         player,
         format!(

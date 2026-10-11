@@ -12,7 +12,7 @@ use mud_world::{BoardDraft, MailDraft, Named, Online, Player, Posture, PostureKi
 
 use super::grants::authority_level;
 use super::look_auras::pronouns;
-use crate::commands::{Category, Command, Help, has_flag, name_of, send_to};
+use crate::commands::{Category, Command, Help, has_flag, name_of, send_msg, send_to};
 
 const NO_PERSON: &str = "There is no one by that name here.\r\n";
 
@@ -107,7 +107,7 @@ fn cmd_ptell(world: &mut World, player: Entity, args: &str) {
     }
     if is_writing(world, target) {
         let he = gender_pronoun(world, target);
-        send_to(
+        send_msg(
             world,
             player,
             format!("{he}'s writing a message right now; try again later.\r\n"),
@@ -155,7 +155,7 @@ fn cmd_ptell(world: &mut World, player: Entity, args: &str) {
         send_to(world, e, line.clone());
     }
 
-    send_to(
+    send_msg(
         world,
         target,
         format!("<cyan>{sender} responds to your petition, '</><b:cyan>{message}</><cyan>'</>\r\n"),

@@ -819,7 +819,7 @@ pub(crate) async fn cmd_qgive(
             );
             crate::quest_progress::recheck_collect_objectives(world, target);
         }
-        Ok(None) => send_to(
+        Ok(None) => send_msg(
             world,
             player,
             format!("{target_name} already has Quest ({zone}, {id}).\r\n"),
@@ -1013,7 +1013,7 @@ pub(crate) async fn cmd_qreset(
         &format!("{me} -> {target_word} {zone}:{id}"),
     );
     match mud_db::quests::admin_reset(pool, &character_id, zone, id).await {
-        Ok(0) => send_to(
+        Ok(0) => send_msg(
             world,
             player,
             format!("{target_word} has no record of Quest ({zone}, {id}).\r\n"),

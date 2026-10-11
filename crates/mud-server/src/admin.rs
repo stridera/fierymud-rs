@@ -1796,6 +1796,7 @@ pub(crate) fn inspect_actor(world: &mut World, name: &str) -> AdminResponse {
                 json!({
                     "name": eff.name,
                     "remaining_secs": eff.remaining_secs,
+                    "permanent": eff.remaining_secs < 0,
                 })
             })
             .collect()

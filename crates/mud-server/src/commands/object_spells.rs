@@ -24,7 +24,7 @@ use mud_world::{
 
 use super::{
     AbilityCatalog, EffectSpec, FormulaCtx, broadcast_room_except_rendered, name_or,
-    numeric_or_formula, send_to,
+    numeric_or_formula, send_msg,
 };
 
 /// `alter_object` effect specs bound to `def`, in order.
@@ -89,7 +89,7 @@ pub(super) fn apply_alter_object(
     let say = |template: Option<&str>| template.map(|t| t.replace("{item}", &item_name));
     if adding == has {
         if let Some(msg) = say(param_str(spec, "noopMessageToCaster")) {
-            send_to(world, caster, format!("{msg}\r\n"));
+            send_msg(world, caster, format!("{msg}\r\n"));
         }
         return false;
     }
@@ -116,7 +116,7 @@ pub(super) fn apply_alter_object(
     }
     crate::item_alter::mark_dirty(world, item);
     if let Some(msg) = say(param_str(spec, "messageToCaster")) {
-        send_to(world, caster, format!("{msg}\r\n"));
+        send_msg(world, caster, format!("{msg}\r\n"));
     }
     if let Some(msg) = say(param_str(spec, "messageToRoom"))
         && let Some(room) = containing_room(world, item)
@@ -209,7 +209,7 @@ fn apply_enchant(
             .is_some_and(|a| !a.0.is_empty());
     if !type_ok || set_flags.iter().any(|f| has_flag(*f)) || has_applies {
         if let Some(msg) = say(param_str(spec, "noopMessageToCaster")) {
-            send_to(world, caster, format!("{msg}\r\n"));
+            send_msg(world, caster, format!("{msg}\r\n"));
         }
         return false;
     }
@@ -254,7 +254,7 @@ fn apply_enchant(
     crate::equip_apply::grant_applies_to_worn(world, item, &applies);
     crate::item_alter::mark_dirty(world, item);
     if let Some(msg) = say(param_str(spec, message)) {
-        send_to(world, caster, format!("{msg}\r\n"));
+        send_msg(world, caster, format!("{msg}\r\n"));
     }
     true
 }
@@ -480,7 +480,7 @@ mod tests {
         let helm = item(&mut world, "a shiny helm", "helm", caster);
         cast(&mut world, caster, "curse", "helm");
         assert!(cursed(&world, helm));
-        assert!(drain(&mut rx).contains("a shiny helm briefly glows red."));
+        assert!(drain(&mut rx).contains("A shiny helm briefly glows red."));
     }
 
     #[test]
@@ -539,7 +539,7 @@ mod tests {
             world.get::<WeaponDiceSizeAdjust>(sword).map(|a| a.0),
             Some(0)
         );
-        assert!(drain(&mut rx).contains("a long sword briefly glows blue."));
+        assert!(drain(&mut rx).contains("A long sword briefly glows blue."));
     }
 
     #[test]
@@ -864,7 +864,7 @@ mod tests {
                 .is_some()
         );
         let out = drain(&mut rx);
-        assert!(out.contains("a long sword glows blue."), "{out}");
+        assert!(out.contains("A long sword glows blue."), "{out}");
     }
 
     #[test]
@@ -881,7 +881,7 @@ mod tests {
             world.get::<ItemBarredAlignments>(sword).unwrap().0,
             vec![Alignment::Good]
         );
-        assert!(drain(&mut rx).contains("a long sword glows red."));
+        assert!(drain(&mut rx).contains("A long sword glows red."));
 
         let (mut world, caster, mut rx) = world_with_enchant(17, 0);
         let sword = proto_item(&mut world, caster, ObjectType::Weapon, vec![]);
@@ -891,7 +891,7 @@ mod tests {
             vec![("accuracy".to_string(), 2), ("attack_power".to_string(), 5)]
         );
         assert!(world.get::<ItemBarredAlignments>(sword).is_none());
-        assert!(drain(&mut rx).contains("a long sword glows yellow."));
+        assert!(drain(&mut rx).contains("A long sword glows yellow."));
     }
 
     #[test]

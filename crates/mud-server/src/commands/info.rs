@@ -4075,7 +4075,7 @@ pub(crate) fn cmd_experience(world: &mut World, player: Entity, _args: &str) {
         return;
     };
     let mut out = format!("\r\nLevel {}    Experience: {}\r\n", p.level, p.experience);
-    if let Some(lp) = crate::commands::level_progress(world, &p) {
+    if let Some(lp) = crate::commands::level_progress_for(world, player, &p) {
         let into_bracket = (lp.current_xp - lp.level_floor_xp).max(0);
         let bracket = (lp.next_level_xp - lp.level_floor_xp).max(1);
         let to_go = (bracket - into_bracket).max(0);
@@ -4089,7 +4089,9 @@ pub(crate) fn cmd_experience(world: &mut World, player: Entity, _args: &str) {
             lp.percent,
             to_go,
         ));
-    } else if mud_db::enums::is_staff_level(p.level) {
+    } else if mud_db::enums::is_staff_level(p.level)
+        || mud_world::bypasses_restrictions(world, player)
+    {
         out.push_str("Experience has no meaning for you.\r\n");
     } else if mud_world::is_starstar(world, &p) {
         out.push_str(crate::commands::MAX_MORTAL_EXP_MESSAGE);
@@ -4177,10 +4179,10 @@ pub(crate) fn cmd_bribe(world: &mut World, player: Entity, args: &str) {
         player,
         &format!("You hand {} to {target_name}.\r\n", format_amount(amount)),
     );
-    send_rendered(
+    send_msg(
         world,
         target,
-        &format!(
+        format!(
             "{} bribes you with {}.\r\n",
             name_of(world, player),
             format_amount(amount)
@@ -4233,10 +4235,10 @@ fn shopkeeper_sees_customer(
     if can_see_player(world, keeper, player) {
         return true;
     }
-    send_rendered(
+    send_msg(
         world,
         player,
-        &format!(
+        format!(
             "{} says, 'I don't trade with someone I can't see!'\r\n",
             cap_sentence_start(keeper_name)
         ),
@@ -4274,7 +4276,7 @@ pub(crate) fn cmd_list(world: &mut World, player: Entity, _args: &str) {
         .get(&(keeper_marker.shop_zone_id, keeper_marker.shop_id))
         .cloned();
     let Some(shop) = shop_def else {
-        send_to(
+        send_msg(
             world,
             player,
             format!(
@@ -4353,10 +4355,10 @@ pub(crate) fn cmd_list(world: &mut World, player: Entity, _args: &str) {
         out.push_str("\r\nUse 'buy <#|name>' (or 'hire') to take one along.\r\n");
     }
     if shop.items.is_empty() && shop.pets.is_empty() {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{keeper_name} has nothing to sell right now.\r\n"),
+            format!("{keeper_name} has nothing to sell right now.\r\n"),
         );
         return;
     }
@@ -4436,10 +4438,10 @@ pub(crate) fn cmd_inspect(world: &mut World, player: Entity, args: &str) {
         .get(&(keeper_marker.shop_zone_id, keeper_marker.shop_id))
         .cloned()
     else {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{keeper_name} has nothing to show you.\r\n"),
+            format!("{keeper_name} has nothing to show you.\r\n"),
         );
         return;
     };
@@ -4449,10 +4451,10 @@ pub(crate) fn cmd_inspect(world: &mut World, player: Entity, args: &str) {
     if arg.is_empty() {
         let mut out = String::new();
         if shop.items.is_empty() && shop.pets.is_empty() {
-            send_rendered(
+            send_msg(
                 world,
                 player,
-                &format!("{keeper_name} has nothing to inspect right now.\r\n"),
+                format!("{keeper_name} has nothing to inspect right now.\r\n"),
             );
             return;
         }
@@ -4543,10 +4545,10 @@ pub(crate) fn cmd_inspect(world: &mut World, player: Entity, args: &str) {
         };
         let fee = inspect_fee(shop_offer_price(&offer, proto.cost, shop.buy_profit));
         if !staff && on_hand < fee {
-            send_rendered(
+            send_msg(
                 world,
                 player,
-                &format!(
+                format!(
                     "{keeper_name} eyes you. \"You need {} to have that inspected.\"\r\n",
                     format_wealth(fee - on_hand).unwrap_or_else(|| "more coin".to_string())
                 ),
@@ -4619,10 +4621,10 @@ pub(crate) fn cmd_inspect(world: &mut World, player: Entity, args: &str) {
         return;
     }
 
-    send_rendered(
+    send_msg(
         world,
         player,
-        &format!("{keeper_name} doesn't have '{arg}' to inspect.\r\n"),
+        format!("{keeper_name} doesn't have '{arg}' to inspect.\r\n"),
     );
 }
 
@@ -4669,10 +4671,10 @@ pub(crate) fn cmd_buy(world: &mut World, player: Entity, args: &str) {
         .get(&(keeper_marker.shop_zone_id, keeper_marker.shop_id))
         .cloned()
     else {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{keeper_name} has nothing to sell.\r\n"),
+            format!("{keeper_name} has nothing to sell.\r\n"),
         );
         return;
     };
@@ -4701,20 +4703,16 @@ pub(crate) fn cmd_buy(world: &mut World, player: Entity, args: &str) {
             cmd_hire(world, player, arg);
             return;
         }
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{keeper_name} doesn't sell '{arg}'.\r\n"),
+            format!("{keeper_name} doesn't sell '{arg}'.\r\n"),
         );
         return;
     };
     let offer = shop.items[idx];
     if offer.amount == 0 {
-        send_rendered(
-            world,
-            player,
-            &format!("{keeper_name} is out of those.\r\n"),
-        );
+        send_msg(world, player, format!("{keeper_name} is out of those.\r\n"));
         return;
     }
     let Some(proto) = object_protos
@@ -4727,10 +4725,10 @@ pub(crate) fn cmd_buy(world: &mut World, player: Entity, args: &str) {
     let price_copper = shop_offer_price(&offer, proto.cost, shop.buy_profit);
     // A shop never pays the buyer, and never gives wares away.
     if price_copper <= 0 {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{keeper_name} shakes their head. \"That isn't for sale.\"\r\n"),
+            format!("{keeper_name} shakes their head. \"That isn't for sale.\"\r\n"),
         );
         return;
     }
@@ -4753,10 +4751,10 @@ pub(crate) fn cmd_buy(world: &mut World, player: Entity, args: &str) {
     if on_hand < price_copper {
         let need = price_copper - on_hand;
         let need_msg = format_wealth(need).unwrap_or_else(|| "more coin".to_string());
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{keeper_name} eyes you. \"You need {need_msg} more for that.\"\r\n"),
+            format!("{keeper_name} eyes you. \"You need {need_msg} more for that.\"\r\n"),
         );
         return;
     }
@@ -4826,18 +4824,18 @@ pub(crate) fn cmd_hire(world: &mut World, player: Entity, args: &str) {
         .get(&(keeper_marker.shop_zone_id, keeper_marker.shop_id))
         .cloned()
     else {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{keeper_name} has nothing to hire.\r\n"),
+            format!("{keeper_name} has nothing to hire.\r\n"),
         );
         return;
     };
     if shop.pets.is_empty() {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{keeper_name} doesn't deal in pets.\r\n"),
+            format!("{keeper_name} doesn't deal in pets.\r\n"),
         );
         return;
     }
@@ -4856,20 +4854,16 @@ pub(crate) fn cmd_hire(world: &mut World, player: Entity, args: &str) {
         })
     };
     let Some(idx) = offer_idx else {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{keeper_name} doesn't have '{arg}' for hire.\r\n"),
+            format!("{keeper_name} doesn't have '{arg}' for hire.\r\n"),
         );
         return;
     };
     let offer = shop.pets[idx];
     if offer.amount == 0 {
-        send_rendered(
-            world,
-            player,
-            &format!("{keeper_name} is out of those.\r\n"),
-        );
+        send_msg(world, player, format!("{keeper_name} is out of those.\r\n"));
         return;
     }
     let Some(proto) = mob_protos.get(&(offer.mob_zone_id, offer.mob_id)).cloned() else {
@@ -4885,10 +4879,10 @@ pub(crate) fn cmd_hire(world: &mut World, player: Entity, args: &str) {
     if on_hand < price_copper {
         let need = price_copper - on_hand;
         let need_msg = format_wealth(need).unwrap_or_else(|| "more coin".to_string());
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{keeper_name} eyes you. \"You need {need_msg} more for that.\"\r\n"),
+            format!("{keeper_name} eyes you. \"You need {need_msg} more for that.\"\r\n"),
         );
         return;
     }
@@ -4979,18 +4973,18 @@ pub(crate) fn cmd_sell(world: &mut World, player: Entity, args: &str) {
     // so the player sees a specific reason rather than the generic
     // "shopkeeper isn't interested" fall-through.
     if has_restriction(world, item, mud_db::enums::ObjectRestriction::NoSell) {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{keeper_name} refuses to buy {item_name}.\r\n"),
+            format!("{keeper_name} refuses to buy {item_name}.\r\n"),
         );
         return;
     }
     if has_object_flag(world, item, mud_db::enums::ObjectFlag::Soulbound) {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{item_name} is soulbound — it cannot be sold.\r\n"),
+            format!("{item_name} is soulbound — it cannot be sold.\r\n"),
         );
         return;
     }
@@ -5004,10 +4998,10 @@ pub(crate) fn cmd_sell(world: &mut World, player: Entity, args: &str) {
         .get(&(keeper_marker.shop_zone_id, keeper_marker.shop_id))
         .cloned()
     else {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{keeper_name} isn't running a shop.\r\n"),
+            format!("{keeper_name} isn't running a shop.\r\n"),
         );
         return;
     };
@@ -5048,20 +5042,20 @@ pub(crate) fn cmd_sell(world: &mut World, player: Entity, args: &str) {
         })
     });
     if !accepted {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{keeper_name} isn't interested in {item_name}.\r\n"),
+            format!("{keeper_name} isn't interested in {item_name}.\r\n"),
         );
         return;
     }
     let item_key = world.get::<WorldKey>(item).map(|k| (k.zone, k.id));
     let pay_copper = shop_sell_payout(&shop, base_cost, item_key);
     if pay_copper <= 0 {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{keeper_name} chuckles. \"That's worthless to me.\"\r\n"),
+            format!("{keeper_name} chuckles. \"That's worthless to me.\"\r\n"),
         );
         return;
     }
@@ -7127,10 +7121,10 @@ pub(crate) fn cmd_summonmount(world: &mut World, player: Entity, _args: &str) {
         ));
     }
     let mount_name = name_of(world, mount_entity);
-    send_rendered(
+    send_msg(
         world,
         player,
-        &format!("{mount_name} answers your summons!\r\n"),
+        format!("{mount_name} answers your summons!\r\n"),
     );
     broadcast_room_except_players_rendered(
         world,
@@ -7211,7 +7205,7 @@ pub(crate) fn cmd_camp(world: &mut World, player: Entity, args: &str) {
             .and_then(|p| p.camp_kit_tier);
         let Some(tier_bonus) = tier_bonus else {
             let item_name = name_of(world, item);
-            send_to(world, player, format!("{item_name} isn't a camp kit.\r\n"));
+            send_msg(world, player, format!("{item_name} isn't a camp kit.\r\n"));
             return;
         };
         (Some(item), Some((wk.zone, wk.id)), tier_bonus)
@@ -7302,10 +7296,10 @@ pub(crate) fn cmd_point(world: &mut World, player: Entity, args: &str) {
                 &format!("{player_name} points out {target_name}, who was hiding here!\r\n"),
             );
             // The revealed actor sees the call-out personally.
-            crate::commands::send_rendered(
+            crate::commands::send_msg(
                 world,
                 target,
-                &format!("{player_name} points out your hiding place!\r\n"),
+                format!("{player_name} points out your hiding place!\r\n"),
             );
         } else {
             send_rendered(world, player, &format!("You point at {target_name}.\r\n"));
@@ -7315,11 +7309,7 @@ pub(crate) fn cmd_point(world: &mut World, player: Entity, args: &str) {
                 &[player, target],
                 &format!("{player_name} points at {target_name}.\r\n"),
             );
-            crate::commands::send_rendered(
-                world,
-                target,
-                &format!("{player_name} points at you.\r\n"),
-            );
+            crate::commands::send_msg(world, target, format!("{player_name} points at you.\r\n"));
         }
         return;
     }
@@ -7683,7 +7673,12 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
     // `level + 1` so the player sees what they'll gain on the
     // upcoming level-up. None at the cap (no row above max) or
     // when the table hasn't loaded yet.
+    let is_god = mud_world::bypasses_restrictions(world, player);
     let next_level_gains: Option<(i32, i32, i32)> = profile_owned.as_ref().and_then(|(lvl, ..)| {
+        // Gods have no next level to preview.
+        if is_god {
+            return None;
+        }
         let next = lvl + 1;
         world
             .resource::<mud_world::LevelTable>()
@@ -7733,7 +7728,7 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
         // character's class factor, so the percent agrees with `level`.
         level_progress: world
             .get::<Profile>(player)
-            .and_then(|p| crate::commands::level_progress(world, p)),
+            .and_then(|p| crate::commands::level_progress_for(world, player, p)),
         stars: stars_owned.as_deref(),
         location: location_owned
             .as_ref()
@@ -8003,10 +7998,10 @@ pub(crate) fn cmd_wake(world: &mut World, player: Entity, args: &str) {
     };
     let target_name = name_of(world, target);
     if world.get::<Posture>(target).map(|p| p.0) != Some(PostureKind::Sleeping) {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!(
+            format!(
                 "{} is already awake.\r\n",
                 crate::commands::cap_sentence_start(&target_name)
             ),
@@ -8024,7 +8019,7 @@ pub(crate) fn cmd_wake(world: &mut World, player: Entity, args: &str) {
     try_insert(world, target, Posture(PostureKind::Standing));
     let player_name = name_of(world, player);
     send_rendered(world, player, &format!("You wake {target_name}.\r\n"));
-    send_rendered(world, target, &format!("{player_name} wakes you up.\r\n"));
+    send_msg(world, target, format!("{player_name} wakes you up.\r\n"));
     broadcast_room_except_players_rendered(
         world,
         located.0,
@@ -8368,9 +8363,9 @@ pub(crate) fn cmd_toggle(world: &mut World, player: Entity, args: &str) {
         .find(|(f, _)| *f == flag)
         .map_or_else(|| flag.label(), |(_, n)| *n);
     if now_on {
-        send_to(world, player, format!("{label} is now ON.\r\n"));
+        send_msg(world, player, format!("{label} is now ON.\r\n"));
     } else {
-        send_to(world, player, format!("{label} is now OFF.\r\n"));
+        send_msg(world, player, format!("{label} is now OFF.\r\n"));
     }
 }
 
@@ -8586,7 +8581,7 @@ pub(crate) fn cmd_color(world: &mut World, player: Entity, args: &str) {
     term::set_color_off(world, player, off);
     term::set_pref(world, player, mud_world::PREF_COLOR_KEY, pref);
     term::sync_output(world, player);
-    send_to(world, player, format!("{msg}\r\n"));
+    send_msg(world, player, format!("{msg}\r\n"));
 }
 
 /// `charset [ascii|utf8|auto]`: show or set ASCII vs UTF-8 output.
@@ -8623,7 +8618,7 @@ pub(crate) fn cmd_charset(world: &mut World, player: Entity, args: &str) {
     };
     term::set_pref(world, player, mud_world::PREF_CHARSET_KEY, pref);
     term::sync_output(world, player);
-    send_to(world, player, format!("{msg}\r\n"));
+    send_msg(world, player, format!("{msg}\r\n"));
 }
 
 pub(crate) fn cmd_wimpy(world: &mut World, player: Entity, args: &str) {
@@ -9168,7 +9163,7 @@ pub(crate) fn cmd_unlock(world: &mut World, player: Entity, args: &str) {
                 .get::<Exits>(room)
                 .and_then(|e| e.0.get(&dir).map(exit_noun_phrase))
                 .unwrap_or_else(|| "The way".to_string());
-            send_to(world, player, format!("{noun} is locked.\r\n"));
+            send_msg(world, player, format!("{noun} is locked.\r\n"));
             return;
         }
     }
@@ -10687,10 +10682,10 @@ fn get_plain(world: &mut World, player: Entity, args: &str) {
     // no TAKE flag). Carried corpses couldn't be saved with their owner's
     // gear, so nobody, staff included, picks one up.
     if world.get::<mud_world::PlayerCorpse>(item).is_some() {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{item_name}: you can't take that!\r\n"),
+            format!("{item_name}: you can't take that!\r\n"),
         );
         return;
     }
@@ -10715,11 +10710,7 @@ fn get_plain(world: &mut World, player: Entity, args: &str) {
     if !crate::commands::is_staff(world, player)
         && has_restriction(world, item, mud_db::enums::ObjectRestriction::NoTake)
     {
-        send_rendered(
-            world,
-            player,
-            &format!("{item_name} is fixed in place.\r\n"),
-        );
+        send_msg(world, player, format!("{item_name} is fixed in place.\r\n"));
         return;
     }
 
@@ -10862,7 +10853,7 @@ fn get_from_container_inner(
                 .get::<crate::corpses::DecayDeleting>(container)
                 .is_some())
     {
-        send_to(
+        send_msg(
             world,
             player,
             format!("{container_name} is still settling; try again in a moment.\r\n"),
@@ -11004,11 +10995,7 @@ fn get_from_container_inner(
     if !crate::commands::is_staff(world, player)
         && has_restriction(world, item, mud_db::enums::ObjectRestriction::NoTake)
     {
-        send_rendered(
-            world,
-            player,
-            &format!("{item_name} is fixed in place.\r\n"),
-        );
+        send_msg(world, player, format!("{item_name} is fixed in place.\r\n"));
         return;
     }
     if !crate::commands::is_staff(world, player)
@@ -11112,10 +11099,10 @@ fn get_all_from_floor(world: &mut World, player: Entity, room: Entity, filter: &
             continue;
         }
         if world.get::<mud_world::PlayerCorpse>(*item).is_some() {
-            send_rendered(
+            send_msg(
                 world,
                 player,
-                &format!("{item_name}: you can't take that!\r\n"),
+                format!("{item_name}: you can't take that!\r\n"),
             );
             continue;
         }
@@ -11208,10 +11195,10 @@ fn put_plain(world: &mut World, player: Entity, args: &str) {
     // exactly what is in the database; anything dropped in would be lost
     // from the giver's save and never reach the corpse's rows.
     if world.get::<mud_world::PlayerCorpse>(container).is_some() {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{container_name} can't hold anything more.\r\n"),
+            format!("{container_name} can't hold anything more.\r\n"),
         );
         return;
     }
@@ -11219,10 +11206,10 @@ fn put_plain(world: &mut World, player: Entity, args: &str) {
     // Only containers hold things: `put x coins` used to move the item
     // inside any carried object (a coin pile, a sword, ...).
     if !is_container_entity(world, container) {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{container_name} isn't a container.\r\n"),
+            format!("{container_name} isn't a container.\r\n"),
         );
         return;
     }
@@ -11476,10 +11463,10 @@ pub(crate) fn refuse_nonempty_container(
     if !has_contents(world, item) {
         return false;
     }
-    send_rendered(
+    send_msg(
         world,
         player,
-        &format!("{item_name} still has things in it. Empty it first.\r\n"),
+        format!("{item_name} still has things in it. Empty it first.\r\n"),
     );
     true
 }
@@ -11503,10 +11490,10 @@ pub(crate) fn refuse_drop_blocked(
         return true;
     }
     if has_object_flag(world, item, mud_db::enums::ObjectFlag::Soulbound) {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{item_name} is soulbound — it stays with you.\r\n"),
+            format!("{item_name} is soulbound — it stays with you.\r\n"),
         );
         return true;
     }
@@ -11606,7 +11593,7 @@ fn drop_plain(world: &mut World, player: Entity, args: &str) {
             );
         }
         if blocked > 0 {
-            send_to(
+            send_msg(
                 world,
                 player,
                 format!("{blocked} item(s) refused to leave your grasp.\r\n"),
@@ -11640,10 +11627,10 @@ fn drop_plain(world: &mut World, player: Entity, args: &str) {
         return;
     }
     if has_object_flag(world, item, mud_db::enums::ObjectFlag::Soulbound) {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{item_name} is soulbound — it stays with you.\r\n"),
+            format!("{item_name} is soulbound — it stays with you.\r\n"),
         );
         return;
     }
@@ -11706,10 +11693,10 @@ fn give_plain(world: &mut World, player: Entity, args: &str) {
     // both drop and give.
     let item_name_pre = name_of(world, item);
     if has_object_flag(world, item, mud_db::enums::ObjectFlag::Soulbound) {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{item_name_pre} is soulbound — it cannot change hands.\r\n"),
+            format!("{item_name_pre} is soulbound — it cannot change hands.\r\n"),
         );
         return;
     }
@@ -11743,10 +11730,10 @@ fn give_plain(world: &mut World, player: Entity, args: &str) {
     if world.get::<Player>(target).is_some()
         && carried_weight(world, target) + item_weight(world, item) > carry_capacity(world, target)
     {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!(
+            format!(
                 "{} is too laden to take {item_name}.\r\n",
                 crate::commands::cap_sentence_start(&target_name)
             ),
@@ -11770,7 +11757,7 @@ fn give_plain(world: &mut World, player: Entity, args: &str) {
         player,
         format!("You give {item_name} to {target_name}.\r\n"),
     );
-    send_to(
+    send_msg(
         world,
         target,
         format!("{player_name} gives you {item_name}.\r\n"),
@@ -11961,7 +11948,7 @@ pub(crate) fn cmd_light(world: &mut World, player: Entity, args: &str) {
             .map(|p| p.r#type)
     });
     if kind != Some(mud_db::enums::ObjectType::Light) {
-        send_to(
+        send_msg(
             world,
             player,
             format!("{item_name} isn't a light source.\r\n"),
@@ -11969,7 +11956,7 @@ pub(crate) fn cmd_light(world: &mut World, player: Entity, args: &str) {
         return;
     }
     if mud_world::is_lit(world, item) {
-        send_to(world, player, format!("{item_name} is already lit.\r\n"));
+        send_msg(world, player, format!("{item_name} is already lit.\r\n"));
         return;
     }
     // Burnt out (or no fuel data at all, which is never assumed infinite).
@@ -12025,7 +12012,7 @@ pub(crate) fn cmd_extinguish(world: &mut World, player: Entity, args: &str) {
         return;
     }
     if world.get::<mud_world::Lit>(item).is_none() {
-        send_to(world, player, format!("{item_name} isn't lit.\r\n"));
+        send_msg(world, player, format!("{item_name} isn't lit.\r\n"));
         return;
     }
     if let Ok(mut e) = world.get_entity_mut(item) {
@@ -12073,7 +12060,7 @@ pub(crate) fn cmd_mount(world: &mut World, player: Entity, args: &str) {
     }
     if world.get::<mud_world::RiddenBy>(target).is_some() {
         let n = name_of(world, target);
-        send_rendered(world, player, &format!("{n} is already being ridden.\r\n"));
+        send_msg(world, player, format!("{n} is already being ridden.\r\n"));
         return;
     }
     if world.get::<Fighting>(target).is_some() {
@@ -12543,15 +12530,15 @@ pub(crate) fn cmd_pour(world: &mut World, player: Entity, args: &str) {
     };
     let src_name = name_of(world, src);
     let Some(src_state) = world.get::<mud_world::LiquidContainer>(src).cloned() else {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{src_name} isn't a drink container.\r\n"),
+            format!("{src_name} isn't a drink container.\r\n"),
         );
         return;
     };
     if src_state.remaining <= 0 {
-        send_rendered(world, player, &format!("{src_name} is already empty.\r\n"));
+        send_msg(world, player, format!("{src_name} is already empty.\r\n"));
         return;
     }
     // No target: empty the source onto the floor.
@@ -12584,16 +12571,16 @@ pub(crate) fn cmd_pour(world: &mut World, player: Entity, args: &str) {
     }
     let dest_name = name_of(world, dest);
     let Some(dest_state) = world.get::<mud_world::LiquidContainer>(dest).cloned() else {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{dest_name} isn't a drink container.\r\n"),
+            format!("{dest_name} isn't a drink container.\r\n"),
         );
         return;
     };
     let dest_room = dest_state.capacity - dest_state.remaining;
     if dest_room <= 0 {
-        send_rendered(world, player, &format!("{dest_name} is full.\r\n"));
+        send_msg(world, player, format!("{dest_name} is full.\r\n"));
         return;
     }
     // Empty destination: takes the source's liquid type and any
@@ -12602,10 +12589,10 @@ pub(crate) fn cmd_pour(world: &mut World, player: Entity, args: &str) {
     let same_liquid =
         dest_state.remaining == 0 || dest_state.liquid.eq_ignore_ascii_case(&src_state.liquid);
     if !same_liquid {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{dest_name} already holds something else.\r\n"),
+            format!("{dest_name} already holds something else.\r\n"),
         );
         return;
     }
@@ -12695,16 +12682,16 @@ pub(crate) fn cmd_fill(world: &mut World, player: Entity, args: &str) {
     };
     let dest_name = name_of(world, dest);
     let Some(dest_state) = world.get::<mud_world::LiquidContainer>(dest).cloned() else {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{dest_name} isn't a drink container.\r\n"),
+            format!("{dest_name} isn't a drink container.\r\n"),
         );
         return;
     };
     let dest_room = dest_state.capacity - dest_state.remaining;
     if dest_room <= 0 {
-        send_rendered(world, player, &format!("{dest_name} is already full.\r\n"));
+        send_msg(world, player, format!("{dest_name} is already full.\r\n"));
         return;
     }
 
@@ -12730,10 +12717,10 @@ pub(crate) fn cmd_fill(world: &mut World, player: Entity, args: &str) {
     }
     let src_name = name_of(world, src);
     let Some(src_state) = world.get::<mud_world::LiquidContainer>(src).cloned() else {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{src_name} isn't a drink container.\r\n"),
+            format!("{src_name} isn't a drink container.\r\n"),
         );
         return;
     };
@@ -12747,15 +12734,15 @@ pub(crate) fn cmd_fill(world: &mut World, player: Entity, args: &str) {
             .is_some_and(|p| p.r#type == mud_db::enums::ObjectType::Fountain)
     });
     if !src_is_fountain && src_state.remaining <= 0 {
-        send_rendered(world, player, &format!("{src_name} is empty.\r\n"));
+        send_msg(world, player, format!("{src_name} is empty.\r\n"));
         return;
     }
     // Liquid-type match required when dest already holds something.
     if dest_state.remaining > 0 && !dest_state.liquid.eq_ignore_ascii_case(&src_state.liquid) {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{dest_name} already holds something else.\r\n"),
+            format!("{dest_name} already holds something else.\r\n"),
         );
         return;
     }
@@ -12840,18 +12827,18 @@ pub(crate) fn cmd_taste(world: &mut World, player: Entity, args: &str) {
     };
     let item_name = name_of(world, item);
     let Some(state) = world.get::<mud_world::LiquidContainer>(item).cloned() else {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{item_name} isn't a drink container.\r\n"),
+            format!("{item_name} isn't a drink container.\r\n"),
         );
         return;
     };
     if state.remaining <= 0 {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{item_name} is empty — nothing to taste.\r\n"),
+            format!("{item_name} is empty — nothing to taste.\r\n"),
         );
         return;
     }
@@ -13852,7 +13839,7 @@ pub(crate) fn cmd_level(world: &mut World, player: Entity, _args: &str) {
         level: p.level,
         title: world.resource::<mud_world::LevelTable>().title_for(p.level),
         stars: stars.as_deref(),
-        progress: crate::commands::level_progress(world, p),
+        progress: crate::commands::level_progress_for(world, player, p),
     };
     let out = render_level_report(&report);
     send_rendered(world, player, &out);
@@ -14215,7 +14202,7 @@ pub(crate) fn cmd_invite(world: &mut World, player: Entity, args: &str) {
         .is_some_and(|g| g.0 == player)
     {
         let n = name_of(world, target);
-        send_rendered(world, player, &format!("{n} is already in your group.\r\n"));
+        send_msg(world, player, format!("{n} is already in your group.\r\n"));
         return;
     }
     if let Some(refusal) = group_join_refusal(world, player, target) {
@@ -14320,7 +14307,7 @@ pub(crate) fn cmd_accept(world: &mut World, player: Entity, _args: &str) {
                 dest = summon.dest_room_name
             ),
         );
-        send_to(
+        send_msg(
             world,
             summon.from,
             format!("{tname} accepts your summons.\r\n"),
@@ -14386,10 +14373,10 @@ pub(crate) fn cmd_accept(world: &mut World, player: Entity, _args: &str) {
         player,
         &format!("You join {inviter_name}'s group.\r\n"),
     );
-    send_rendered(
+    send_msg(
         world,
         invite.from,
-        &format!("{player_name} joins your group.\r\n"),
+        format!("{player_name} joins your group.\r\n"),
     );
 }
 
@@ -14437,7 +14424,7 @@ pub(crate) fn cmd_decline(world: &mut World, player: Entity, _args: &str) {
             let tname = world
                 .get::<Named>(player)
                 .map_or("Someone".to_string(), |n| n.name.clone());
-            send_to(
+            send_msg(
                 world,
                 summon.from,
                 format!("{tname} declines your summons.\r\n"),
@@ -14454,10 +14441,10 @@ pub(crate) fn cmd_decline(world: &mut World, player: Entity, _args: &str) {
     send_to(world, player, "You decline the invite.\r\n");
     if inviter_alive {
         let player_name = name_of(world, player);
-        send_rendered(
+        send_msg(
             world,
             invite.from,
-            &format!("{player_name} declines your group invite.\r\n"),
+            format!("{player_name} declines your group invite.\r\n"),
         );
     }
 }
@@ -14697,7 +14684,7 @@ pub(crate) fn cmd_split(world: &mut World, player: Entity, args: &str) {
         if *m == player {
             continue;
         }
-        send_to(
+        send_msg(
             world,
             *m,
             format!(
@@ -14733,10 +14720,10 @@ pub(crate) fn cmd_disband(world: &mut World, player: Entity, _args: &str) {
     for member in &to_release {
         release_from(world, *member, player);
         let m_name = name_of(world, *member);
-        send_rendered(
+        send_msg(
             world,
             *member,
-            &format!("{player_name} dismisses you from the group.\r\n"),
+            format!("{player_name} dismisses you from the group.\r\n"),
         );
         send_rendered(
             world,
@@ -14791,10 +14778,10 @@ pub(crate) fn cmd_follow(world: &mut World, player: Entity, args: &str) {
         player,
         &format!("You start following {target_name}.\r\n"),
     );
-    send_rendered(
+    send_msg(
         world,
         target,
-        &format!("{player_name} starts following you.\r\n"),
+        format!("{player_name} starts following you.\r\n"),
     );
     // Broadcast the new follow to other room observers so they
     // see the party shape forming. Skipping player + target since
@@ -14834,10 +14821,10 @@ pub(crate) fn cmd_unfollow(world: &mut World, player: Entity, _args: &str) {
             &format!("You stop following {target_name}.\r\n"),
         );
         let player_name = name_of(world, player);
-        send_rendered(
+        send_msg(
             world,
             prev_target,
-            &format!("{player_name} stops following you.\r\n"),
+            format!("{player_name} stops following you.\r\n"),
         );
         // Room broadcast — same shape as cmd_follow's join. Only
         // fires when the unfollow target is in the same room; a
@@ -14925,11 +14912,7 @@ pub(crate) fn render_identify_block(
     let item_name = name_of(world, item);
     let key = world.get::<WorldKey>(item).copied();
     let Some(key) = key else {
-        send_rendered(
-            world,
-            player,
-            &format!("{item_name} has no proto link.\r\n"),
-        );
+        send_msg(world, player, format!("{item_name} has no proto link.\r\n"));
         return None;
     };
     let proto = world
@@ -14949,7 +14932,8 @@ pub(crate) fn render_identify_block(
     // Header — boxed item title with type badge. Width chosen to
     // match common 80-column game windows; the strip-color length
     // matters for the corner alignment, not the rendered width.
-    let plain_name = render_color_tags(&p.name, ColorMode::Strip);
+    let title_name = cap_sentence_start(&p.name);
+    let plain_name = render_color_tags(&title_name, ColorMode::Strip);
     let title_inner = format!(" {plain_name} ");
     let bar_width = title_inner.chars().count().max(40);
     let bar = "─".repeat(bar_width);
@@ -14958,7 +14942,7 @@ pub(crate) fn render_identify_block(
     let pad = bar_width.saturating_sub(title_inner.chars().count());
     out.push_str(&format!(
         "<b:cyan>│</> <b:white>{}</><b:cyan>{}│</>\r\n",
-        render_color_tags(&p.name, mode),
+        render_color_tags(&title_name, mode),
         " ".repeat(pad + 1),
     ));
     out.push_str(&format!("<b:cyan>╰{bar}╯</>\r\n"));

@@ -16,7 +16,7 @@ use mud_world::{
 };
 
 use crate::commands::{
-    Category, Command, Help, ItemClass, find_item, name_of, record_admin_action, send_to,
+    Category, Command, Help, ItemClass, find_item, name_of, record_admin_action, send_msg, send_to,
     try_insert,
 };
 use crate::item_custom::{
@@ -105,7 +105,7 @@ fn cmd_nameitem(world: &mut World, player: Entity, args: &str) {
         .to_string();
     if rest.eq_ignore_ascii_case("clear") {
         if split_label(&old_name).is_none() {
-            send_to(
+            send_msg(
                 world,
                 player,
                 format!("{old_name} has no label to clear.\r\n"),

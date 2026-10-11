@@ -112,7 +112,7 @@ fn ptell_refusals() {
         body: vec![],
     });
     dispatch(&mut w, imm, "ptell pet hi");
-    assert!(drain(&mut rx).contains("he's writing a message right now"));
+    assert!(drain(&mut rx).contains("He's writing a message right now"));
     assert!(drain(&mut pet_rx).is_empty());
 }
 

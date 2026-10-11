@@ -10,8 +10,8 @@ use mud_world::{Located, Mob, Player, WorldKey};
 use crate::commands::{
     Category, Command, Help, Prevent, anonymise_for, broadcast_room_anonymised,
     bump_talk_quest_progress, can_see_player, effect_prevents, find_actor_in_room, group_members,
-    group_root, has_flag, name_approval_gate, name_of, send_comm_channel_text, send_rendered,
-    send_to,
+    group_root, has_flag, name_approval_gate, name_of, send_comm_channel_text, send_msg,
+    send_rendered, send_to,
 };
 
 inventory::submit! {
@@ -243,7 +243,7 @@ fn emote_as(world: &mut World, player: Entity, args: &str, suffix: &str) {
         let shown_actor = shown_name(world, t, player, &player_name);
         let shown = format!("{shown_actor}{suffix}");
         let gmcp_text = format!("{shown} {action}");
-        send_to(world, t, format!("{shown} {action}\r\n"));
+        send_msg(world, t, format!("{shown} {action}\r\n"));
         send_comm_channel_text(world, t, "emote", &shown_actor, &gmcp_text);
     }
 }
@@ -356,7 +356,7 @@ fn cmd_whisper(world: &mut World, player: Entity, args: &str) {
         );
     }
     let heard_from = shown_name(world, target, player, &speaker);
-    send_to(
+    send_msg(
         world,
         target,
         format!("{heard_from} whispers to you, \"{message}\"\r\n"),
@@ -416,7 +416,7 @@ fn cmd_insult(world: &mut World, player: Entity, args: &str) {
         format!("You insult {target_name}: {line}\r\n"),
     );
     let insulter = shown_name(world, target, player, &actor_name);
-    send_to(
+    send_msg(
         world,
         target,
         crate::commands::cap_sentence_start(&format!("{insulter} insults you: {line}\r\n")),

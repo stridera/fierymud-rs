@@ -28,8 +28,8 @@ use crate::TickCount;
 use crate::commands::{
     Prevent, anonymise_for, apply_damage, broadcast_room_anonymised,
     broadcast_room_except_rendered, can_see_player, cap_sentence_start, carried_weight,
-    carry_capacity, direction_name, effect_prevents, has_effect_named, name_of, opposite, send_to,
-    try_insert, try_remove,
+    carry_capacity, direction_name, effect_prevents, has_effect_named, name_of, opposite, send_msg,
+    send_to, try_insert, try_remove,
 };
 
 /// Legacy `LVL_IMMORT`: gods neither fall nor feel weight.
@@ -309,7 +309,7 @@ pub(crate) fn refuse_heavy_flier(world: &mut World, caster: Entity, target: Enti
     send_to(world, target, "You feel somewhat lighter.\r\n");
     if caster != target {
         let n = cap_sentence_start(&name_of(world, target));
-        send_to(world, caster, format!("{n} remains earthbound.\r\n"));
+        send_msg(world, caster, format!("{n} remains earthbound.\r\n"));
     }
 }
 

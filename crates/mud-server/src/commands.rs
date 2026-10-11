@@ -443,7 +443,7 @@ pub fn drain_player_updates(world: &mut World) {
                 {
                     let name = name_of(world, item);
                     world.entity_mut(item).insert(Located(entity));
-                    send_to(
+                    send_msg(
                         world,
                         entity,
                         format!(
@@ -693,6 +693,9 @@ pub(crate) use magic_focus::Concentrating;
 #[cfg(test)]
 #[path = "commands/blindness_tests.rs"]
 mod blindness_tests;
+#[cfg(test)]
+#[path = "commands/capitalise_tests.rs"]
+mod capitalise_tests;
 #[cfg(test)]
 #[path = "commands/data_over_code_tests.rs"]
 mod data_over_code_tests;
@@ -2476,6 +2479,15 @@ pub(crate) fn send_to(world: &World, target: Entity, text: impl Into<String>) {
     send_raw(world, target, rendered);
 }
 
+/// [`send_to`] for a *message line* (an act()-style echo that starts with
+/// an entity name or short description): capitalises the first visible
+/// character after the recipient-independent name substitution, like
+/// legacy `act()`'s `CAP()`. Leading colour tags / ANSI are skipped.
+/// Do not use for prompts, tables, help text or raw player text.
+pub(crate) fn send_msg(world: &World, target: Entity, text: impl Into<String>) {
+    send_to(world, target, cap_sentence_start(&text.into()));
+}
+
 /// [`send_to`] for prose: word-wraps to the player's width (their
 /// `columns` preference, else the client's NAWS width, else 80) before
 /// rendering colour tags. Wrapping is opt-in per call site so
@@ -2790,14 +2802,14 @@ fn flush_lua_outbox(world: &mut World) {
             .filter(|&e| Some(e) != except && world.get::<Connection>(e).is_some())
             .collect();
         for r in recipients {
-            send_to(world, r, format!("{msg}\r\n"));
+            send_msg(world, r, format!("{msg}\r\n"));
         }
     }
     // Direct one-to-one delivery (actor:send). send_to silently no-ops
     // if the target has no Connection (mob targets, disconnected
     // players) — that's the desired behavior.
     for (target, msg) in direct {
-        send_to(world, target, format!("{msg}\r\n"));
+        send_msg(world, target, format!("{msg}\r\n"));
     }
 
     // Queued `actor:command(text)` invocations. Re-enters dispatch as
@@ -10044,6 +10056,31 @@ pub(crate) fn damage_color_tag(damage: i32) -> Option<&'static str> {
     }
 }
 
+/// Shared display for an effect's remaining time in real seconds, used
+/// by the staff views (`stat`, `mstat`, `ostat`, `vstat`, `rstat`, inspect).
+/// Negative values are the "permanent" sentinel (`remaining_secs == -1`)
+/// and read "permanent", never "-1s". Finite times are human-friendly:
+/// "45s", "3m 5s", "2h 15m", "1d 4h"; zero units are dropped ("2h").
+#[must_use]
+pub(crate) fn format_effect_duration(remaining_secs: i32) -> String {
+    if remaining_secs < 0 {
+        return "permanent".to_string();
+    }
+    let s = i64::from(remaining_secs);
+    let (d, h, m, sec) = (s / 86_400, (s % 86_400) / 3_600, (s % 3_600) / 60, s % 60);
+    let parts: Vec<String> = match (d, h, m) {
+        (0, 0, 0) => return format!("{sec}s"),
+        (0, 0, _) => vec![format!("{m}m"), format!("{sec}s")],
+        (0, _, _) => vec![format!("{h}h"), format!("{m}m")],
+        _ => vec![format!("{d}d"), format!("{h}h")],
+    };
+    parts
+        .into_iter()
+        .filter(|p| !p.starts_with('0'))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// XML-Lite open tag for an effect's remaining duration. Effects
 /// running close to expiry render warm so the player notices in
 /// time to refresh; longer-lived buffs / debuffs read plain.
@@ -10590,7 +10627,7 @@ pub(crate) fn practice_one(world: &mut World, player: Entity, name: &str) {
         .get(&(class_id, def.id))
         .copied();
     let Some(cap) = cap else {
-        send_to(
+        send_msg(
             world,
             player,
             format!("{} isn't on your class's list.\r\n", def.name),
@@ -11340,6 +11377,22 @@ pub(crate) fn level_progress(world: &World, profile: &Profile) -> Option<LevelPr
     })
 }
 
+/// [`level_progress`] for a specific character: gods (immortal rank by
+/// `bypasses_restrictions`, which can be a website role on a sub-100
+/// character) have no XP-to-level to show, so `score`, `level`, the
+/// vitals GMCP and the prompt `%e` all treat them as having none.
+#[must_use]
+pub(crate) fn level_progress_for(
+    world: &World,
+    entity: Entity,
+    profile: &Profile,
+) -> Option<LevelProgress> {
+    if mud_world::bypasses_restrictions(world, entity) {
+        return None;
+    }
+    level_progress(world, profile)
+}
+
 /// Render a fixed-width ASCII progress bar for the score sheet.
 /// Twenty cells wide; filled glyph `=`, empty glyph `-`. Color
 /// codes stay out — the runtime-side ANSI wrapper layers them in
@@ -11902,7 +11955,7 @@ pub(crate) fn toggle_player_flag(
         send_to(world, player, "You have no player flags slot.\r\n");
         return;
     };
-    send_to(
+    send_msg(
         world,
         player,
         format!("{}\r\n", if now_on { on_msg } else { off_msg }),
@@ -12456,10 +12509,10 @@ pub(crate) fn look_in_container(world: &mut World, player: Entity, target_word: 
     let is_corpse = world.get::<mud_world::Corpse>(container).is_some();
     let container_name = name_of(world, container);
     if !is_corpse && !matches!(kind, Some(mud_db::enums::ObjectType::Container)) {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{container_name} isn't a container.\r\n"),
+            format!("{container_name} isn't a container.\r\n"),
         );
         return;
     }
@@ -12481,7 +12534,7 @@ pub(crate) fn look_in_container(world: &mut World, player: Entity, target_word: 
     };
     let coin = world.get::<mud_world::CoinPile>(container).map(|c| c.0);
     if items.is_empty() && coin.unwrap_or(0) <= 0 {
-        send_rendered(world, player, &format!("{container_name} is empty.\r\n"));
+        send_msg(world, player, format!("{container_name} is empty.\r\n"));
         return;
     }
     let mut out = format!("{container_name} contains:\r\n");
@@ -12620,7 +12673,7 @@ pub(crate) fn look_direction(world: &mut World, player: Entity, dir: Direction) 
             mud_db::enums::ExitState::Locked => format!("<red>{noun} is locked.</>"),
             _ => format!("<yellow>{noun} is closed.</>"),
         };
-        send_to(
+        send_msg(
             world,
             player,
             format!("{}\r\n", render_color_tags(&line, mode_pre)),
@@ -13193,7 +13246,7 @@ pub(crate) fn consume_item(
 ) -> bool {
     let target_word = args.trim();
     if target_word.is_empty() {
-        send_to(world, player, format!("{} what?\r\n", capitalize(verb)));
+        send_msg(world, player, format!("{} what?\r\n", capitalize(verb)));
         return false;
     }
     let item = find_item(world, player, target_word, ItemClass::Inventory);
@@ -13339,7 +13392,7 @@ pub(crate) fn spawn_consumable_effect(
 pub(crate) fn drink_amount(world: &mut World, player: Entity, args: &str, units: i32, verb: &str) {
     let target_word = args.trim();
     if target_word.is_empty() {
-        send_to(
+        send_msg(
             world,
             player,
             format!("{} from what?\r\n", capitalize(verb)),
@@ -13359,10 +13412,10 @@ pub(crate) fn drink_amount(world: &mut World, player: Entity, args: &str, units:
     };
     let item_name = name_of(world, item);
     let Some(state) = world.get::<mud_world::LiquidContainer>(item).cloned() else {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{item_name} isn't a drink container.\r\n"),
+            format!("{item_name} isn't a drink container.\r\n"),
         );
         return;
     };
@@ -13378,7 +13431,7 @@ pub(crate) fn drink_amount(world: &mut World, player: Entity, args: &str, units:
             .is_some_and(|p| p.r#type == mud_db::enums::ObjectType::Fountain)
     });
     if !is_fountain && state.remaining <= 0 {
-        send_rendered(world, player, &format!("{item_name} is empty.\r\n"));
+        send_msg(world, player, format!("{item_name} is empty.\r\n"));
         return;
     }
     let drank = if is_fountain {
@@ -13435,7 +13488,7 @@ pub(crate) fn drink_amount(world: &mut World, player: Entity, args: &str, units:
     // attached to the liquid row. Renders once per swig only when
     // the player knows what they're drinking.
     if identified && let Some(desc) = &liquid_def.description {
-        send_rendered(world, player, &format!("{desc}\r\n"));
+        send_msg(world, player, format!("{desc}\r\n"));
     }
     if state.poisoned {
         send_to(
@@ -13490,7 +13543,7 @@ pub(crate) fn drink_amount(world: &mut World, player: Entity, args: &str, units:
     }
     let was_last = !is_fountain && state.remaining == drank;
     if was_last {
-        send_rendered(world, player, &format!("{item_name} is empty now.\r\n"));
+        send_msg(world, player, format!("{item_name} is empty now.\r\n"));
     }
 }
 
@@ -13522,7 +13575,7 @@ pub(crate) fn invoke_object_abilities(
     let item_word = parts.first().map(|s| s.trim()).filter(|s| !s.is_empty());
     let target_word = parts.get(1).map(|s| s.trim()).filter(|s| !s.is_empty());
     let Some(item_word) = item_word else {
-        send_to(world, player, format!("{} what?\r\n", capitalize(verb)));
+        send_msg(world, player, format!("{} what?\r\n", capitalize(verb)));
         return;
     };
     let item = find_item(world, player, item_word, ItemClass::Inventory);
@@ -13570,11 +13623,7 @@ pub(crate) fn invoke_item_abilities(
     let item_name = name_of(world, item);
     let key = world.get::<WorldKey>(item).copied();
     let Some(key) = key else {
-        send_rendered(
-            world,
-            player,
-            &format!("{item_name} has no proto link.\r\n"),
-        );
+        send_msg(world, player, format!("{item_name} has no proto link.\r\n"));
         return;
     };
     let kind = world
@@ -13593,7 +13642,7 @@ pub(crate) fn invoke_item_abilities(
     if !single_use {
         let charges = world.get::<mud_world::Charges>(item).copied();
         if matches!(charges, Some(mud_world::Charges(0))) {
-            send_rendered(world, player, &format!("{item_name} is depleted.\r\n"));
+            send_msg(world, player, format!("{item_name} is depleted.\r\n"));
             return;
         }
     }
@@ -13604,10 +13653,10 @@ pub(crate) fn invoke_item_abilities(
         .map(|v| v.iter().map(|b| b.ability_id).collect())
         .unwrap_or_default();
     if bindings.is_empty() {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{item_name} has no bound magic.\r\n"),
+            format!("{item_name} has no bound magic.\r\n"),
         );
         return;
     }
@@ -13647,11 +13696,11 @@ pub(crate) fn invoke_item_abilities(
         bindings
     };
     if let Some(f) = flavor {
-        send_rendered(world, player, &format!("{}\r\n", f.you));
+        send_msg(world, player, format!("{}\r\n", f.you));
         if let Some(located) = world.get::<Located>(player).copied() {
             let mut except = vec![player];
             if let Some((victim, line)) = f.victim {
-                send_rendered(world, victim, &format!("{line}\r\n"));
+                send_msg(world, victim, format!("{line}\r\n"));
                 except.push(victim);
             }
             broadcast_room_visual(
@@ -13663,7 +13712,7 @@ pub(crate) fn invoke_item_abilities(
             );
         }
     } else {
-        send_rendered(world, player, &format!("{intro_phrase} {item_name}.\r\n"));
+        send_msg(world, player, format!("{intro_phrase} {item_name}.\r\n"));
         // Room broadcast — bystanders should see the gesture
         // (waving a wand, tapping a staff, reciting from a scroll)
         // even before the spell effects fire. Spell-specific
@@ -13740,7 +13789,7 @@ pub(crate) fn invoke_item_abilities(
         }
         let depleted = c.0 == 0;
         if depleted {
-            send_rendered(world, player, &format!("{item_name} crumbles to dust.\r\n"));
+            send_msg(world, player, format!("{item_name} crumbles to dust.\r\n"));
             crate::equip_apply::despawn_item(world, item);
         }
     }
@@ -14824,7 +14873,7 @@ fn filter_aoe_by_alignment_rules(
             .get("message")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("Your alignment forbids it.");
-        send_to(world, caster, format!("{msg}\r\n"));
+        send_msg(world, caster, format!("{msg}\r\n"));
         // Cast spent, nothing to say about the room.
         targets.clear();
         return true;
@@ -14915,11 +14964,11 @@ fn aoe_preflight(
         return false;
     }
     if let Some(refusal) = aoe_outdoors_refusal(world, player, def) {
-        send_to(world, player, format!("{refusal}\r\n"));
+        send_msg(world, player, format!("{refusal}\r\n"));
         return false;
     }
     if let Some(refusal) = aoe_group_refusal(world, player, def) {
-        send_to(world, player, format!("{refusal}\r\n"));
+        send_msg(world, player, format!("{refusal}\r\n"));
         return false;
     }
     if aoe_targets_in_room(world, player, room, scope).is_empty() {
@@ -15746,7 +15795,7 @@ fn resolve_and_gate_target(
                 Some(opp)
             } else {
                 let display = def.plain_name.to_ascii_lowercase().replace('_', " ");
-                send_to(
+                send_msg(
                     world,
                     player,
                     format!(
@@ -15764,7 +15813,7 @@ fn resolve_and_gate_target(
         && travel_to_target_params(world, def).is_some()
     {
         let display = def.plain_name.to_ascii_lowercase().replace('_', " ");
-        send_to(
+        send_msg(
             world,
             player,
             format!(
@@ -15886,7 +15935,7 @@ fn resolve_and_gate_target(
         .cloned()
         && let Some(refusal) = check_target_type(world, player, target_entity, &rule.valid_targets)
     {
-        send_to(world, player, format!("{refusal}\r\n"));
+        send_msg(world, player, format!("{refusal}\r\n"));
         return None;
     }
     // Live gate: walk AbilityRestrictions and refuse the cast on the
@@ -15909,7 +15958,7 @@ fn resolve_and_gate_target(
         };
         let rendered =
             render_ability_template(&refusal, &actor_name, &target_name, target_entity == player);
-        send_to(world, player, format!("{rendered}\r\n"));
+        send_msg(world, player, format!("{rendered}\r\n"));
         return None;
     }
     // Legacy `attack_ok`: hostile magic obeys the same PK / peaceful-mob /
@@ -16026,7 +16075,7 @@ pub(crate) fn invoke_ability_core(
     // normalization on both sides.
     let (raw_needle, target_word) = parse_quoted_first_token(args);
     if raw_needle.is_empty() {
-        send_to(world, player, format!("{} what?\r\n", capitalize(verb)));
+        send_msg(world, player, format!("{} what?\r\n", capitalize(verb)));
         return;
     }
     let mut needle = raw_needle.to_ascii_lowercase().replace(' ', "_");
@@ -16515,7 +16564,7 @@ pub(crate) fn invoke_ability_core(
         && inferred_scope.is_some()
         && let Some(refusal) = aoe_outdoors_refusal(world, player, &def)
     {
-        send_to(world, player, format!("{refusal}\r\n"));
+        send_msg(world, player, format!("{refusal}\r\n"));
         settle_slot(world, player, slot_hold, false);
         return;
     }
@@ -16528,7 +16577,7 @@ pub(crate) fn invoke_ability_core(
         // `CAST_RESULT_CHARGE` before any message). A cast refuses with the
         // legacy line and, like legacy, charges no slot.
         if !from_item {
-            send_to(world, player, format!("{refusal}\r\n"));
+            send_msg(world, player, format!("{refusal}\r\n"));
         }
         settle_slot(world, player, slot_hold, from_item);
         return;
@@ -16837,7 +16886,7 @@ pub(crate) fn invoke_ability_core(
         } else {
             name_or(world, target_entity, "(unknown)")
         };
-        send_to(
+        send_msg(
             world,
             player,
             format!(
@@ -16975,7 +17024,7 @@ pub(crate) fn invoke_ability_core(
             .iter()
             .any(|s| is_status_debuff_effect(&s.effect_type))
     {
-        send_to(
+        send_msg(
             world,
             player,
             format!(
@@ -17090,7 +17139,7 @@ pub(crate) fn invoke_ability_core(
                         .is_some_and(|l| l.0 == mud_db::enums::LifeForce::Undead);
                     if undead {
                         let tname = name_or(world, target_entity, "the creature");
-                        send_to(
+                        send_msg(
                             world,
                             player,
                             format!("{tname} seems far too lifeless to drain any energy from.\r\n"),
@@ -17442,7 +17491,7 @@ pub(crate) fn invoke_ability_core(
                             let caster_name = actor_name_pre.clone();
                             let target_name = name_or(world, target_entity, "the target");
                             if bolt == 0 {
-                                send_to(
+                                send_msg(
                                     world,
                                     player,
                                     format!(
@@ -17510,7 +17559,7 @@ pub(crate) fn invoke_ability_core(
                                     player,
                                     &actor_name_pre,
                                 ));
-                                send_to(
+                                send_msg(
                                     world,
                                     target_entity,
                                     format!(
@@ -17756,7 +17805,7 @@ pub(crate) fn invoke_ability_core(
                     ) {
                         let line =
                             render_ability_template(&t, &actor_name_pre, &target_name_pre, false);
-                        send_to(world, player, format!("{line}\r\n"));
+                        send_msg(world, player, format!("{line}\r\n"));
                     }
                 }
                 applied_msgs.push(if removed == 0 {
@@ -18441,7 +18490,7 @@ pub(crate) fn invoke_ability_core(
                             let tname = world
                                 .get::<Named>(target_entity)
                                 .map_or("they".to_string(), |n| n.name.clone());
-                            send_to(
+                            send_msg(
                                 world,
                                 player,
                                 format!("{tname} is not accepting summons.\r\n"),
@@ -18730,7 +18779,7 @@ pub(crate) fn invoke_ability_core(
                         &[target_entity],
                         &cap_sentence_start(&format!("{tname} arrives suddenly.\r\n")),
                     );
-                    send_to(
+                    send_msg(
                         world,
                         target_entity,
                         format!("{cname} has summoned you!\r\n"),
@@ -18964,7 +19013,7 @@ pub(crate) fn invoke_ability_core(
                 if let Some(traversal) = wall_traversal {
                     let arg = target_word.map_or("", str::trim);
                     let Some(dir) = parse_direction(arg) else {
-                        send_to(
+                        send_msg(
                             world,
                             player,
                             format!(
@@ -19148,7 +19197,7 @@ pub(crate) fn invoke_ability_core(
                 // matching the legacy `corpse → inv` flow.
                 if world.get::<mud_world::Ghost>(target_entity).is_none() {
                     let target_name = name_or(world, target_entity, "(unknown)");
-                    send_to(
+                    send_msg(
                         world,
                         player,
                         format!(
@@ -19167,7 +19216,7 @@ pub(crate) fn invoke_ability_core(
                     .any(|c| crate::corpses::is_unsettled(world, *c))
                 {
                     let target_name = name_or(world, target_entity, "(unknown)");
-                    send_to(
+                    send_msg(
                         world,
                         player,
                         format!(
@@ -19223,7 +19272,7 @@ pub(crate) fn invoke_ability_core(
                         ),
                     );
                 }
-                send_to(
+                send_msg(
                     world,
                     player,
                     format!(
@@ -19831,7 +19880,7 @@ pub(crate) fn invoke_ability_core(
                     && senses::is_noblind(world, target_entity)
                 {
                     let victim = name_of(world, target_entity);
-                    send_to(
+                    send_msg(
                         world,
                         player,
                         format!("{victim} is immune to blindness.\r\n"),
@@ -20219,7 +20268,7 @@ pub(crate) fn invoke_ability_core(
                 applied_msgs.len()
             )
         };
-        send_rendered(world, target_entity, &format!("{line}\r\n"));
+        send_msg(world, target_entity, format!("{line}\r\n"));
     }
     // Room broadcast: success_to_room (or success_self_room when
     // self-targeted). Skipped if the ability has no template — the
@@ -20263,7 +20312,7 @@ pub(crate) fn invoke_ability_core(
     // Legacy `act(to_room, TO_ROOM)` reaches everyone in the room except
     // the cured person, the caster included.
     for (to_target, to_room) in cleanse_notes {
-        send_rendered(world, target_entity, &format!("{to_target}\r\n"));
+        send_msg(world, target_entity, format!("{to_target}\r\n"));
         if let Some(room_line) = to_room
             && let Some(located) = world.get::<Located>(target_entity).copied()
         {
@@ -20814,7 +20863,7 @@ fn send_hit_templates(
         && let Some(t) = victim_template
     {
         let line = render_ability_template(t, actor_name, target_name, false);
-        send_rendered(world, target_entity, &format!("{line}\r\n"));
+        send_msg(world, target_entity, format!("{line}\r\n"));
     }
     if let Some(t) = room_template
         && let Some(located) = world.get::<Located>(player).copied()
@@ -20853,7 +20902,8 @@ pub(crate) fn render_ability_template(
     let target_obj = if reflexive { "yourself" } else { "them" };
     let target_poss = if reflexive { "your" } else { "their" };
     let target_subj = if reflexive { "you" } else { "they" };
-    template
+    let target_ref = if reflexive { "yourself" } else { "themself" };
+    let rendered = template
         .replace("{actor.name}", actor_name)
         .replace("{target.name}", target_sub)
         .replace("{actor.he}", "they")
@@ -20870,6 +20920,44 @@ pub(crate) fn render_ability_template(
         .replace("{target.her}", target_obj)
         .replace("{target.his}", target_poss)
         .replace("{target.pos}", target_poss)
+        .replace("{actor.ref}", "themself")
+        .replace("{target.ref}", target_ref);
+    warn_unknown_template_tokens(&rendered);
+    // Legacy `act()` CAP(): "{target.name} is brutally burnt..." with a
+    // mob short description must open "A swamp troll is ...".
+    cap_sentence_start(&rendered)
+}
+
+/// Every `{word.word}` / `{word}` placeholder still present in `rendered`.
+/// A template that names a token the renderer does not know leaks it
+/// verbatim ("{actor.pos} summoned creature fades away."); callers log
+/// these so content with a typo or an unsupported token is found.
+pub(crate) fn unknown_template_tokens(rendered: &str) -> Vec<&str> {
+    let mut found = Vec::new();
+    let mut rest = rendered;
+    while let Some(open) = rest.find('{') {
+        let after = &rest[open..];
+        let Some(close) = after.find('}') else { break };
+        let token = &after[..=close];
+        let inner = &token[1..token.len() - 1];
+        if !inner.is_empty()
+            && inner
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+        {
+            found.push(token);
+        }
+        rest = &after[close + 1..];
+    }
+    found
+}
+
+/// Log (warn) any unrendered placeholder left in a rendered ability message.
+fn warn_unknown_template_tokens(rendered: &str) {
+    let unknown = unknown_template_tokens(rendered);
+    if !unknown.is_empty() {
+        tracing::warn!(?unknown, rendered, "ability message has unrendered tokens");
+    }
 }
 
 /// One row from the effect-mapping fanout: id, presentational name,
@@ -22916,23 +23004,25 @@ pub(crate) fn fix_possessive_article(name: &str) -> String {
     }
 }
 
-/// Uppercase the first alphabetic character, leaving the rest of the
-/// string unchanged. Skips past leading XML-Lite color tags
-/// (e.g. `<b:cyan>Dragon</>`) so the first *visible* letter gets
-/// capitalized, not `<`. Use at sentence-start sites where a
-/// mob/player name leads — "the Elite Mage leaves." → "The Elite
-/// Mage leaves."  This differs from `capitalize` (full title-case),
-/// which would lowercase "Elite" / "Mage" downstream of the article.
+/// Uppercase the first *visible* character of a message, leaving the
+/// rest unchanged. Skips leading whitespace, XML-Lite colour tags
+/// (e.g. `<b:cyan>Dragon</>`) and raw ANSI escape sequences, then
+/// uppercases that character if it is a letter (Unicode-safe). A
+/// message whose first visible character is not a letter (a digit, a
+/// quote, punctuation) is returned unchanged. Use at sentence-start
+/// sites where a mob/player name leads — "the Elite Mage leaves." →
+/// "The Elite Mage leaves."  This differs from `capitalize` (full
+/// title-case), which would lowercase "Elite" / "Mage" downstream of
+/// the article. Legacy `act()` ran `CAP()` over every formatted line;
+/// the room broadcasts, `send_msg` and `render_ability_template` do the
+/// same through this.
 pub(crate) fn cap_sentence_start(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    let mut done = false;
+    let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
-        if !done {
-            // Pass XML-Lite tags through verbatim — `<b:cyan>` etc.
-            // The first letter we want to capitalize is the one after
-            // the (possibly multiple) leading tags.
-            if c == '<' {
+        match c {
+            // XML-Lite tag: pass through verbatim, up to and including `>`.
+            '<' => {
                 out.push(c);
                 for tag_c in chars.by_ref() {
                     out.push(tag_c);
@@ -22940,17 +23030,27 @@ pub(crate) fn cap_sentence_start(s: &str) -> String {
                         break;
                     }
                 }
-                continue;
             }
-            if c.is_alphabetic() {
-                for upper in c.to_uppercase() {
-                    out.push(upper);
+            // ANSI CSI sequence (`ESC [ params final-byte`).
+            '\x1b' => {
+                out.push(c);
+                if chars.peek() == Some(&'[') {
+                    out.extend(chars.next());
+                    for seq_c in chars.by_ref() {
+                        out.push(seq_c);
+                        if ('\u{40}'..='\u{7e}').contains(&seq_c) {
+                            break;
+                        }
+                    }
                 }
-                done = true;
-                continue;
+            }
+            c if c.is_whitespace() => out.push(c),
+            c => {
+                out.extend(c.to_uppercase());
+                out.extend(chars);
+                return out;
             }
         }
-        out.push(c);
     }
     out
 }
@@ -23023,7 +23123,7 @@ pub(crate) fn run_social(world: &mut World, player: Entity, social: &SocialDef, 
         // No-arg path.
         if let Some(line) = social.char_no_arg.as_ref() {
             let s = substitute(line, &actor_name, None);
-            send_rendered(world, player, &format!("{s}\r\n"));
+            send_msg(world, player, format!("{s}\r\n"));
         }
         if let Some(line) = social.others_no_arg.as_ref() {
             let s = substitute(line, &actor_name, None);
@@ -23037,7 +23137,7 @@ pub(crate) fn run_social(world: &mut World, player: Entity, social: &SocialDef, 
     if self_target {
         if let Some(line) = social.char_auto.as_ref() {
             let s = substitute(line, &actor_name, Some(&actor_name));
-            send_rendered(world, player, &format!("{s}\r\n"));
+            send_msg(world, player, format!("{s}\r\n"));
         }
         if let Some(line) = social.others_auto.as_ref() {
             let s = substitute(line, &actor_name, Some(&actor_name));
@@ -23050,7 +23150,7 @@ pub(crate) fn run_social(world: &mut World, player: Entity, social: &SocialDef, 
     let target = find_actor_in_room(world, target_word, room, player);
     let Some(target) = target else {
         if let Some(line) = social.not_found.as_ref() {
-            send_to(world, player, format!("{line}\r\n"));
+            send_msg(world, player, format!("{line}\r\n"));
         } else {
             send_to(world, player, format!("'{target_word}' isn't here.\r\n"));
         }
@@ -23061,11 +23161,11 @@ pub(crate) fn run_social(world: &mut World, player: Entity, social: &SocialDef, 
 
     if let Some(line) = social.char_found.as_ref() {
         let s = substitute(line, &actor_name, Some(&target_name));
-        send_rendered(world, player, &format!("{s}\r\n"));
+        send_msg(world, player, format!("{s}\r\n"));
     }
     if let Some(line) = social.vict_found.as_ref() {
         let s = substitute(line, &actor_name, Some(&target_name));
-        send_rendered(world, target, &format!("{s}\r\n"));
+        send_msg(world, target, format!("{s}\r\n"));
     }
     if let Some(line) = social.others_found.as_ref() {
         let s = substitute(line, &actor_name, Some(&target_name));
@@ -23084,15 +23184,21 @@ pub(crate) fn matches_self(actor_name: &str, target_word: &str) -> bool {
 /// per-character gender; "their" / "them" / "they" are the safe defaults.
 pub(crate) fn substitute(template: &str, actor_name: &str, target_name: Option<&str>) -> String {
     let target = target_name.unwrap_or("someone");
-    template
+    let rendered = template
         .replace("{actor.name}", actor_name)
         .replace("{target.name}", target)
         .replace("{actor.pronoun.objective}", "them")
+        .replace("{actor.pronoun.reflexive}", "themself")
+        .replace("{actor.pronoun.Subjective}", "They")
         .replace("{actor.pronoun.subjective}", "they")
         .replace("{actor.pronoun.possessive}", "their")
         .replace("{target.pronoun.objective}", "them")
+        .replace("{target.pronoun.reflexive}", "themself")
+        .replace("{target.pronoun.Subjective}", "They")
         .replace("{target.pronoun.subjective}", "they")
-        .replace("{target.pronoun.possessive}", "their")
+        .replace("{target.pronoun.possessive}", "their");
+    warn_unknown_template_tokens(&rendered);
+    rendered
 }
 
 /// Single-recipient companion to `broadcast_room_except_rendered`.
@@ -23394,8 +23500,9 @@ pub(crate) fn broadcast_room_except_rendered(
 ) {
     let mut targets = crate::room_index::listeners_in(world, room);
     targets.retain(|e| !except.contains(e));
+    let msg = cap_sentence_start(raw_msg);
     for t in targets {
-        send_to(world, t, raw_msg);
+        send_to(world, t, msg.as_str());
     }
 }
 
@@ -23412,7 +23519,7 @@ pub(crate) fn broadcast_room_anonymised(
     let mut targets = crate::room_index::listeners_in(world, room);
     targets.retain(|e| !except.contains(e));
     for t in targets {
-        let msg = anonymise_for(world, t, actors, raw_msg);
+        let msg = cap_sentence_start(&anonymise_for(world, t, actors, raw_msg));
         send_to(world, t, msg);
     }
 }
@@ -23430,8 +23537,9 @@ pub(crate) fn broadcast_room_except_players_rendered(
 ) {
     let mut targets = crate::room_index::player_listeners_in(world, room);
     targets.retain(|e| !except.contains(e));
+    let msg = cap_sentence_start(raw_msg);
     for t in targets {
-        send_to(world, t, raw_msg);
+        send_to(world, t, msg.as_str());
     }
 }
 
@@ -23450,8 +23558,9 @@ pub(crate) fn broadcast_room_visible(
 ) {
     let mut targets = crate::room_index::player_listeners_in(world, room);
     targets.retain(|e| !except.contains(e) && can_see_player(world, *e, sender));
+    let msg = cap_sentence_start(raw_msg);
     for t in targets {
-        send_to(world, t, raw_msg);
+        send_to(world, t, msg.as_str());
     }
 }
 
@@ -23478,9 +23587,10 @@ pub(crate) fn broadcast_room_visual(
     // observer in it — compute it once, and only when someone is there
     // to see (`room_has_light` walks the room's contents).
     let visible_here = !room_is_dark(world, room) || room_has_light(world, room);
+    let msg = cap_sentence_start(raw_msg);
     for t in targets {
         if visible_here || sees_characters_in_dark(world, t) {
-            send_to(world, t, raw_msg);
+            send_to(world, t, msg.as_str());
         }
     }
 }
@@ -23568,7 +23678,8 @@ pub(crate) fn send_char_vitals(world: &mut World, target: Entity) {
     };
     let next_level_pct = world
         .get::<Profile>(target)
-        .and_then(|p| level_progress(world, p))
+        .and_then(|p| level_progress_for(world, target, p))
+        // Gods have no level progress; the client keeps its gauge at 0.
         .map_or(0, |lp| lp.percent);
     let payload = serde_json::json!({
         "hp": h.hp,
@@ -24218,10 +24329,10 @@ pub(crate) fn auto_assist_followers_of(
             helper,
             &format!("You auto-assist and engage {attacker_name}!\r\n",),
         );
-        send_rendered(
+        send_msg(
             world,
             attacker,
-            &format!("{helper_name} auto-assists and joins the fight against you!\r\n",),
+            format!("{helper_name} auto-assists and joins the fight against you!\r\n",),
         );
     }
 }
@@ -24243,7 +24354,7 @@ pub(crate) fn engage_skill_shim(
     }
     let arg = args.trim();
     if arg.is_empty() {
-        send_to(world, player, format!("{} whom?\r\n", capitalize(skill)));
+        send_msg(world, player, format!("{} whom?\r\n", capitalize(skill)));
         return;
     }
     if arg.eq_ignore_ascii_case("me") || arg.eq_ignore_ascii_case("self") {
@@ -24353,7 +24464,7 @@ pub(crate) fn ungroup(world: &mut World, ch: Entity, verbose: bool, forceful: bo
             );
             let name = name_of(world, new_leader);
             for m in &others[1..] {
-                send_to(
+                send_msg(
                     world,
                     *m,
                     format!("<green>{name} is now leading your group!</>\r\n"),
@@ -24392,8 +24503,8 @@ pub(crate) fn ungroup(world: &mut World, ch: Entity, verbose: bool, forceful: bo
                     "You have left your group!".to_string(),
                 )
             };
-            send_to(world, leader, format!("<green>{to_leader}</>\r\n"));
-            send_to(world, ch, format!("<green>{to_ch}</>\r\n"));
+            send_msg(world, leader, format!("<green>{to_leader}</>\r\n"));
+            send_msg(world, ch, format!("<green>{to_ch}</>\r\n"));
         }
         disband_group(world, leader, &[ch], verbose, true);
         return;
@@ -24414,10 +24525,10 @@ pub(crate) fn ungroup(world: &mut World, ch: Entity, verbose: bool, forceful: bo
             )
         };
         for m in &remaining {
-            send_to(world, *m, format!("<green>{to_others}</>\r\n"));
+            send_msg(world, *m, format!("<green>{to_others}</>\r\n"));
         }
-        send_to(world, ch, format!("<green>{to_ch}</>\r\n"));
-        send_to(world, leader, format!("<green>{to_leader}</>\r\n"));
+        send_msg(world, ch, format!("<green>{to_ch}</>\r\n"));
+        send_msg(world, leader, format!("<green>{to_leader}</>\r\n"));
     }
 }
 
@@ -24458,7 +24569,7 @@ fn disband_group(
             } else {
                 format!("{leader_name} has disbanded the group.")
             };
-            send_to(world, *m, format!("<green>{text}</>\r\n"));
+            send_msg(world, *m, format!("<green>{text}</>\r\n"));
         }
     }
 }
@@ -24506,10 +24617,10 @@ pub(crate) fn group_dismiss_one(world: &mut World, dismisser: Entity, target_nam
         dismisser,
         &format!("You dismiss {target_name_canonical} from the group.\r\n"),
     );
-    send_rendered(
+    send_msg(
         world,
         target,
-        &format!("{dismisser_name} dismisses you from the group.\r\n"),
+        format!("{dismisser_name} dismisses you from the group.\r\n"),
     );
 }
 
@@ -24698,7 +24809,7 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
             ExitState::Locked => "locked",
             _ => "closed",
         };
-        send_to(world, player, format!("{noun} is {verb}.\r\n"));
+        send_msg(world, player, format!("{noun} is {verb}.\r\n"));
         return;
     }
     let Some(target) = exit.to else {
@@ -24830,7 +24941,7 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
                 } else {
                     "closed"
                 };
-                send_to(
+                send_msg(
                     world,
                     f,
                     format!("{} is {verb}.\r\n", exit_noun_phrase(&exit)),
@@ -24844,7 +24955,7 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
                 // Legacy tells only the follower; the leader would never
                 // learn the pet was left behind, so say so.
                 let fname = cap_sentence_start(&name_of(world, f));
-                send_to(
+                send_msg(
                     world,
                     leader,
                     format!("{fname} can't follow you there.\r\n"),
@@ -25203,7 +25314,7 @@ pub(crate) fn engage_combat(world: &mut World, attacker: Entity, defender: Entit
         return;
     }
     let attacker_cap = cap_sentence_start(&seen_name(world, defender, attacker, &attacker_name));
-    send_to(
+    send_msg(
         world,
         defender,
         format!("{attacker_cap} sees you and attacks!\r\n"),

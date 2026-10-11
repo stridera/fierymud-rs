@@ -20,7 +20,7 @@ const MOB_CORPSE_DECAY_SECS: i32 = 600;
 use crate::commands::{
     apply_attacker_damage, arrival_from, broadcast_room_except_players_rendered,
     broadcast_room_except_rendered, damage_color_tag, direction_name, disengage_attackers_of,
-    drain_stamina, flee_through_exit, name_of, send_to, try_insert, try_remove,
+    drain_stamina, flee_through_exit, name_of, send_msg, send_to, try_insert, try_remove,
 };
 
 /// Four real-time seconds per swing (40 ticks at 10Hz) — matches legacy
@@ -230,7 +230,7 @@ fn expire_corpse(world: &mut World, corpse: Entity, name: &str) {
             );
         }
         crate::item_decay::HolderKind::Player => {
-            crate::commands::send_to(
+            crate::commands::send_msg(
                 world,
                 holder,
                 format!(
@@ -931,7 +931,7 @@ pub fn combat_tick(world: &mut World) {
         let target_name = name_of(world, target);
         let target_room = world.get::<Located>(target).map(|l| l.0);
         if let Some(room) = target_room {
-            send_to(
+            send_msg(
                 world,
                 target,
                 format!("{mob_name} turns its hate on you!\r\n"),
@@ -1596,7 +1596,7 @@ fn apply_swing(world: &mut World, s: &Swing) {
         };
         let target_cap = crate::commands::cap_sentence_start(&target_name);
         let attacker_cap = crate::commands::cap_sentence_start(&s.attacker_name);
-        send_to(
+        send_msg(
             world,
             s.attacker,
             format!("{target_cap} {via}s your attack!\r\n{tail}"),
@@ -1647,7 +1647,7 @@ fn apply_swing(world: &mut World, s: &Swing) {
             s.attacker,
             &s.attacker_name,
         ));
-        send_to(
+        send_msg(
             world,
             s.target,
             format!("<dim>{attacker_to_target} swings at you but misses.</>\r\n{target_tail}"),
@@ -1846,7 +1846,7 @@ fn apply_swing(world: &mut World, s: &Swing) {
         s.attacker,
         &s.attacker_name,
     ));
-    send_to(
+    send_msg(
         world,
         s.target,
         format!(

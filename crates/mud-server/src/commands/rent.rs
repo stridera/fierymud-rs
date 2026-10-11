@@ -29,7 +29,7 @@ use mud_world::{
 };
 
 use crate::commands::info::begin_quit;
-use crate::commands::{Category, Command, Help, name_of, send_rendered, send_to};
+use crate::commands::{Category, Command, Help, name_of, send_msg, send_rendered, send_to};
 
 /// Copper-per-gold conversion. Wealth is stored in copper; inn
 /// `fee_gp` is authored in gold pieces. Centralized so a future
@@ -239,7 +239,7 @@ fn clerk_can_serve(world: &mut World, player: Entity, clerk: Entity, clerk_name:
         .get::<Posture>(clerk)
         .is_some_and(|p| p.0.rank() <= PostureKind::Sleeping.rank());
     if asleep || world.get::<Stunned>(clerk).is_some() {
-        send_to(
+        send_msg(
             world,
             player,
             format!("{clerk_name} is unable to talk to you...\r\n"),
@@ -247,7 +247,7 @@ fn clerk_can_serve(world: &mut World, player: Entity, clerk: Entity, clerk_name:
         return false;
     }
     if world.get::<Fighting>(clerk).is_some() {
-        send_to(
+        send_msg(
             world,
             player,
             format!("{clerk_name} is too busy to help you right now.\r\n"),
@@ -258,10 +258,10 @@ fn clerk_can_serve(world: &mut World, player: Entity, clerk: Entity, clerk_name:
         .get::<Account>(player)
         .is_some_and(|a| a.role.rank() > UserRole::Player.rank());
     if !is_staff && !crate::commands::can_see_player(world, clerk, player) {
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{clerk_name} says, 'I don't deal with people I can't see!'\r\n"),
+            format!("{clerk_name} says, 'I don't deal with people I can't see!'\r\n"),
         );
         return false;
     }

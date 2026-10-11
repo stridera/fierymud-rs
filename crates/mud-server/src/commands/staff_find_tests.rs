@@ -391,14 +391,14 @@ fn vstat_shows_a_mob_without_spawning_it() {
     for cmd in ["vstat mob 30 5", "vstat mob 30:5", "vstat m 5"] {
         dispatch(&mut w, p, cmd);
         let out = drain(&mut rx);
-        assert!(out.contains("a snarling goblin"), "{cmd}: {out}");
+        assert!(out.contains("A snarling goblin"), "{cmd}: {out}");
         assert!(out.contains("(30, 5)"), "{cmd}: {out}");
     }
     let spawned = w.query_filtered::<Entity, With<Mob>>().iter(&w).count();
     assert_eq!(spawned, 0, "vstat must not spawn the mob");
 
     dispatch(&mut w, p, "vstat obj 30:12");
-    assert!(drain(&mut rx).contains("a rusty sword"));
+    assert!(drain(&mut rx).contains("A rusty sword"));
     dispatch(&mut w, p, "vstat mob 30 999");
     assert!(drain(&mut rx).contains("No mob proto"));
     dispatch(&mut w, p, "vstat mob goblin");

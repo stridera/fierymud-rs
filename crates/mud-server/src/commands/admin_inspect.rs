@@ -17,7 +17,7 @@ use crate::TickCount;
 use crate::commands::{
     AdminAuditLog, Category, Command, Connection, DbPool, Help, ItemClass, cap_sentence_start,
     direction_name, direction_rank, drain_lua_outbox, find_actor_in_room, find_item, name_of,
-    name_or, send_to,
+    name_or, send_msg, send_to,
 };
 
 inventory::submit! {
@@ -500,7 +500,7 @@ pub(crate) fn cmd_lua(world: &mut World, player: Entity, args: &str) {
             }
         }
         Err(e) => {
-            send_to(world, player, format!("{e}\r\n"));
+            send_msg(world, player, format!("{e}\r\n"));
         }
     }
 }
@@ -733,7 +733,7 @@ pub(crate) fn cmd_firetrig(world: &mut World, player: Entity, args: &str) {
                 send_to(world, player, out);
             }
         }
-        Err(e) => send_to(world, player, format!("{e}\r\n")),
+        Err(e) => send_msg(world, player, format!("{e}\r\n")),
     }
 }
 
@@ -806,7 +806,7 @@ pub(crate) fn cmd_varlist(world: &mut World, player: Entity, args: &str) {
         .map(|v| v.0.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
         .unwrap_or_default();
     if entries.is_empty() {
-        send_to(
+        send_msg(
             world,
             player,
             format!(
@@ -847,7 +847,7 @@ pub(crate) fn cmd_varclear(world: &mut World, player: Entity, args: &str) {
                 format!("Cleared {key} on {target_name}.\r\n"),
             );
         } else {
-            send_to(
+            send_msg(
                 world,
                 player,
                 format!(
@@ -864,7 +864,7 @@ pub(crate) fn cmd_varclear(world: &mut World, player: Entity, args: &str) {
             v.0.clear();
         }
         if count == 0 {
-            send_to(
+            send_msg(
                 world,
                 player,
                 format!(
@@ -1318,7 +1318,10 @@ pub(crate) fn cmd_mstat(world: &mut World, player: Entity, args: &str) {
 
     let mut out = String::from("\r\n");
     out.push_str(&format!("(zone, id):    ({zone}, {id})\r\n"));
-    out.push_str(&format!("name:          {}\r\n", p.name));
+    out.push_str(&format!(
+        "name:          {}\r\n",
+        cap_sentence_start(&p.name)
+    ));
     out.push_str(&format!("keywords:      {}\r\n", p.keywords.join(", ")));
     out.push_str(&format!("room_desc:     {}\r\n", p.room_description));
     if !p.examine_description.trim().is_empty() {
@@ -1886,7 +1889,7 @@ pub(crate) fn cmd_set(world: &mut World, player: Entity, args: &str) {
             format!("Set {target_name}.{field} = {value_word}.\r\n"),
         );
     } else {
-        send_to(
+        send_msg(
             world,
             player,
             format!(
@@ -2425,9 +2428,12 @@ pub(crate) fn cmd_astat(world: &mut World, player: Entity, args: &str) {
             .map(|d| format!(" from {}", d.name))
             .unwrap_or_default();
         let dur = if remaining < 0 {
-            "permanent".to_string()
+            crate::commands::format_effect_duration(remaining)
         } else {
-            format!("{remaining}s left")
+            format!(
+                "{} left",
+                crate::commands::format_effect_duration(remaining)
+            )
         };
         out.push_str(&format!(
             "  {name:<20} strength={strength:<3} {dur} source={source:?}{from_str}\r\n"
@@ -2537,7 +2543,10 @@ pub(crate) fn cmd_rstat(world: &mut World, player: Entity, args: &str) {
 
     let mut out = String::from("\r\n");
     out.push_str(&format!("entity:        {room:?}\r\n"));
-    out.push_str(&format!("name:          {}\r\n", name_of(world, room)));
+    out.push_str(&format!(
+        "name:          {}\r\n",
+        cap_sentence_start(&name_of(world, room))
+    ));
     if let Some(wk) = world.get::<WorldKey>(room) {
         out.push_str(&format!("world_key:     ({}, {})\r\n", wk.zone, wk.id));
     }
@@ -2749,7 +2758,10 @@ pub(crate) fn cmd_rstat(world: &mut World, player: Entity, args: &str) {
     } else {
         out.push_str(&format!("effects:       {} active\r\n", effects.len()));
         for (name, secs) in &effects {
-            out.push_str(&format!("               {name} ({secs}s)\r\n"));
+            out.push_str(&format!(
+                "               {name} ({})\r\n",
+                crate::commands::format_effect_duration(*secs)
+            ));
         }
     }
     send_to(world, player, out);
@@ -2802,7 +2814,10 @@ pub(crate) fn cmd_stat(world: &mut World, player: Entity, args: &str) {
 
     let mut out = String::from("\r\n");
     out.push_str(&format!("entity:        {target:?}\r\n"));
-    out.push_str(&format!("name:          {}\r\n", name_of(world, target)));
+    out.push_str(&format!(
+        "name:          {}\r\n",
+        cap_sentence_start(&name_of(world, target))
+    ));
     if let Some(wk) = world.get::<WorldKey>(target) {
         out.push_str(&format!("world_key:     ({}, {})\r\n", wk.zone, wk.id));
     }
@@ -2950,7 +2965,10 @@ pub(crate) fn cmd_stat(world: &mut World, player: Entity, args: &str) {
     } else {
         out.push_str(&format!("effects:       {} active\r\n", effects.len()));
         for (name, secs) in &effects {
-            out.push_str(&format!("               {name} ({secs}s)\r\n"));
+            out.push_str(&format!(
+                "               {name} ({})\r\n",
+                crate::commands::format_effect_duration(*secs)
+            ));
         }
     }
     send_to(world, player, out);

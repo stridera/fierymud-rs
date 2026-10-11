@@ -29,7 +29,7 @@ use mud_world::{
 use super::attack_ok::{attack_ok, is_charmed};
 use super::{
     broadcast_room_except_rendered, broadcast_room_visual, cap_sentence_start,
-    disengage_attackers_of, engage_combat, name_of, send_to, try_remove,
+    disengage_attackers_of, engage_combat, name_of, send_msg, send_to, try_remove,
 };
 
 /// Legacy `roll > 100`.
@@ -235,7 +235,7 @@ pub(super) fn banish(
         caster.entity,
         format!("You look at {victim_name} and shout, '<b:red>I banish thee!</>'\r\n"),
     );
-    send_to(
+    send_msg(
         world,
         victim,
         format!("{cap_caster} looks at you and shouts, '<b:red>I banish thee!</>'\r\n"),
@@ -249,7 +249,7 @@ pub(super) fn banish(
 
     let resist = resist_reason(world, victim).or(saved.then_some(Resist::SavingThrow));
     if let Some(why) = resist {
-        send_to(
+        send_msg(
             world,
             caster.entity,
             format!("{cap_victim} resists you.\r\n"),

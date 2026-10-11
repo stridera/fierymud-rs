@@ -318,6 +318,8 @@ pub(crate) fn build_char_effects(world: &mut World, target: Entity) -> String {
                 "id": super::info::effect_id(world, &inst),
                 "name": super::info::effect_label(world, &inst),
                 "ability": ability,
+                // Seconds left; -1 marks a permanent effect (kept numeric
+                // for the client, which tests `< 0`).
                 "duration": inst.remaining_secs,
                 "source": source,
                 "strength": inst.strength,

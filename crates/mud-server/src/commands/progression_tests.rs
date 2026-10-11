@@ -310,3 +310,31 @@ fn level_and_experience_commands_print_ascii_only() {
     assert!(out.contains("XP to level 6"), "{out}");
     assert!(!out.contains("(level 5)"), "no repeated level text: {out}");
 }
+
+#[test]
+fn immortals_get_no_level_progress_rows() {
+    let mut world = world();
+    world.init_resource::<mud_world::AchievementCatalog>();
+    let (mortal, mut mrx) = spawn(&mut world, "Mortal", 20, 5_000, CLERIC);
+    dispatch(&mut world, mortal, "level");
+    assert!(strip_ansi(&drain(&mut mrx)).contains("XP to level 21"));
+    dispatch(&mut world, mortal, "score");
+    assert!(strip_ansi(&drain(&mut mrx)).contains("Next level"));
+    let progress = |w: &World, e| {
+        let p = w.get::<Profile>(e).unwrap();
+        crate::commands::level_progress_for(w, e, p)
+    };
+    assert!(progress(&world, mortal).is_some());
+
+    // A level-20 character holding an immortal rank is a god.
+    let (god, mut grx) = spawn(&mut world, "Godly", 20, 5_000, CLERIC);
+    world.get_mut::<Account>(god).unwrap().role = UserRole::Immortal;
+    assert!(progress(&world, god).is_none());
+    for line in ["level", "experience", "score"] {
+        dispatch(&mut world, god, line);
+        let out = strip_ansi(&drain(&mut grx));
+        assert!(!out.contains("Next level"), "{line}: {out}");
+        assert!(!out.contains("XP to level"), "{line}: {out}");
+        assert!(!out.contains("to go"), "{line}: {out}");
+    }
+}

@@ -8,7 +8,8 @@ use mud_world::{IgnoreList, LastTeller, Named, Online, Player, TellLog};
 
 use crate::commands::{
     Account, Category, Command, DbPool, Help, Prevent, effect_prevents, format_idle, has_flag,
-    name_approval_gate, name_of, send_comm_channel_text, send_rendered, send_to, try_insert,
+    name_approval_gate, name_of, send_comm_channel_text, send_msg, send_rendered, send_to,
+    try_insert,
 };
 
 inventory::submit! {
@@ -161,10 +162,10 @@ fn deliver_tell(world: &mut World, player: Entity, target_name: &str, message: &
     }
     if has_flag(world, target, PlayerFlag::NoTell) {
         let actual = name_of(world, target);
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{actual} is not accepting tells right now.\r\n"),
+            format!("{actual} is not accepting tells right now.\r\n"),
         );
         return;
     }
@@ -174,10 +175,10 @@ fn deliver_tell(world: &mut World, player: Entity, target_name: &str, message: &
         .is_some_and(|l| l.contains(&player_name_for_check))
     {
         let actual = name_of(world, target);
-        send_rendered(
+        send_msg(
             world,
             player,
-            &format!("{actual} is not accepting tells right now.\r\n"),
+            format!("{actual} is not accepting tells right now.\r\n"),
         );
         return;
     }
@@ -201,10 +202,10 @@ fn deliver_tell(world: &mut World, player: Entity, target_name: &str, message: &
             &format!("<dim>({target_name} is AFK and may not respond right away.)</>\r\n"),
         );
     }
-    send_rendered(
+    send_msg(
         world,
         target,
-        &format!("<cyan><b:cyan>{player_name}</> tells you, \"{message}\"</>\r\n"),
+        format!("<cyan><b:cyan>{player_name}</> tells you, \"{message}\"</>\r\n"),
     );
 
     // GMCP companion frame for both ends of the conversation —

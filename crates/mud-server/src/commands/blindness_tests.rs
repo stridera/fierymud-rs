@@ -526,14 +526,14 @@ fn noblind_mobs_shrug_off_blindness_and_others_do_not() {
     let said = drain(&mut rx);
     assert!(fx.world.get::<Blinded>(golem).is_none(), "NOBLIND: {said}");
     assert!(
-        said.contains("a stone golem is immune to blindness."),
+        said.contains("A stone golem is immune to blindness."),
         "{said}"
     );
     cast(&mut fx, p, "cast 'flagspell' rat");
     assert!(fx.world.get::<Blinded>(rat).is_some());
 }
 
-fn exit_to(to: Entity) -> mud_world::ExitData {
+pub(super) fn exit_to(to: Entity) -> mud_world::ExitData {
     mud_world::ExitData {
         to: Some(to),
         state: ExitState::Open,

@@ -16,7 +16,7 @@ use mud_db::enums::{RestSource, Sector};
 use mud_world::{Camping, ClassCatalog, Item, Located, PendingWakeAttachments, Profile, RestState};
 
 use crate::TickCount;
-use crate::commands::{Camped, Quitting, send_rendered};
+use crate::commands::{Camped, Quitting, send_msg, send_rendered};
 
 /// Sectors a player may camp in. Mirrors the legacy refusal
 /// pattern: indoor (Structure), city, water variants, and air
@@ -130,7 +130,7 @@ fn cancel(world: &mut World, entity: Entity, msg: &str) {
     if let Ok(mut em) = world.get_entity_mut(entity) {
         em.remove::<Camping>();
     }
-    send_rendered(world, entity, &format!("{msg}\r\n"));
+    send_msg(world, entity, format!("{msg}\r\n"));
 }
 
 fn complete(world: &mut World, entity: Entity, camp: Camping) {

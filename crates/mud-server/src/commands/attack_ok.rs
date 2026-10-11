@@ -546,7 +546,7 @@ mod tests {
         pk_on(&mut world, b);
         crate::commands::info::cmd_order(&mut world, a, "pet kill victim");
         let text = drain(&mut rx);
-        assert!(text.contains("pet attacks Victim"), "{text}");
+        assert!(text.contains("Pet attacks Victim"), "{text}");
         assert!(!text.contains("You must turn on PK"), "{text}");
     }
 
