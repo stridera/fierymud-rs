@@ -22,16 +22,17 @@ use std::collections::{HashMap, HashSet};
 use bevy_ecs::prelude::*;
 use mud_db::enums::{ExitState, MobBehavior, MobTrait, ObjectRestriction, Sector};
 use mud_world::{
-    AttachedTriggers, Corpse, ExitData, Exits, Fighting, Follower, Item, Located, Mob,
-    MobBehaviors, MobTraits, Named, ObjectRestrictions, Player, RiddenBy, RoomSector, WorldKey,
+    Corpse, ExitData, Exits, Fighting, Follower, Item, Located, Mob, MobBehaviors, MobTraits,
+    Named, ObjectRestrictions, Player, RiddenBy, RoomSector, WorldKey,
 };
 
 use crate::TickCount;
 use crate::commands::{arrival_from, broadcast_room_except_players_rendered, direction_name};
 
-/// One wander check every 300 ticks (= 30s real-time at 10Hz).
-/// Each tick a fixed fraction of eligible mobs actually move —
-/// see `WANDER_CHANCE_DENOM`.
+/// Every mob gets one wander check per 300 ticks (= 30s real-time at 10Hz).
+/// The checks are staggered by entity index ([`wander_slot`]) so each tick
+/// handles about 1/300 of the mobs instead of all of them every 300th tick.
+/// A fixed fraction of the checks actually move — see `WANDER_CHANCE_DENOM`.
 const WANDER_PERIOD_TICKS: u64 = 300;
 /// Per-eligible-mob chance to actually wander on a wander tick.
 /// 1 in 4 means roughly one move every 2 minutes per mob —
@@ -43,6 +44,14 @@ const WANDER_CHANCE_DENOM: u32 = 4;
 /// takes one item on a 50% roll — at most one per tick per mob, so a
 /// busy zone doesn't see mobs hoover the floor in a single frame.
 pub(crate) const SCAVENGER_PERIOD_TICKS: u64 = 100;
+
+/// True when `mob` is due its wander check on `tick`: `(index + tick)` is a
+/// multiple of [`WANDER_PERIOD_TICKS`]. Entity indices are dense, so
+/// consecutive mobs land on consecutive ticks and every mob is due exactly
+/// once per period.
+fn wander_slot(mob: Entity, tick: u64) -> bool {
+    (u64::from(mob.index_u32()) + tick).is_multiple_of(WANDER_PERIOD_TICKS)
+}
 
 /// True when the room's sector counts as "water" for AQUATIC-mob
 /// movement: SHALLOWS, WATER, UNDERWATER. Beach / swamp aren't water
@@ -68,23 +77,25 @@ fn is_tethered(world: &World, mob: Entity, room: Entity) -> bool {
 #[allow(clippy::too_many_lines)]
 pub fn wander_tick(world: &mut World) {
     let tick = world.resource::<TickCount>().0;
-    if !tick.is_multiple_of(WANDER_PERIOD_TICKS) {
-        return;
-    }
-    // Snapshot every eligible mob with its current room. The full
-    // gate runs in Rust here; the per-step exit roll happens later.
-    let candidates: Vec<(Entity, Entity)> = {
-        let mut q = world.query_filtered::<(
-            Entity,
-            &Located,
-            Option<&MobBehaviors>,
-            Option<&AttachedTriggers>,
-        ), (With<Mob>, Without<Fighting>, Without<RiddenBy>)>();
-        q.iter(world)
-            .filter(|(_, _, beh, _)| !beh.is_some_and(|b| b.has(MobBehavior::Sentinel)))
-            .map(|(e, l, _, _)| (e, l.0))
-            .collect()
+    // Snapshot the mobs due a wander check this tick (see [`wander_slot`]).
+    // An entity-only scan keeps the cost of the untouched ~299/300 of the
+    // world minimal; the gates below read components of the due mobs only.
+    // The full gate runs in Rust here; the per-step exit roll happens later.
+    let due: Vec<Entity> = {
+        let mut q =
+            world.query_filtered::<Entity, (With<Mob>, Without<Fighting>, Without<RiddenBy>)>();
+        q.iter(world).filter(|&e| wander_slot(e, tick)).collect()
     };
+    let candidates: Vec<(Entity, Entity)> = due
+        .into_iter()
+        .filter_map(|e| {
+            let room = world.get::<Located>(e)?.0;
+            let sentinel = world
+                .get::<MobBehaviors>(e)
+                .is_some_and(|b| b.has(MobBehavior::Sentinel));
+            (!sentinel).then_some((e, room))
+        })
+        .collect();
     // Servants and mobs trailing a leader who is still in the room stay put.
     let candidates: Vec<(Entity, Entity)> = candidates
         .into_iter()
@@ -501,7 +512,7 @@ mod tests {
         // Run several times so the RNG eventually picks "move" (1-in-4)
         // and the exit-pool filter has a chance to be exercised.
         for _ in 0..50 {
-            wander_tick(&mut world);
+            wander_period(&mut world);
         }
         assert_eq!(
             world.get::<Located>(mob).map(|l| l.0),
@@ -528,7 +539,7 @@ mod tests {
         // moved at least once. Flake tolerance lives in the upper
         // bound; if this fails the gate is mis-applied.
         for _ in 0..50 {
-            wander_tick(&mut world);
+            wander_period(&mut world);
             if world.get::<Located>(mob).map(|l| l.0) == Some(to) {
                 moved = true;
                 break;
@@ -577,7 +588,7 @@ mod tests {
         }
         world.insert_resource(TickCount(WANDER_PERIOD_TICKS));
         for _ in 0..200 {
-            wander_tick(&mut world);
+            wander_period(&mut world);
             // Put the control back so every tick re-rolls the same mix.
             world.entity_mut(control).insert(Located(from));
         }
@@ -587,7 +598,7 @@ mod tests {
         // Control: the same room does let an upright mob go.
         let mut moved = false;
         for _ in 0..200 {
-            wander_tick(&mut world);
+            wander_period(&mut world);
             if world.get::<Located>(control).map(|l| l.0) == Some(to) {
                 moved = true;
                 break;
@@ -653,7 +664,7 @@ mod tests {
 
         world.insert_resource(TickCount(WANDER_PERIOD_TICKS));
         for _ in 0..50 {
-            wander_tick(&mut world);
+            wander_period(&mut world);
         }
         assert_eq!(
             world.get::<Located>(mob).map(|l| l.0),
@@ -681,7 +692,7 @@ mod tests {
         world.insert_resource(TickCount(WANDER_PERIOD_TICKS));
         let mut moved = false;
         for _ in 0..50 {
-            wander_tick(&mut world);
+            wander_period(&mut world);
             if world.get::<Located>(mob).map(|l| l.0) == Some(to) {
                 moved = true;
                 break;
@@ -1029,18 +1040,31 @@ mod tests {
     #[test]
     fn wander_tick_prod_scale_is_fast() {
         let mut world = wander_world();
-        let start = std::time::Instant::now();
-        wander_tick(&mut world);
-        let first = start.elapsed();
-        let start = std::time::Instant::now();
-        wander_tick(&mut world);
-        let second = start.elapsed();
+        let mut worst = [std::time::Duration::ZERO; 2];
+        for (period, slot) in worst.iter_mut().enumerate() {
+            for t in 0..WANDER_PERIOD_TICKS {
+                world.insert_resource(TickCount(period as u64 * WANDER_PERIOD_TICKS + t));
+                let start = std::time::Instant::now();
+                wander_tick(&mut world);
+                *slot = (*slot).max(start.elapsed());
+            }
+        }
+        let [first, second] = worst;
         eprintln!(
-            "wander_tick 5500 mobs / 4000 items / 10k rooms: first={first:?} second={second:?}"
+            "wander_tick 5500 mobs / 4000 items / 10k rooms, worst tick: \
+             first period={first:?} second period={second:?}"
         );
         if !cfg!(debug_assertions) {
-            assert!(first.as_millis() < 20, "first pass took {first:?}");
-            assert!(second.as_millis() < 20, "second pass took {second:?}");
+            assert!(first.as_millis() < 20, "first period took {first:?}");
+            assert!(second.as_millis() < 20, "second period took {second:?}");
+        }
+    }
+
+    /// Run one full wander period (every mob gets exactly one check).
+    fn wander_period(world: &mut World) {
+        for t in 0..WANDER_PERIOD_TICKS {
+            world.insert_resource(TickCount(t));
+            wander_tick(world);
         }
     }
 
@@ -1049,7 +1073,7 @@ mod tests {
     fn wander_many(world: &mut World, mob: Entity) -> Option<Entity> {
         world.insert_resource(TickCount(WANDER_PERIOD_TICKS));
         for _ in 0..200 {
-            wander_tick(world);
+            wander_period(world);
         }
         world.get::<Located>(mob).map(|l| l.0)
     }
@@ -1119,5 +1143,90 @@ mod tests {
         let walker = make_mob(&mut world, from);
         world.entity_mut(walker).insert(mud_world::WaterWalk);
         assert_eq!(wander_many(&mut world, walker), Some(lake), "waterwalk");
+    }
+
+    /// Prod-scale wander (`wander_world`: 5500 mobs, a third sentinel, 10k
+    /// rooms). Times every `wander_tick` over two wander periods and reports
+    /// the worst one. The work must be spread over the period instead of
+    /// landing as one spike on every 300th tick, while each mob keeps
+    /// wandering at the old overall rate (a 1-in-`WANDER_CHANCE_DENOM` roll
+    /// per `WANDER_PERIOD_TICKS`).
+    #[test]
+    fn wander_work_is_spread_across_ticks() {
+        let mut world = wander_world();
+        let mobs: Vec<Entity> = {
+            let mut q = world.query_filtered::<Entity, With<Mob>>();
+            q.iter(&world).collect()
+        };
+        let walkers = mobs
+            .iter()
+            .filter(|&&m| {
+                !world
+                    .get::<MobBehaviors>(m)
+                    .is_some_and(|b| b.has(MobBehavior::Sentinel))
+            })
+            .count();
+        let mut last: Vec<Entity> = mobs
+            .iter()
+            .map(|&m| world.get::<Located>(m).unwrap().0)
+            .collect();
+        let periods = 2;
+        let ticks = WANDER_PERIOD_TICKS * periods;
+        let (mut worst, mut total) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+        let (mut max_movers, mut total_moves) = (0usize, 0usize);
+        for t in 0..ticks {
+            world.insert_resource(TickCount(t));
+            let start = std::time::Instant::now();
+            wander_tick(&mut world);
+            let took = start.elapsed();
+            worst = worst.max(took);
+            total += took;
+            let mut movers = 0;
+            for (slot, &m) in last.iter_mut().zip(&mobs) {
+                let now = world.get::<Located>(m).unwrap().0;
+                if now != *slot {
+                    movers += 1;
+                    *slot = now;
+                }
+            }
+            max_movers = max_movers.max(movers);
+            total_moves += movers;
+        }
+        eprintln!(
+            "wander perf: {} mobs ({walkers} walkers), {ticks} ticks: worst tick {worst:?}, \
+             mean {:?}, max movers/tick {max_movers}, total moves {total_moves}",
+            mobs.len(),
+            total / u32::try_from(ticks).unwrap(),
+        );
+        // Every walker rolls 1-in-WANDER_CHANCE_DENOM once per period; a few
+        // are boxed in by water and the like, so allow a wide lower margin.
+        let expected = walkers * usize::try_from(periods).unwrap() / WANDER_CHANCE_DENOM as usize;
+        assert!(
+            (expected * 6 / 10..=expected * 11 / 10).contains(&total_moves),
+            "total moves {total_moves}, expected about {expected}",
+        );
+        assert!(
+            max_movers <= mobs.len() / 100,
+            "{max_movers} mobs moved in a single tick; the work is not spread out",
+        );
+    }
+
+    /// Every mob is due exactly one wander check per period, and a single
+    /// tick only picks a thin slice of dense entity indices.
+    #[test]
+    fn each_mob_is_due_once_per_period() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let mobs: Vec<Entity> = (0..1000).map(|_| make_mob(&mut world, room)).collect();
+        for &m in &mobs {
+            let due = (0..WANDER_PERIOD_TICKS)
+                .filter(|&t| wander_slot(m, t))
+                .count();
+            assert_eq!(due, 1, "{m:?} due {due} times in one period");
+        }
+        for t in 0..WANDER_PERIOD_TICKS {
+            let n = mobs.iter().filter(|&&m| wander_slot(m, t)).count();
+            assert!(n <= 1000 / 300 + 2, "tick {t}: {n} mobs due");
+        }
     }
 }

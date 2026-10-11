@@ -1136,8 +1136,10 @@ fn a_hidden_wandering_mob_is_felt_leaving_too() {
         ))
         .id();
     super::senses::force_sense_roll(Some(1));
-    world.insert_resource(crate::TickCount(300));
-    for _ in 0..200 {
+    // Each mob is due one wander check per 300 ticks (staggered by entity
+    // index) and rolls 1 in 4 on it: walk the clock until the move happens.
+    for tick in 0..300 * 200 {
+        world.insert_resource(crate::TickCount(tick));
         crate::wander::wander_tick(&mut world);
         if world.get::<Located>(mob).is_some_and(|l| l.0 == b) {
             break;

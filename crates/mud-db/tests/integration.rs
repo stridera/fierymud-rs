@@ -704,8 +704,13 @@ async fn race_innates_are_granted_to_a_fresh_ability_set() {
         .await
         .expect("list elf innates");
     assert!(
-        innates.iter().any(|r| r.ability_name == "MAGIC_MISSILE"),
+        innates.iter().any(|r| r.ability_name == "Magic Missile"),
         "elf innate rows: {innates:?}"
+    );
+    // Display names ("Innate Sylvan"), never the raw `plain_name` ids.
+    assert!(
+        innates.iter().all(|r| !r.ability_name.contains('_')),
+        "raw plain_name leaked into the display name: {innates:?}"
     );
     let mut rows: Vec<CharacterAbilityRow> = Vec::new();
     let granted = merge_innates(&mut rows, &innates);

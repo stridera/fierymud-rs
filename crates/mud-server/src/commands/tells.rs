@@ -40,7 +40,7 @@ inventory::submit! {
         category: Category::Communication,
         help: Help {
             usage: "reply <message>",
-            summary: "Send a tell to whoever last tell'd you.",
+            summary: "Send a tell to whoever last told you.",
             long: "Forwards through 'tell' so the LastTeller stamp \
                    lands on them too — start a back-and-forth without \
                    typing the name.",
@@ -250,7 +250,7 @@ fn cmd_reply(world: &mut World, player: Entity, args: &str) {
         return;
     }
     let Some(LastTeller(last)) = world.get::<LastTeller>(player).copied() else {
-        send_to(world, player, "Nobody has tell'd you recently.\r\n");
+        send_to(world, player, "Nobody has told you recently.\r\n");
         return;
     };
     if world.get_entity(last).is_err() || world.get::<Online>(last).is_none() {
@@ -352,4 +352,21 @@ fn cmd_lasttells(world: &mut World, player: Entity, _args: &str) {
         ));
     }
     send_to(world, player, out);
+}
+
+#[cfg(test)]
+mod reply_tests {
+    use super::*;
+    use crate::commands::test_support::{drain, player_in};
+
+    #[test]
+    fn reply_with_nobody_to_answer_says_told() {
+        let mut world = World::new();
+        let room = world.spawn_empty().id();
+        let (p, mut rx) = player_in(&mut world, room);
+        cmd_reply(&mut world, p, "hi");
+        let out = drain(&mut rx);
+        assert!(out.contains("Nobody has told you recently."), "{out}");
+        assert!(!out.contains("tell'd"), "{out}");
+    }
 }

@@ -594,7 +594,7 @@ pub(crate) async fn cmd_innate(
             "\r\nInnate abilities of every race ({}):\r\n",
             actives.len()
         );
-        let names: Vec<String> = actives.iter().map(|d| d.plain_name.clone()).collect();
+        let names: Vec<String> = actives.iter().map(|d| d.name.clone()).collect();
         let width = crate::layout::wrap_width(world, player);
         let column_width = names.iter().map(String::len).max().unwrap_or(0) + 2;
         for row in crate::layout::format_grid(&names, column_width, 2, width) {
@@ -1810,5 +1810,46 @@ mod tests {
         assert!(!gate("1"));
         assert!(!gate("'yes'"));
         assert!(!gate("nil"));
+    }
+}
+
+#[cfg(test)]
+mod innate_listing_tests {
+    use super::*;
+    use crate::commands::test_support::{ability_def, drain, player_in};
+    use mud_db::abilities::AbilityKind;
+    use mud_db::enums::UserRole;
+    use mud_world::{AbilityCatalog, Account, RaceAbilitiesData};
+
+    /// The god's every-race `innate` listing prints display names, not the
+    /// raw `plain_name` ids such as `INN_SYLL`.
+    #[tokio::test]
+    async fn god_innate_listing_shows_display_names() {
+        let mut world = World::new();
+        let mut catalog = AbilityCatalog::default();
+        let mut def = ability_def(7, "Innate Sylvan", AbilityKind::Spell);
+        def.plain_name = "INN_SYLL".to_string();
+        def.passive = false;
+        catalog.by_name.insert("inn_syll".to_string(), def);
+        world.insert_resource(catalog);
+        let mut data = RaceAbilitiesData::default();
+        data.insert("ELF", 7, 100);
+        world.insert_resource(data);
+        let room = world.spawn_empty().id();
+        let (god, mut rx) = player_in(&mut world, room);
+        world.entity_mut(god).insert(Account {
+            user_id: "u".into(),
+            character_id: "c".into(),
+            role: UserRole::Immortal,
+            account_role: UserRole::Immortal,
+            perms: vec![],
+        });
+        // Never touched: the god listing is answered from the catalog.
+        let pool = mud_db::sqlx::PgPool::connect_lazy("postgres://nobody@localhost/none")
+            .expect("lazy pool");
+        cmd_innate(&mut world, god, &pool, "").await;
+        let out = drain(&mut rx);
+        assert!(out.contains("Innate Sylvan"), "{out}");
+        assert!(!out.contains("INN_SYLL"), "{out}");
     }
 }

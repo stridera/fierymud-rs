@@ -2023,20 +2023,43 @@ pub(crate) fn flee_through_exit(world: &mut World, player: Entity) {
     send_to(world, player, format!("You flee {dir_name}!\r\n"));
     cmd_look(world, player, "");
 }
-pub(crate) fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
+/// `one` when `n == 1`, else `many` (`1 hit`, `2 hits`).
+pub(crate) fn plural(n: usize, one: &'static str, many: &'static str) -> &'static str {
+    if n == 1 { one } else { many }
+}
+pub(crate) fn cmd_kick(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "kick") {
         return;
     }
-    let Some(fighting) = world.get::<Fighting>(player).copied() else {
-        send_to(world, player, "You aren't fighting anyone.\r\n");
-        return;
+    let arg = args.trim();
+    let target = if arg.is_empty() {
+        let Some(fighting) = world.get::<Fighting>(player).copied() else {
+            send_to(world, player, "Kick whom? You aren't fighting anyone.\r\n");
+            return;
+        };
+        if world.get_entity(fighting.0).is_err() {
+            try_remove::<Fighting>(world, player);
+            send_to(world, player, "Your target is gone.\r\n");
+            return;
+        }
+        fighting.0
+    } else {
+        // Legacy `do_kick` takes a victim and starts the fight; resolve it
+        // like bash does (visible actors in the room only).
+        let Some(located) = world.get::<Located>(player).copied() else {
+            send_to(world, player, "You are nowhere.\r\n");
+            return;
+        };
+        let Some(t) = find_actor_in_room(world, arg, located.0, player) else {
+            send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
+            return;
+        };
+        if t == player {
+            send_to(world, player, "You can't kick yourself.\r\n");
+            return;
+        }
+        t
     };
-    let target = fighting.0;
-    if world.get_entity(target).is_err() {
-        try_remove::<Fighting>(world, player);
-        send_to(world, player, "Your target is gone.\r\n");
-        return;
-    }
     if !super::attack_ok::offensive_target_allowed(world, player, target) {
         return;
     }
@@ -2053,6 +2076,19 @@ pub(crate) fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
         "use",
         Some(target),
     );
+    // Start the fight when the kick opened it (first-attacker priority, as
+    // in backstab/bash: never steal a mob's existing target).
+    if !arg.is_empty() && world.get_entity(target).is_ok() {
+        if world.get::<Fighting>(player).is_none() {
+            try_insert(world, player, Fighting(target));
+        }
+        if world.get::<Fighting>(target).is_none()
+            && world.get::<CombatStats>(target).is_some()
+            && let Ok(mut e) = world.get_entity_mut(target)
+        {
+            e.insert(Fighting(player));
+        }
+    }
 }
 pub(crate) fn cmd_berserk(world: &mut World, player: Entity, _args: &str) {
     if !require_alert_posture(world, player, "berserk") {
@@ -2722,7 +2758,9 @@ pub(crate) fn cmd_hitall(world: &mut World, player: Entity, _args: &str) {
         world,
         player,
         format!(
-            "You swing wildly: {total_hits} hit(s), {kills} kill(s) for {dmg} damage each.\r\n",
+            "You swing wildly: {total_hits} {}, {kills} {} for {dmg} damage each.\r\n",
+            plural(total_hits, "hit", "hits"),
+            plural(kills, "kill", "kills"),
         ),
     );
     broadcast_room_except_rendered(
@@ -3300,6 +3338,8 @@ pub(crate) fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
 
     let target_name = name_of(world, target);
     let player_name = name_of(world, player);
+    let target_obj =
+        super::look_auras::pronouns(&super::look_auras::target_gender(world, target)).2;
 
     let (dead, threshold_msg) = apply_damage_from(world, target, damage, player);
 
@@ -3320,7 +3360,7 @@ pub(crate) fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
     send_rendered(
         world,
         player,
-        &format!("You bash {target_name} for {damage} damage, knocking them down!\r\n"),
+        &format!("You bash {target_name} for {damage} damage, knocking {target_obj} down!\r\n"),
     );
     send_msg(
         world,
@@ -3334,7 +3374,7 @@ pub(crate) fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
         world,
         located.0,
         &[player, target],
-        &format!("{player_name} bashes {target_name}, knocking them down.\r\n"),
+        &format!("{player_name} bashes {target_name}, knocking {target_obj} down.\r\n"),
     );
 
     if dead {
@@ -4011,5 +4051,136 @@ mod area_spare_tests {
 
         let hit = skip_forbidden_pets(&mut world, me, vec![mate, tail, mine, boss]);
         assert_eq!(hit, vec![tail], "only the groupmate's tag-along is hit");
+    }
+}
+
+#[cfg(test)]
+mod playtest_fix_tests {
+    use super::*;
+    use crate::commands::test_support::{drain, install_core_abilities, mob_proto, player_in};
+    use mud_db::enums::MobProfession;
+    use mud_world::{MobPrototypes, PeacefulRoom, WorldKey};
+
+    fn mob(world: &mut World, room: Entity, name: &str) -> Entity {
+        world
+            .spawn((
+                Mob,
+                Named { name: name.into() },
+                Located(room),
+                CombatStats::default(),
+                Health { hp: 500, max: 500 },
+            ))
+            .id()
+    }
+
+    fn arena() -> (World, Entity, Entity, crate::commands::test_support::Rx) {
+        let mut world = World::new();
+        install_core_abilities(&mut world);
+        let room = world.spawn_empty().id();
+        let (p, rx) = player_in(&mut world, room);
+        world
+            .entity_mut(p)
+            .insert((CombatStats::default(), Health { hp: 100, max: 100 }));
+        (world, room, p, rx)
+    }
+
+    #[test]
+    fn plural_picks_the_form_by_count() {
+        assert_eq!(plural(0, "hit", "hits"), "hits");
+        assert_eq!(plural(1, "hit", "hits"), "hit");
+        assert_eq!(plural(2, "kill", "kills"), "kills");
+    }
+
+    #[test]
+    fn kick_with_a_victim_starts_the_fight() {
+        let (mut world, room, p, mut rx) = arena();
+        let ogre = mob(&mut world, room, "an ogre");
+        cmd_kick(&mut world, p, "ogre");
+        let out = drain(&mut rx);
+        assert!(!out.contains("aren't fighting"), "{out}");
+        assert_eq!(world.get::<Fighting>(p).map(|f| f.0), Some(ogre), "{out}");
+        assert_eq!(world.get::<Fighting>(ogre).map(|f| f.0), Some(p), "{out}");
+    }
+
+    #[test]
+    fn kick_without_a_victim_or_fight_asks_whom() {
+        let (mut world, _room, p, mut rx) = arena();
+        cmd_kick(&mut world, p, "");
+        let out = drain(&mut rx);
+        assert!(out.contains("Kick whom?"), "{out}");
+        assert!(world.get::<Fighting>(p).is_none());
+    }
+
+    #[test]
+    fn kick_needs_a_visible_victim_in_the_room() {
+        let (mut world, _room, p, mut rx) = arena();
+        cmd_kick(&mut world, p, "dragon");
+        let out = drain(&mut rx);
+        assert!(out.contains("You don't see 'dragon' here."), "{out}");
+        assert!(world.get::<Fighting>(p).is_none());
+    }
+
+    #[test]
+    fn kick_is_refused_in_a_peaceful_room() {
+        let (mut world, room, p, mut rx) = arena();
+        world.entity_mut(room).insert(PeacefulRoom);
+        let ogre = mob(&mut world, room, "an ogre");
+        cmd_kick(&mut world, p, "ogre");
+        let out = drain(&mut rx);
+        assert!(world.get::<Fighting>(p).is_none(), "{out}");
+        assert!(world.get::<Fighting>(ogre).is_none(), "{out}");
+    }
+
+    #[test]
+    fn kick_refuses_to_start_player_versus_player() {
+        let (mut world, room, p, mut rx) = arena();
+        let (other, _orx) = player_in(&mut world, room);
+        world.entity_mut(other).insert(Named {
+            name: "Victim".into(),
+        });
+        cmd_kick(&mut world, p, "victim");
+        let out = drain(&mut rx);
+        assert!(world.get::<Fighting>(p).is_none(), "{out}");
+        assert!(world.get::<Fighting>(other).is_none(), "{out}");
+    }
+
+    #[test]
+    fn hitall_counts_agree_with_their_nouns() {
+        let (mut world, room, p, mut rx) = arena();
+        mob(&mut world, room, "an ogre");
+        cmd_hitall(&mut world, p, "");
+        let out = drain(&mut rx);
+        assert!(out.contains("1 hit, 0 kills"), "{out}");
+        mob(&mut world, room, "a rat");
+        world.entity_mut(p).remove::<Fighting>();
+        cmd_hitall(&mut world, p, "");
+        let out = drain(&mut rx);
+        assert!(out.contains("2 hits, 0 kills"), "{out}");
+    }
+
+    fn bash_text(gender: &str) -> String {
+        let (mut world, room, p, mut rx) = arena();
+        let mut protos = MobPrototypes::default();
+        let mut proto = mob_proto(30, 1, MobProfession::Trainer);
+        proto.gender = gender.to_string();
+        protos.by_key.insert((30, 1), proto);
+        world.insert_resource(protos);
+        let target = mob(&mut world, room, "a sewer rat");
+        world
+            .entity_mut(target)
+            .insert(WorldKey { zone: 30, id: 1 });
+        cmd_bash(&mut world, p, "rat");
+        drain(&mut rx)
+    }
+
+    #[test]
+    fn bash_uses_the_targets_pronoun() {
+        let out = bash_text("male");
+        assert!(out.contains("knocking him down"), "{out}");
+        let out = bash_text("female");
+        assert!(out.contains("knocking her down"), "{out}");
+        let out = bash_text("neutral");
+        assert!(out.contains("knocking it down"), "{out}");
+        assert!(!out.contains("them"), "{out}");
     }
 }

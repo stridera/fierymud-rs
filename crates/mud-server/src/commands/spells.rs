@@ -500,6 +500,30 @@ pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
     crate::effects::remove_effect_instance(world, bearer, target_effect);
     send_to(world, player, format!("You cancel {removed_name}.\r\n"));
 }
+/// Resolve what `study` was given with the cast matcher: quoted or unquoted
+/// multi-word names, an exact name first, then a name prefix.
+pub(crate) fn resolve_study_ability(
+    catalog: &AbilityCatalog,
+    args: &str,
+) -> Option<mud_world::AbilityDef> {
+    let needle = if args.trim_start().starts_with(['\'', '"']) {
+        crate::commands::parse_quoted_first_token(args)
+            .0
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join("_")
+    } else {
+        args.split_whitespace().collect::<Vec<_>>().join("_")
+    }
+    .to_ascii_lowercase();
+    if needle.is_empty() {
+        return None;
+    }
+    catalog
+        .find_exact(&needle, None)
+        .or_else(|| catalog.find_by_prefix(&needle, None, None))
+        .cloned()
+}
 pub(crate) fn cmd_study(world: &mut World, player: Entity, args: &str) {
     use mud_world::SpellSlotData;
     let Some(profile) = world.get::<Profile>(player).cloned() else {
@@ -511,18 +535,17 @@ pub(crate) fn cmd_study(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "You have no class.\r\n");
         return;
     };
-    let key = args.trim().to_ascii_lowercase();
-    if key.is_empty() {
-        send_to(world, player, "Study what?\r\n");
-        return;
-    }
-    let Some(def) = world
-        .resource::<AbilityCatalog>()
-        .by_name
-        .get(&key)
-        .cloned()
-    else {
-        send_to(world, player, format!("'{key}' isn't a known ability.\r\n"));
+    let Some(def) = resolve_study_ability(world.resource::<AbilityCatalog>(), args) else {
+        let typed = args.trim();
+        if typed.is_empty() {
+            send_to(world, player, "Study what?\r\n");
+        } else {
+            send_to(
+                world,
+                player,
+                format!("'{typed}' isn't a known ability.\r\n"),
+            );
+        }
         return;
     };
     if !god
@@ -668,5 +691,59 @@ mod pick_tests {
         ));
         cmd_pick(&mut world, p, "north");
         assert!(drain(&mut rx).contains("don't know how"));
+    }
+}
+
+#[cfg(test)]
+mod study_resolver_tests {
+    use super::*;
+    use crate::commands::test_support::ability_def;
+    use mud_db::abilities::AbilityKind;
+
+    fn catalog() -> AbilityCatalog {
+        let mut catalog = AbilityCatalog::default();
+        for (id, name) in [
+            (1, "Magic_Missile"),
+            (2, "Fire"),
+            (3, "Fireball"),
+            (4, "Word_Of_Recall"),
+        ] {
+            catalog.by_name.insert(
+                name.to_ascii_lowercase(),
+                ability_def(id, name, AbilityKind::Spell),
+            );
+        }
+        catalog
+    }
+
+    fn id_of(args: &str) -> Option<i32> {
+        resolve_study_ability(&catalog(), args).map(|d| d.id)
+    }
+
+    #[test]
+    fn unquoted_multi_word_names_resolve() {
+        assert_eq!(id_of("magic missile"), Some(1));
+        assert_eq!(id_of("Magic   Missile"), Some(1));
+        assert_eq!(id_of("word of recall"), Some(4));
+    }
+
+    #[test]
+    fn quoted_names_resolve() {
+        assert_eq!(id_of("'magic missile'"), Some(1));
+        assert_eq!(id_of("\"magic missile\""), Some(1));
+    }
+
+    #[test]
+    fn a_prefix_resolves_but_an_exact_name_wins() {
+        assert_eq!(id_of("magic m"), Some(1));
+        assert_eq!(id_of("fireb"), Some(3));
+        assert_eq!(id_of("fire"), Some(2), "exact name beats the longer prefix");
+    }
+
+    #[test]
+    fn unknown_or_empty_input_resolves_to_nothing() {
+        assert_eq!(id_of(""), None);
+        assert_eq!(id_of("   "), None);
+        assert_eq!(id_of("nonsense"), None);
     }
 }

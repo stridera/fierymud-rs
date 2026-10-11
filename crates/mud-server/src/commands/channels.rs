@@ -401,11 +401,13 @@ fn cmd_wiznet(world: &mut World, player: Entity, args: &str) {
 }
 
 fn cmd_lastgossips(world: &mut World, player: Entity, args: &str) {
-    show_channel_history(world, player, args, "gossip", "<yellow>", "gossips");
+    show_channel_history(
+        world, player, args, "gossip", "<yellow>", "gossip", "gossips",
+    );
 }
 
 fn cmd_lastshouts(world: &mut World, player: Entity, args: &str) {
-    show_channel_history(world, player, args, "shout", "<b:red>", "shouts");
+    show_channel_history(world, player, args, "shout", "<b:red>", "shout", "shouts");
 }
 
 /// Body shared by `lastgossips` / `lastshouts`. Pulls the channel
@@ -420,7 +422,8 @@ fn show_channel_history(
     args: &str,
     channel: &'static str,
     channel_tag: &str,
-    plural_label: &str,
+    singular_label: &'static str,
+    plural_label: &'static str,
 ) {
     let n: usize = args
         .trim()
@@ -437,7 +440,8 @@ fn show_channel_history(
         send_to(world, player, format!("No recent {plural_label}.\r\n"));
         return;
     }
-    let mut out = format!("\r\n<b:cyan>Last {} {plural_label}:</>\r\n", entries.len(),);
+    let label = super::combat_commands::plural(entries.len(), singular_label, plural_label);
+    let mut out = format!("\r\n<b:cyan>Last {} {label}:</>\r\n", entries.len());
     let now = std::time::SystemTime::now();
     // Render oldest-first so the player reads chronologically;
     // recent_on returns reverse-chronological. Reverse our take().
@@ -456,4 +460,42 @@ fn show_channel_history(
         ));
     }
     crate::commands::send_rendered(world, player, &out);
+}
+
+#[cfg(test)]
+mod history_label_tests {
+    use super::*;
+    use crate::commands::test_support::{drain, player_in};
+    use mud_world::{ChannelEntry, ChannelHistory};
+
+    fn history_of(n: usize) -> String {
+        let mut world = World::new();
+        let room = world.spawn_empty().id();
+        let (p, mut rx) = player_in(&mut world, room);
+        let mut history = ChannelHistory::default();
+        for i in 0..n {
+            history.push(ChannelEntry {
+                at: std::time::SystemTime::now(),
+                channel: "gossip",
+                speaker: "Bob".into(),
+                body: format!("hello {i}"),
+            });
+        }
+        world.insert_resource(history);
+        cmd_lastgossips(&mut world, p, "");
+        drain(&mut rx)
+    }
+
+    #[test]
+    fn one_gossip_is_singular() {
+        let out = history_of(1);
+        assert!(out.contains("Last 1 gossip:"), "{out}");
+        assert!(!out.contains("gossips"), "{out}");
+    }
+
+    #[test]
+    fn several_gossips_are_plural() {
+        let out = history_of(3);
+        assert!(out.contains("Last 3 gossips:"), "{out}");
+    }
 }

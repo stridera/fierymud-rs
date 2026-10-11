@@ -14,7 +14,7 @@ pub struct RaceAbilityRow {
     /// `Race` enum value as raw text (HUMAN / ELF / etc.).
     pub race: String,
     pub ability_id: i32,
-    /// Display name from the joined `Ability.plain_name`.
+    /// Display name from the joined `Ability.name`.
     pub ability_name: String,
     /// `SkillCategory` (PRIMARY / SECONDARY / ...) as raw text.
     pub category: String,
@@ -30,14 +30,14 @@ pub async fn list_for_race(pool: &PgPool, race: &str) -> sqlx::Result<Vec<RaceAb
         SELECT
             ra.race::text       AS "race!: String",
             ra.ability_id,
-            a.plain_name        AS "ability_name!: String",
+            a.name              AS "ability_name!: String",
             ra.category::text   AS "category!: String",
             ra.bonus,
             ra.proficiency_cap
         FROM "RaceAbilities" ra
         JOIN "Ability" a ON a.id = ra.ability_id
         WHERE ra.race::text = $1
-        ORDER BY a.plain_name
+        ORDER BY a.name
         "#,
         race,
     )
