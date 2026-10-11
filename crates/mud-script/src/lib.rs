@@ -913,6 +913,7 @@ impl LuaHost {
                 if let Some((zone, id)) = key {
                     t.set("zone_id", zone)?;
                     t.set("id", id)?;
+                    t.set("local_id", id)?;
                 }
                 env.raw_set("room", t)?;
             }
@@ -2582,6 +2583,7 @@ const READ_ACTOR_FIELDS: &[&str] = &[
     "is_fighting",
     "flags",
     "id",
+    "local_id",
     "zone_id",
 ];
 
@@ -3590,7 +3592,7 @@ impl UserData for LuaActor {
             world_from_lua(lua, |w| entity_is_staff(w, this.entity))
         });
 
-        // Field access (`self.room`, `self.id`, `self.zone_id`,
+        // Field access (`self.room`, `self.id`, `self.local_id`, `self.zone_id`,
         // `self.name`, `self.hp`, `self.max_hp`). The DG-Script-converted
         // corpus uses `obj.field` syntax, not `obj:field()`. Returning
         // nil for unknown fields is intentional — the trigger's intent
@@ -3618,7 +3620,10 @@ impl UserData for LuaActor {
                             None => Ok(Value::Nil),
                         }
                     }
-                    "id" => world_from_lua(lua, |w| {
+                    // `local_id` is the documented composite-key spelling
+                    // (`zone_id` + `local_id`); same value as `id`. Players
+                    // have no WorldKey and read 0 for both.
+                    "id" | "local_id" => world_from_lua(lua, |w| {
                         Value::Integer(w.get::<WorldKey>(this.entity).map_or(0, |wk| wk.id).into())
                     }),
                     "zone_id" => world_from_lua(lua, |w| {
@@ -4925,7 +4930,7 @@ enum ProtoKind {
 
 /// Read-only handle to a prototype row. Returned by `mobiles.template`
 /// and `objects.template` so trigger bodies can inspect proto fields
-/// (`.name`, `.id`, `.zone_id`) without spawning.
+/// (`.name`, `.id`, `.local_id`, `.zone_id`) without spawning.
 #[derive(Clone, Copy)]
 pub struct LuaProto {
     pub zone: i32,
@@ -4939,7 +4944,7 @@ impl UserData for LuaProto {
             MetaMethod::Index,
             |lua, this, key: String| -> mlua::Result<Value> {
                 match key.as_str() {
-                    "id" => Ok(Value::Integer(this.id.into())),
+                    "id" | "local_id" => Ok(Value::Integer(this.id.into())),
                     "zone_id" => Ok(Value::Integer(this.zone.into())),
                     "name" => {
                         let s = world_from_lua(lua, |w| match this.kind {
@@ -5717,6 +5722,59 @@ mod tests {
             .exec_for_actor(&mut world, actor, "print(self.name)")
             .expect("ok");
         assert_eq!(out, "TestActor\r\n");
+    }
+
+    #[test]
+    fn local_id_matches_id_for_mobs_items_and_players() {
+        let mut world = World::new();
+        let mob = world
+            .spawn((
+                Mob,
+                Named { name: "Orc".into() },
+                WorldKey { zone: 53, id: 14 },
+            ))
+            .id();
+        let other_mob = world
+            .spawn((
+                Mob,
+                Named { name: "Orc".into() },
+                WorldKey { zone: 54, id: 14 },
+            ))
+            .id();
+        let item = world
+            .spawn((
+                Item,
+                Named { name: "Gem".into() },
+                WorldKey { zone: 53, id: 46 },
+            ))
+            .id();
+        let player = world.spawn((Player, Named { name: "P".into() })).id();
+        let mut host = LuaHost::new();
+        let body = "print(self.zone_id, self.local_id, self.id)";
+        assert_eq!(
+            host.exec_for_actor(&mut world, mob, body).unwrap(),
+            "53\t14\t14\r\n"
+        );
+        assert_eq!(
+            host.exec_for_actor(&mut world, item, body).unwrap(),
+            "53\t46\t46\r\n"
+        );
+        // (zone_id, local_id) tells same-local-id mobs of different zones apart.
+        assert_eq!(
+            host.exec_for_actor(&mut world, other_mob, body).unwrap(),
+            "54\t14\t14\r\n"
+        );
+        // Players have no WorldKey: local_id reads 0, like id and zone_id.
+        assert_eq!(
+            host.exec_for_actor(&mut world, player, body).unwrap(),
+            "0\t0\t0\r\n"
+        );
+        // The read-only `actor` binding exposes it too.
+        assert_eq!(
+            host.exec_for_actor(&mut world, mob, "print(actor.local_id)")
+                .unwrap(),
+            "14\r\n"
+        );
     }
 
     #[test]
