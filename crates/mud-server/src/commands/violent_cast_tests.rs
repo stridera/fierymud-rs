@@ -285,3 +285,110 @@ fn a_buff_cast_on_yourself_keeps_the_first_person_lines() {
     assert!(drain(&mut rx).contains("You rise into the air and begin to fly."));
     assert!(drain(&mut wrx).contains("Tester rises into the air and begins to fly."));
 }
+
+const WORD_OF_COMMAND: i32 = 5;
+const WORD_OF_RECALL: i32 = 6;
+
+/// `word` prefixes both Word of Command (violent, sorts first) and Word of
+/// Recall; the caster knows both, as an immortal does.
+fn world_with_word_spells() -> (World, Entity, Entity, Rx) {
+    let (mut world, room, caster, rx) = world_with_spells();
+    {
+        let mut catalog = world.resource_mut::<AbilityCatalog>();
+        spell(
+            &mut catalog,
+            WORD_OF_COMMAND,
+            "word_of_command",
+            true,
+            MODIFY,
+        );
+        spell(
+            &mut catalog,
+            WORD_OF_RECALL,
+            "word_of_recall",
+            false,
+            MODIFY,
+        );
+    }
+    world
+        .get_mut::<KnownAbilities>(caster)
+        .unwrap()
+        .entries
+        .extend([(WORD_OF_COMMAND, 500, true), (WORD_OF_RECALL, 500, true)]);
+    world.entity_mut(room).insert(mud_world::PeacefulRoom);
+    (world, room, caster, rx)
+}
+
+fn cast_args(world: &mut World, caster: Entity, args: &str) {
+    crate::commands::reset_cast_landed();
+    invoke_ability_with(
+        world,
+        caster,
+        args,
+        AbilityKind::Spell,
+        "cast",
+        false,
+        false,
+        false,
+        None,
+    );
+}
+
+#[test]
+fn unquoted_word_of_recall_works_in_a_peaceful_room() {
+    let (mut world, _room, caster, mut rx) = world_with_word_spells();
+    drain(&mut rx);
+    cast_args(&mut world, caster, "word of recall");
+    let out = drain(&mut rx);
+    assert!(!out.contains("peaceful aura"), "{out}");
+    assert!(crate::commands::cast_landed(), "recall landed: {out}");
+}
+
+#[test]
+fn quoted_and_abbreviated_word_of_recall_work_in_a_peaceful_room() {
+    let (mut world, _room, caster, mut rx) = world_with_word_spells();
+    for args in ["'word of recall'", "word of rec", "'word of recall' me"] {
+        drain(&mut rx);
+        cast_args(&mut world, caster, args);
+        let out = drain(&mut rx);
+        assert!(!out.contains("peaceful aura"), "{args}: {out}");
+        assert!(crate::commands::cast_landed(), "{args}: {out}");
+    }
+}
+
+#[test]
+fn word_of_command_is_still_refused_in_a_peaceful_room() {
+    let (mut world, room, caster, mut rx) = world_with_word_spells();
+    goblin(&mut world, room);
+    drain(&mut rx);
+    cast_args(&mut world, caster, "word of command goblin");
+    let out = drain(&mut rx);
+    assert!(out.contains("peaceful aura"), "{out}");
+    assert!(!crate::commands::cast_landed());
+}
+
+#[test]
+fn unquoted_multiword_name_keeps_the_rest_as_the_target() {
+    let (mut world, _room, _caster, _rx) = world_with_spells();
+    world.resource_mut::<AbilityCatalog>().by_name.insert(
+        "magic_missile".into(),
+        ability_def(9, "magic_missile", AbilityKind::Spell),
+    );
+    let catalog = world.resource::<AbilityCatalog>();
+    let found = super::unquoted_multiword_ability("magic missile goblin", |n| {
+        catalog
+            .find_by_prefix(n, Some(AbilityKind::Spell), None)
+            .map(|d| d.id)
+    });
+    assert_eq!(
+        found,
+        Some((9, Some("goblin"), "magic_missile".to_string()))
+    );
+    // A lone word never takes the multi-word path.
+    assert_eq!(
+        super::unquoted_multiword_ability("ray goblin", |n| catalog
+            .find_by_prefix(n, Some(AbilityKind::Spell), None)
+            .map(|d| d.id)),
+        None
+    );
+}

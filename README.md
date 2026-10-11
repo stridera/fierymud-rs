@@ -48,11 +48,25 @@ The server expects a populated PostgreSQL database (imported via FieryLib) and a
 DATABASE_URL=postgres://user@localhost/fierydev ./target/release/mud-server
 ```
 
-| Listener        | Default            | Env override            |
-|-----------------|--------------------|-------------------------|
-| Telnet          | `0.0.0.0:4003`     | `MUD_LISTEN_ADDR`       |
-| TLS (optional)  | `0.0.0.0:4443`     | `MUD_TLS_LISTEN_ADDR`   |
-| Admin HTTP API  | `127.0.0.1:8080`   | `ADMIN_LISTEN_ADDR`     |
+| Listener        | Default            | Address override        | Port override      |
+|-----------------|--------------------|-------------------------|--------------------|
+| Telnet          | `0.0.0.0:4003`     | `MUD_LISTEN_ADDR`       | `MUD_TELNET_PORT`  |
+| TLS (optional)  | `0.0.0.0:4443`     | `MUD_TLS_LISTEN_ADDR`   | `MUD_TLS_PORT` (`0` = off) |
+| Admin HTTP API  | `127.0.0.1:8080`   | `ADMIN_LISTEN_ADDR`     | `ADMIN_PORT`       |
+
+Precedence for telnet and TLS: port env var, then the `server.port` /
+`server.tls_port` `GameConfig` rows, then the address env var, then the
+default. `ADMIN_PORT` replaces only the port of `ADMIN_LISTEN_ADDR`. The
+effective ports are logged when the tick loop starts.
+
+### Running a second (scratch) server
+
+A scratch server can run beside the dev server by overriding the ports. It
+shares the same database, so it writes to the same player rows:
+
+```bash
+MUD_TELNET_PORT=5003 MUD_TLS_PORT=0 ADMIN_PORT=8180 ./target/debug/mud-server
+```
 
 The admin HTTP API (localhost-only by default; bearer auth via `ADMIN_TOKEN`)
 exposes `/api/admin/*` endpoints for world inspection and manipulation —

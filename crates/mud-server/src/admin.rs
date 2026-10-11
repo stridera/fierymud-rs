@@ -197,7 +197,8 @@ struct AppState {
 }
 
 /// Spawn the HTTP listener on `ADMIN_LISTEN_ADDR` (default
-/// `127.0.0.1:8080`). Returns the inbox receiver so the caller
+/// `127.0.0.1:8080`; `ADMIN_PORT` overrides just the port). Returns the
+/// effective bind address (`None` when refused) and the inbox receiver so the caller
 /// can install it as a bevy resource. The pool is used by handlers
 /// that need DB access (e.g. `session/create` loads the character
 /// and its inventory before handing off to the world tick).
@@ -209,12 +210,12 @@ struct AppState {
 /// from another machine on a trusted LAN), set
 /// `ADMIN_ALLOW_UNAUTH_LOCAL=true` — explicit and easy to grep for in
 /// production logs.
-pub fn spawn_admin_server(pool: PgPool) -> mpsc::Receiver<AdminCommand> {
+pub fn spawn_admin_server(pool: PgPool) -> (mpsc::Receiver<AdminCommand>, Option<SocketAddr>) {
     let (tx, rx) = mpsc::channel::<AdminCommand>(ADMIN_QUEUE_CAP);
-    let addr: SocketAddr = std::env::var("ADMIN_LISTEN_ADDR")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| "127.0.0.1:8080".parse().expect("default admin addr parses"));
+    let addr = crate::envflags::resolve_admin_addr(
+        crate::envflags::port_from_env("ADMIN_PORT"),
+        std::env::var("ADMIN_LISTEN_ADDR").ok().as_deref(),
+    );
     // An empty / whitespace-only ADMIN_TOKEN is "unset", never a valid
     // secret (an empty expected token would match a request with no header).
     let token = crate::envflags::non_blank(std::env::var("ADMIN_TOKEN").ok()).map(Arc::new);
@@ -228,7 +229,7 @@ pub fn spawn_admin_server(pool: PgPool) -> mpsc::Receiver<AdminCommand> {
             "admin HTTP refused: non-loopback bind without ADMIN_TOKEN. \
              Set ADMIN_TOKEN, or ADMIN_ALLOW_UNAUTH_LOCAL=true to bypass (dev only)."
         );
-        return rx;
+        return (rx, None);
     }
     if token.is_none() {
         warn!(%addr, "admin HTTP API starting WITHOUT ADMIN_TOKEN: all /api/admin/* endpoints are unauthenticated");
@@ -246,7 +247,7 @@ pub fn spawn_admin_server(pool: PgPool) -> mpsc::Receiver<AdminCommand> {
             Err(e) => warn!(%addr, error = %e, "admin HTTP listener bind failed"),
         }
     });
-    rx
+    (rx, Some(addr))
 }
 
 fn build_router(state: AppState) -> Router {

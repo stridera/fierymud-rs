@@ -15225,6 +15225,46 @@ pub(crate) fn parse_quoted_first_token(args: &str) -> (String, Option<&str>) {
     (head, tail)
 }
 
+/// Longest run of two or more leading words in unquoted `args` that
+/// `lookup` resolves to an ability, with the remaining words as the target
+/// and the underscore-joined needle that matched. `None` when no multi-word
+/// run matches (the caller keeps the single-first-word resolution).
+fn unquoted_multiword_ability<T>(
+    args: &str,
+    lookup: impl Fn(&str) -> Option<T>,
+) -> Option<(T, Option<&str>, String)> {
+    let trimmed = args.trim_start();
+    // Byte offset where each word ends.
+    let mut ends = Vec::new();
+    let mut in_word = false;
+    for (i, c) in trimmed.char_indices() {
+        if c.is_whitespace() {
+            if in_word {
+                ends.push(i);
+            }
+            in_word = false;
+        } else {
+            in_word = true;
+        }
+    }
+    if in_word {
+        ends.push(trimmed.len());
+    }
+    for n in (2..=ends.len()).rev() {
+        let head = &trimmed[..ends[n - 1]];
+        let needle = head
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join("_")
+            .to_ascii_lowercase();
+        if let Some(found) = lookup(&needle) {
+            let tail = trimmed[ends[n - 1]..].trim();
+            return Some((found, (!tail.is_empty()).then_some(tail), needle));
+        }
+    }
+    None
+}
+
 /// fn-ptr shim used by the Lua `skills.execute` binding. Hardcodes
 /// kind=Skill / verb="use" so the host doesn't have to know about
 /// `AbilityKind`. The signature matches `mud_script::SkillExecutor`.
@@ -15967,15 +16007,31 @@ pub(crate) fn invoke_ability_core(
         send_to(world, player, format!("{} what?\r\n", capitalize(verb)));
         return;
     }
-    let needle = raw_needle.to_ascii_lowercase().replace(' ', "_");
+    let mut needle = raw_needle.to_ascii_lowercase().replace(' ', "_");
 
     // Exact name (of the right kind) wins; otherwise the typed words must
     // be a prefix of the ability name (`invis` never reaches
     // `mass_invisibility`).
-    let def = world
+    let mut def = world
         .resource::<AbilityCatalog>()
         .find_by_prefix(&needle, Some(kind), world.get::<KnownAbilities>(player))
         .cloned();
+    // Unquoted multi-word names (`cast word of recall`): the first word alone
+    // is a prefix of several spells (`word` also reaches Word of Command), so
+    // try the longest run of leading words that names an ability before
+    // settling for the first word.
+    let mut target_word = target_word;
+    if !args.trim_start().starts_with(['\'', '"']) {
+        let catalog = world.resource::<AbilityCatalog>();
+        let known = world.get::<KnownAbilities>(player);
+        if let Some((found, tail, joined)) = unquoted_multiword_ability(args, |n| {
+            catalog.find_by_prefix(n, Some(kind), known).cloned()
+        }) {
+            def = Some(found);
+            target_word = tail;
+            needle = joined;
+        }
+    }
     let Some(def) = def else {
         send_to(
             world,

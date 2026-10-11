@@ -415,18 +415,17 @@ async fn main() {
     // legacy "trigger on creation" semantics.
     triggers::fire_load_for_all_mobs(&mut world);
 
-    // Listen address precedence: GameConfig > env > hardcoded default.
-    // GameConfig is the operator-facing source of truth; env still
-    // works as a dev-time override (`MUD_LISTEN_ADDR=...`); hardcoded
-    // default is the last-resort fallback when neither is set.
+    // Listen address precedence: `MUD_TELNET_PORT` env > GameConfig
+    // `server.port` > `MUD_LISTEN_ADDR` env > hardcoded default. The port
+    // env var lets a scratch server run beside the dev server against the
+    // same GameConfig (see README "Running a second server").
     let listen_addr = {
         let cfg = world.resource::<mud_world::RuntimeConfig>();
-        let port = cfg.get_i32("server", "port", 0);
-        if port > 0 {
-            format!("0.0.0.0:{port}")
-        } else {
-            std::env::var("MUD_LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:4003".into())
-        }
+        envflags::resolve_telnet_addr(
+            envflags::port_from_env("MUD_TELNET_PORT"),
+            cfg.get_i32("server", "port", 0),
+            envflags::non_blank(std::env::var("MUD_LISTEN_ADDR").ok()),
+        )
     };
     // Inbound command queue cap. Reads from
     // `server.max_command_queue_size` GameConfig (default 4096); a
@@ -519,28 +518,34 @@ async fn main() {
         world
             .resource::<mud_world::RuntimeConfig>()
             .get_bool("security", "enable_tls", true);
+    let tls_port_env = envflags::port_from_env("MUD_TLS_PORT");
+    // Effective TLS address for the boot log; `None` when disabled.
+    let mut effective_tls_addr: Option<String> = None;
     if !enable_tls {
         info!("TLS listener disabled by `security.enable_tls=false`");
+    } else if tls_port_env == Some(0) {
+        info!("TLS listener disabled by MUD_TLS_PORT=0");
     } else if let (Ok(cert_path), Ok(key_path)) = (
         std::env::var("TLS_CERT_PATH"),
         std::env::var("TLS_KEY_PATH"),
     ) {
-        // TLS port: same precedence chain as plain telnet.
+        // TLS port: `MUD_TLS_PORT` > `server.tls_port` > `MUD_TLS_LISTEN_ADDR` > default.
         let tls_addr = {
             let cfg = world.resource::<mud_world::RuntimeConfig>();
-            let port = cfg.get_i32("server", "tls_port", 0);
-            if port > 0 {
-                format!("0.0.0.0:{port}")
-            } else {
-                std::env::var("MUD_TLS_LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:4443".into())
-            }
+            envflags::resolve_tls_addr(
+                tls_port_env,
+                cfg.get_i32("server", "tls_port", 0),
+                envflags::non_blank(std::env::var("MUD_TLS_LISTEN_ADDR").ok()),
+            )
+            .expect("MUD_TLS_PORT=0 handled above")
         };
         // Required by rustls 0.23+: install a default crypto provider
         // before any ServerConfig is built.
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         info!(tls_addr = %tls_addr, cert = %cert_path, "TLS listener configured");
+        effective_tls_addr = Some(tls_addr.clone());
         let inbound_tx_tls = inbound_tx.clone();
-        let tls_addr_for_task = tls_addr.clone();
+        let tls_addr_for_task = tls_addr;
         let cert_path_for_task = cert_path.clone();
         let key_path_for_task = key_path.clone();
         tokio::spawn(async move {
@@ -559,8 +564,8 @@ async fn main() {
     } else {
         info!(
             "TLS disabled — set TLS_CERT_PATH and TLS_KEY_PATH to enable on \
-             the configured tls_port (`server.tls_port` GameConfig row, \
-             then $MUD_TLS_LISTEN_ADDR, then 0.0.0.0:4443)"
+             the configured tls_port (`MUD_TLS_PORT`, then `server.tls_port` \
+             GameConfig row, then $MUD_TLS_LISTEN_ADDR, then 0.0.0.0:4443)"
         );
     }
     drop(inbound_tx);
@@ -568,7 +573,7 @@ async fn main() {
     // Spawn the admin HTTP listener and install its inbox + virtual
     // session table as resources so the world tick can drain pending
     // requests synchronously each frame.
-    let admin_rx = admin::spawn_admin_server(pool.clone());
+    let (admin_rx, admin_addr) = admin::spawn_admin_server(pool.clone());
     world.insert_resource(admin::AdminInbox(std::sync::Mutex::new(admin_rx)));
     world.insert_resource(admin::VirtualSessions::default());
     world.insert_resource(admin::WorldPause::default());
@@ -681,6 +686,8 @@ async fn main() {
     info!(
         rate_hz = TICK_HZ,
         listen_addr = %listen_addr,
+        tls_addr = effective_tls_addr.as_deref().unwrap_or("off"),
+        admin_addr = admin_addr.map_or_else(|| "off".to_string(), |a| a.to_string()),
         "tick loop running; Ctrl-C / SIGTERM to stop"
     );
 
