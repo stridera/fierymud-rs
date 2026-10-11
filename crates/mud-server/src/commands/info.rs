@@ -2054,11 +2054,11 @@ inventory::submit! {
         required_perm: None,
         category: Category::Quest,
         help: Help {
-            usage: "quest",
+            usage: "quest [on|off]",
             summary: "Join or leave the Quest event.",
             long: "Toggles your QUEST flag, which marks you as taking part \
-                   in staff-run quest events. Use 'quests' to see your \
-                   own quests.",
+                   in staff-run quest events ('quest on' / 'quest off' set \
+                   it explicitly). Use 'quests' to see your own quests.",
         },
         run: cmd_quest_flag,
     }
@@ -9125,7 +9125,37 @@ fn fighting_another_player(world: &mut World, player: Entity) -> bool {
     })
 }
 
-pub(crate) fn cmd_quest_flag(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_quest_flag(world: &mut World, player: Entity, args: &str) {
+    // Only a bare `quest` (or `quest on` / `quest off`) touches the flag;
+    // `quest list` and friends must not silently flip it.
+    let arg = args.trim();
+    let want = match arg.to_ascii_lowercase().as_str() {
+        "" => None,
+        "on" => Some(true),
+        "off" => Some(false),
+        _ => {
+            send_to(
+                world,
+                player,
+                "Usage: quest [on|off]. To see your own quests, use 'quests'.\r\n",
+            );
+            return;
+        }
+    };
+    if let Some(want) = want {
+        let is_on = world
+            .get::<PlayerFlags>(player)
+            .is_some_and(|pf| pf.has(PlayerFlag::Quest));
+        if is_on == want {
+            let msg = if want {
+                "You are already part of the Quest.\r\n"
+            } else {
+                "You are not part of the Quest.\r\n"
+            };
+            send_to(world, player, msg);
+            return;
+        }
+    }
     toggle_player_flag(
         world,
         player,
@@ -10907,8 +10937,10 @@ fn split_put_args(args: &str) -> Option<(&str, &str)> {
     if let Some(pair) = split_preposition(args, &["in", "into", "on"]) {
         return Some(pair);
     }
-    let (item, container) = args.split_once(char::is_whitespace)?;
-    (!container.trim().is_empty()).then_some((item.trim(), container.trim()))
+    // Same rule as `put_plain`: the container is the last word.
+    let (item, container) = args.trim().rsplit_once(char::is_whitespace)?;
+    (!item.trim().is_empty() && !container.trim().is_empty())
+        .then_some((item.trim(), container.trim()))
 }
 
 /// Split `give` arguments into `(item, target)`.
@@ -11531,17 +11563,22 @@ fn put_plain(world: &mut World, player: Entity, args: &str) {
     // <container>`. The preposition forms are natural and match how
     // players type it.
     let trimmed = args.trim();
-    let (item_word, container_word) =
-        if let Some(pair) = split_preposition(trimmed, &["in", "into", "on"]) {
-            pair
-        } else {
-            let parts: Vec<&str> = trimmed.splitn(2, char::is_whitespace).collect();
-            if parts.len() != 2 || parts[1].trim().is_empty() {
+    let (item_word, container_word) = if let Some(pair) =
+        split_preposition(trimmed, &["in", "into", "on"])
+    {
+        pair
+    } else {
+        // No preposition: the container is the LAST word and the item is
+        // everything before it, so `put flour bag` puts the flour in the
+        // bag and `put bag of flour sack` names a three-word item.
+        match trimmed.rsplit_once(char::is_whitespace) {
+            Some((item, container)) if !item.trim().is_empty() => (item.trim(), container.trim()),
+            _ => {
                 send_to(world, player, "Usage: put <item> in <container>\r\n");
                 return;
             }
-            (parts[0].trim(), parts[1].trim())
-        };
+        }
+    };
 
     let Some(located) = world.get::<Located>(player).copied() else {
         return;
@@ -11549,7 +11586,29 @@ fn put_plain(world: &mut World, player: Entity, args: &str) {
     let room = located.0;
     let player_name = name_of(world, player);
 
-    let container = find_item(world, player, container_word, ItemClass::CarriedFirst);
+    // The item first (silently): a same-keyword item must not be taken for
+    // the container, e.g. `put flour bag` with a bag of flour AND a bag.
+    let item_hint = if parse_all_filter(item_word).is_some() {
+        None
+    } else {
+        find_item(world, player, item_word, ItemClass::Inventory)
+    };
+    let mut container = find_item(world, player, container_word, ItemClass::CarriedFirst);
+    if container.is_some_and(|c| Some(c) == item_hint || !is_container_entity(world, c))
+        && !container_word.contains('.')
+    {
+        let better = crate::commands::item_target::find_items_all(
+            world,
+            player,
+            container_word,
+            ItemClass::CarriedFirst,
+        )
+        .into_iter()
+        .find(|c| Some(*c) != item_hint && is_container_entity(world, *c));
+        if better.is_some() {
+            container = better;
+        }
+    }
     let Some(container) = container else {
         send_rendered(
             world,
@@ -17728,6 +17787,39 @@ mod playtest_2026_10_11_tests {
         assert!(!out.contains("once those land"), "{out}");
         dispatch(&mut world, p, "quest");
         assert!(drain(&mut rx).contains("You are no longer part of the Quest."));
+    }
+
+    /// Playtest r3 #62: only a bare `quest` (or `on` / `off`) touches the
+    /// flag; `quest list` and friends print usage and leave it alone.
+    #[test]
+    fn quest_with_other_arguments_does_not_toggle_the_flag() {
+        let mut world = World::new();
+        let room = world.spawn((Room, RoomSector(Sector::Field))).id();
+        let (p, mut rx) = player_in(&mut world, room);
+        with_account(&mut world, p);
+        world
+            .entity_mut(p)
+            .insert(mud_world::PlayerFlags::default());
+        let on = |w: &World| {
+            w.get::<mud_world::PlayerFlags>(p)
+                .unwrap()
+                .has(mud_db::enums::PlayerFlag::Quest)
+        };
+        for args in ["quest list", "quest accept 1", "quest foo"] {
+            dispatch(&mut world, p, args);
+            let out = drain(&mut rx);
+            assert!(out.contains("Usage: quest [on|off]"), "{args}: {out}");
+            assert!(!on(&world), "{args} must not flip the flag");
+        }
+        dispatch(&mut world, p, "quest on");
+        assert!(on(&world));
+        dispatch(&mut world, p, "quest on");
+        assert!(drain(&mut rx).contains("already part of the Quest"));
+        assert!(on(&world));
+        dispatch(&mut world, p, "quest off");
+        assert!(!on(&world));
+        dispatch(&mut world, p, "quest");
+        assert!(on(&world));
     }
 
     // #32: uniform equipment rows.

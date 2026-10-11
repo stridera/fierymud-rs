@@ -735,4 +735,25 @@ mod tests {
         // The opponent was resolved: the PK rule for a player target fired.
         assert!(text.contains("You must turn on PK first"), "{text}");
     }
+    /// Playtest r3 #82: legacy `do_rescue` looks for an attacker first.
+    #[test]
+    fn rescue_of_someone_nobody_is_attacking_says_so() {
+        let (mut world, rescuer, _b, mut rx) = duo();
+        let room = world.get::<Located>(rescuer).unwrap().0;
+        let (_ally, _y) = ally_under_attack(&mut world, room);
+        let (idle, _irx) = player_in(&mut world, room);
+        world.entity_mut(idle).insert((
+            Named {
+                name: "Idle".into(),
+            },
+            mud_world::Keywords(vec!["idle".into()]),
+        ));
+        install_rescue(&mut world, rescuer);
+        let _ = drain(&mut rx);
+        crate::commands::combat_commands::cmd_rescue(&mut world, rescuer, "idle");
+        let text = drain(&mut rx);
+        assert!(text.contains("But nobody is fighting Idle!"), "{text}");
+        assert!(!text.contains("Banzai"), "{text}");
+        assert!(world.get::<Fighting>(rescuer).is_none());
+    }
 }

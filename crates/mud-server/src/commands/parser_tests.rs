@@ -765,6 +765,64 @@ fn ability_prefix_prefers_spells_the_caster_knows() {
     assert_eq!(id(Some(&KnownAbilities::default())), Some(1));
 }
 
+/// Playtest r3 #81: `cast m` with several matching spells is a question.
+#[test]
+fn ambiguous_ability_prefix_lists_the_known_candidates() {
+    use crate::commands::test_support::ability_def;
+    use mud_db::abilities::AbilityKind::Spell;
+    use mud_world::{AbilityCatalog, KnownAbilities};
+
+    let mut catalog = AbilityCatalog::default();
+    for (id, plain, display) in [
+        (1, "magic_missile", "Magic Missile"),
+        (2, "mass_invisibility", "Mass Invisibility"),
+        (3, "meteorswarm", "Meteorswarm"),
+        (4, "fire", "Fire"),
+        (5, "fireball", "Fireball"),
+    ] {
+        let mut def = ability_def(id, plain, Spell);
+        def.name = display.to_string();
+        catalog.by_name.insert(plain.to_string(), def);
+    }
+    let known = KnownAbilities {
+        entries: vec![(1, 100, true), (2, 100, true)],
+    };
+    // Two known matches: listed alphabetically, lowercase; the unknown
+    // Meteorswarm is not offered.
+    assert_eq!(
+        catalog.ambiguous_prefix_names("m", Spell, Some(&known)),
+        vec!["magic missile".to_string(), "mass invisibility".to_string()]
+    );
+    // One known match is no question.
+    let one = KnownAbilities {
+        entries: vec![(1, 100, true)],
+    };
+    assert!(
+        catalog
+            .ambiguous_prefix_names("m", Spell, Some(&one))
+            .is_empty()
+    );
+    // Nothing known: every prefix match is a candidate.
+    assert_eq!(
+        catalog
+            .ambiguous_prefix_names("m", Spell, Some(&KnownAbilities::default()))
+            .len(),
+        3
+    );
+    // An exact name is never ambiguous.
+    assert!(
+        catalog
+            .ambiguous_prefix_names("fire", Spell, Some(&KnownAbilities::default()))
+            .is_empty()
+    );
+    // A unique prefix is not either.
+    assert!(
+        catalog
+            .ambiguous_prefix_names("mag", Spell, Some(&known))
+            .is_empty()
+    );
+}
+
 #[test]
 fn ability_lookup_resolves_the_full_display_name_of_an_abbreviated_plain_name() {
     use crate::commands::test_support::ability_def;

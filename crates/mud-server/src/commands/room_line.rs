@@ -122,6 +122,10 @@ fn phrase(world: &mut World, viewer: Entity, actor: Entity) -> String {
         Some(Hold::Stunned) => return " is here, stunned.".to_string(),
         None => {}
     }
+    // A ghost has left its body; "standing here" would read as alive.
+    if world.get::<mud_world::Ghost>(actor).is_some() {
+        return " is here, a disembodied spirit.".to_string();
+    }
     if let Some(Fighting(target)) = world.get::<Fighting>(actor).copied() {
         let who = if target == viewer {
             "YOU".to_string()

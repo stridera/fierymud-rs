@@ -2333,6 +2333,21 @@ pub struct AbilityCatalog {
     pub passive_ids: std::collections::HashSet<i32>,
 }
 
+/// `name` with its `<...>` colour tags removed (apostrophes kept).
+fn strip_tags(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut in_tag = false;
+    for c in name.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
 /// Display name reduced to matchable words: colour tags and apostrophes
 /// dropped (`<b:red>Gaia's Cloak</>` -> `Gaias Cloak`).
 fn display_key(name: &str) -> String {
@@ -2387,6 +2402,48 @@ impl AbilityCatalog {
         kind: Option<mud_db::abilities::AbilityKind>,
     ) -> Option<&AbilityDef> {
         self.find_ranked(needle, kind, None, true)
+    }
+
+    /// The abilities an abbreviated `needle` could mean, when it is
+    /// ambiguous: no exact name, and more than one prefix match. Abilities
+    /// the caster `known`s are the only candidates when any of them match
+    /// (so an unlearned spell never muddies the list); otherwise every
+    /// prefix match counts. Names come back lowercase with colour tags
+    /// stripped, in alphabetical order, ready for "Did you mean: ...?".
+    /// Empty when the needle resolves unambiguously.
+    #[must_use]
+    pub fn ambiguous_prefix_names(
+        &self,
+        needle: &str,
+        kind: mud_db::abilities::AbilityKind,
+        known: Option<&crate::components::KnownAbilities>,
+    ) -> Vec<String> {
+        use crate::targeting::{NameRank, rank_ability_name};
+        let mut matches: Vec<(bool, String)> = Vec::new();
+        for d in self.by_name.values().filter(|d| d.kind == kind) {
+            let rank = match rank_ability_name(needle, &d.plain_name) {
+                NameRank::None => rank_ability_name(needle, &display_key(&d.name)),
+                r => r,
+            };
+            match rank {
+                NameRank::Exact => return Vec::new(),
+                NameRank::Prefix => {
+                    let is_known = known.is_some_and(|k| k.has_any(d.id));
+                    matches.push((is_known, strip_tags(&d.name).to_lowercase()));
+                }
+                NameRank::None => {}
+            }
+        }
+        if matches.iter().any(|(k, _)| *k) {
+            matches.retain(|(k, _)| *k);
+        }
+        let mut names: Vec<String> = matches.into_iter().map(|(_, n)| n).collect();
+        names.sort();
+        names.dedup();
+        if names.len() < 2 {
+            names.clear();
+        }
+        names
     }
 
     fn find_ranked(

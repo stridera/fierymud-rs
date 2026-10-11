@@ -120,3 +120,36 @@ fn house_place_refuses_soulbound_and_no_drop_items() {
         assert!(world.get::<mud_world::HousePlacement>(sword).is_none());
     }
 }
+
+/// Playtest r3 #31: `put flour bag` with a bag of flour AND a bag. The
+/// container is the last word and must be a real container that is not the
+/// item itself, even though the bag of flour also answers to `bag`.
+#[test]
+fn put_flour_bag_picks_the_real_container_over_the_bag_of_flour() {
+    let (mut world, player, mut rx) = shop_world();
+    let bag = bag_at(&mut world, player);
+    // Newer than the bag, so it wins a plain `bag` lookup.
+    let flour = item_at(&mut world, player, 9, "a bag of flour", "flour");
+    world
+        .entity_mut(flour)
+        .insert(mud_world::Keywords(vec!["flour".into(), "bag".into()]));
+    cmd_put(&mut world, player, "flour bag");
+    let out = drain(&mut rx);
+    assert!(!out.contains("isn't a container"), "{out}");
+    assert_eq!(world.get::<Located>(flour).unwrap().0, bag, "{out}");
+    assert_eq!(world.get::<Located>(bag).unwrap().0, player);
+}
+
+/// Without a preposition the item is every word before the last one.
+#[test]
+fn put_treats_the_last_word_as_the_container() {
+    let (mut world, player, mut rx) = shop_world();
+    let bag = bag_at(&mut world, player);
+    let sword = item_at(&mut world, player, 7, "a steel sword", "steel");
+    world
+        .entity_mut(sword)
+        .insert(mud_world::Keywords(vec!["steel".into(), "sword".into()]));
+    cmd_put(&mut world, player, "steel sword bag");
+    let out = drain(&mut rx);
+    assert_eq!(world.get::<Located>(sword).unwrap().0, bag, "{out}");
+}

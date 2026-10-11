@@ -2989,6 +2989,21 @@ pub(crate) fn cmd_rescue(world: &mut World, player: Entity, args: &str) {
         );
         return;
     }
+    // Legacy `do_rescue` looks for an attacker before anything else:
+    // "But nobody is fighting X!" (no stamina spent, no success message).
+    if let Some(located) = world.get::<Located>(player).copied()
+        && let Some(victim) = find_actor_in_room(world, arg, located.0, player)
+        && world.get::<Fighting>(victim).is_none()
+        && !crate::commands::is_being_attacked(world, victim)
+    {
+        let victim_name = name_or(world, victim, arg);
+        send_msg(
+            world,
+            player,
+            format!("But nobody is fighting {victim_name}!\r\n"),
+        );
+        return;
+    }
     let cost = skill_stamina_cost(world, "rescue", RESCUE_COST);
     if !check_stamina(world, player, cost, "rescue") {
         return;

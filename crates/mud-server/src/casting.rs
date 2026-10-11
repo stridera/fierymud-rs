@@ -2135,14 +2135,52 @@ mod tests {
         zap(&mut world, caster, "bob");
         let caster_out = strip_escapes(&drain(&mut rx));
         assert!(
-            caster_out.contains("Your Zap hits") && caster_out.contains("for 500 damage"),
+            caster_out.contains("Your zap hits") && caster_out.contains("for 500 damage"),
             "caster sees the number: {caster_out:?}"
         );
         let bob_out = strip_escapes(&drain(&mut bob_rx));
         assert!(
-            bob_out.contains("Zap hits you for 500 damage"),
+            bob_out.contains("zap hits you for 500 damage"),
             "target sees the number: {bob_out:?}"
         );
+        assert_eq!(hp(&world, bob), 4500);
+    }
+
+    /// Playtest r3 #6: a spell with a caster template shows ONE result line
+    /// (template plus the number), and ability names inside sentences are
+    /// lowercase ("Your zap", never "Your Zap").
+    #[test]
+    fn templated_damage_spell_sends_one_caster_line_with_the_number() {
+        let (mut world, room) = world_with_zap();
+        world.resource_mut::<AbilityCatalog>().messages.insert(
+            ZAP,
+            mud_world::AbilityMessageSet {
+                success_to_caster: Some("You zap {target.name} hard!".into()),
+                ..mud_world::AbilityMessageSet::default()
+            },
+        );
+        let (caster, mut rx) = player_in(&mut world, room);
+        world.entity_mut(caster).insert((
+            Health { hp: 50, max: 50 },
+            KnownAbilities {
+                entries: vec![(ZAP, 500, true)],
+            },
+            mud_world::PlayerFlags(vec![mud_db::enums::PlayerFlag::PkEnabled]),
+        ));
+        let (bob, _bob_rx) = bob_in(&mut world, room);
+        world.entity_mut(bob).insert((
+            Health {
+                hp: 5000,
+                max: 5000,
+            },
+            mud_world::PlayerFlags(vec![mud_db::enums::PlayerFlag::PkEnabled]),
+        ));
+        let _ = drain(&mut rx);
+        zap(&mut world, caster, "bob");
+        let out = strip_escapes(&drain(&mut rx));
+        assert_eq!(out.matches("You zap Bob hard!").count(), 1, "{out:?}");
+        assert!(out.contains("hard! (500 damage)"), "{out:?}");
+        assert!(!out.to_lowercase().contains("your zap hits"), "{out:?}");
         assert_eq!(hp(&world, bob), 4500);
     }
 
@@ -2336,6 +2374,93 @@ mod tests {
             world.get::<KnownAbilities>(caster).is_none(),
             "nothing is written for a god"
         );
+    }
+
+    /// Playtest r3 #83: Dark Presence carries a "victim must not be good"
+    /// rule next to its caster rule. A good god casting it (on themself or a
+    /// good ally) is never told "the dark gods have forsaken you".
+    #[test]
+    fn good_god_casts_dark_presence_on_a_good_target_but_a_good_mortal_cannot() {
+        for (role, allowed) in [
+            (mud_db::enums::UserRole::Player, false),
+            (mud_db::enums::UserRole::Immortal, true),
+        ] {
+            let (mut world, caster, goblin, mut rx) = evil_only_zap(role, true);
+            world
+                .resource_mut::<AbilityCatalog>()
+                .restriction_rules
+                .insert(
+                    ZAP,
+                    ["victim", "caster"]
+                        .into_iter()
+                        .map(|side| {
+                            serde_json::json!({"type": "alignment", "value": "good",
+                                "target": side, "prohibited": true,
+                                "message": "In your goodness, the dark gods have forsaken you!"})
+                        })
+                        .collect(),
+                );
+            world.entity_mut(goblin).insert(mud_world::CombatStats {
+                alignment: 800,
+                ..Default::default()
+            });
+            zap(&mut world, caster, "goblin");
+            let out = drain(&mut rx);
+            assert_eq!(
+                out.contains("dark gods have forsaken you"),
+                !allowed,
+                "{role:?}: {out}"
+            );
+            assert_eq!(
+                world.get_entity(goblin).is_err(),
+                allowed,
+                "{role:?}: {out}"
+            );
+        }
+    }
+
+    /// Playtest r3 #81: `cast z` with two known spells starting with z lists
+    /// them instead of silently casting the alphabetically-first one.
+    #[test]
+    fn ambiguous_spell_prefix_lists_the_candidates_instead_of_casting() {
+        let (mut world, room) = world_with_zap();
+        let zephyr = ability_def(ZAP + 40, "Zephyr", AbilityKind::Spell);
+        let zephyr_id = zephyr.id;
+        world
+            .resource_mut::<AbilityCatalog>()
+            .by_name
+            .insert("zephyr".to_string(), zephyr);
+        let (caster, mut rx) = player_in(&mut world, room);
+        world.entity_mut(caster).insert((
+            Health { hp: 50, max: 50 },
+            KnownAbilities {
+                entries: vec![(ZAP, 500, true), (zephyr_id, 500, true)],
+            },
+        ));
+        let (goblin, _) = goblin_with_loot(&mut world, room);
+        let _ = drain(&mut rx);
+        let cast = |world: &mut World, args: &str| {
+            crate::commands::invoke_ability_with(
+                world,
+                caster,
+                args,
+                AbilityKind::Spell,
+                "cast",
+                false,
+                false,
+                true,
+                None,
+            );
+        };
+        cast(&mut world, "z goblin");
+        let out = strip_escapes(&drain(&mut rx));
+        assert!(out.contains("Did you mean: zap, zephyr?"), "{out}");
+        assert!(world.get::<Casting>(caster).is_none(), "nothing was cast");
+        assert!(world.get_entity(goblin).is_ok());
+        // An unambiguous abbreviation still resolves.
+        cast(&mut world, "ze goblin");
+        let out = strip_escapes(&drain(&mut rx));
+        assert!(!out.contains("Did you mean"), "{out}");
     }
 
     #[test]

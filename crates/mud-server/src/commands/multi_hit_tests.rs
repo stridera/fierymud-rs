@@ -65,12 +65,14 @@ fn every_dart_gets_its_own_message_and_damage_line() {
         5,
         "{out}"
     );
+    // Playtest r3 #6: the dart line carries the number; no second
+    // "Your Ice Darts hits ..." line per dart.
     assert_eq!(
-        out.matches("Your Ice Darts hits").count(),
+        out.matches("(7 damage)").count(),
         5,
-        "one damage line per dart: {out}"
+        "one result line per dart: {out}"
     );
-    assert_eq!(out.matches("for 7 damage").count(), 5, "{out}");
+    assert!(!out.to_lowercase().contains("your ice darts hits"), "{out}");
     assert_eq!(fx.world.get::<Health>(rat).unwrap().hp, 500 - 5 * 7);
     let seen = drain(&mut wrx);
     assert_eq!(
@@ -87,7 +89,7 @@ fn a_single_bolt_spell_keeps_one_message() {
     cast(&mut fx, p, "cast 'ice darts' rat");
     let out = drain(&mut rx);
     assert_eq!(out.matches("You sling an ice dart").count(), 1, "{out}");
-    assert_eq!(out.matches("for 7 damage").count(), 1, "{out}");
+    assert_eq!(out.matches("(7 damage)").count(), 1, "{out}");
     assert_eq!(fx.world.get::<Health>(rat).unwrap().hp, 493);
 }
 
@@ -98,7 +100,7 @@ fn darts_stop_when_the_victim_dies_and_pelt_the_corpse() {
     let _ = drain(&mut rx);
     cast(&mut fx, p, "cast 'ice darts' rat");
     let out = drain(&mut rx);
-    assert_eq!(out.matches("for 7 damage").count(), 2, "{out}");
+    assert_eq!(out.matches("(7 damage)").count(), 2, "{out}");
     assert_eq!(out.matches("dead already").count(), 1, "{out}");
 }
 
@@ -132,7 +134,7 @@ fn an_oversized_bolt_count_fires_at_most_the_cap() {
     let _ = drain(&mut rx);
     cast(&mut fx, p, "cast 'ice darts' rat");
     let out = drain(&mut rx);
-    assert_eq!(out.matches("for 7 damage").count(), 10, "{out}");
+    assert_eq!(out.matches("(7 damage)").count(), 10, "{out}");
     assert_eq!(fx.world.get::<Health>(rat).unwrap().hp, 5000 - 10 * 7);
 }
 

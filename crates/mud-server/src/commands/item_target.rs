@@ -101,9 +101,25 @@ fn find_in_place(
     index: usize,
     place: Place,
 ) -> Option<Entity> {
+    place_hits(world, player, room, needle, place)
+        .get(index - 1)
+        .copied()
+}
+
+/// Every item matching `needle` in one `place`, in the order the `N.`
+/// counter walks them.
+fn place_hits(
+    world: &mut World,
+    player: Entity,
+    room: Option<Entity>,
+    needle: &str,
+    place: Place,
+) -> Vec<Entity> {
     match place {
         Place::Room => {
-            let room = room?;
+            let Some(room) = room else {
+                return Vec::new();
+            };
             let mut q = world
                 .query_filtered::<(Entity, &Located, &Named, Option<&Keywords>), bevy_ecs::prelude::With<Item>>();
             let mut hits: Vec<Entity> = q
@@ -112,7 +128,7 @@ fn find_in_place(
                 .map(|(e, _, _, _)| e)
                 .collect();
             sort_newest_first(world, room, &mut hits, |e| *e);
-            hits.get(index - 1).copied()
+            hits
         }
         Place::Pack | Place::Worn => {
             let mut q = world.query_filtered::<(
@@ -135,13 +151,33 @@ fn find_in_place(
             }
             if place == Place::Worn {
                 worn.sort_by_key(|(_, s)| slot_rank(*s));
-                worn.get(index - 1).map(|(e, _)| *e)
+                worn.into_iter().map(|(e, _)| e).collect()
             } else {
                 sort_newest_first(world, player, &mut packed, |e| *e);
-                packed.get(index - 1).copied()
+                packed
             }
         }
     }
+}
+
+/// Every item `needle` could name for `player` across the places of
+/// `class`, in search order. For commands that must pick the best of
+/// several same-keyword items (`put flour bag`: the bag of flour and the
+/// bag both answer to `bag`). An `N.` prefix is ignored here.
+pub(crate) fn find_items_all(
+    world: &mut World,
+    player: Entity,
+    needle: &str,
+    class: ItemClass,
+) -> Vec<Entity> {
+    let (_, needle) = parse_indexed_needle(needle);
+    let needle = needle.to_ascii_lowercase();
+    let room = world.get::<Located>(player).map(|l| l.0);
+    class
+        .order()
+        .iter()
+        .flat_map(|place| place_hits(world, player, room, &needle, *place))
+        .collect()
 }
 
 /// Position of `slot` in `equipment`'s display order.

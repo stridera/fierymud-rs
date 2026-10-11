@@ -818,7 +818,7 @@ fn a_made_sunray_save_turns_away_only_the_blinding() {
         "damage lands: {said}"
     );
     assert!(
-        said.contains("resists the lingering effect of your Sunray"),
+        said.contains("resists the lingering effect of your sunray"),
         "{said}"
     );
 }

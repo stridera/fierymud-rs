@@ -11279,9 +11279,14 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
             d.is_frozen,
             d.is_stunned,
         );
+        let word = if d.is_ghost {
+            "disembodied"
+        } else {
+            p.0.label()
+        };
         let label = match tag {
-            Some(open) => format!("{open}{}</>", p.0.label()),
-            None => p.0.label().to_string(),
+            Some(open) => format!("{open}{word}</>"),
+            None => word.to_string(),
         };
         out.push_str(&format!("  Posture: {label}\r\n"));
     }
@@ -11813,9 +11818,14 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
             d.is_frozen,
             d.is_stunned,
         );
+        let word = if d.is_ghost {
+            "disembodied"
+        } else {
+            p.0.label()
+        };
         let label = match tag {
-            Some(open) => format!("{open}{}</>", p.0.label()),
-            None => p.0.label().to_string(),
+            Some(open) => format!("{open}{word}</>"),
+            None => word.to_string(),
         };
         row(format!("Posture:   {label}"));
     }
@@ -16412,6 +16422,7 @@ pub(crate) fn invoke_ability_core(
     // be an exact name itself, so `cast summon d` is Summon on `d` and never
     // Summon Demon (see [`unquoted_multiword_ability`]).
     let mut target_word = target_word;
+    let mut multiword_resolved = false;
     if !args.trim_start().starts_with(['\'', '"']) {
         let catalog = world.resource::<AbilityCatalog>();
         if let Some((found, tail, joined)) =
@@ -16420,6 +16431,30 @@ pub(crate) fn invoke_ability_core(
             def = Some(found);
             target_word = tail;
             needle = joined;
+            multiword_resolved = true;
+        }
+    }
+    // An abbreviation that several of the caster's abilities share (`cast m`)
+    // is a question, not a coin flip: list them. Gods, mobs and items keep
+    // the quiet first-match pick.
+    if def.is_some()
+        && !multiword_resolved
+        && !from_item
+        && known.is_some()
+        && !mud_world::bypasses_restrictions(world, player)
+    {
+        let names = world.resource::<AbilityCatalog>().ambiguous_prefix_names(
+            &needle,
+            kind,
+            known.as_deref(),
+        );
+        if !names.is_empty() {
+            send_to(
+                world,
+                player,
+                format!("Did you mean: {}?\r\n", names.join(", ")),
+            );
+            return;
         }
     }
     let Some(def) = def else {
@@ -17150,14 +17185,18 @@ pub(crate) fn invoke_ability_core(
             format!(
                 "{} resists your {}.\r\n",
                 cap_sentence_start(&target_name),
-                def.name,
+                def.name.to_lowercase(),
             ),
         );
         if target_entity != player {
             send_rendered(
                 world,
                 target_entity,
-                &format!("You resist {}'s {}.\r\n", actor_name_pre, def.name,),
+                &format!(
+                    "You resist {}'s {}.\r\n",
+                    actor_name_pre,
+                    def.name.to_lowercase(),
+                ),
             );
         }
         // The spell was cast and the target shrugged it off: legacy
@@ -17265,7 +17304,19 @@ pub(crate) fn invoke_ability_core(
             false
         }
     };
-    let emit_header_now = has_damage_effect && !damage_will_be_absorbed;
+    // A caster template ("You kick X hard!") is the one result line of a
+    // damage cast: the damage arm sends it with the number appended instead of
+    // a second "Your Kick hits X for N damage." line. Until then it waits in
+    // `pending_header` (and still goes out post-loop if no damage arm ran).
+    let caster_template_exists = messages_pre.as_ref().is_some_and(|m| {
+        if target_entity == player {
+            m.success_to_self.is_some() || m.success_to_caster.is_some()
+        } else {
+            m.success_to_caster.is_some()
+        }
+    });
+    let mut header_sent_with_damage = false;
+    let emit_header_now = has_damage_effect && !damage_will_be_absorbed && !caster_template_exists;
     if emit_header_now {
         out.push_str(&render_header());
         send_to(world, player, std::mem::take(&mut out));
@@ -17289,7 +17340,7 @@ pub(crate) fn invoke_ability_core(
             format!(
                 "{} resists the lingering effect of your {}.\r\n",
                 cap_sentence_start(&target_name_pre),
-                def.name,
+                def.name.to_lowercase(),
             ),
         );
         if target_entity != player {
@@ -17298,7 +17349,8 @@ pub(crate) fn invoke_ability_core(
                 target_entity,
                 &format!(
                     "You resist the lingering effect of {}'s {}.\r\n",
-                    actor_name_pre, def.name,
+                    actor_name_pre,
+                    def.name.to_lowercase(),
                 ),
             );
         }
@@ -17512,12 +17564,9 @@ pub(crate) fn invoke_ability_core(
                         break;
                     }
                     if bolt_count > 1 {
-                        // Per-missile messages: the caster template for every
-                        // bolt after the first (it went out before the loop),
-                        // victim and room templates for all of them.
-                        if bolt > 0 && emit_header_now {
-                            send_to(world, player, render_header());
-                        }
+                        // Per-missile messages: victim and room templates for
+                        // every bolt (the caster's own line is sent with the
+                        // damage number below).
                         if !custom_messaging {
                             per_hit_messaging = true;
                             send_hit_templates(
@@ -17756,7 +17805,7 @@ pub(crate) fn invoke_ability_core(
                                     format!(
                                         "{} partially resists your {}.\r\n",
                                         cap_sentence_start(&target_name),
-                                        def.name,
+                                        def.name.to_lowercase(),
                                     ),
                                 );
                             }
@@ -17766,7 +17815,8 @@ pub(crate) fn invoke_ability_core(
                                     target_entity,
                                     &format!(
                                         "You partially resist {}'s {}.\r\n",
-                                        caster_name, def.name,
+                                        caster_name,
+                                        def.name.to_lowercase(),
                                     ),
                                 );
                             }
@@ -17793,13 +17843,24 @@ pub(crate) fn invoke_ability_core(
                                 Some(open) => format!("{open}{amount}</>"),
                                 None => amount.to_string(),
                             };
-                            if target_entity == player {
+                            let ability_lc = def.name.to_lowercase();
+                            if caster_template_exists && !damage_will_be_absorbed {
+                                // One result line: the template, number appended.
+                                header_sent_with_damage = true;
                                 send_to(
                                     world,
                                     player,
                                     format!(
-                                        "Your {} hurts you for {damage_label} damage.\r\n",
-                                        def.name
+                                        "{} <dim>({damage_label} damage)</>\r\n",
+                                        render_header().trim_end()
+                                    ),
+                                );
+                            } else if target_entity == player {
+                                send_to(
+                                    world,
+                                    player,
+                                    format!(
+                                        "Your {ability_lc} hurts you for {damage_label} damage.\r\n",
                                     ),
                                 );
                             } else {
@@ -17808,10 +17869,12 @@ pub(crate) fn invoke_ability_core(
                                     world,
                                     player,
                                     format!(
-                                        "Your {} hits <b:cyan>{target_name}</> for {damage_label} damage.\r\n",
-                                        def.name,
+                                        "Your {ability_lc} hits <b:cyan>{target_name}</> for {damage_label} damage.\r\n",
                                     ),
                                 );
+                            }
+                            if target_entity != player {
+                                let ability_lc = def.name.to_lowercase();
                                 let caster_to_target = cap_sentence_start(&seen_name(
                                     world,
                                     target_entity,
@@ -17822,8 +17885,7 @@ pub(crate) fn invoke_ability_core(
                                     world,
                                     target_entity,
                                     format!(
-                                        "{caster_to_target}'s {} hits you for {damage_label} damage.\r\n",
-                                        def.name,
+                                        "{caster_to_target}'s {ability_lc} hits you for {damage_label} damage.\r\n",
                                     ),
                                 );
                             }
@@ -20496,6 +20558,7 @@ pub(crate) fn invoke_ability_core(
             || lower.contains("(target not dead"))
     });
     if let Some(h) = pending_header
+        && !header_sent_with_damage
         && !custom_messaging
         && (any_non_refusal || applied_msgs.is_empty())
     {
@@ -20921,10 +20984,11 @@ pub(crate) fn check_ability_restrictions(
             target
         };
         let passed = match rule_type {
-            // A rule about the caster's own alignment ("only evil casters")
-            // never stops a god; a rule about the victim still applies.
+            // Alignment rules never stop a god, whether they are about the
+            // caster ("only evil casters") or the victim (a good god casting
+            // Dark Presence on themself has a good victim).
             "alignment" => {
-                (target_kind == Some("caster") && mud_world::bypasses_restrictions(world, caster))
+                mud_world::bypasses_restrictions(world, caster)
                     || check_rule_alignment(world, resolved_target, rule)
             }
             "target_standing" | "position" => check_rule_standing(world, target),

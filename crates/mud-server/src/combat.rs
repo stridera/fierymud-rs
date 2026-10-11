@@ -1671,7 +1671,6 @@ fn apply_swing(world: &mut World, s: &Swing) {
             String::new()
         };
         let target_cap = crate::commands::cap_sentence_start(&target_name);
-        let attacker_cap = crate::commands::cap_sentence_start(&s.attacker_name);
         send_msg(
             world,
             s.attacker,
@@ -1689,7 +1688,7 @@ fn apply_swing(world: &mut World, s: &Swing) {
             room,
             &[s.attacker, s.target],
             &[(s.attacker, &s.attacker_name), (s.target, &target_name)],
-            &format!("{target_cap} {via}s {attacker_cap}'s attack.\r\n"),
+            &format!("{target_cap} {via}s {}'s attack.\r\n", s.attacker_name),
         );
         drain_stamina(world, s.attacker, 1);
         return;
@@ -1716,7 +1715,6 @@ fn apply_swing(world: &mut World, s: &Swing) {
             format!("<dim>You swing at {target_name} but miss.</>\r\n{tail}"),
         );
         let attacker_cap = crate::commands::cap_sentence_start(&s.attacker_name);
-        let target_cap_for_room = crate::commands::cap_sentence_start(&target_name);
         let attacker_to_target = crate::commands::cap_sentence_start(&crate::commands::seen_name(
             world,
             s.target,
@@ -1733,7 +1731,7 @@ fn apply_swing(world: &mut World, s: &Swing) {
             room,
             &[s.attacker, s.target],
             &[(s.attacker, &s.attacker_name), (s.target, &target_name)],
-            &format!("<dim>{attacker_cap} swings at {target_cap_for_room} but misses.</>\r\n",),
+            &format!("<dim>{attacker_cap} swings at {target_name} but misses.</>\r\n"),
         );
         // Stamina still drains — you swung, you spent the breath.
         drain_stamina(world, s.attacker, 1);
@@ -2465,13 +2463,15 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
         // The dead don't ride: the mount (if any) keeps its place in the room.
         clear_mount_links(world, victim);
         // Legacy `extract_char` -> `ungroup(ch, true, false)`: the dead leave
-        // their group. A leader hands it to the next member (or the group
+        // their group (below). Legacy `extract_char` -> `die_follower`: the dead stop following
+        // anyone, and their player followers stop following them ("You stop
+        // following X."). Mob followers (persistent pets) stay attached so
+        // they survive a relog. Runs BEFORE `ungroup`, whose `release_from`
+        // would drop the follow links silently and leave nothing to announce.
+        crate::commands::die_follower(world, victim, true);
+        // `ungroup`: a leader hands the group to the next member (or it
         // disbands when only one other is left), with the legacy notices.
         crate::commands::ungroup(world, victim, true, false);
-        // Legacy `extract_char` -> `die_follower`: the dead stop following
-        // anyone, and their player followers stop following them. Mob
-        // followers (persistent pets) stay attached so they survive a relog.
-        crate::commands::die_follower(world, victim, true);
         // Lines queued behind a cast (an alias chain) must not run after the
         // respawn: the dead player's plans died with them.
         crate::commands::input_queue::clear(world, victim);
@@ -6219,6 +6219,34 @@ mod tests {
         assert!(drain(&mut trx).contains("You stop following Mort."));
     }
 
+    /// Playtest r3 #84: a dead group leader's followers are told they stopped
+    /// following (the group hand-over must not drop the follow links
+    /// silently first), and the ghost no longer reads as "standing here".
+    #[test]
+    fn leader_death_tells_each_follower_they_stopped_following() {
+        use crate::commands::test_support::drain;
+        let mut fx = crate::commands::gmcp_tests::fixture();
+        let room = fx.a;
+        fx.world.insert_resource(TickCount(0));
+        let (dead, _drx) = crate::commands::gmcp_tests::player(&mut fx.world, room, "Lead");
+        let (a, mut arx) = crate::commands::gmcp_tests::player(&mut fx.world, room, "Aaa");
+        let (b, mut brx) = crate::commands::gmcp_tests::player(&mut fx.world, room, "Bbb");
+        for m in [a, b] {
+            fx.world
+                .entity_mut(m)
+                .insert((mud_world::GroupMember(dead), mud_world::Follower(dead)));
+        }
+        handle_death(&mut fx.world, dead, "Lead", room);
+        assert!(drain(&mut arx).contains("You stop following Lead."));
+        assert!(drain(&mut brx).contains("You stop following Lead."));
+        assert!(fx.world.get::<mud_world::Follower>(a).is_none());
+        // Still grouped under the new leader.
+        assert!(fx.world.get::<mud_world::GroupMember>(b).is_some());
+        let line = crate::commands::room_line::player_line(&mut fx.world, a, dead);
+        assert!(!line.contains("standing"), "{line}");
+        assert!(line.contains("disembodied spirit"), "{line}");
+    }
+
     /// Nobody keeps following a dead mob.
     #[test]
     fn mob_death_releases_everyone_following_it() {
@@ -7679,5 +7707,34 @@ end
         assert_eq!(weapon_family("STAB"), Some("piercing"));
         assert_eq!(weapon_family("FIRE"), None);
         assert_eq!(weapon_family("HIT"), None);
+    }
+    /// Playtest r3 #46: an observer read "A bandit swings at A thorn monster
+    /// but misses." The victim's name is mid-sentence and stays lowercase;
+    /// only the start of the whole line is capitalised.
+    #[test]
+    fn miss_line_keeps_the_victim_name_lowercase_mid_sentence() {
+        let mut world = World::new();
+        let room = world.spawn(mud_world::Room).id();
+        let target = make_target(&mut world, room, 1000);
+        world.entity_mut(target).insert(Named {
+            name: "a thorn monster".into(),
+        });
+        let attacker = make_attacker(&mut world, room, target, 5);
+        world.entity_mut(attacker).insert(Named {
+            name: "a bandit".into(),
+        });
+        let watcher = credit_player(&mut world, room, "Watcher", 0);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4096);
+        world
+            .entity_mut(watcher)
+            .insert(crate::commands::Connection(tx));
+        // Accuracy 0 vs evasion 50 is a 25% chance; a pinned roll of 100 misses.
+        assert!(!lands_at_roll(&mut world, attacker, target, 100));
+        let out = crate::commands::test_support::drain(&mut rx);
+        assert!(
+            out.contains("A bandit swings at a thorn monster but misses."),
+            "{out:?}"
+        );
+        assert!(!out.contains("at A "), "{out:?}");
     }
 }
