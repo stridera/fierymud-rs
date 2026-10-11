@@ -17,7 +17,7 @@ use super::spells::cmd_pick;
 use super::test_support::{Rx, drain, install_core_abilities, object_proto, player_in};
 
 /// (zone, id) of the chest protos below and of the key that fits the
-/// locked ones (legacy key vnum 3051).
+/// locked ones (composite key 30:51).
 const KEY: (i32, i32) = (30, 51);
 
 fn container_proto(
@@ -34,7 +34,7 @@ fn container_proto(
     objects.by_key.insert((30, id), p);
 }
 
-/// Room with a player, a locked chest (id 60, key 3051), a pickproof
+/// Room with a player, a locked chest (id 60, key 30:51), a pickproof
 /// locked chest (61), an open sack (62) and a sealed non-closeable crate
 /// (63). Every container holds a "gem" (id 70).
 struct Fx {
@@ -53,14 +53,14 @@ impl Fx {
             60,
             "an iron chest",
             "chest",
-            serde_json::json!({"Key": 3051, "Flags": ["Closeable", "Closed", "Locked"], "Capacity": 50}),
+            serde_json::json!({"Key": {"zone": 30, "id": 51}, "Flags": ["Closeable", "Closed", "Locked"], "Capacity": 50}),
         );
         container_proto(
             &mut objects,
             61,
             "a vault",
             "vault",
-            serde_json::json!({"Key": 3051, "Flags": ["Closeable", "PickProof", "Closed", "Locked"], "Capacity": 50}),
+            serde_json::json!({"Key": {"zone": 30, "id": 51}, "Flags": ["Closeable", "PickProof", "Closed", "Locked"], "Capacity": 50}),
         );
         container_proto(
             &mut objects,
@@ -125,12 +125,17 @@ fn state_is_parsed_from_the_proto_values() {
     assert!(!s.closed && !s.locked && s.key.is_none());
     // Key 0 is "no keyhole", and zone 0 maps to zone 1000.
     assert_eq!(
-        ContainerState::from_values(&serde_json::json!({"Key": 0})).key,
+        ContainerState::from_values(&serde_json::json!({"Key": 0}), (30, 60)).key,
         None
     );
     assert_eq!(
-        ContainerState::from_values(&serde_json::json!({"Key": 51})).key,
-        Some((1000, 51))
+        ContainerState::from_values(&serde_json::json!({"Key": null}), (30, 60)).key,
+        None
+    );
+    assert_eq!(
+        ContainerState::from_values(&serde_json::json!({"Key": {"zone": 23, "id": 2}}), (23, 1))
+            .key,
+        Some((23, 2))
     );
     // A key is not a container.
     let key = item_at(&mut fx.world, fx.room, KEY.1, "an iron key", "key");
@@ -396,7 +401,7 @@ fn a_saved_state_overrides_the_proto_and_an_equal_one_does_not() {
     restore_saved(
         &mut fx.world,
         chest,
-        &serde_json::json!({"Key": 3051, "Flags": ["Closeable"]}),
+        &serde_json::json!({"Key": {"zone": 30, "id": 51}, "Flags": ["Closeable"]}),
     );
     let s = container_state(&fx.world, chest).unwrap();
     assert!(s.closeable && !s.closed && !s.locked, "{s:?}");
@@ -406,7 +411,7 @@ fn a_saved_state_overrides_the_proto_and_an_equal_one_does_not() {
     restore_saved(
         &mut fx.world,
         vault,
-        &serde_json::json!({"Key": 3051, "Flags": ["Closeable", "PickProof", "Closed", "Locked"]}),
+        &serde_json::json!({"Key": {"zone": 30, "id": 51}, "Flags": ["Closeable", "PickProof", "Closed", "Locked"]}),
     );
     assert!(fx.world.get::<ContainerState>(vault).is_none());
     // No Flags / Key on the row (new instance): proto default.
@@ -426,14 +431,15 @@ fn a_saved_state_overrides_the_proto_and_an_equal_one_does_not() {
 #[test]
 fn flag_names_round_trip_through_overlay() {
     let s = ContainerState::from_values(
-        &serde_json::json!({"Key": 3051, "Flags": ["PickProof", "Locked", "Closed", "Closeable"]}),
+        &serde_json::json!({"Key": {"zone": 30, "id": 51}, "Flags": ["PickProof", "Locked", "Closed", "Closeable"]}),
+        (30, 60),
     );
     assert_eq!(
         s.flag_names(),
         vec!["Closeable", "Closed", "Locked", "PickProof"]
     );
-    let blank = ContainerState::from_values(&serde_json::json!({}));
-    let back = blank.overlay(&serde_json::json!({"Flags": s.flag_names()}));
+    let blank = ContainerState::from_values(&serde_json::json!({}), (30, 60));
+    let back = blank.overlay(&serde_json::json!({"Flags": s.flag_names()}), (30, 60));
     assert_eq!(
         (back.closeable, back.closed, back.locked, back.pickproof),
         (true, true, true, true)
@@ -484,4 +490,145 @@ fn contents_header_opens_with_a_capital() {
     let out = fx.out();
     assert!(out.contains("A canvas sack contains:"), "{out}");
     assert!(!out.contains("\na canvas sack contains"), "{out}");
+}
+
+// -- composite key parsing ---------------------------------------------------
+
+/// Captures the formatted tracing output of a closure.
+#[derive(Clone, Default)]
+struct LogBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuf {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(b);
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn logged<T>(f: impl FnOnce() -> T) -> (T, String) {
+    let buf = LogBuf::default();
+    let sink = buf.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || sink.clone())
+        .with_ansi(false)
+        .finish();
+    let out = tracing::subscriber::with_default(subscriber, f);
+    let text = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+    (out, text)
+}
+
+#[test]
+fn a_composite_key_parses_without_a_warning() {
+    let (state, log) = logged(|| {
+        ContainerState::from_values(&serde_json::json!({"Key": {"zone": 23, "id": 2}}), (23, 1))
+    });
+    assert_eq!(state.key, Some((23, 2)));
+    assert!(log.is_empty(), "{log}");
+}
+
+#[test]
+fn unset_keys_are_silent() {
+    for unset in [-1, 0] {
+        let (state, log) =
+            logged(|| ContainerState::from_values(&serde_json::json!({"Key": unset}), (23, 1)));
+        assert_eq!(state.key, None);
+        assert!(log.is_empty(), "{log}");
+    }
+}
+
+#[test]
+fn a_positive_integer_or_garbage_key_is_none_and_warns_with_the_object_id() {
+    for bad in [
+        serde_json::json!(2302),
+        serde_json::json!("2302"),
+        serde_json::json!({"zone": 23}),
+        serde_json::json!({"zone": "x", "id": 2}),
+        serde_json::json!([23, 2]),
+    ] {
+        let (state, log) = logged(|| {
+            ContainerState::from_values(&serde_json::json!({ "Key": bad.clone() }), (23, 1))
+        });
+        assert_eq!(state.key, None, "{bad}");
+        assert!(log.contains("WARN"), "{bad}: {log}");
+        assert!(
+            log.contains("object_zone=23") && log.contains("object_id=1"),
+            "{bad}: {log}"
+        );
+    }
+}
+
+#[test]
+fn a_saved_composite_key_overlays_the_proto_key() {
+    use super::containers::restore_saved;
+    let mut fx = Fx::new();
+    let (chest, _) = fx.chest(60, "an iron chest", "chest");
+    restore_saved(
+        &mut fx.world,
+        chest,
+        &serde_json::json!({"Key": {"zone": 30, "id": 99}, "Flags": ["Closeable", "Closed", "Locked"]}),
+    );
+    let s = container_state(&fx.world, chest).unwrap();
+    assert_eq!(s.key, Some((30, 99)));
+    assert!(s.locked);
+    // The proto key no longer fits; the overlay key does.
+    fx.give_key();
+    fx.out();
+    cmd_unlock(&mut fx.world, fx.player, "chest");
+    assert!(container_state(&fx.world, chest).unwrap().locked);
+    assert!(fx.out().contains("proper key"));
+}
+
+// -- dev world ---------------------------------------------------------------
+
+/// Boot the dev world: container 23/1's composite key resolves to 23/2, and
+/// no container prototype carries a `Key` the parser could not read. Skipped
+/// when the dev database is unreachable or still holds integer keys.
+#[tokio::test]
+async fn booted_dev_world_resolves_container_keys() {
+    use crate::commands::test_support::{db_test_lock, db_test_pool_settings};
+    let _lock = db_test_lock().await;
+    let url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://strider@localhost/fierydev".into());
+    let Ok(Ok(pool)) = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        mud_db::connect_with(&url, db_test_pool_settings()),
+    )
+    .await
+    else {
+        eprintln!("skipped: dev database unreachable");
+        return;
+    };
+    let mut world = World::new();
+    mud_world::load_from_db(&mut world, &pool)
+        .await
+        .expect("load world");
+    let objects = world.resource::<ObjectPrototypes>();
+    let Some(chest) = objects.by_key.get(&(23, 1)) else {
+        eprintln!("skipped: dev world has no object 23/1");
+        return;
+    };
+    if chest
+        .values
+        .get("Key")
+        .is_some_and(serde_json::Value::is_number)
+    {
+        eprintln!("skipped: dev database still holds integer container keys");
+        return;
+    }
+    assert_eq!(
+        ContainerState::from_values(&chest.values, (23, 1)).key,
+        Some((23, 2))
+    );
+    for (k, p) in &objects.by_key {
+        if p.r#type != ObjectType::Container {
+            continue;
+        }
+        let raw = p.values.get("Key");
+        let keyed = raw.is_some_and(serde_json::Value::is_object);
+        let parsed = ContainerState::from_values(&p.values, *k).key;
+        assert_eq!(keyed, parsed.is_some(), "{k:?} Key {raw:?}");
+    }
 }

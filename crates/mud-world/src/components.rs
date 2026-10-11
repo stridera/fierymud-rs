@@ -2230,18 +2230,17 @@ pub struct ContainerState {
     pub locked: bool,
     pub pickproof: bool,
     /// `(zone, id)` of the key object, `None` when the container has no
-    /// keyhole (legacy key `< 0`; `0` is treated the same, it is the
-    /// importer's "unset").
+    /// keyhole (the importer's "unset" is `-1` / `0` / `null`).
     pub key: Option<(i32, i32)>,
 }
 
 impl ContainerState {
     /// Parse the CONTAINER `values` JSON:
-    /// `{"Key": 7911, "Flags": ["Closeable", "PickProof", "Closed", "Locked"], ...}`.
-    /// The key is still the legacy vnum (`zone * 100 + id`, zone 0 is zone
-    /// 1000).
+    /// `{"Key": {"zone": 79, "id": 11}, "Flags": ["Closeable", "PickProof", "Closed", "Locked"], ...}`.
+    /// `object` is the `(zone, id)` of the container, named in the warning
+    /// when the `Key` has an unreadable shape (see [`Self::overlay`]).
     #[must_use]
-    pub fn from_values(values: &serde_json::Value) -> Self {
+    pub fn from_values(values: &serde_json::Value, object: (i32, i32)) -> Self {
         Self {
             closeable: false,
             closed: false,
@@ -2249,7 +2248,7 @@ impl ContainerState {
             pickproof: false,
             key: None,
         }
-        .overlay(values)
+        .overlay(values, object)
     }
 
     /// `self` with the container bits and key that `values` carries laid
@@ -2257,8 +2256,13 @@ impl ContainerState {
     /// of a saved instance's `custom_values`): a `Flags` array replaces all
     /// four bits, a `Key` replaces the key; a missing field leaves `self`
     /// alone, so an instance row that holds neither reads as its prototype.
+    ///
+    /// The only key shape is `{"zone": i32, "id": i32}`. `null` and the
+    /// importer's "unset" integers (`-1`, `0`) mean no keyhole; any other
+    /// shape (a positive integer, a string, garbage) also gives `None` and
+    /// logs a warning naming `object` so leftover data shows up in the logs.
     #[must_use]
-    pub fn overlay(mut self, values: &serde_json::Value) -> Self {
+    pub fn overlay(mut self, values: &serde_json::Value, object: (i32, i32)) -> Self {
         if let Some(flags) = values.get("Flags").and_then(serde_json::Value::as_array) {
             let flag = |name: &str| {
                 flags
@@ -2271,15 +2275,8 @@ impl ContainerState {
             self.locked = flag("Locked");
             self.pickproof = flag("PickProof");
         }
-        if let Some(raw_key) = values.get("Key").and_then(|v| {
-            v.as_i64()
-                .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
-        }) {
-            self.key = (raw_key > 0).then_some(raw_key).and_then(|k| {
-                let zone = i32::try_from(k / 100).ok()?;
-                let id = i32::try_from(k % 100).ok()?;
-                Some((if zone == 0 { 1000 } else { zone }, id))
-            });
+        if let Some(raw_key) = values.get("Key") {
+            self.key = parse_container_key(raw_key, object);
         }
         self
     }
@@ -2300,6 +2297,29 @@ impl ContainerState {
         .map(|(_, name)| name.to_string())
         .collect()
     }
+}
+
+/// The key of a container from its `Key` JSON value: `{"zone", "id"}` is
+/// the key object's composite id. `null` / `-1` / `0` are "no keyhole";
+/// every other shape is leftover legacy data, read as no key with a warning.
+fn parse_container_key(raw: &serde_json::Value, object: (i32, i32)) -> Option<(i32, i32)> {
+    if raw.is_null() || matches!(raw.as_i64(), Some(n) if n <= 0) {
+        return None;
+    }
+    let parsed = raw.as_object().and_then(|o| {
+        let zone = i32::try_from(o.get("zone")?.as_i64()?).ok()?;
+        let id = i32::try_from(o.get("id")?.as_i64()?).ok()?;
+        Some((zone, id))
+    });
+    if parsed.is_none() {
+        tracing::warn!(
+            object_zone = object.0,
+            object_id = object.1,
+            key = %raw,
+            "container Key is not {{\"zone\", \"id\"}}; treating as no key"
+        );
+    }
+    parsed
 }
 
 /// Component on spawned DRINKCONTAINER-typed items: per-instance

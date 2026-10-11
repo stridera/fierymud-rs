@@ -51,7 +51,8 @@ pub(crate) fn container_state(world: &World, item: Entity) -> Option<ContainerSt
         .get_resource::<ObjectPrototypes>()?
         .by_key
         .get(&(key.zone, key.id))?;
-    (proto.r#type == ObjectType::Container).then(|| ContainerState::from_values(&proto.values))
+    (proto.r#type == ObjectType::Container)
+        .then(|| ContainerState::from_values(&proto.values, (key.zone, key.id)))
 }
 
 /// Seed `item`'s state from a saved row: the proto default with the
@@ -63,7 +64,10 @@ pub(crate) fn restore_saved(world: &mut World, item: Entity, saved: &serde_json:
     let Some(base) = container_state(world, item) else {
         return;
     };
-    let seeded = base.overlay(saved);
+    let object = world
+        .get::<WorldKey>(item)
+        .map_or((0, 0), |k| (k.zone, k.id));
+    let seeded = base.overlay(saved, object);
     if seeded != base {
         world.entity_mut(item).insert(seeded);
     }

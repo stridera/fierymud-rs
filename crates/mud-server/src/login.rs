@@ -10485,7 +10485,7 @@ mod tests {
         proto.keywords = vec!["strongbox".into()];
         // Authored: closed and locked, pickproof.
         proto.values = serde_json::json!({
-            "Key": 3051, "Flags": ["Closeable", "PickProof", "Closed", "Locked"]
+            "Key": {"zone": 30, "id": 51}, "Flags": ["Closeable", "PickProof", "Closed", "Locked"]
         });
         protos.by_key.insert((oz, oid), proto);
         let by_key = protos.by_key.clone();
@@ -10507,7 +10507,7 @@ mod tests {
         .bind(&c.id)
         .bind(oz)
         .bind(oid)
-        .bind(r#"{"Key": 3051, "Flags": ["Closeable", "PickProof"], "Capacity": 50}"#)
+        .bind(r#"{"Key": {"zone": 30, "id": 51}, "Flags": ["Closeable", "PickProof"], "Capacity": 50}"#)
         .execute(&pool)
         .await
         .unwrap();
