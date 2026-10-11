@@ -13,41 +13,12 @@ use bevy_ecs::prelude::*;
 use mud_db::enums::{ObjectFlag, ObjectType};
 use mud_world::{
     CoinPile, Corpse, Decomposing, Description, Item, ItemTimer, Keywords, Located, LooseCoins,
-    Named, ObjectFlags, ObjectProto, ObjectPrototypes, WorldKey,
+    Named, ObjectFlags, ObjectPrototypes, WorldKey,
 };
 
 use crate::commands::{broadcast_room_except_rendered, cap_sentence_start, send_to};
 
-/// Legacy MUD-hour to wall seconds. Matches the constant used by
-/// effect duration resolution; centralized here to keep the timer
-/// math grounded in one place.
-pub(crate) const SECS_PER_MUD_HOUR: i32 = 75;
-
-/// Run-at-spawn hook: if the proto has a positive `timer_hours`
-/// AND the object isn't flagged PERMANENT, attach an `ItemTimer`
-/// to the entity. Caller passes the freshly-spawned entity + its
-/// proto. Safe to call after any `world.spawn(...)` that produced
-/// an Item entity.
-pub fn attach_timer_if_decaying(world: &mut World, entity: Entity, proto: &ObjectProto) {
-    if proto.timer_hours <= 0 {
-        return;
-    }
-    if proto.flags.contains(&ObjectFlag::Permanent) {
-        return;
-    }
-    let remaining = proto.timer_hours.saturating_mul(SECS_PER_MUD_HOUR);
-    let decompose = proto
-        .decompose_timer
-        .saturating_mul(SECS_PER_MUD_HOUR)
-        .max(0);
-    let Ok(mut em) = world.get_entity_mut(entity) else {
-        return;
-    };
-    em.insert(ItemTimer {
-        remaining_secs: remaining,
-        decompose_window_secs: decompose,
-    });
-}
+pub(crate) use mud_world::SECS_PER_MUD_HOUR;
 
 /// Legacy `stop_decomposing` (handler.cpp `obj_to_char`, `equip_char`,
 /// `obj_to_obj` into a carried container): a rotting item that a

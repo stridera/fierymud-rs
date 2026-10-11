@@ -18,11 +18,11 @@ use mlua::{
 };
 use mud_db::enums::EntityType;
 use mud_world::{
-    AbilityCatalog, AppliedTo, AttachedTriggers, ClassCatalog, CombatStats, CoreStats, Description,
-    EffectCatalog, EffectInstance, EntityVariableCache, EquippedSlot, Fighting, Follower, Health,
-    Hiddenness, Item, Keywords, KnownAbilities, Located, LuaOutbox, Mob, MobPrototypes, Named,
-    ObjectPrototypes, Online, Player, Posture, PostureKind, Profile, Title, TriggerCatalog,
-    WorldKey, WorldKeyIndex,
+    AbilityCatalog, AppliedTo, ClassCatalog, CombatStats, CoreStats, Description, EffectCatalog,
+    EffectInstance, EntityVariableCache, EquippedSlot, Fighting, Follower, Health, Hiddenness,
+    Item, Keywords, KnownAbilities, Located, LuaOutbox, Mob, MobPrototypes, Named,
+    ObjectPrototypes, Online, Player, Posture, PostureKind, Profile, Title, WorldKey,
+    WorldKeyIndex,
 };
 
 /// One trigger body that ran into `wait(N)` and got parked. We hold the
@@ -4970,29 +4970,7 @@ fn spawn_obj_proto(lua: &Lua, room: Entity, zone: i32, id: i32) -> mlua::Result<
             .by_key
             .get(&(zone, id))
             .cloned()?;
-        let trigger_keys = world
-            .resource::<TriggerCatalog>()
-            .object_attachments
-            .get(&(zone, id))
-            .cloned();
-        let mut em = world.spawn((
-            Item,
-            Named {
-                name: proto.name.clone(),
-            },
-            Keywords(proto.keywords.clone()),
-            WorldKey { zone, id },
-            Located(room),
-        ));
-        if let Some(desc) = proto.examine_description.clone() {
-            em.insert(Description(desc));
-        }
-        if let Some(keys) = trigger_keys {
-            em.insert(AttachedTriggers(keys));
-        }
-        let item = em.id();
-        mud_world::attach_proto_charges(world, item, zone, id);
-        Some(item)
+        Some(mud_world::spawn_item_from_proto(world, &proto, room))
     })?;
     match entity {
         Some(e) => Ok(Value::UserData(

@@ -17,8 +17,8 @@ use crate::reset_gear::{
 };
 
 use crate::components::{
-    AttachedTriggers, BoardLink, Description, ExitData, Exits, FromObjectReset, Item, Keywords,
-    LiquidContainer, Located, Named, Room, RoomSector, WorldKey, Zone, ZoneClimate,
+    AttachedTriggers, Description, ExitData, Exits, FromObjectReset, Located, Named, Room,
+    RoomSector, WorldKey, Zone, ZoneClimate,
 };
 use crate::resources::{
     AbilityCatalog, AbilityDef, AbilityMessageSet, BoardCatalog, BoardSummary, ClassCatalog,
@@ -1466,74 +1466,10 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         if current >= r.max_instances.max(1) {
             continue;
         }
-        let trigger_keys = world
-            .resource::<TriggerCatalog>()
-            .object_attachments
-            .get(&proto_key)
-            .cloned();
-        let primary_slot = wear_flags_primary_slot(&proto.wear_flags);
-        let spawned_item;
-        {
-            let mut bundle = world.spawn((
-                Item,
-                Named {
-                    name: proto.name.clone(),
-                },
-                Keywords(proto.keywords.clone()),
-                WorldKey {
-                    zone: proto.zone_id,
-                    id: proto.id,
-                },
-                Located(room_entity),
-                FromObjectReset(r.id),
-            ));
-            if let Some(desc) = proto.examine_description.clone() {
-                bundle.insert(Description(desc));
-            }
-            if let Some(s) = primary_slot {
-                bundle.insert(crate::components::WearableIn(s));
-            }
-            if let Some(board_id) = proto.board_id {
-                bundle.insert(BoardLink(board_id));
-            }
-            if let Some(liq) = proto.liquid.clone() {
-                bundle.insert(LiquidContainer {
-                    liquid: liq.liquid,
-                    capacity: liq.capacity,
-                    remaining: liq.remaining,
-                    poisoned: liq.poisoned,
-                });
-            }
-            if let Some(fuel) = proto.light_fuel {
-                bundle.insert(crate::components::LightFuel {
-                    capacity: fuel.capacity,
-                    remaining: fuel.remaining,
-                });
-            }
-            if let Some(ref keys) = trigger_keys {
-                bundle.insert(AttachedTriggers(keys.clone()));
-            }
-            // Per-instance attribute components — only attached when
-            // the proto carries any flags / restrictions so plain
-            // items stay component-light. Consumers (drop / get /
-            // sell / look / examine) gate on these via the
-            // component lookup rather than the proto store.
-            if !proto.flags.is_empty() {
-                bundle.insert(crate::components::ObjectFlags(proto.flags.clone()));
-            }
-            if !proto.restrictions.is_empty() {
-                bundle.insert(crate::components::ObjectRestrictions(
-                    proto.restrictions.clone(),
-                ));
-            }
-            if let Some(h) = proto.initial_hiddenness() {
-                bundle.insert(h);
-            }
-            spawned_item = bundle.id();
-            objects_by_reset.insert(r.id, vec![spawned_item]);
-            stats.object_resets_spawned += 1;
-        }
-        crate::reset_gear::attach_proto_charges(world, spawned_item, proto.zone_id, proto.id);
+        let spawned_item = crate::item_spawn::spawn_item_from_proto(world, &proto, room_entity);
+        world.entity_mut(spawned_item).insert(FromObjectReset(r.id));
+        objects_by_reset.insert(r.id, vec![spawned_item]);
+        stats.object_resets_spawned += 1;
         *object_world_count.entry(proto_key).or_insert(0) += 1;
     }
     world.insert_resource(ObjectResetCatalog {

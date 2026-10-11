@@ -479,23 +479,7 @@ pub fn drain_player_updates(world: &mut World) {
                     continue;
                 };
                 for _ in 0..quantity.max(1) {
-                    let mut bundle = world.spawn((
-                        Item,
-                        Named {
-                            name: proto.name.clone(),
-                        },
-                        Keywords(proto.keywords.clone()),
-                        WorldKey {
-                            zone: proto.zone_id,
-                            id: proto.id,
-                        },
-                        Located(entity),
-                    ));
-                    if let Some(desc) = proto.examine_description.clone() {
-                        bundle.insert(Description(desc));
-                    }
-                    let rewarded = bundle.id();
-                    mud_world::attach_proto_charges(world, rewarded, proto.zone_id, proto.id);
+                    crate::item_spawn::spawn_item_from_proto(world, &proto, entity);
                 }
                 send_to(
                     world,
@@ -611,6 +595,9 @@ pub(crate) mod containers;
 #[cfg(test)]
 #[path = "commands/containers_tests.rs"]
 mod containers_tests;
+#[cfg(test)]
+#[path = "commands/item_spawn_sites_tests.rs"]
+mod item_spawn_sites_tests;
 #[cfg(test)]
 #[path = "commands/lua_safety_tests.rs"]
 mod lua_safety_tests;
@@ -14516,33 +14503,11 @@ pub(crate) fn spawn_house_item(
         .get(&(proto_zone, proto_id))
         .cloned();
     let Some(proto) = proto else { return };
-    let mut bundle = world.spawn((
-        Item,
-        Named {
-            name: proto.name.clone(),
-        },
-        Keywords(proto.keywords.clone()),
-        WorldKey {
-            zone: proto.zone_id,
-            id: proto.id,
-        },
-        Located(parent),
-        mud_world::HouseItem(house_item_id),
-    ));
-    if let Some(desc) = proto.examine_description.clone() {
-        bundle.insert(Description(desc));
-    }
-    // The prototype's own flags and restrictions, so the stored delta
-    // (`flags_added`, `restrictions_added`) lands on the same base a
-    // carried item has.
-    if !proto.flags.is_empty() {
-        bundle.insert(mud_world::ObjectFlags(proto.flags.clone()));
-    }
-    if !proto.restrictions.is_empty() {
-        bundle.insert(mud_world::ObjectRestrictions(proto.restrictions.clone()));
-    }
-    let item = bundle.id();
-    mud_world::attach_proto_charges(world, item, proto.zone_id, proto.id);
+    // The prototype's own components (flags and restrictions included), so
+    // the stored delta (`flags_added`, `restrictions_added`) lands on the
+    // same base a carried item has.
+    let item = crate::item_spawn::spawn_item_from_proto(world, &proto, parent);
+    try_insert(world, item, mud_world::HouseItem(house_item_id));
     // What is left in the wand, not what a fresh one holds: the stored count
     // wins over the prototype's.
     if let Some(charges) = custom.charges {
@@ -17886,26 +17851,7 @@ pub(crate) fn invoke_ability_core(
                 // room — Create Food / Minor Creation produce a
                 // carried item, not a room fixture (portals use the
                 // room-spawn path below).
-                let mut bundle = world.spawn((
-                    Item,
-                    Named {
-                        name: proto.name.clone(),
-                    },
-                    Keywords(proto.keywords.clone()),
-                    WorldKey {
-                        zone: proto.zone_id,
-                        id: proto.id,
-                    },
-                    Located(player),
-                ));
-                if let Some(desc) = proto.examine_description.clone() {
-                    bundle.insert(Description(desc));
-                }
-                let created = bundle.id();
-                mud_world::attach_proto_charges(world, created, proto.zone_id, proto.id);
-                // A proto with a lifetime (`timer_hours`) rots like any
-                // other spawned copy of it.
-                crate::item_decay::attach_timer_if_decaying(world, created, &proto);
+                let created = crate::item_spawn::spawn_item_from_proto(world, &proto, player);
                 if wield && wear_item(world, player, created, WearWhere::Hands(Slot::Wield), false)
                 {
                     applied_msgs.push(format!(
@@ -17954,23 +17900,8 @@ pub(crate) fn invoke_ability_core(
                     applied_msgs.push(format!("{pretty} (caster has no room)"));
                     continue;
                 };
-                let mut bundle = world.spawn((
-                    Item,
-                    Named {
-                        name: proto.name.clone(),
-                    },
-                    Keywords(proto.keywords.clone()),
-                    WorldKey {
-                        zone: proto.zone_id,
-                        id: proto.id,
-                    },
-                    Located(located.0),
-                ));
-                if let Some(desc) = proto.examine_description.clone() {
-                    bundle.insert(Description(desc));
-                }
-                let portal_entity = bundle.id();
-                mud_world::attach_proto_charges(world, portal_entity, proto.zone_id, proto.id);
+                let portal_entity =
+                    crate::item_spawn::spawn_item_from_proto(world, &proto, located.0);
                 // Decay duration: the schema's `decay` is in hours
                 // (matches other duration units). Convert to seconds
                 // for the EffectInstance.

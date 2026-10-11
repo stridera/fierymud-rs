@@ -1,4 +1,5 @@
 pub mod components;
+pub mod item_spawn;
 pub mod loader;
 pub mod mob_ai_rules;
 pub mod mob_effects;
@@ -46,6 +47,7 @@ pub use components::{
     ZoneVisits, group_members, group_root, innate_cooldown_key, is_lit, room_in_god_zone,
     wear_keyword_slot, zone_is_god,
 };
+pub use item_spawn::{SECS_PER_MUD_HOUR, attach_timer_if_decaying, spawn_item_from_proto};
 pub use loader::{
     LoadStats, ReloadStats, default_weather_for_climate, load_ability_catalog, load_content_tables,
     load_effect_catalog, load_from_db, load_mob_ai_data, load_trigger_catalog, merge_prototypes,

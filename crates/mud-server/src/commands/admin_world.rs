@@ -7,9 +7,9 @@
 use bevy_ecs::prelude::*;
 use mud_db::enums::UserRole;
 use mud_world::{
-    Account, AppliedTo, Description, EffectCatalog, EffectInstance, EffectSource, Fighting, Frozen,
-    Health, Item, Keywords, Located, Mob, MobPrototypes, Named, ObjectPrototypes, Online, Player,
-    PlayerCorpse, PlayerFlags, Profile, Stamina, Wealth, WearableIn, WorldKey, WorldKeyIndex,
+    Account, AppliedTo, EffectCatalog, EffectInstance, EffectSource, Fighting, Frozen, Health,
+    Item, Keywords, Located, Mob, MobPrototypes, Named, ObjectPrototypes, Online, Player,
+    PlayerCorpse, PlayerFlags, Profile, Stamina, Wealth, WorldKey, WorldKeyIndex,
 };
 use tracing::info;
 
@@ -1453,59 +1453,13 @@ pub(crate) fn cmd_loadobj(world: &mut World, player: Entity, args: &str) {
     };
     let room = located.0;
     let proto_name = proto.name.clone();
-    let proto_keywords = proto.keywords.clone();
-    let examine = proto.examine_description.clone();
 
-    let primary_slot = mud_world::wear_flags_primary_slot(&proto.wear_flags);
     // Spawn directly into the loader's inventory rather than the
     // floor — admin tooling shouldn't race with scavengers / mobs /
     // other players who could grab a freshly-loaded item before
     // the admin reacts. `get` and `drop` are still available if
     // the admin actually wants it on the floor.
-    let mut bundle = world.spawn((
-        Item,
-        Named {
-            name: proto_name.clone(),
-        },
-        Keywords(proto_keywords),
-        WorldKey {
-            zone: proto.zone_id,
-            id: proto.id,
-        },
-        Located(player),
-    ));
-    if let Some(desc) = examine {
-        bundle.insert(Description(desc));
-    }
-    if let Some(s) = primary_slot {
-        bundle.insert(WearableIn(s));
-    }
-    if let Some(board_id) = proto.board_id {
-        bundle.insert(mud_world::BoardLink(board_id));
-    }
-    if let Some(liq) = proto.liquid.clone() {
-        bundle.insert(mud_world::LiquidContainer {
-            liquid: liq.liquid,
-            capacity: liq.capacity,
-            remaining: liq.remaining,
-            poisoned: liq.poisoned,
-        });
-    }
-    if let Some(fuel) = proto.light_fuel {
-        bundle.insert(mud_world::LightFuel {
-            capacity: fuel.capacity,
-            remaining: fuel.remaining,
-        });
-    }
-    if !proto.flags.is_empty() {
-        bundle.insert(mud_world::ObjectFlags(proto.flags.clone()));
-    }
-    if !proto.restrictions.is_empty() {
-        bundle.insert(mud_world::ObjectRestrictions(proto.restrictions.clone()));
-    }
-    let item = bundle.id();
-    crate::item_decay::attach_timer_if_decaying(world, item, &proto);
-    mud_world::attach_proto_charges(world, item, proto.zone_id, proto.id);
+    let item = crate::item_spawn::spawn_item_from_proto(world, &proto, player);
 
     send_rendered(
         world,

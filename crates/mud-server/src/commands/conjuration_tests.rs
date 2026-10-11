@@ -537,3 +537,42 @@ fn a_created_object_with_a_lifetime_gets_a_decay_timer() {
     let secs: Vec<i32> = q.iter(&f.world).map(|t| t.remaining_secs).collect();
     assert_eq!(secs, vec![2 * crate::item_decay::SECS_PER_MUD_HOUR]);
 }
+
+#[test]
+fn a_conjured_item_has_the_prototypes_flags_restrictions_triggers_and_hiddenness() {
+    use mud_db::enums::{ObjectFlag, ObjectRestriction};
+    let mut f = ice_dagger_fx();
+    {
+        let mut protos = f.world.resource_mut::<ObjectPrototypes>();
+        let dagger = protos.by_key.get_mut(&(10, 47)).unwrap();
+        dagger.flags = vec![ObjectFlag::Magic];
+        dagger.restrictions = vec![ObjectRestriction::NoDrop];
+        dagger.concealment = 30;
+    }
+    let mut triggers = mud_world::TriggerCatalog::default();
+    triggers.object_attachments.insert((10, 47), vec![(10, 5)]);
+    f.world.insert_resource(triggers);
+    f.cast("'ice dagger'");
+    let caster = f.caster;
+    let mut q = f.world.query_filtered::<(
+        Entity,
+        &Located,
+        Option<&mud_world::ObjectFlags>,
+        Option<&mud_world::ObjectRestrictions>,
+        Option<&mud_world::AttachedTriggers>,
+        Option<&mud_world::Hiddenness>,
+    ), With<Item>>();
+    let rows: Vec<_> = q
+        .iter(&f.world)
+        .filter(|r| r.1.0 == caster)
+        .map(|r| {
+            (
+                r.2.is_some_and(|x| x.has(ObjectFlag::Magic)),
+                r.3.is_some_and(|x| x.has(ObjectRestriction::NoDrop)),
+                r.4.map(|t| t.0.clone()),
+                r.5.map(|h| h.0),
+            )
+        })
+        .collect();
+    assert_eq!(rows, vec![(true, true, Some(vec![(10, 5)]), Some(30))]);
+}

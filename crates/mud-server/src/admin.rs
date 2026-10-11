@@ -30,10 +30,9 @@ use mud_db::{
 };
 use mud_net::Outbound;
 use mud_world::{
-    Account, AppliedTo, AttachedTriggers, BoardLink, ClassCatalog, CombatStats, Description,
-    EffectInstance, Exits, Health, Item, Keywords, LastInputAt, LiquidContainer, Located,
-    LoggedInAt, Mob, MobPrototypes, Named, ObjectPrototypes, Online, Player, Posture, Profile,
-    Stamina, TriggerCatalog, WearableIn, WorldKey, WorldKeyIndex, wear_flags_primary_slot,
+    Account, AppliedTo, ClassCatalog, CombatStats, EffectInstance, Exits, Health, Item,
+    LastInputAt, Located, LoggedInAt, Mob, MobPrototypes, Named, ObjectPrototypes, Online, Player,
+    Posture, Profile, Stamina, TriggerCatalog, WorldKey, WorldKeyIndex,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -2195,52 +2194,7 @@ pub(crate) fn spawn_into(
                     format!("no object prototype ({zone_id}, {id})"),
                 ));
             };
-            let primary_slot = wear_flags_primary_slot(&proto.wear_flags);
-            let trigger_keys = world
-                .resource::<TriggerCatalog>()
-                .object_attachments
-                .get(&(zone_id, id))
-                .cloned();
-            let mut bundle = world.spawn((
-                Item,
-                Named {
-                    name: proto.name.clone(),
-                },
-                Keywords(proto.keywords.clone()),
-                WorldKey {
-                    zone: proto.zone_id,
-                    id: proto.id,
-                },
-                Located(room_entity),
-            ));
-            if let Some(desc) = proto.examine_description.clone() {
-                bundle.insert(Description(desc));
-            }
-            if let Some(s) = primary_slot {
-                bundle.insert(WearableIn(s));
-            }
-            if let Some(board_id) = proto.board_id {
-                bundle.insert(BoardLink(board_id));
-            }
-            if let Some(liq) = proto.liquid.clone() {
-                bundle.insert(LiquidContainer {
-                    liquid: liq.liquid,
-                    capacity: liq.capacity,
-                    remaining: liq.remaining,
-                    poisoned: liq.poisoned,
-                });
-            }
-            if let Some(fuel) = proto.light_fuel {
-                bundle.insert(mud_world::LightFuel {
-                    capacity: fuel.capacity,
-                    remaining: fuel.remaining,
-                });
-            }
-            if let Some(keys) = trigger_keys {
-                bundle.insert(AttachedTriggers(keys));
-            }
-            let entity = bundle.id();
-            mud_world::attach_proto_charges(world, entity, proto.zone_id, proto.id);
+            let entity = crate::item_spawn::spawn_item_from_proto(world, &proto, room_entity);
             Ok(json!({
                 "success": true,
                 "kind": "object",

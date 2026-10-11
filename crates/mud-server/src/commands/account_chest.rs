@@ -34,10 +34,7 @@
 
 use bevy_ecs::prelude::*;
 use mud_db::enums::UserRole;
-use mud_world::{
-    AttachedTriggers, BoardLink, Charges, Description, Item, Keywords, LightFuel, LiquidContainer,
-    Located, Named, ObjectFlags, ObjectPrototypes, ObjectRestrictions, TriggerCatalog, WorldKey,
-};
+use mud_world::{Charges, LightFuel, LiquidContainer, ObjectPrototypes, WorldKey};
 use serde::{Deserialize, Serialize};
 
 use crate::autosave::SaveCoordinator;
@@ -479,61 +476,26 @@ pub(crate) fn spawn_withdrawn_item(
         );
         return;
     };
-    let trigger_keys = world
-        .get_resource::<TriggerCatalog>()
-        .and_then(|cat| cat.object_attachments.get(&proto_key).cloned());
-    let primary_slot = mud_world::wear_flags_primary_slot(&proto.wear_flags);
-    let item_entity = {
-        let mut bundle = world.spawn((
-            Item,
-            Named {
-                name: proto.name.clone(),
-            },
-            Keywords(proto.keywords.clone()),
-            WorldKey {
-                zone: proto.zone_id,
-                id: proto.id,
-            },
-            mud_world::PersistedItemId(inventory_row_id),
-            Located(player),
-        ));
-        if let Some(desc) = proto.examine_description.clone() {
-            bundle.insert(Description(desc));
+    let item_entity = crate::item_spawn::spawn_item_from_proto(world, &proto, player);
+    world
+        .entity_mut(item_entity)
+        .insert(mud_world::PersistedItemId(inventory_row_id));
+    // Per-instance overrides on top of the proto defaults: a stored liquid
+    // or fuel level beats the prototype's fill, like the `character_items`
+    // loader.
+    if let Some(mut lc) = world.get_mut::<LiquidContainer>(item_entity) {
+        if let Some(t) = state.liquid_type.clone() {
+            lc.liquid = t;
         }
-        if let Some(s) = primary_slot {
-            bundle.insert(mud_world::WearableIn(s));
+        if let Some(r) = state.liquid_remaining {
+            lc.remaining = r;
         }
-        if let Some(board_id) = proto.board_id {
-            bundle.insert(BoardLink(board_id));
-        }
-        if let Some(liq) = proto.liquid.clone() {
-            // Per-instance override beats proto defaults — same
-            // shape as the character_items loader.
-            bundle.insert(LiquidContainer {
-                liquid: state.liquid_type.clone().unwrap_or(liq.liquid),
-                capacity: liq.capacity,
-                remaining: state.liquid_remaining.unwrap_or(liq.remaining),
-                poisoned: liq.poisoned,
-            });
-        }
-        if let Some(fuel) = proto.light_fuel {
-            bundle.insert(LightFuel {
-                capacity: fuel.capacity,
-                remaining: state.light_remaining.unwrap_or(fuel.remaining),
-            });
-        }
-        if let Some(keys) = trigger_keys {
-            bundle.insert(AttachedTriggers(keys));
-        }
-        if !proto.flags.is_empty() {
-            bundle.insert(ObjectFlags(proto.flags.clone()));
-        }
-        if !proto.restrictions.is_empty() {
-            bundle.insert(ObjectRestrictions(proto.restrictions.clone()));
-        }
-        bundle.id()
-    };
-    crate::item_decay::attach_timer_if_decaying(world, item_entity, &proto);
+    }
+    if let Some(r) = state.light_remaining
+        && let Some(mut f) = world.get_mut::<LightFuel>(item_entity)
+    {
+        f.remaining = r;
+    }
     // The stored count when the chest kept one, else a fresh pool from the
     // prototype (no `Charges` would read as an endless wand).
     mud_world::attach_proto_charges(world, item_entity, proto.zone_id, proto.id);
@@ -562,7 +524,7 @@ pub(crate) fn spawn_withdrawn_item(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mud_world::Account;
+    use mud_world::{Account, Item, Keywords, Located, Named, ObjectRestrictions};
 
     #[tokio::test(flavor = "current_thread")]
     async fn unlinked_character_gets_link_hint_instead_of_account_chest() {

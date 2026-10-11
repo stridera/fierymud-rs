@@ -7,11 +7,10 @@ use mud_db::character_items::CharacterItemRow;
 use mud_db::{characters, characters::CharacterRow, sqlx::PgPool, users, users::User};
 use mud_net::{ConnId, Outbound};
 use mud_world::{
-    Account, AccountSummary, AttachedTriggers, BankWealth, BoardLink, CombatStats, CoreStats,
-    Description, EquippedSlot, Follower, Ghost, Health, Item, Keywords, KnownAbilities,
-    LiquidContainer, Located, LoggedInAt, Mob, MobPrototypes, Named, ObjectPrototypes, Online,
-    Player, PlayerFlags, Posture, PostureKind, Profile, Prompt, RecallPoint, Slot, Stamina, Title,
-    TriggerCatalog, Wealth, WearableIn, WorldKey, WorldKeyIndex, wear_flags_primary_slot,
+    Account, AccountSummary, BankWealth, CombatStats, CoreStats, Description, EquippedSlot,
+    Follower, Ghost, Health, Item, KnownAbilities, Located, LoggedInAt, Mob, MobPrototypes, Named,
+    ObjectPrototypes, Online, Player, PlayerFlags, Posture, PostureKind, Profile, Prompt,
+    RecallPoint, Slot, Stamina, Title, Wealth, WorldKey, WorldKeyIndex,
 };
 use subtle::ConstantTimeEq;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -6505,71 +6504,15 @@ pub(crate) fn spawn_inventory(
                 made_progress = true;
                 continue;
             };
-            // Mirror the proto-derived attach set the loader's reset
-            // pass uses: WearableIn (so saved equipment stays
-            // wearable), BoardLink (boards in inventory still link),
-            // LiquidContainer (drink containers stay drinkable —
-            // bug from this morning where a saved water skin came
-            // back without LiquidContainer and `drink` rejected it),
-            // AttachedTriggers (so on_get / on_drop fire on saved
-            // items). Without this list, inventory rehydration only
-            // produces a bare Item with no capability components.
-            let primary_slot = wear_flags_primary_slot(&proto.wear_flags);
-            let trigger_keys = world
-                .resource::<TriggerCatalog>()
-                .object_attachments
-                .get(&(proto.zone_id, proto.id))
-                .cloned();
-            let mut bundle = world.spawn((
-                Item,
-                Named {
-                    name: proto.name.clone(),
-                },
-                Keywords(proto.keywords.clone()),
-                WorldKey {
-                    zone: proto.zone_id,
-                    id: proto.id,
-                },
-                Located(parent_entity),
-            ));
-            if let Some(desc) = proto.examine_description.clone() {
-                bundle.insert(Description(desc));
-            }
-            if let Some(s) = primary_slot {
-                bundle.insert(WearableIn(s));
-            }
-            if let Some(board_id) = proto.board_id {
-                bundle.insert(BoardLink(board_id));
-            }
-            if let Some(liq) = proto.liquid.clone() {
-                bundle.insert(LiquidContainer {
-                    liquid: liq.liquid,
-                    capacity: liq.capacity,
-                    remaining: liq.remaining,
-                    poisoned: liq.poisoned,
-                });
-            }
-            if let Some(fuel) = proto.light_fuel {
-                bundle.insert(mud_world::LightFuel {
-                    capacity: fuel.capacity,
-                    remaining: fuel.remaining,
-                });
-            }
-            if let Some(keys) = trigger_keys {
-                bundle.insert(AttachedTriggers(keys));
-            }
-            // Per-instance attribute flags carry along through
-            // login rehydration the same as proto-spawned items
-            // — without this, a quest item flagged NO_DROP would
-            // lose its restriction on logout/login.
-            if !proto.flags.is_empty() {
-                bundle.insert(mud_world::ObjectFlags(proto.flags.clone()));
-            }
-            if !proto.restrictions.is_empty() {
-                bundle.insert(mud_world::ObjectRestrictions(proto.restrictions.clone()));
-            }
-            let item_entity = bundle.id();
-            crate::item_decay::attach_timer_if_decaying(world, item_entity, &proto);
+            // The shared proto spawn attaches the whole proto-derived set
+            // (wearable slot, board link, liquid, light fuel, triggers,
+            // flags, restrictions, hidden state, decay timer, proto
+            // charges). The row's saved per-instance state is applied on
+            // top below, so a saved value always beats the proto default.
+            // Decay timers are not persisted per instance: a restored
+            // decaying item restarts the proto's clock, as before.
+            let item_entity =
+                crate::item_spawn::spawn_item_from_proto(world, &proto, parent_entity);
             // Stamp the row's id so save_inventory_diff knows to UPDATE
             // this row instead of issuing a delete-and-reinsert that
             // would clobber DB columns the runtime doesn't own
@@ -6590,11 +6533,10 @@ pub(crate) fn spawn_inventory(
                 worn.insert(slot);
                 e.insert(EquippedSlot(slot));
             }
-            // Charges: the proto's starting pool first (so a row left at the
-            // schema default `-1` still gets one), then the persisted
-            // per-instance value when the row has one (>= 0). Wands that were
-            // half-spent before logout come back half-spent.
-            mud_world::attach_proto_charges(world, item_entity, proto.zone_id, proto.id);
+            // Charges: the proto's starting pool (attached by the spawn, so a
+            // row left at the schema default `-1` still gets one), then the
+            // persisted per-instance value when the row has one (>= 0).
+            // Wands that were half-spent before logout come back half-spent.
             if row.charges >= 0
                 && let Ok(mut e) = world.get_entity_mut(item_entity)
             {
