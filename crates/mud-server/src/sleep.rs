@@ -23,14 +23,24 @@ const NIGHT_START_HOUR: i32 = 22;
 /// hour 5; mobs wake the same tick to keep the world consistent.
 const MORNING_HOUR: i32 = 5;
 
-/// Marker for mobs put to sleep by the day/night cycle. Lets the
-/// morning sweep distinguish "I tucked this mob in last night" from
-/// "this mob is sleeping because of a sleep spell" — we never wake
-/// the latter at sunrise. Combat's "jolt awake" path leaves the
-/// marker dangling on a now-Standing mob; the morning sweep cleans
-/// it up either way.
-#[derive(Component, Debug, Clone, Copy)]
-pub struct SleptByNight;
+/// Mobs put to sleep by the day/night cycle. Lets the morning sweep
+/// distinguish "I tucked this mob in last night" from "this mob is
+/// sleeping because of a sleep spell" — we never wake the latter at
+/// sunrise. Combat's "jolt awake" path leaves the entry dangling on a
+/// now-Standing mob; the morning sweep cleans it up either way.
+///
+/// A resource, not a marker component: tagging thousands of mobs at once
+/// moved each to a new archetype, and the first move out of each of a prod
+/// world's thousands of archetypes builds the target archetype and its
+/// table (a 240-310 ms stall on the first sweep after every boot).
+#[derive(Resource, Debug, Default)]
+pub struct NightSleepers(HashSet<Entity>);
+
+impl NightSleepers {
+    pub fn contains(&self, mob: Entity) -> bool {
+        self.0.contains(&mob)
+    }
+}
 
 /// At hour 22 outdoor mobs lie down, at hour 5 they get up. Runs only
 /// on game-hour boundaries (every 750 ticks, same cadence as the
@@ -43,6 +53,7 @@ pub fn mob_sleep_tick(world: &mut World) {
         return;
     }
     let hour = world.resource::<MudClock>().hour;
+    world.init_resource::<NightSleepers>();
     match hour {
         NIGHT_START_HOUR => {
             sleep_outdoor_mobs(world);
@@ -108,6 +119,7 @@ fn sleep_outdoor_mobs(world: &mut World) {
             .collect()
     };
     let listeners = listener_rooms(world);
+    let mut tucked_in = Vec::new();
     for (mob, room) in candidates {
         // Cities still get dark, but city-dweller mobs (guards,
         // shopkeepers) staying alert at night reads better than
@@ -121,7 +133,8 @@ fn sleep_outdoor_mobs(world: &mut World) {
             continue;
         }
         if let Ok(mut em) = world.get_entity_mut(mob) {
-            em.insert((Posture(PostureKind::Sleeping), SleptByNight));
+            em.insert(Posture(PostureKind::Sleeping));
+            tucked_in.push(mob);
         }
         if !listeners.contains(&room) {
             continue;
@@ -139,23 +152,27 @@ fn sleep_outdoor_mobs(world: &mut World) {
             );
         }
     }
+    let mut night = world.resource_mut::<NightSleepers>();
+    night.0.extend(tucked_in);
 }
 
 fn wake_night_sleepers(world: &mut World) {
-    let to_wake: Vec<Entity> = {
-        let mut q = world.query_filtered::<Entity, (With<Mob>, With<SleptByNight>)>();
-        q.iter(world).collect()
-    };
+    // Drained, not iterated: the sweep ends with nobody tagged, and
+    // despawned mobs (killed overnight) drop out with the rest.
+    let to_wake: Vec<Entity> = std::mem::take(&mut world.resource_mut::<NightSleepers>().0)
+        .into_iter()
+        .filter(|&mob| world.get::<Mob>(mob).is_some())
+        .collect();
     let listeners = listener_rooms(world);
     for mob in to_wake {
         let was_sleeping = world.get::<Posture>(mob).map(|p| p.0) == Some(PostureKind::Sleeping);
         let in_combat = world.get::<Fighting>(mob).is_some();
         let room = world.get::<Located>(mob).map(|l| l.0);
-        if let Ok(mut em) = world.get_entity_mut(mob) {
-            em.remove::<SleptByNight>();
-            if was_sleeping && !in_combat {
-                em.insert(Posture(PostureKind::Standing));
-            }
+        if was_sleeping
+            && !in_combat
+            && let Ok(mut em) = world.get_entity_mut(mob)
+        {
+            em.insert(Posture(PostureKind::Standing));
         }
         if was_sleeping
             && !in_combat
@@ -227,7 +244,7 @@ mod tests {
             Some(PostureKind::Sleeping),
             "outdoor mob should be asleep at night"
         );
-        assert!(world.get::<SleptByNight>(mob).is_some());
+        assert!(world.resource::<NightSleepers>().contains(mob));
 
         world.resource_mut::<MudClock>().hour = MORNING_HOUR;
         world.resource_mut::<TickCount>().0 = 1500;
@@ -237,7 +254,7 @@ mod tests {
             Some(PostureKind::Standing),
             "outdoor mob should wake at morning"
         );
-        assert!(world.get::<SleptByNight>(mob).is_none());
+        assert!(!world.resource::<NightSleepers>().contains(mob));
     }
 
     #[test]
@@ -269,7 +286,7 @@ mod tests {
             Some(PostureKind::Standing),
             "cave mobs are not subject to day/night sleeping"
         );
-        assert!(world.get::<SleptByNight>(mob).is_none());
+        assert!(!world.resource::<NightSleepers>().contains(mob));
     }
 
     #[test]
@@ -289,7 +306,7 @@ mod tests {
     #[test]
     fn morning_does_not_wake_spell_sleepers() {
         let (mut world, _room, mob) = make_world();
-        // Spell sleep — Posture flipped, no SleptByNight marker.
+        // Spell sleep — Posture flipped, not in NightSleepers.
         world
             .get_entity_mut(mob)
             .unwrap()
@@ -458,7 +475,7 @@ mod tests {
         mob_sleep_tick(&mut world);
         let sleep = start.elapsed();
         assert!(
-            world.query::<&SleptByNight>().iter(&world).count() > MOBS / 2,
+            world.resource::<NightSleepers>().0.len() > MOBS / 2,
             "most mobs should have been tucked in"
         );
 
@@ -467,13 +484,111 @@ mod tests {
         let start = std::time::Instant::now();
         mob_sleep_tick(&mut world);
         let wake = start.elapsed();
-        assert_eq!(world.query::<&SleptByNight>().iter(&world).count(), 0);
+        assert_eq!(world.resource::<NightSleepers>().0.len(), 0);
         eprintln!(
             "mob_sleep_tick 5500 mobs / 4000 items / 10k rooms: sleep={sleep:?} wake={wake:?}"
         );
         if !cfg!(debug_assertions) {
             assert!(sleep.as_millis() < 20, "sleep pass took {sleep:?}");
             assert!(wake.as_millis() < 20, "wake pass took {wake:?}");
+        }
+    }
+
+    /// One const-generic component per bit: prod mobs differ in dozens of
+    /// optional components, so a world has thousands of distinct
+    /// archetypes, not the 32 of `scatter`.
+    #[derive(Component)]
+    struct Bit<const N: usize>;
+    #[derive(Component)]
+    struct Pad<const N: usize>;
+
+    macro_rules! insert_all {
+        ($ent:expr, $ty:ident; $($n:literal),*) => {
+            $( $ent.insert($ty::<$n>); )*
+        };
+    }
+
+    fn shape(world: &mut World, e: Entity, h: usize) {
+        let mut ent = world.entity_mut(e);
+        insert_all!(ent, Pad; 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+            20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39);
+        let h = h.wrapping_mul(2_654_435_761) >> 7;
+        macro_rules! bits {
+            ($($n:literal),*) => { $( if h >> $n & 1 != 0 { ent.insert(Bit::<$n>); } )* };
+        }
+        bits!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11);
+    }
+
+    /// Prod stalled 240-310 ms on the first night/morning sweep after each
+    /// boot (never again until the next restart): tagging a mob
+    /// structurally moves it to a new archetype, and the first move out of
+    /// each of a prod world's thousands of archetypes builds the target
+    /// archetype and its table. Day one is the number that matters.
+    #[test]
+    fn sleep_tick_first_day_with_many_archetypes_is_fast() {
+        const ROOMS: usize = 10_000;
+        const MOBS: usize = 5500;
+        let mut world = World::new();
+        world.insert_resource(TickCount(750));
+        world.insert_resource(MudClock {
+            year: 1,
+            month: 1,
+            day: 1,
+            hour: NIGHT_START_HOUR,
+            minute: 0,
+            stamp: 0,
+        });
+        let rooms: Vec<Entity> = (0..ROOMS)
+            .map(|i| {
+                world
+                    .spawn((
+                        Room,
+                        RoomSector(if i % 5 == 0 {
+                            Sector::Cave
+                        } else {
+                            Sector::Field
+                        }),
+                    ))
+                    .id()
+            })
+            .collect();
+        for i in 0..MOBS {
+            let mob = world
+                .spawn((
+                    Mob,
+                    Named {
+                        name: format!("mob {i}"),
+                    },
+                    Located(rooms[(i * 7) % ROOMS]),
+                    Posture(PostureKind::Standing),
+                ))
+                .id();
+            shape(&mut world, mob, i + 1);
+        }
+        let archetypes = world.archetypes().len();
+
+        let mut times = Vec::new();
+        for day in 0..2u64 {
+            world.resource_mut::<MudClock>().hour = NIGHT_START_HOUR;
+            world.resource_mut::<TickCount>().0 = 1500 * day + 750;
+            let start = std::time::Instant::now();
+            mob_sleep_tick(&mut world);
+            let sleep = start.elapsed();
+            world.resource_mut::<MudClock>().hour = MORNING_HOUR;
+            world.resource_mut::<TickCount>().0 = 1500 * day + 1500;
+            let start = std::time::Instant::now();
+            mob_sleep_tick(&mut world);
+            times.push((sleep, start.elapsed()));
+        }
+        eprintln!(
+            "mob_sleep_tick {MOBS} mobs / {archetypes} archetypes: day1 sleep={:?} wake={:?}; day2 sleep={:?} wake={:?}",
+            times[0].0, times[0].1, times[1].0, times[1].1
+        );
+        if !cfg!(debug_assertions) {
+            for (sleep, wake) in &times {
+                assert!(sleep.as_millis() < 20, "sleep pass took {sleep:?}");
+                assert!(wake.as_millis() < 20, "wake pass took {wake:?}");
+            }
         }
     }
 }

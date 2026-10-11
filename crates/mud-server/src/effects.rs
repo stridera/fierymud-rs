@@ -140,7 +140,9 @@ pub(crate) fn fall_asleep(world: &mut World, target: Entity) {
 /// morning. The wear-off or jolt text is the caller's.
 fn wake_after_sleep(world: &mut World, target: Entity) {
     if has_sleep_effect(world, target)
-        || world.get::<crate::sleep::SleptByNight>(target).is_some()
+        || world
+            .get_resource::<crate::sleep::NightSleepers>()
+            .is_some_and(|n| n.contains(target))
         || world.get::<mud_world::Posture>(target).map(|p| p.0)
             != Some(mud_world::PostureKind::Sleeping)
     {
