@@ -6,8 +6,7 @@ use tracing::{info, warn};
 
 use crate::TickCount;
 use crate::commands::{
-    apply_damage, drain_lua_outbox, name_of, name_or, send_msg, send_rendered, send_to, try_insert,
-    try_remove,
+    apply_damage, drain_lua_outbox, name_of, name_or, send_msg, send_to, try_insert, try_remove,
 };
 
 /// Marker added to an `EffectInstance` after its `on_apply` Lua
@@ -520,10 +519,18 @@ fn despawn_summoned_mob(world: &mut World, target: Entity) {
     if world.get::<mud_world::Player>(target).is_some() {
         return;
     }
-    if let Some(mob_room) = world.get::<mud_world::Located>(target).map(|l| l.0) {
-        let mob_name = world
-            .get::<mud_world::Named>(target)
-            .map_or("the summoned creature".to_string(), |n| n.name.clone());
+    // The summoner: the conjured mob follows them (`Follower`), and only a
+    // player gets a line.
+    let owner = world
+        .get::<mud_world::Follower>(target)
+        .map(|f| f.0)
+        .filter(|&o| world.get::<mud_world::Player>(o).is_some());
+    let mob_name = world
+        .get::<mud_world::Named>(target)
+        .map_or("the summoned creature".to_string(), |n| n.name.clone());
+    let mob_room = world.get::<mud_world::Located>(target).map(|l| l.0);
+    let mut told_owner = false;
+    if let Some(mob_room) = mob_room {
         let players: Vec<Entity> = {
             let mut q =
                 world.query_filtered::<(Entity, &mud_world::Located), With<mud_world::Player>>();
@@ -534,13 +541,34 @@ fn despawn_summoned_mob(world: &mut World, target: Entity) {
         };
         let msg = format!("{mob_name} fades back to where it was summoned from.\r\n");
         for p in players {
-            send_msg(world, p, msg.clone());
+            if Some(p) == owner {
+                told_owner = true;
+                send_msg(world, p, owner_fade_line(&mob_name));
+            } else {
+                send_msg(world, p, msg.clone());
+            }
         }
+    }
+    // A summoner who is elsewhere (the mob wandered, or they left it) still
+    // learns it is gone.
+    if let Some(owner) = owner
+        && !told_owner
+    {
+        send_msg(world, owner, owner_fade_line(&mob_name));
     }
     // Legacy `extract_char`: carried and worn items drop to the room, the
     // mob's followers and rider let go, and anyone fighting it disengages.
     let room = world.get::<mud_world::Located>(target).map(|l| l.0);
     crate::commands::extract_mob(world, target, room, false);
+}
+
+/// The summoner's own line when their conjured mob fades: "Your fire
+/// elemental fades back to where it was summoned from."
+fn owner_fade_line(mob_name: &str) -> String {
+    format!(
+        "Your {} fades back to where it was summoned from.\r\n",
+        crate::commands::without_article(mob_name)
+    )
 }
 
 /// Remove one `EffectInstance` before its time (dispel, cleanse, `cancel`,
@@ -701,40 +729,59 @@ pub fn effects_tick(world: &mut World) {
             // Look up wearoff_to_target / wearoff_to_room from the
             // AbilityMessages catalog. ability_id is None for hardcoded
             // effects (rend's bleed, gouge's blind, admin tests) — those
-            // fall through to the terse default.
-            let (wearoff_target, wearoff_room) = ability_id
-                .and_then(|aid| {
-                    world
-                        .resource::<AbilityCatalog>()
-                        .messages
-                        .get(&aid)
-                        .map(|m| (m.wearoff_to_target.clone(), m.wearoff_to_room.clone()))
-                })
-                .unwrap_or((None, None));
-            // Send_to registers the target for end-of-tick prompt refresh
-            // via commands::flush_prompts; no per-system tracking here.
-            let target_msg = wearoff_target
-                .as_deref()
-                .map_or_else(|| format!("Your {name} fades.\r\n"), |t| format!("{t}\r\n"));
-            send_rendered(world, target, &target_msg);
-            if let Some(line) = wearoff_room.as_deref()
-                && let Some(located) = world.get::<Located>(target).copied()
-            {
+            // fall through to the terse default. A conjured mob's
+            // `summoned-*` instance lives on the mob, not the caster, so the
+            // caster-facing wear-off text would render against the wrong
+            // entity; `despawn_summoned_mob` below tells the room and the
+            // summoner instead.
+            let is_summon = name.starts_with("summoned-");
+            if !is_summon {
+                let (wearoff_target, wearoff_room) = ability_id
+                    .and_then(|aid| {
+                        world
+                            .resource::<AbilityCatalog>()
+                            .messages
+                            .get(&aid)
+                            .map(|m| (m.wearoff_to_target.clone(), m.wearoff_to_room.clone()))
+                    })
+                    .unwrap_or((None, None));
                 let target_name = name_of(world, target);
                 // Wear-off has no separate caster on hand: the effect's
                 // bearer stands in for `{actor.*}` and `{target.*}` alike.
-                let rendered = crate::commands::render_ability_template(
-                    line,
-                    &target_name,
-                    &target_name,
-                    false,
+                // The bearer reads their own line in the second person
+                // ("Your berserker fury fades."); the room sees the name.
+                let target_msg = wearoff_target.as_deref().map_or_else(
+                    || format!("Your {name} fades.\r\n"),
+                    |t| {
+                        let line = crate::commands::render_ability_template(
+                            t,
+                            &target_name,
+                            &target_name,
+                            true,
+                            crate::commands::Viewer::Actor,
+                        );
+                        format!("{line}\r\n")
+                    },
                 );
-                crate::commands::broadcast_room_except_rendered(
-                    world,
-                    located.0,
-                    &[target],
-                    &format!("{rendered}\r\n"),
-                );
+                send_msg(world, target, target_msg);
+                if let Some(line) = wearoff_room.as_deref()
+                    && let Some(located) = world.get::<Located>(target).copied()
+                {
+                    let rendered = crate::commands::render_ability_template(
+                        line,
+                        &target_name,
+                        &target_name,
+                        false,
+                        crate::commands::Viewer::Bystander,
+                    );
+                    crate::commands::broadcast_room_anonymised(
+                        world,
+                        located.0,
+                        &[target],
+                        &[(target, target_name.as_str())],
+                        &format!("{rendered}\r\n"),
+                    );
+                }
             }
             // Same reversal as a dispel / cleanse (stat delta, resistance,
             // alignment tag, markers); only the wear-off text and the

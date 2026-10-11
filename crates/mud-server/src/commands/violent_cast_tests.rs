@@ -367,28 +367,190 @@ fn word_of_command_is_still_refused_in_a_peaceful_room() {
     assert!(!crate::commands::cast_landed());
 }
 
+/// The real catalog names the unquoted-cast parser has to tell apart: a
+/// short spell that is also the first word of longer ones.
+fn parse_catalog() -> AbilityCatalog {
+    let mut catalog = AbilityCatalog::default();
+    for (id, name) in [
+        (20, "summon"),
+        (21, "summon_demon"),
+        (22, "summon_elemental"),
+        (23, "armor"),
+        (24, "armor_of_gaia"),
+        (25, "heal"),
+        (26, "word_of_recall"),
+        (27, "word_of_command"),
+        (28, "magic_missile"),
+        (29, "color_spray"),
+        (30, "cone_of_cold"),
+    ] {
+        catalog
+            .by_name
+            .insert(name.to_string(), ability_def(id, name, AbilityKind::Spell));
+    }
+    catalog
+}
+
+/// `(ability plain name, target words)` for unquoted `args`, as the cast
+/// parser resolves them; a miss falls back to the first word alone.
+fn parse(
+    catalog: &AbilityCatalog,
+    known: Option<&KnownAbilities>,
+    args: &str,
+) -> (String, Option<String>) {
+    let (first, rest) = parse_quoted_first_token(args);
+    if let Some((def, tail, _)) =
+        super::resolve_unquoted_ability(catalog, known, AbilityKind::Spell, args)
+    {
+        return (def.plain_name, tail.map(str::to_string));
+    }
+    let def = catalog
+        .find_by_prefix(&first, Some(AbilityKind::Spell), known)
+        .map_or_else(|| "NONE".to_string(), |d| d.plain_name.clone());
+    (def, rest.map(str::to_string))
+}
+
+fn t(s: &str) -> String {
+    s.to_string()
+}
+
+#[test]
+fn an_exact_first_word_beats_a_longer_prefix_that_swallows_the_target() {
+    let catalog = parse_catalog();
+    // `summon d` must not become Summon Demon; `armor o` not Armor of Gaia.
+    assert_eq!(
+        parse(&catalog, None, "summon d"),
+        ("SUMMON".into(), Some(t("d")))
+    );
+    assert_eq!(
+        parse(&catalog, None, "summon e"),
+        ("SUMMON".into(), Some(t("e")))
+    );
+    assert_eq!(
+        parse(&catalog, None, "summon co"),
+        ("SUMMON".into(), Some(t("co")))
+    );
+    assert_eq!(
+        parse(&catalog, None, "armor o"),
+        ("ARMOR".into(), Some(t("o")))
+    );
+    assert_eq!(
+        parse(&catalog, None, "summon dracos extra"),
+        ("SUMMON".into(), Some(t("dracos extra")))
+    );
+    // The same word as ability and target.
+    assert_eq!(
+        parse(&catalog, None, "heal heal"),
+        ("HEAL".into(), Some(t("heal")))
+    );
+    assert_eq!(
+        parse(&catalog, None, "HEAL Heal"),
+        ("HEAL".into(), Some(t("Heal")))
+    );
+}
+
+#[test]
+fn an_exact_multiword_name_wins_over_its_first_word() {
+    let catalog = parse_catalog();
+    assert_eq!(
+        parse(&catalog, None, "word of recall"),
+        ("WORD_OF_RECALL".into(), None)
+    );
+    assert_eq!(
+        parse(&catalog, None, "word of command goblin"),
+        ("WORD_OF_COMMAND".into(), Some(t("goblin")))
+    );
+    assert_eq!(
+        parse(&catalog, None, "summon demon bob"),
+        ("SUMMON_DEMON".into(), Some(t("bob")))
+    );
+    assert_eq!(
+        parse(&catalog, None, "armor of gaia me"),
+        ("ARMOR_OF_GAIA".into(), Some(t("me")))
+    );
+    assert_eq!(
+        parse(&catalog, None, "Magic Missile goblin"),
+        ("MAGIC_MISSILE".into(), Some(t("goblin")))
+    );
+}
+
+#[test]
+fn abbreviated_multiword_names_still_resolve_by_prefix() {
+    let catalog = parse_catalog();
+    // `word` is not an exact ability, so the prefix run applies.
+    assert_eq!(
+        parse(&catalog, None, "word of rec"),
+        ("WORD_OF_RECALL".into(), None)
+    );
+    assert_eq!(
+        parse(&catalog, None, "c s goblin"),
+        ("COLOR_SPRAY".into(), Some(t("goblin")))
+    );
+}
+
+/// `cast word recall`: "word recall" is not a name, `word` alone is not
+/// exact, and `recall` is not a word of "word of recall", so the words are
+/// not joined. The first word resolves by prefix (the caster's known spell
+/// first) and `recall` is the target - the spell is not guessed from the
+/// second word.
+#[test]
+fn word_recall_without_of_resolves_the_first_word_with_known_first() {
+    let catalog = parse_catalog();
+    let known = KnownAbilities {
+        entries: vec![(26, 500, true)],
+    };
+    assert_eq!(
+        parse(&catalog, Some(&known), "word recall"),
+        ("WORD_OF_RECALL".into(), Some(t("recall")))
+    );
+    // Without knowing either, alphabetical order decides.
+    assert_eq!(
+        parse(&catalog, None, "word recall"),
+        ("WORD_OF_COMMAND".into(), Some(t("recall")))
+    );
+}
+
+#[test]
+fn cast_summon_d_targets_dracos_not_summon_demon() {
+    let (mut world, room, caster, mut rx) = world_with_spells();
+    {
+        let mut catalog = world.resource_mut::<AbilityCatalog>();
+        spell(&mut catalog, 20, "summon", false, MODIFY);
+        spell(&mut catalog, 21, "summon_demon", false, MODIFY);
+    }
+    world
+        .get_mut::<KnownAbilities>(caster)
+        .unwrap()
+        .entries
+        .extend([(20, 500, true), (21, 500, true)]);
+    world.spawn((
+        Mob,
+        Named {
+            name: "Dracos".into(),
+        },
+        Keywords(vec!["dracos".into()]),
+        Located(room),
+        Health { hp: 50, max: 50 },
+    ));
+    drain(&mut rx);
+    cast_args(&mut world, caster, "summon d");
+    let out = drain(&mut rx);
+    // Summon itself resolved (it looks up an online player named `d`); a
+    // swallowed target would have cast Summon Demon on nobody instead.
+    assert!(out.contains("no one named 'd' online"), "{out}");
+    assert!(!out.contains("summon_demon"), "{out}");
+}
+
 #[test]
 fn unquoted_multiword_name_keeps_the_rest_as_the_target() {
-    let (mut world, _room, _caster, _rx) = world_with_spells();
-    world.resource_mut::<AbilityCatalog>().by_name.insert(
-        "magic_missile".into(),
-        ability_def(9, "magic_missile", AbilityKind::Spell),
-    );
-    let catalog = world.resource::<AbilityCatalog>();
-    let found = super::unquoted_multiword_ability("magic missile goblin", |n| {
-        catalog
-            .find_by_prefix(n, Some(AbilityKind::Spell), None)
-            .map(|d| d.id)
-    });
+    let catalog = parse_catalog();
+    let found =
+        super::resolve_unquoted_ability(&catalog, None, AbilityKind::Spell, "magic missile goblin")
+            .map(|(d, tail, needle)| (d.id, tail, needle));
     assert_eq!(
         found,
-        Some((9, Some("goblin"), "magic_missile".to_string()))
+        Some((28, Some("goblin"), "magic_missile".to_string()))
     );
     // A lone word never takes the multi-word path.
-    assert_eq!(
-        super::unquoted_multiword_ability("ray goblin", |n| catalog
-            .find_by_prefix(n, Some(AbilityKind::Spell), None)
-            .map(|d| d.id)),
-        None
-    );
+    assert!(super::resolve_unquoted_ability(&catalog, None, AbilityKind::Spell, "armor").is_none());
 }

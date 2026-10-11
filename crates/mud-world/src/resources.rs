@@ -2374,6 +2374,28 @@ impl AbilityCatalog {
         kind: Option<mud_db::abilities::AbilityKind>,
         known: Option<&crate::components::KnownAbilities>,
     ) -> Option<&AbilityDef> {
+        self.find_ranked(needle, kind, known, false)
+    }
+
+    /// Like [`Self::find_by_prefix`] but only a full-word, case-insensitive
+    /// match of the ability name counts (`summon` is Summon, never Summon
+    /// Demon). `_` and spaces are interchangeable in `needle`.
+    #[must_use]
+    pub fn find_exact(
+        &self,
+        needle: &str,
+        kind: Option<mud_db::abilities::AbilityKind>,
+    ) -> Option<&AbilityDef> {
+        self.find_ranked(needle, kind, None, true)
+    }
+
+    fn find_ranked(
+        &self,
+        needle: &str,
+        kind: Option<mud_db::abilities::AbilityKind>,
+        known: Option<&crate::components::KnownAbilities>,
+        exact_only: bool,
+    ) -> Option<&AbilityDef> {
         use crate::targeting::{NameRank, rank_ability_name};
         let key = |d: &AbilityDef| d.plain_name.to_ascii_lowercase();
         let mut exact: Option<&AbilityDef> = None;
@@ -2396,13 +2418,13 @@ impl AbilityCatalog {
                         exact = Some(d);
                     }
                 }
-                NameRank::Prefix => {
+                NameRank::Prefix if !exact_only => {
                     let k = (!known.is_some_and(|kn| kn.has_any(d.id)), key(d));
                     if prefix.as_ref().is_none_or(|(pk, _)| k < *pk) {
                         prefix = Some((k, d));
                     }
                 }
-                NameRank::None => {}
+                NameRank::Prefix | NameRank::None => {}
             }
         }
         exact.or_else(|| prefix.map(|(_, d)| d))

@@ -2796,20 +2796,21 @@ fn flush_lua_outbox(world: &mut World) {
         }
     }
     // Room broadcasts: snapshot recipients per room so the inner loop
-    // doesn't re-borrow World mid-send.
+    // doesn't re-borrow World mid-send. Script text goes out verbatim
+    // (`send_to`, not `send_msg`): legacy `send`/`echo` never CAP()'d it.
     for (room, msg, except) in messages {
         let recipients: Vec<Entity> = crate::room_index::contents_of(world, room)
             .filter(|&e| Some(e) != except && world.get::<Connection>(e).is_some())
             .collect();
         for r in recipients {
-            send_msg(world, r, format!("{msg}\r\n"));
+            send_to(world, r, format!("{msg}\r\n"));
         }
     }
     // Direct one-to-one delivery (actor:send). send_to silently no-ops
     // if the target has no Connection (mob targets, disconnected
     // players) — that's the desired behavior.
     for (target, msg) in direct {
-        send_msg(world, target, format!("{msg}\r\n"));
+        send_to(world, target, format!("{msg}\r\n"));
     }
 
     // Queued `actor:command(text)` invocations. Re-enters dispatch as
@@ -15296,13 +15297,24 @@ pub(crate) fn parse_quoted_first_token(args: &str) -> (String, Option<&str>) {
     (head, tail)
 }
 
-/// Longest run of two or more leading words in unquoted `args` that
-/// `lookup` resolves to an ability, with the remaining words as the target
-/// and the underscore-joined needle that matched. `None` when no multi-word
-/// run matches (the caller keeps the single-first-word resolution).
+/// Resolve the ability named by the leading words of unquoted `args` (two or
+/// more words; a lone word never takes this path), returning the ability,
+/// the remaining words as the target, and the underscore-joined needle.
+///
+/// Rule, in order:
+/// 1. the longest run of two or more leading words that names an ability
+///    EXACTLY (`word of recall`);
+/// 2. else the first word alone, when it names an ability exactly, with the
+///    rest as the target (`summon d` is Summon on `d`, not Summon Demon;
+///    `armor o` is Armor on `o`, not Armor of Gaia);
+/// 3. else the longest run of two or more words that is a word-by-word
+///    prefix of an ability (`word of rec`).
+///
+/// `None` leaves the caller on the single-first-word prefix resolution.
 fn unquoted_multiword_ability<T>(
     args: &str,
-    lookup: impl Fn(&str) -> Option<T>,
+    exact: impl Fn(&str) -> Option<T>,
+    prefix: impl Fn(&str) -> Option<T>,
 ) -> Option<(T, Option<&str>, String)> {
     let trimmed = args.trim_start();
     // Byte offset where each word ends.
@@ -15321,19 +15333,51 @@ fn unquoted_multiword_ability<T>(
     if in_word {
         ends.push(trimmed.len());
     }
-    for n in (2..=ends.len()).rev() {
-        let head = &trimmed[..ends[n - 1]];
-        let needle = head
+    if ends.len() < 2 {
+        return None;
+    }
+    let needle_of = |n: usize| {
+        trimmed[..ends[n - 1]]
             .split_whitespace()
             .collect::<Vec<_>>()
             .join("_")
-            .to_ascii_lowercase();
-        if let Some(found) = lookup(&needle) {
-            let tail = trimmed[ends[n - 1]..].trim();
-            return Some((found, (!tail.is_empty()).then_some(tail), needle));
+            .to_ascii_lowercase()
+    };
+    let result = |found: T, n: usize, needle: String| {
+        let tail = trimmed[ends[n - 1]..].trim();
+        Some((found, (!tail.is_empty()).then_some(tail), needle))
+    };
+    for n in (2..=ends.len()).rev() {
+        let needle = needle_of(n);
+        if let Some(found) = exact(&needle) {
+            return result(found, n, needle);
+        }
+    }
+    let first = needle_of(1);
+    if let Some(found) = exact(&first) {
+        return result(found, 1, first);
+    }
+    for n in (2..=ends.len()).rev() {
+        let needle = needle_of(n);
+        if let Some(found) = prefix(&needle) {
+            return result(found, n, needle);
         }
     }
     None
+}
+
+/// [`unquoted_multiword_ability`] over the real catalog.
+fn resolve_unquoted_ability<'a>(
+    catalog: &AbilityCatalog,
+    known: Option<&mud_world::KnownAbilities>,
+    kind: mud_db::abilities::AbilityKind,
+    args: &'a str,
+) -> Option<(mud_world::AbilityDef, Option<&'a str>, String)> {
+    unquoted_multiword_ability(
+        args,
+        |n| catalog.find_exact(n, Some(kind)).cloned(),
+        |n| catalog.find_by_prefix(n, Some(kind), known).cloned(),
+    )
 }
 
 /// fn-ptr shim used by the Lua `skills.execute` binding. Hardcodes
@@ -15956,8 +16000,13 @@ fn resolve_and_gate_target(
         } else {
             name_or(world, target_entity, "(unknown)")
         };
-        let rendered =
-            render_ability_template(&refusal, &actor_name, &target_name, target_entity == player);
+        let rendered = render_ability_template(
+            &refusal,
+            &actor_name,
+            &target_name,
+            target_entity == player,
+            Viewer::Actor,
+        );
         send_msg(world, player, format!("{rendered}\r\n"));
         return None;
     }
@@ -16082,22 +16131,24 @@ pub(crate) fn invoke_ability_core(
 
     // Exact name (of the right kind) wins; otherwise the typed words must
     // be a prefix of the ability name (`invis` never reaches
-    // `mass_invisibility`).
+    // `mass_invisibility`). Gods "know" every ability, so the known-first
+    // tie-break reads `known_abilities_of`, not the stored component.
+    let known = mud_world::known_abilities_of(world, player);
     let mut def = world
         .resource::<AbilityCatalog>()
-        .find_by_prefix(&needle, Some(kind), world.get::<KnownAbilities>(player))
+        .find_by_prefix(&needle, Some(kind), known.as_deref())
         .cloned();
     // Unquoted multi-word names (`cast word of recall`): the first word alone
-    // is a prefix of several spells (`word` also reaches Word of Command), so
-    // try the longest run of leading words that names an ability before
-    // settling for the first word.
+    // is a prefix of several spells (`word` also reaches Word of Command), but
+    // a longer run must match an ability name exactly or the first word must
+    // be an exact name itself, so `cast summon d` is Summon on `d` and never
+    // Summon Demon (see [`unquoted_multiword_ability`]).
     let mut target_word = target_word;
     if !args.trim_start().starts_with(['\'', '"']) {
         let catalog = world.resource::<AbilityCatalog>();
-        let known = world.get::<KnownAbilities>(player);
-        if let Some((found, tail, joined)) = unquoted_multiword_ability(args, |n| {
-            catalog.find_by_prefix(n, Some(kind), known).cloned()
-        }) {
+        if let Some((found, tail, joined)) =
+            resolve_unquoted_ability(catalog, known.as_deref(), kind, args)
+        {
             def = Some(found);
             target_word = tail;
             needle = joined;
@@ -16969,6 +17020,7 @@ pub(crate) fn invoke_ability_core(
                 &actor_name_pre,
                 &target_name_pre,
                 target_entity == player,
+                Viewer::Actor,
             );
             format!("{}\r\n", render_color_tags(&rendered, mode))
         } else if target_entity == player {
@@ -17787,10 +17839,27 @@ pub(crate) fn invoke_ability_core(
                         Some(&spec.default_params),
                     );
                     if let Some(t) = to_target {
-                        let line =
-                            render_ability_template(&t, &actor_name_pre, &target_name_pre, false);
+                        // A self-cleanse reads to the caster in the second
+                        // person; otherwise the line goes to the cured person.
+                        let line = render_ability_template(
+                            &t,
+                            &actor_name_pre,
+                            &target_name_pre,
+                            target_entity == player,
+                            if target_entity == player {
+                                Viewer::Actor
+                            } else {
+                                Viewer::Target
+                            },
+                        );
                         let room = to_room.map(|r| {
-                            render_ability_template(&r, &actor_name_pre, &target_name_pre, false)
+                            render_ability_template(
+                                &r,
+                                &actor_name_pre,
+                                &target_name_pre,
+                                false,
+                                Viewer::Bystander,
+                            )
                         });
                         cleanse_notes.push((line, room));
                     }
@@ -17803,8 +17872,13 @@ pub(crate) fn invoke_ability_core(
                         Some(&spec.default_params),
                         target_entity == player,
                     ) {
-                        let line =
-                            render_ability_template(&t, &actor_name_pre, &target_name_pre, false);
+                        let line = render_ability_template(
+                            &t,
+                            &actor_name_pre,
+                            &target_name_pre,
+                            target_entity == player,
+                            Viewer::Actor,
+                        );
                         send_msg(world, player, format!("{line}\r\n"));
                     }
                 }
@@ -20259,7 +20333,7 @@ pub(crate) fn invoke_ability_core(
         let line = if let Some(t) = target_template {
             // success_to_victim is rendered for the *victim* — they're
             // never the actor, so reflexive collapse doesn't apply.
-            render_ability_template(t, &actor_name, &target_name_raw, false)
+            render_ability_template(t, &actor_name, &target_name_raw, false, Viewer::Target)
         } else {
             format!(
                 "{} {verb}s {} on you. ({} effect(s))",
@@ -20290,7 +20364,8 @@ pub(crate) fn invoke_ability_core(
         && let Some(located) = world.get::<Located>(player).copied()
     {
         // Bystanders see actor + target as third parties — never reflexive.
-        let rendered = render_ability_template(t, &actor_name, &target_name_raw, false);
+        let rendered =
+            render_ability_template(t, &actor_name, &target_name_raw, false, Viewer::Bystander);
         let mut except: Vec<Entity> = vec![player];
         if target_entity != player {
             except.push(target_entity);
@@ -20862,13 +20937,14 @@ fn send_hit_templates(
     if target_entity != player
         && let Some(t) = victim_template
     {
-        let line = render_ability_template(t, actor_name, target_name, false);
+        let line = render_ability_template(t, actor_name, target_name, false, Viewer::Target);
         send_msg(world, target_entity, format!("{line}\r\n"));
     }
     if let Some(t) = room_template
         && let Some(located) = world.get::<Located>(player).copied()
     {
-        let rendered = render_ability_template(t, actor_name, target_name, false);
+        let rendered =
+            render_ability_template(t, actor_name, target_name, false, Viewer::Bystander);
         let mut except: Vec<Entity> = vec![player];
         let mut actors: Vec<(Entity, &str)> = vec![(player, actor_name)];
         if target_entity != player {
@@ -20885,42 +20961,99 @@ fn send_hit_templates(
     }
 }
 
+/// Who reads a rendered `AbilityMessages` line. The same template is shown
+/// to the caster, the victim and the bystanders, and each sees themself as
+/// "you"/"your" and everyone else by name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Viewer {
+    /// The caster (or, for a wear-off, the effect's bearer).
+    Actor,
+    /// The one the ability was cast on, when that is not the caster.
+    Target,
+    /// Anyone else in the room.
+    Bystander,
+}
+
 /// Substitute `{actor.X}` / `{target.X}` placeholders in an
-/// `AbilityMessages` template. Names use the entity's `Named.name`
-/// verbatim; unknown pronouns default to gender-neutral
-/// they/them/their (entities don't carry gender yet — Phase E).
-/// `reflexive=true` collapses target-side placeholders to second-person
-/// reflexive forms (`yourself` / `your`) so a self-targeted spell
-/// without a `success_to_self` row still reads naturally.
+/// `AbilityMessages` template for one [`Viewer`].
+///
+/// The viewer's own side reads in the second person (`{actor.name}` ->
+/// "you", `{actor.pos}` -> "your", `{actor.ref}` -> "yourself"); the other
+/// side keeps the entity's `Named.name` verbatim, with `{..pos}` becoming
+/// "<Name>'s" (bystanders who cannot see that entity get "Someone's" when
+/// the caller runs the line through [`broadcast_room_anonymised`]). Other
+/// pronouns default to gender-neutral they/them/their (entities don't carry
+/// gender yet - Phase E). `reflexive=true` means the target IS the actor
+/// (only meaningful for [`Viewer::Actor`]): target-side placeholders
+/// collapse to `yourself` / `your` so a self-targeted spell without a
+/// `success_to_self` row still reads naturally.
 pub(crate) fn render_ability_template(
     template: &str,
     actor_name: &str,
     target_name: &str,
     reflexive: bool,
+    viewer: Viewer,
 ) -> String {
-    let target_sub = if reflexive { "yourself" } else { target_name };
-    let target_obj = if reflexive { "yourself" } else { "them" };
-    let target_poss = if reflexive { "your" } else { "their" };
-    let target_subj = if reflexive { "you" } else { "they" };
-    let target_ref = if reflexive { "yourself" } else { "themself" };
+    let actor_is_viewer = viewer == Viewer::Actor;
+    let target_is_viewer = viewer == Viewer::Target || (actor_is_viewer && reflexive);
+    let (actor_name_s, actor_subj, actor_obj, actor_his, actor_pos, actor_ref) = if actor_is_viewer
+    {
+        (
+            "you".to_string(),
+            "you",
+            "you",
+            "your",
+            "your".to_string(),
+            "yourself",
+        )
+    } else {
+        (
+            actor_name.to_string(),
+            "they",
+            "them",
+            "their",
+            format!("{actor_name}'s"),
+            "themself",
+        )
+    };
+    let (target_name_s, target_subj, target_obj, target_his, target_pos, target_ref) =
+        if target_is_viewer {
+            (
+                if reflexive { "yourself" } else { "you" }.to_string(),
+                "you",
+                if reflexive { "yourself" } else { "you" },
+                "your",
+                "your".to_string(),
+                "yourself",
+            )
+        } else {
+            (
+                target_name.to_string(),
+                "they",
+                "them",
+                "their",
+                format!("{target_name}'s"),
+                "themself",
+            )
+        };
     let rendered = template
-        .replace("{actor.name}", actor_name)
-        .replace("{target.name}", target_sub)
-        .replace("{actor.he}", "they")
-        .replace("{actor.she}", "they")
-        .replace("{actor.it}", "they")
-        .replace("{actor.him}", "them")
-        .replace("{actor.her}", "them")
-        .replace("{actor.his}", "their")
-        .replace("{actor.pos}", "their")
+        .replace("{actor.name}", &actor_name_s)
+        .replace("{target.name}", &target_name_s)
+        .replace("{actor.he}", actor_subj)
+        .replace("{actor.she}", actor_subj)
+        .replace("{actor.it}", actor_subj)
+        .replace("{actor.him}", actor_obj)
+        .replace("{actor.her}", actor_obj)
+        .replace("{actor.his}", actor_his)
+        .replace("{actor.pos}", &actor_pos)
         .replace("{target.he}", target_subj)
         .replace("{target.she}", target_subj)
         .replace("{target.it}", target_subj)
         .replace("{target.him}", target_obj)
         .replace("{target.her}", target_obj)
-        .replace("{target.his}", target_poss)
-        .replace("{target.pos}", target_poss)
-        .replace("{actor.ref}", "themself")
+        .replace("{target.his}", target_his)
+        .replace("{target.pos}", &target_pos)
+        .replace("{actor.ref}", actor_ref)
         .replace("{target.ref}", target_ref);
     warn_unknown_template_tokens(&rendered);
     // Legacy `act()` CAP(): "{target.name} is brutally burnt..." with a

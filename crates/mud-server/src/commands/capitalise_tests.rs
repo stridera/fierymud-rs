@@ -2,15 +2,17 @@
 //! mob short descriptions ("a swamp troll") lead many echoes. Speech bodies
 //! and non-message text are left alone. Test-only.
 
+use bevy_ecs::prelude::Entity;
 use mud_world::{
-    AbilityCatalog, AbilityMessageSet, AppliedTo, EffectInstance, EffectSource, Health, Mob, Named,
+    AbilityCatalog, AbilityMessageSet, AppliedTo, EffectInstance, EffectSource, Follower, Health,
+    Located, Mob, Named,
 };
 
 use super::blindness_tests::{DAMAGE, cast, caster_with_spells};
 use super::gmcp_tests::{fixture, player};
 use super::test_support::drain;
 use super::{
-    broadcast_room_except_rendered, cap_sentence_start, dispatch, format_effect_duration,
+    Viewer, broadcast_room_except_rendered, cap_sentence_start, dispatch, format_effect_duration,
     render_ability_template, substitute, unknown_template_tokens,
 };
 
@@ -161,10 +163,18 @@ fn no_known_template_token_survives_rendering() {
         "actor.ref",
         "target.ref",
     ];
-    for reflexive in [false, true] {
-        for t in ability_tokens {
-            let out = render_ability_template(&format!("x {{{t}}} y"), "Ann", "Bob", reflexive);
-            assert!(unknown_template_tokens(&out).is_empty(), "{t} -> {out}");
+    for viewer in [Viewer::Actor, Viewer::Target, Viewer::Bystander] {
+        for reflexive in [false, true] {
+            for t in ability_tokens {
+                let out = render_ability_template(
+                    &format!("x {{{t}}} y"),
+                    "Ann",
+                    "Bob",
+                    reflexive,
+                    viewer,
+                );
+                assert!(unknown_template_tokens(&out).is_empty(), "{t} -> {out}");
+            }
         }
     }
     for who in ["actor", "target"] {
@@ -186,17 +196,21 @@ fn no_known_template_token_survives_rendering() {
 
 #[test]
 fn unknown_tokens_are_detected() {
-    let out = render_ability_template("{actor.bogus} waves {target.name}.", "Ann", "Bob", false);
+    let out = render_ability_template(
+        "{actor.bogus} waves {target.name}.",
+        "Ann",
+        "Bob",
+        false,
+        Viewer::Bystander,
+    );
     assert_eq!(unknown_template_tokens(&out), vec!["{actor.bogus}"]);
     assert!(unknown_template_tokens("plain { text } and 1}{").is_empty());
 }
 
-#[test]
-fn summon_wearoff_names_the_owner_and_is_capitalised() {
-    let mut fx = fixture();
-    let room = fx.a;
-    let (owner, mut orx) = player(&mut fx.world, room, "Strider");
-    let (_w, mut wrx) = player(&mut fx.world, room, "Watcher");
+/// Place a `summoned-*` effect on a conjured mob the way the summon spell
+/// does (`AppliedTo(mob)`, the mob following `owner`), with the caster-facing
+/// wear-off texts the content carries.
+fn summoned_mob_with_effect(fx: &mut super::gmcp_tests::Fx, owner: Entity, room: Entity) -> Entity {
     fx.world.resource_mut::<AbilityCatalog>().messages.insert(
         56,
         AbilityMessageSet {
@@ -205,28 +219,204 @@ fn summon_wearoff_names_the_owner_and_is_capitalised() {
             ..AbilityMessageSet::default()
         },
     );
+    let mob = fx
+        .world
+        .spawn((
+            Mob,
+            Named {
+                name: "a fire elemental".into(),
+            },
+            Located(room),
+            Health { hp: 50, max: 50 },
+            Follower(owner),
+        ))
+        .id();
     fx.world.spawn((
         EffectInstance {
             kind: 1,
-            name: "summon-test".into(),
+            name: "summoned-fire_elemental".into(),
             strength: 1,
             remaining_secs: 1,
             source: EffectSource::Spell,
             ability_id: Some(56),
         },
-        AppliedTo(owner),
+        AppliedTo(mob),
     ));
+    mob
+}
+
+/// The wear-off lines belong to the caster, but the effect lives on the
+/// mob: they must not render against it. The despawn line tells the room
+/// and the summoner instead.
+#[test]
+fn summon_wearoff_skips_the_caster_lines_and_tells_the_summoner() {
+    let mut fx = fixture();
+    let (room, elsewhere) = (fx.a, fx.b);
+    let (owner, mut orx) = player(&mut fx.world, elsewhere, "Strider");
+    let (_w, mut wrx) = player(&mut fx.world, room, "Watcher");
+    let mob = summoned_mob_with_effect(&mut fx, owner, room);
     let _ = drain(&mut orx);
     let _ = drain(&mut wrx);
     fx.world.insert_resource(crate::TickCount(0));
     crate::effects::effects_tick(&mut fx.world);
-    assert!(drain(&mut orx).contains("Your summoned creature fades away."));
     let seen = drain(&mut wrx);
     assert!(
-        seen.contains("Strider's summoned creature fades away."),
+        seen.contains("A fire elemental fades back to where it was summoned from."),
         "{seen}"
     );
+    assert!(!seen.contains("summoned creature"), "{seen}");
     assert!(!seen.contains('{'), "{seen}");
+    let told = drain(&mut orx);
+    assert!(
+        told.contains("Your fire elemental fades back to where it was summoned from."),
+        "{told}"
+    );
+    assert!(!told.contains("summoned creature"), "{told}");
+    assert!(fx.world.get_entity(mob).is_err(), "mob despawned");
+}
+
+/// A summoner standing with the mob gets the one first-person line, not the
+/// bystander line as well.
+#[test]
+fn summon_wearoff_in_the_same_room_is_one_line_for_the_summoner() {
+    let mut fx = fixture();
+    let room = fx.a;
+    let (owner, mut orx) = player(&mut fx.world, room, "Strider");
+    let (_w, mut wrx) = player(&mut fx.world, room, "Watcher");
+    let _mob = summoned_mob_with_effect(&mut fx, owner, room);
+    let _ = drain(&mut orx);
+    let _ = drain(&mut wrx);
+    fx.world.insert_resource(crate::TickCount(0));
+    crate::effects::effects_tick(&mut fx.world);
+    let told = drain(&mut orx);
+    assert_eq!(
+        told.matches("fades back to where it was summoned from")
+            .count(),
+        1,
+        "{told}"
+    );
+    assert!(told.contains("Your fire elemental fades"), "{told}");
+    let seen = drain(&mut wrx);
+    assert!(seen.contains("A fire elemental fades back"), "{seen}");
+}
+
+/// A non-summon wear-off puts the effect on its bearer: they read it in the
+/// second person, the room reads their name, and `{actor.pos}` renders per
+/// viewer instead of leaking.
+#[test]
+fn wearoff_renders_per_viewer_including_the_possessive() {
+    let mut fx = fixture();
+    let room = fx.a;
+    let (bearer, mut brx) = player(&mut fx.world, room, "Strider");
+    let (_w, mut wrx) = player(&mut fx.world, room, "Watcher");
+    fx.world.resource_mut::<AbilityCatalog>().messages.insert(
+        57,
+        AbilityMessageSet {
+            wearoff_to_target: Some("{actor.pos} berserker fury fades.".into()),
+            wearoff_to_room: Some("{actor.pos} berserker fury fades from {actor.him}.".into()),
+            ..AbilityMessageSet::default()
+        },
+    );
+    fx.world.spawn((
+        EffectInstance {
+            kind: 1,
+            name: "berserk".into(),
+            strength: 1,
+            remaining_secs: 1,
+            source: EffectSource::Spell,
+            ability_id: Some(57),
+        },
+        AppliedTo(bearer),
+    ));
+    let _ = drain(&mut brx);
+    let _ = drain(&mut wrx);
+    fx.world.insert_resource(crate::TickCount(0));
+    crate::effects::effects_tick(&mut fx.world);
+    let own = drain(&mut brx);
+    assert!(own.contains("Your berserker fury fades."), "{own}");
+    let seen = drain(&mut wrx);
+    assert!(
+        seen.contains("Strider's berserker fury fades from them."),
+        "{seen}"
+    );
+    assert!(!seen.contains('{') && !own.contains('{'));
+}
+
+#[test]
+fn possessive_and_pronoun_tokens_render_per_viewer() {
+    let r =
+        |t: &str, reflexive, viewer| render_ability_template(t, "Ann", "Bob", reflexive, viewer);
+    // The actor reads "your" (capitalised at sentence start), others the name.
+    assert_eq!(
+        r("{actor.pos} aura fades.", false, Viewer::Actor),
+        "Your aura fades."
+    );
+    assert_eq!(
+        r("{actor.pos} aura fades.", false, Viewer::Target),
+        "Ann's aura fades."
+    );
+    assert_eq!(
+        r("{actor.pos} aura fades.", false, Viewer::Bystander),
+        "Ann's aura fades."
+    );
+    assert_eq!(r("1 {actor.pos} y", false, Viewer::Actor), "1 your y");
+    // The target side: "your" for the victim, the name for everyone else.
+    assert_eq!(
+        r("{target.pos} aura fades.", false, Viewer::Target),
+        "Your aura fades."
+    );
+    assert_eq!(
+        r("{target.pos} aura fades.", false, Viewer::Actor),
+        "Bob's aura fades."
+    );
+    assert_eq!(
+        r("{target.pos} aura fades.", false, Viewer::Bystander),
+        "Bob's aura fades."
+    );
+    // Self-target as the actor: both sides are "you".
+    assert_eq!(
+        r("{target.pos} aura fades.", true, Viewer::Actor),
+        "Your aura fades."
+    );
+    // The other actor tokens follow the same you/name split.
+    assert_eq!(r("{actor.name} nods.", false, Viewer::Actor), "You nods.");
+    assert_eq!(
+        r("{actor.name} nods.", false, Viewer::Bystander),
+        "Ann nods."
+    );
+    assert_eq!(
+        r("1 hit {actor.ref}", false, Viewer::Actor),
+        "1 hit yourself"
+    );
+    assert_eq!(
+        r("1 hit {actor.ref}", false, Viewer::Bystander),
+        "1 hit themself"
+    );
+    assert_eq!(r("{target.name}!", false, Viewer::Target), "You!");
+    assert_eq!(r("{target.name}!", false, Viewer::Bystander), "Bob!");
+    assert_eq!(r("{target.name}!", true, Viewer::Actor), "Yourself!");
+}
+
+/// Observers who cannot see the actor get "Someone's" through the room
+/// broadcast, since the possessive is "<Name>'s".
+#[test]
+fn bystander_possessive_becomes_someones_when_the_actor_is_unseen() {
+    let mut fx = fixture();
+    let room = fx.a;
+    let (actor, _arx) = player(&mut fx.world, room, "Ann");
+    let (blind, mut brx) = player(&mut fx.world, room, "Blind");
+    fx.world.entity_mut(blind).insert(mud_world::Blinded);
+    let line = render_ability_template(
+        "{actor.pos} aura fades.",
+        "Ann",
+        "Ann",
+        false,
+        Viewer::Bystander,
+    );
+    let _ = drain(&mut brx);
+    super::broadcast_room_anonymised(&mut fx.world, room, &[actor], &[(actor, "Ann")], &line);
+    let out = drain(&mut brx);
+    assert!(out.contains("Someone's aura fades."), "{out}");
 }
 
 #[test]
