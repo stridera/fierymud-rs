@@ -772,6 +772,26 @@ pub async fn grant_simple_rewards(
     Ok(out)
 }
 
+/// Force the quest row `IN_PROGRESS` -> `COMPLETED` and pay `rewards`
+/// in ONE transaction: either the quest is completed and every reward is
+/// in the database, or neither happened. `None` when the row was not
+/// in progress (nothing is flipped, nothing is paid), so a repeat or a
+/// racing completion pays nothing.
+pub async fn complete_and_grant(
+    pool: &PgPool,
+    character_id: &str,
+    character_quest_id: &str,
+    rewards: &[QuestRewardRow],
+) -> sqlx::Result<Option<GrantOutcome>> {
+    let mut tx = pool.begin().await?;
+    if crate::quests::admin_complete_on(&mut tx, character_quest_id).await? == 0 {
+        return Ok(None);
+    }
+    let out = grant_simple_rewards_tx(&mut tx, character_id, rewards).await?;
+    tx.commit().await?;
+    Ok(Some(out))
+}
+
 /// [`grant_simple_rewards`] inside the caller's transaction, so a
 /// grant can commit or roll back together with other writes (the
 /// `qreward` claim record).

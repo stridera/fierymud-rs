@@ -428,22 +428,28 @@ struct RoomCharge {
 /// the update channel. The task is independent of any command job, so no
 /// watchdog can cut it off between the commit and the report.
 ///
-/// The report is queued with `try_send` while the turn is held, so every
-/// snapshot taken under the turn (save, quit) drains it first and the
-/// refund of a failed insert cannot be written over. It must not wait for
-/// queue room under the turn: the tick can itself be waiting for that turn
-/// (a relog's `begin_ordered`) and is also what drains the queue, which
-/// would be a deadlock. A full queue is rare; then the turn is released
-/// first and the report awaits room, at the price of a short window in
-/// which a snapshot still shows the charge.
+/// Queue room for the report is reserved BEFORE `add` writes the charge
+/// ([`crate::quest_progress::reserve_under_turn`]), so the turn is never
+/// released between the paid insert and the queued report: every snapshot
+/// taken under the turn (save, quit) drains the report first, and the refund
+/// of a failed insert cannot be written over. Waiting for room is done
+/// without the turn (the tick can itself be waiting for it, and is what
+/// drains the queue), and only while nothing has been paid yet.
 fn charge_and_add_room<F>(c: RoomCharge, add: F)
 where
     F: std::future::Future<Output = Result<(i32, i32), String>> + Send + 'static,
 {
-    use tokio::sync::mpsc::error::TrySendError;
     let coordinator = c.coordinator.clone();
     let character_id = c.character_id.clone();
-    coordinator.spawn_ordered(&character_id, move |mut ordered| async move {
+    coordinator.spawn_ordered(&character_id, move |ordered| async move {
+        let (ordered, reservation) = crate::quest_progress::reserve_under_turn(
+            &c.coordinator,
+            &c.character_id,
+            ordered,
+            &c.update_tx,
+            1,
+        )
+        .await;
         let mut done = c.done;
         done.outcome = add.await;
         let msg = crate::commands::PendingPlayerUpdate::HouseExpandDone {
@@ -451,22 +457,8 @@ where
             done: Box::new(done),
         };
         // Snapshots taken before this report would write the charge (or its
-        // absence) over the new balance.
-        ordered.supersede_earlier_snapshots();
-        match c.update_tx.try_send(msg) {
-            Ok(()) => drop(ordered),
-            Err(TrySendError::Full(msg)) => {
-                drop(ordered);
-                if c.update_tx.send(msg).await.is_err() {
-                    tracing::error!(character_id = %c.character_id,
-                        "house expansion outcome could not be delivered");
-                }
-            }
-            Err(TrySendError::Closed(_)) => {
-                tracing::error!(character_id = %c.character_id,
-                    "house expansion outcome could not be delivered");
-            }
-        }
+        // absence) over the new balance (`deliver_under_turn` supersedes them).
+        crate::quest_progress::deliver_under_turn(ordered, reservation, vec![msg]);
     });
 }
 
@@ -779,9 +771,9 @@ mod expand_tests {
         assert_eq!(wealth(&f), 0);
     }
 
-    /// Holding the turn must not block on a full update queue: the outcome is
-    /// queued without waiting while the turn is held, and still arrives when
-    /// the queue is full (after the turn is released).
+    /// Holding the turn must not block on a full update queue: room is waited
+    /// for without the turn (nothing is paid yet), and the outcome arrives
+    /// once there is room.
     #[tokio::test(flavor = "current_thread")]
     async fn a_full_update_queue_does_not_hold_the_turn() {
         let mut f = fixture();
@@ -803,9 +795,63 @@ mod expand_tests {
             "the turn is free although the queue is full"
         );
         drain_player_updates(&mut f.world);
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Room again: the insert (which takes a moment) runs and reports.
+        settle().await;
         drain_player_updates(&mut f.world);
         assert_eq!(rooms(&f), 2, "the outcome arrived once there was room");
+    }
+
+    /// The paid insert is not written while the queue has no room for its
+    /// report (a release of the turn after the charge could let a quit save
+    /// write the old balance back and lose the report): it waits, with the
+    /// turn free, and runs under the turn once there is room, queuing the
+    /// report before the turn is released.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_paid_insert_waits_for_room_to_report_it() {
+        let mut f = fixture();
+        for _ in 0..16 {
+            f.tx.try_send(crate::commands::PendingPlayerUpdate::WealthDelta {
+                character_id: "c-house".into(),
+                amount: 0,
+            })
+            .unwrap();
+        }
+        let inserts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = std::sync::Arc::clone(&inserts);
+        let turns = f
+            .world
+            .resource::<crate::autosave::SaveCoordinator>()
+            .clone();
+        let turns_in_insert = turns.clone();
+        start_expansion(
+            &mut f.world,
+            f.player,
+            "c-house".into(),
+            f.tx.clone(),
+            plan(),
+            async move {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                assert!(
+                    turns_in_insert.try_begin_ordered("c-house").is_none(),
+                    "the insert runs under the turn"
+                );
+                Ok((101, 1))
+            },
+        );
+        settle().await;
+        assert_eq!(
+            inserts.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "charged with no room to report it"
+        );
+        assert!(turns.try_begin_ordered("c-house").is_some(), "turn is free");
+        // The tick drains the queue; the insert then runs and reports.
+        drain_player_updates(&mut f.world);
+        settle().await;
+        drain_player_updates(&mut f.world);
+        assert_eq!(inserts.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(rooms(&f), 2, "the report arrived");
+        assert_eq!(wealth(&f), 10_000 - COST);
     }
 
     /// Live database: the charge is relative, so a quest reward added to the

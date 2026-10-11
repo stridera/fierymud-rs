@@ -790,6 +790,17 @@ pub async fn abandon(pool: &PgPool, character_quest_id: &str) -> sqlx::Result<u6
 /// by admin tooling for testing — real completion comes from quest
 /// objective resolution.
 pub async fn admin_complete(pool: &PgPool, character_quest_id: &str) -> sqlx::Result<u64> {
+    let mut conn = pool.acquire().await?;
+    admin_complete_on(&mut conn, character_quest_id).await
+}
+
+/// [`admin_complete`] on the caller's connection or transaction, so the
+/// status flip can commit together with the rewards it unlocks
+/// ([`crate::quest_objectives::complete_and_grant`]).
+pub(crate) async fn admin_complete_on(
+    conn: &mut sqlx::PgConnection,
+    character_quest_id: &str,
+) -> sqlx::Result<u64> {
     let result = sqlx::query!(
         r#"
         UPDATE "CharacterQuest"
@@ -800,7 +811,7 @@ pub async fn admin_complete(pool: &PgPool, character_quest_id: &str) -> sqlx::Re
         "#,
         character_quest_id,
     )
-    .execute(pool)
+    .execute(conn)
     .await?;
     Ok(result.rows_affected())
 }

@@ -218,22 +218,12 @@ pub(crate) async fn compose_board_step(
             return;
         }
         let body = draft.body.join("\n");
-        let poster = name_of(world, player);
+        let caller = Caller::of(world, player);
         let level = world.get::<Profile>(player).map_or(1, |p| p.level);
         let pool = pool.clone();
         let persist = {
             let (board_id, edit_id) = (draft.board_id, draft.edit_message_id);
-            async move {
-                let result = if let Some(edit_id) = edit_id {
-                    mud_db::boards::update_message(&pool, edit_id, &subject, &body, &poster)
-                        .await
-                        .map(|_| edit_id)
-                } else {
-                    mud_db::boards::post_message(&pool, board_id, &poster, level, &subject, &body)
-                        .await
-                };
-                result.map_err(|e| e.to_string())
-            }
+            async move { persist_draft(&pool, board_id, edit_id, &caller, level, &subject, &body).await }
         };
         send_draft(world, player, draft, persist).await;
         return;
@@ -269,6 +259,44 @@ pub(crate) async fn compose_board_step(
         ),
         ComposeStep::BodyAdded => {}
     }
+}
+
+/// Shown when the write refuses an edit the draft was opened for.
+const EDIT_REFUSED: &str =
+    "That post can no longer be edited (the board is locked, it was removed, or it isn't yours).";
+
+/// Store a finished draft: a new post, or the edit of `edit_id`. The edit's
+/// permission (poster, board unlocked; staff bypass both) is checked again
+/// by the write itself, because the check made when the draft was opened can
+/// be stale by now.
+async fn persist_draft(
+    pool: &mud_db::sqlx::PgPool,
+    board_id: i32,
+    edit_id: Option<i32>,
+    caller: &Caller,
+    level: i32,
+    subject: &str,
+    body: &str,
+) -> Result<i32, String> {
+    if let Some(edit_id) = edit_id {
+        return match mud_db::boards::update_message(
+            pool,
+            edit_id,
+            subject,
+            body,
+            &caller.name,
+            caller.is_builder,
+        )
+        .await
+        {
+            Ok(0) => Err(EDIT_REFUSED.to_string()),
+            Ok(_) => Ok(edit_id),
+            Err(e) => Err(e.to_string()),
+        };
+    }
+    mud_db::boards::post_message(pool, board_id, &caller.name, level, subject, body)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Ship a finished draft: the database write runs off the tick
@@ -1064,5 +1092,122 @@ mod off_tick_tests {
             assert!(crate::commands::run_queued_input(&mut world, player, &pool).await);
             assert!(drain(&mut rx).contains("A quiet hall"), "{cmd}");
         }
+    }
+}
+
+/// Live-database check of the write-time permission rule for edits.
+#[cfg(test)]
+mod edit_permission_tests {
+    use super::*;
+    use mud_db::sqlx;
+    use std::time::Duration;
+
+    fn caller(name: &str, is_builder: bool) -> Caller {
+        Caller {
+            name: name.to_string(),
+            is_builder,
+        }
+    }
+
+    async fn content_of(pool: &sqlx::PgPool, id: i32) -> Option<String> {
+        sqlx::query_scalar("SELECT content FROM \"BoardMessage\" WHERE id = $1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn audits(pool: &sqlx::PgPool, id: i32) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM \"BoardMessageEdit\" WHERE message_id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// Opening the draft checked the poster and the lock; the write checks
+    /// them again, so a board locked meanwhile, someone else's post and a
+    /// post deleted meanwhile are refused (nothing written, no audit row),
+    /// while the poster (any letter case) and staff are not.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_edit_is_rechecked_when_it_is_written() {
+        let _db_lock = crate::commands::test_support::db_test_lock().await;
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://strider@localhost/fierydev".into());
+        let Ok(Ok(pool)) = tokio::time::timeout(
+            Duration::from_secs(3),
+            mud_db::connect_with(&url, crate::commands::test_support::db_test_pool_settings()),
+        )
+        .await
+        else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let alias = format!("zzrh-{}-{nanos}", std::process::id());
+        let board: i32 = sqlx::query_scalar(
+            "INSERT INTO \"Board\" (alias, title, updated_at) VALUES ($1, 'zz', NOW()) \
+             RETURNING id",
+        )
+        .bind(&alias)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let msg = mud_db::boards::post_message(&pool, board, "Alice", 10, "s", "original")
+            .await
+            .unwrap();
+        let edit = |who: Caller, body: &'static str| {
+            let pool = pool.clone();
+            async move { persist_draft(&pool, board, Some(msg), &who, 10, "s", body).await }
+        };
+
+        // Not the poster.
+        assert_eq!(
+            edit(caller("Bob", false), "bob").await,
+            Err(EDIT_REFUSED.into())
+        );
+        assert_eq!(content_of(&pool, msg).await.as_deref(), Some("original"));
+        assert_eq!(
+            audits(&pool, msg).await,
+            0,
+            "a refused edit leaves no audit row"
+        );
+
+        // The poster, whatever the letter case of the name.
+        assert_eq!(edit(caller("aLiCe", false), "by alice").await, Ok(msg));
+        assert_eq!(content_of(&pool, msg).await.as_deref(), Some("by alice"));
+        assert_eq!(audits(&pool, msg).await, 1);
+
+        // The board locks after the draft was opened: the poster is refused,
+        // staff are not.
+        sqlx::query("UPDATE \"Board\" SET locked = true WHERE id = $1")
+            .bind(board)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            edit(caller("Alice", false), "late").await,
+            Err(EDIT_REFUSED.into())
+        );
+        assert_eq!(content_of(&pool, msg).await.as_deref(), Some("by alice"));
+        assert_eq!(edit(caller("Mod", true), "by staff").await, Ok(msg));
+        assert_eq!(content_of(&pool, msg).await.as_deref(), Some("by staff"));
+        assert_eq!(audits(&pool, msg).await, 2);
+
+        // The post was deleted meanwhile: nothing to edit, even for staff.
+        mud_db::boards::delete_message(&pool, msg).await.unwrap();
+        assert_eq!(
+            edit(caller("Mod", true), "ghost").await,
+            Err(EDIT_REFUSED.into())
+        );
+
+        sqlx::query("DELETE FROM \"Board\" WHERE id = $1")
+            .bind(board)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 }

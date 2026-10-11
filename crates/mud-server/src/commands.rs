@@ -9828,10 +9828,14 @@ fn bump_quest_progress_with(
         })
         .collect();
     let update_tx_root = world.get_resource::<PlayerUpdateTx>().map(|t| t.0.clone());
+    let coordinator_root = world
+        .get_resource::<crate::autosave::SaveCoordinator>()
+        .cloned();
     for (entity, cid, out) in recipients {
         let is_actor = entity == actor;
         let pool = pool.clone();
         let update_tx = update_tx_root.clone();
+        let coordinator = coordinator_root.clone();
         let talk = talk.cloned();
         tokio::spawn(async move {
             let rows_res = match kind {
@@ -9902,6 +9906,7 @@ fn bump_quest_progress_with(
                 character_id: cid,
                 out,
                 update_tx,
+                coordinator,
             };
             let prefix = if is_actor { "" } else { "(party) " };
             for row in &rows {

@@ -25,6 +25,9 @@ pub(crate) struct Notifier {
     pub character_id: String,
     pub out: mud_net::Outbound,
     pub update_tx: Option<tokio::sync::mpsc::Sender<PendingPlayerUpdate>>,
+    /// The save-turn coordinator rewards are paid under (see
+    /// [`grant_completion_rewards`]); `None` in a world without one.
+    pub coordinator: Option<crate::autosave::SaveCoordinator>,
 }
 
 impl Notifier {
@@ -39,6 +42,9 @@ impl Notifier {
             character_id: world.get::<Account>(player)?.character_id.clone(),
             out: world.get::<Connection>(player)?.0.clone(),
             update_tx: world.get_resource::<PlayerUpdateTx>().map(|t| t.0.clone()),
+            coordinator: world
+                .get_resource::<crate::autosave::SaveCoordinator>()
+                .cloned(),
         })
     }
 }
@@ -226,54 +232,125 @@ impl CompletionPayout {
     }
 }
 
+/// A finished quest's rewards, read before anything is paid: the
+/// unconditional ones (paid at completion) and whether conditional ones
+/// are waiting for `qreward`.
+pub(crate) struct RewardPlan {
+    /// "Conditional rewards are waiting" line, shown first.
+    hint: Option<String>,
+    rewards: Vec<mud_db::quest_objectives::QuestRewardRow>,
+}
+
+impl RewardPlan {
+    pub(crate) async fn load(
+        pool: &mud_db::sqlx::PgPool,
+        quest_zone_id: i32,
+        quest_id: i32,
+    ) -> Self {
+        let all_rewards =
+            mud_db::quest_objectives::list_quest_rewards(pool, quest_zone_id, quest_id)
+                .await
+                .unwrap_or_default();
+        let (deferred, rewards): (Vec<_>, Vec<_>) = all_rewards
+            .into_iter()
+            .partition(|r| r.condition.as_deref().is_some_and(|c| !c.trim().is_empty()));
+        let hint = (!deferred.is_empty()).then(|| {
+            format!(
+                "Conditional rewards available — \
+                 type 'qreward {quest_zone_id} {quest_id}' to view and claim.\r\n"
+            )
+        });
+        Self { hint, rewards }
+    }
+
+    /// The most world updates paying this plan can queue: one per reward,
+    /// plus the house a HOUSING reward may have just created. This much
+    /// queue room is reserved BEFORE the payout is written
+    /// ([`reserve_under_turn`]).
+    pub(crate) fn update_bound(&self) -> usize {
+        if self.rewards.is_empty() {
+            0
+        } else {
+            self.rewards.len() + 1
+        }
+    }
+}
+
+/// How paying a finished quest's rewards went.
+pub(crate) enum Payment {
+    /// Written to the database; the world side and the text are not.
+    Paid(CompletionPayout),
+    /// The quest was no longer in progress (a repeat, a racing
+    /// completion): nothing was completed and nothing was paid.
+    NotInProgress,
+    /// The write failed and was rolled back.
+    Failed(String),
+}
+
 /// Pay a finished quest's unconditional rewards to the database (each
 /// numeric reward is a relative `x = x + n` update in one transaction) and
 /// work out what the world must mirror, without sending anything: the
 /// caller decides how and when the updates reach the tick. Conditional
 /// rewards are deferred to `qreward`, which can evaluate the condition on
 /// the world thread.
+///
+/// `complete` is `Some(character_quest_id)` when this payment is also the
+/// completion (staff `qcomplete`): the status flip then runs in the SAME
+/// transaction as the rewards, so a failure leaves the quest in progress
+/// and unpaid, and a repeat pays nothing. With `None` the quest was
+/// already flipped (the objective path); a failed grant is logged and the
+/// world still mirrors the reward.
 pub(crate) async fn pay_completion_rewards(
     pool: &mud_db::sqlx::PgPool,
     character_id: &str,
-    quest_zone_id: i32,
-    quest_id: i32,
-) -> CompletionPayout {
-    let mut payout = CompletionPayout::default();
-    let all_rewards = mud_db::quest_objectives::list_quest_rewards(pool, quest_zone_id, quest_id)
-        .await
-        .unwrap_or_default();
-    let (deferred, rewards): (Vec<_>, Vec<_>) = all_rewards
-        .into_iter()
-        .partition(|r| r.condition.as_deref().is_some_and(|c| !c.trim().is_empty()));
-    if !deferred.is_empty() {
-        payout.hint = Some(format!(
-            "Conditional rewards available — \
-             type 'qreward {quest_zone_id} {quest_id}' to view and claim.\r\n"
-        ));
-    }
-    if rewards.is_empty() {
-        return payout;
-    }
-    let cid = character_id;
-    let outcome = match mud_db::quest_objectives::grant_simple_rewards(pool, cid, &rewards).await {
-        Ok(o) => o,
-        Err(e) => {
-            tracing::warn!(error = %e, "reward grant failed");
-            mud_db::quest_objectives::GrantOutcome::default()
-        }
+    plan: &RewardPlan,
+    complete: Option<&str>,
+) -> Payment {
+    let mut payout = CompletionPayout {
+        hint: plan.hint.clone(),
+        ..CompletionPayout::default()
     };
+    let rewards = &plan.rewards;
+    let cid = character_id;
+    let outcome = match complete {
+        Some(character_quest_id) => {
+            match mud_db::quest_objectives::complete_and_grant(
+                pool,
+                cid,
+                character_quest_id,
+                rewards,
+            )
+            .await
+            {
+                Ok(Some(o)) => o,
+                Ok(None) => return Payment::NotInProgress,
+                Err(e) => return Payment::Failed(e.to_string()),
+            }
+        }
+        None if rewards.is_empty() => mud_db::quest_objectives::GrantOutcome::default(),
+        None => match mud_db::quest_objectives::grant_simple_rewards(pool, cid, rewards).await {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::warn!(error = %e, "reward grant failed");
+                mud_db::quest_objectives::GrantOutcome::default()
+            }
+        },
+    };
+    if rewards.is_empty() {
+        return Payment::Paid(payout);
+    }
     if outcome.house_created
         && let Some(granted) = house_granted_update(pool, cid).await
     {
         payout.updates.push(granted);
     }
-    for r in &rewards {
+    for r in rewards {
         if let Some(update) = reward_update(cid, r) {
             payout.updates.push(update);
         }
     }
     let mut buf = String::from("Rewards:\r\n");
-    for r in &rewards {
+    for r in rewards {
         let line = match (r.reward_type.as_str(), r.amount, r.quantity) {
             ("EXPERIENCE", Some(a), _) => format!("  +{a} experience\r\n"),
             ("GOLD", Some(a), _) => format!("  +{a} gold\r\n"),
@@ -291,7 +368,7 @@ pub(crate) async fn pay_completion_rewards(
     if buf.len() > "Rewards:\r\n".len() {
         payout.summary = Some(buf);
     }
-    payout
+    Payment::Paid(payout)
 }
 
 /// The ECS mutation that mirrors one paid reward (the database side is
@@ -331,29 +408,55 @@ pub(crate) fn reward_update(
     }
 }
 
-/// Pay a finished quest's unconditional rewards: DB writes first, then
-/// the matching ECS mutations so the player sees the gain without
-/// relogging.
+/// Pay a finished quest's unconditional rewards from the objective path:
+/// DB writes first, then the matching ECS mutations so the player sees the
+/// gain without relogging. The work runs in a task of its own that holds
+/// the character's write turn ([`SaveCoordinator::spawn_ordered`]), with
+/// the same guarantees as `qcomplete` (see `start_completion`): the numeric
+/// rewards are relative SQL updates, queue room is reserved before they are
+/// written, and the updates are queued under the turn after
+/// `supersede_earlier_snapshots`. So an autosave whose snapshot predates the
+/// reward cannot write the old balance back, and a relog that reads the row
+/// after the payment is not given it a second time.
 pub(crate) async fn grant_completion_rewards(
     pool: &mud_db::sqlx::PgPool,
     notify: &Notifier,
     quest_zone_id: i32,
     quest_id: i32,
 ) {
-    let payout = pay_completion_rewards(pool, &notify.character_id, quest_zone_id, quest_id).await;
-    if let Some(hint) = &payout.hint {
-        notify.say(hint);
-    }
-    if let Some(tx) = notify.update_tx.as_ref() {
-        for u in payout.updates {
-            // Bounded channel — await until the tick drains a slot.
-            // Failure means the receiver dropped (shutting down).
-            let _ = tx.send(u).await;
-        }
-    }
-    if let Some(summary) = &payout.summary {
-        notify.say(summary);
-    }
+    let plan = RewardPlan::load(pool, quest_zone_id, quest_id).await;
+    let coordinator = notify.coordinator.clone().unwrap_or_default();
+    let (pool, notify) = (pool.clone(), notify.clone());
+    let turn_for = notify.character_id.clone();
+    coordinator
+        .clone()
+        .spawn_ordered(&turn_for, move |ordered| async move {
+            let (ordered, reservation) = match notify.update_tx.as_ref() {
+                Some(tx) => {
+                    reserve_under_turn(
+                        &coordinator,
+                        &notify.character_id,
+                        ordered,
+                        tx,
+                        plan.update_bound(),
+                    )
+                    .await
+                }
+                None => (ordered, Reservation::none()),
+            };
+            let payout =
+                match pay_completion_rewards(&pool, &notify.character_id, &plan, None).await {
+                    Payment::Paid(p) => p,
+                    Payment::NotInProgress | Payment::Failed(_) => return,
+                };
+            if let Some(hint) = &payout.hint {
+                notify.say(hint);
+            }
+            deliver_under_turn(ordered, reservation, payout.updates);
+            if let Some(summary) = &payout.summary {
+                notify.say(summary);
+            }
+        });
 }
 
 /// The world-side `HouseSummary` insert for the house a HOUSING reward
@@ -380,43 +483,102 @@ pub(crate) async fn house_granted_update(
     })
 }
 
-/// Queue paid-reward `updates` for the tick while holding the character's
-/// write turn (`ordered`), so a snapshot taken under the turn drains them
-/// before it writes, and an earlier one is already made stale by the
-/// caller's `supersede_earlier_snapshots`. Same rule as `house expand`: the
-/// queue is tried without waiting while the turn is held (the tick can be
-/// waiting for the turn itself, and is what drains the queue); if it is
-/// full the turn is released first and the rest waits for room, at the price
-/// of a short window in which a snapshot still shows the old balance. The
-/// database already holds the reward, so nothing here can lose it.
-pub(crate) async fn deliver_under_turn(
-    ordered: crate::autosave::OrderedSave,
-    tx: &tokio::sync::mpsc::Sender<PendingPlayerUpdate>,
-    updates: Vec<PendingPlayerUpdate>,
-) {
+/// Room in the player-update queue, reserved by [`reserve_under_turn`]
+/// before a database-first payout is written. Sending into it cannot wait
+/// and cannot fail for lack of room.
+pub(crate) struct Reservation<'a> {
+    permits: Option<tokio::sync::mpsc::PermitIterator<'a, PendingPlayerUpdate>>,
+}
+
+impl Reservation<'_> {
+    /// No room reserved: nothing to deliver to (no queue, a closed queue, or
+    /// a payout with no world side).
+    pub(crate) fn none() -> Self {
+        Self { permits: None }
+    }
+}
+
+/// Reserve queue room for up to `n` updates while holding the character's
+/// write turn, WITHOUT ever waiting for it under the turn: the tick can
+/// itself be waiting for the turn (a relog's `begin_ordered`) and is also
+/// what drains the queue, so waiting for room while holding the turn would
+/// deadlock. If the queue is full the turn is released and the wait happens
+/// without it, then the turn is taken again and the reservation retried.
+///
+/// That release is safe only because nothing has been paid yet: a snapshot
+/// that takes the turn in the gap sees the old balance, and the payment
+/// that follows is relative (`x = x + n`) and supersedes it. Releasing the
+/// turn AFTER paying is what lost rewards. Pay only once this returns, then
+/// hand the updates to [`deliver_under_turn`], which cannot block.
+pub(crate) async fn reserve_under_turn<'a>(
+    coordinator: &crate::autosave::SaveCoordinator,
+    character_id: &str,
+    mut ordered: crate::autosave::OrderedSave,
+    tx: &'a tokio::sync::mpsc::Sender<PendingPlayerUpdate>,
+    n: usize,
+) -> (crate::autosave::OrderedSave, Reservation<'a>) {
     use tokio::sync::mpsc::error::TrySendError;
-    let mut turn = Some(ordered);
-    for update in updates {
-        let update = if turn.is_some() {
-            match tx.try_send(update) {
-                Ok(()) => continue,
-                Err(TrySendError::Full(u)) => {
-                    turn = None;
-                    u
-                }
-                Err(TrySendError::Closed(_)) => {
-                    tracing::error!("quest reward could not be delivered: update queue closed");
-                    return;
-                }
+    // A request larger than the whole queue could never be granted; reserve
+    // what fits (the queue is orders of magnitude larger than any payout).
+    let n = n.min(tx.max_capacity());
+    if n == 0 {
+        return (ordered, Reservation::none());
+    }
+    loop {
+        match tx.try_reserve_many(n) {
+            Ok(permits) => {
+                return (
+                    ordered,
+                    Reservation {
+                        permits: Some(permits),
+                    },
+                );
             }
-        } else {
-            update
-        };
-        if tx.send(update).await.is_err() {
-            tracing::error!("quest reward could not be delivered: update queue closed");
-            return;
+            Err(TrySendError::Closed(())) => return (ordered, Reservation::none()),
+            Err(TrySendError::Full(())) => {
+                drop(ordered);
+                // Wait for room without the turn; give the room back at once
+                // (the reservation is made again under the turn).
+                if tx.reserve_many(n).await.is_err() {
+                    return (
+                        coordinator.begin_ordered(character_id).await,
+                        Reservation::none(),
+                    );
+                }
+                ordered = coordinator.begin_ordered(character_id).await;
+            }
         }
     }
+}
+
+/// Queue paid-reward `updates` for the tick into the room reserved by
+/// [`reserve_under_turn`] and only then release the turn `ordered`, so a
+/// snapshot taken under the turn drains them before it writes. Snapshots
+/// taken before are made stale first (`supersede_earlier_snapshots`). The
+/// database already holds the reward, so a closed queue (shutdown) cannot
+/// lose it. Never waits: the turn is never held across an `.await`.
+pub(crate) fn deliver_under_turn(
+    mut ordered: crate::autosave::OrderedSave,
+    mut reservation: Reservation<'_>,
+    updates: Vec<PendingPlayerUpdate>,
+) {
+    if updates.is_empty() {
+        return;
+    }
+    ordered.supersede_earlier_snapshots();
+    let Some(permits) = reservation.permits.as_mut() else {
+        tracing::error!("quest reward could not be delivered: update queue closed");
+        return;
+    };
+    for update in updates {
+        let Some(permit) = permits.next() else {
+            // `update_bound` covers every update a payout makes.
+            tracing::error!("quest reward could not be delivered: reservation too small");
+            return;
+        };
+        permit.send(update);
+    }
+    drop(ordered);
 }
 
 /// How many of each prototype `holder` carries directly (inventory and
@@ -901,5 +1063,125 @@ mod tests {
         assert_eq!(counts.get(&(30, 7)), Some(&2));
         assert_eq!(counts.get(&(30, 8)), Some(&1));
         assert_eq!(counts.len(), 2);
+    }
+
+    fn reply(who: &str) -> PendingPlayerUpdate {
+        PendingPlayerUpdate::Reply {
+            character_id: who.to_string(),
+            text: String::new(),
+        }
+    }
+
+    /// With a full queue the payment still never gets ahead of its
+    /// delivery: room is waited for BEFORE paying (turn released, nothing
+    /// to lose), and once the payment is written the update is queued under
+    /// the same turn. A retire-like observer that takes the turn at every
+    /// chance must never see "paid but not queued". Single-threaded runtime,
+    /// so the payer's last step (queue, release the turn, set its flag)
+    /// cannot be interleaved with the observer.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_full_queue_never_splits_the_payment_from_its_delivery() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        let coordinator = crate::autosave::SaveCoordinator::default();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        tx.try_send(reply("filler")).unwrap();
+        tx.try_send(reply("filler")).unwrap();
+        assert!(tx.try_send(reply("filler")).is_err(), "the queue is full");
+
+        let paid = Arc::new(AtomicBool::new(false));
+        let delivered = Arc::new(AtomicBool::new(false));
+        {
+            let (paid, delivered) = (Arc::clone(&paid), Arc::clone(&delivered));
+            let (turns, tx) = (coordinator.clone(), tx.clone());
+            coordinator.spawn_ordered("payer", move |ordered| async move {
+                let (ordered, reservation) =
+                    reserve_under_turn(&turns, "payer", ordered, &tx, 1).await;
+                // The payment: it takes a while, the turn is held throughout.
+                paid.store(true, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                deliver_under_turn(ordered, reservation, vec![reply("payer")]);
+                delivered.store(true, Ordering::SeqCst);
+            });
+        }
+        let observer = {
+            let (turns, paid, delivered) = (
+                coordinator.clone(),
+                Arc::clone(&paid),
+                Arc::clone(&delivered),
+            );
+            tokio::spawn(async move {
+                let mut saw_paid = false;
+                for _ in 0..150 {
+                    let turn = turns.begin_ordered("payer").await;
+                    let (p, d) = (
+                        paid.load(Ordering::SeqCst),
+                        delivered.load(Ordering::SeqCst),
+                    );
+                    assert!(
+                        !p || d,
+                        "the turn was released between the payment and its update"
+                    );
+                    saw_paid |= p;
+                    drop(turn);
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
+                saw_paid
+            })
+        };
+        // Nothing is paid while the queue is full and nobody drains it.
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert!(
+            !paid.load(Ordering::SeqCst),
+            "paid with no room to report it"
+        );
+        // The tick drains one slot: now the payer can go.
+        assert!(rx.try_recv().is_ok());
+        assert!(observer.await.unwrap(), "the payment never happened");
+        assert!(delivered.load(Ordering::SeqCst));
+        let mut who = Vec::new();
+        while let Ok(PendingPlayerUpdate::Reply { character_id, .. }) = rx.try_recv() {
+            who.push(character_id);
+        }
+        assert_eq!(who, ["filler", "payer"]);
+    }
+
+    /// A reservation covers every update a payout makes, delivered in order
+    /// and without waiting; an unused part is handed back; a closed queue
+    /// loses nothing but the (already written) world mirror.
+    #[tokio::test(flavor = "current_thread")]
+    async fn reserved_updates_arrive_in_order_and_the_rest_is_given_back() {
+        let coordinator = crate::autosave::SaveCoordinator::default();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let turn = coordinator.begin_ordered("c").await;
+        let (turn, reservation) = reserve_under_turn(&coordinator, "c", turn, &tx, 3).await;
+        assert_eq!(tx.capacity(), 1, "three slots are spoken for");
+        deliver_under_turn(turn, reservation, vec![reply("a"), reply("b")]);
+        assert_eq!(tx.capacity(), 2, "the unused slot is given back");
+        assert!(
+            coordinator.try_begin_ordered("c").is_some(),
+            "turn released"
+        );
+        let mut who = Vec::new();
+        while let Ok(PendingPlayerUpdate::Reply { character_id, .. }) = rx.try_recv() {
+            who.push(character_id);
+        }
+        assert_eq!(who, ["a", "b"]);
+
+        // A request larger than the whole queue is cut to what fits.
+        let turn = coordinator.begin_ordered("c").await;
+        let (turn, reservation) = reserve_under_turn(&coordinator, "c", turn, &tx, 99).await;
+        assert_eq!(tx.capacity(), 0);
+        drop((turn, reservation));
+        assert_eq!(tx.capacity(), 4);
+
+        // Closed queue: no reservation, delivery is a no-op, nothing panics.
+        drop(rx);
+        let turn = coordinator.begin_ordered("c").await;
+        let (turn, reservation) = reserve_under_turn(&coordinator, "c", turn, &tx, 1).await;
+        deliver_under_turn(turn, reservation, vec![reply("x")]);
+        assert!(coordinator.try_begin_ordered("c").is_some());
     }
 }

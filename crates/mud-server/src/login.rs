@@ -11296,6 +11296,52 @@ pub(crate) mod tests {
         temp_cleanup(&pool, &[], &[&c.id], &[]).await;
     }
 
+    /// A reward item given to a player who stays online is written out by
+    /// the save its arrival requests, not left in memory until the next
+    /// autosave (a crash or restart in between would lose it).
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_reward_item_for_an_online_player_is_saved_when_it_arrives() {
+        let Some((pool, _db_lock)) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let Some((oz, oid)) = first_object(&pool).await else {
+            return;
+        };
+        let (_user, c) = temp_unlinked_char(&pool, "qri").await;
+        let mut world = World::new();
+        world.insert_resource(SaveCoordinator::default());
+        world.insert_resource(commands::DbPool(pool.clone()));
+        let mut protos = mud_world::ObjectPrototypes::default();
+        protos.by_key.insert(
+            (oz, oid),
+            crate::commands::test_support::object_proto(oz, oid, mud_db::enums::ObjectType::Other),
+        );
+        world.insert_resource(protos);
+        let (tx, inbox_rx) = tokio::sync::mpsc::channel(8);
+        world.insert_resource(commands::PlayerUpdateInbox(std::sync::Mutex::new(inbox_rx)));
+        let room = world.spawn_empty().id();
+        let _player = spawn_player_for(&mut world, &c.id, room);
+        tx.try_send(commands::PendingPlayerUpdate::SpawnItem {
+            character_id: c.id.clone(),
+            object_zone: oz,
+            object_id: oid,
+            quantity: 2,
+        })
+        .unwrap();
+        commands::drain_player_updates(&mut world);
+        // No save is called for here: the arrival of the item asked for one.
+        let coordinator = world.resource::<SaveCoordinator>().clone();
+        assert!(coordinator.flush(&mut world, Duration::from_secs(10)).await);
+        assert_eq!(
+            item_rows(&pool, &[&c.id]).await.len(),
+            2,
+            "the reward item waited for the next autosave"
+        );
+        drop_item_rows(&pool, &[&c.id]).await;
+        temp_cleanup(&pool, &[], &[&c.id], &[]).await;
+    }
+
     /// A reward item whose recipient is already gone when the inbox drains is
     /// written to their pack rows instead of being dropped.
     #[tokio::test(flavor = "current_thread")]

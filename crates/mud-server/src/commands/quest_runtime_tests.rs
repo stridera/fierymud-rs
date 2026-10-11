@@ -315,6 +315,18 @@ impl Fx {
             .unwrap()
     }
 
+    /// Poll until the character's stored experience reaches `want`
+    /// (a reward paid by a background task), bounded.
+    async fn wait_for_paid(&self, want: i32) {
+        for _ in 0..100 {
+            if self.paid().await.0 >= want {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("the reward was never paid");
+    }
+
     async fn accept(&self) {
         let outcome =
             mud_db::quests::accept_for_player(&self.pool, &self.char_id, 10, self.zone, self.quest)
@@ -578,10 +590,15 @@ async fn racing_completions_pay_rewards_once() {
         character_id: fx.char_id.clone(),
         out: tx,
         update_tx: None,
+        coordinator: None,
     };
     let check = || crate::quest_progress::advance_quest(&fx.pool, &notify, &cq, fx.zone, fx.quest);
     tokio::join!(check(), check(), check(), check());
 
+    // The payment runs in a task of its own (under the character's write
+    // turn): wait for it, then give a wrong second payment time to show.
+    fx.wait_for_paid(before.0 + 50).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
     let after = fx.paid().await;
     assert_eq!(after.0 - before.0, 50, "experience paid once");
     assert_eq!(after.1 - before.1, 7, "gold paid once");
@@ -1821,4 +1838,159 @@ async fn a_late_completion_text_still_reaches_the_player() {
     super::drain_player_updates(&mut world);
     assert!(drain(&mut rx).contains("Force-completed quest: x."));
     let _ = player;
+}
+
+/// The objective path pays like `qcomplete` does: under the character's
+/// write turn, in step with the world. An autosave whose snapshot predates
+/// the reward (taken while the payment waits for the turn) is skipped
+/// instead of writing the old gold back, the in-memory gold moves once, and
+/// a later autosave carries it without paying it again.
+#[tokio::test(flavor = "current_thread")]
+async fn objective_completion_pays_once_with_an_autosave_in_flight() {
+    let Some(fx) = fixture().await else { return };
+    fx.visit_objective(1).await;
+    fx.rewards().await;
+    sqlx::query("UPDATE \"Characters\" SET wealth = 100 WHERE id = $1")
+        .bind(&fx.char_id)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    let (mut world, player, mut rx) = fx.tick_world(UserRole::Player);
+    world.entity_mut(player).insert(mud_world::Wealth(100));
+    fx.accept().await;
+    let cq = mud_db::quests::find_character_quest(&fx.pool, &fx.char_id, fx.zone, fx.quest)
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+    mud_db::quest_objectives::upsert_progress(&fx.pool, &cq, fx.zone, fx.quest, 1, 1, 1, true)
+        .await
+        .unwrap();
+    let coordinator = world.resource::<crate::autosave::SaveCoordinator>().clone();
+
+    // The turn is busy (a save in progress) when the last objective lands.
+    let busy = coordinator.begin_ordered(&fx.char_id).await;
+    let notify = crate::quest_progress::Notifier::for_player(&world, player).unwrap();
+    crate::quest_progress::advance_quest(&fx.pool, &notify, &cq, fx.zone, fx.quest).await;
+    assert_eq!(fx.status().await, "COMPLETED");
+    assert_eq!(fx.wealth().await, 100, "the payment waits for the turn");
+    // An autosave snapshots the old gold and queues behind the payment.
+    assert!(crate::login::spawn_background_save(
+        &mut world, player, &fx.pool
+    ));
+    drop(busy);
+
+    let out = drive(&mut world, &mut rx, &fx.pool, "+7 gold").await;
+    assert!(out.contains("*** Quest complete! ***"), "{out}");
+    assert!(coordinator.flush(&mut world, Duration::from_secs(10)).await);
+    coordinator.apply_completions(&mut world);
+    super::drain_player_updates(&mut world);
+    assert_eq!(
+        fx.wealth().await,
+        107,
+        "the stale autosave erased the reward"
+    );
+    assert_eq!(world.get::<mud_world::Wealth>(player).unwrap().0, 107);
+
+    assert!(crate::login::spawn_background_save(
+        &mut world, player, &fx.pool
+    ));
+    assert!(coordinator.flush(&mut world, Duration::from_secs(10)).await);
+    coordinator.apply_completions(&mut world);
+    assert_eq!(fx.wealth().await, 107);
+    assert_eq!(world.get::<mud_world::Wealth>(player).unwrap().0, 107);
+
+    // A repeat completion check pays nothing more.
+    crate::quest_progress::advance_quest(&fx.pool, &notify, &cq, fx.zone, fx.quest).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    super::drain_player_updates(&mut world);
+    assert_eq!(fx.wealth().await, 107);
+    assert_eq!(world.get::<mud_world::Wealth>(player).unwrap().0, 107);
+    fx.end().await;
+}
+
+/// `qcomplete` flips the status and pays in ONE transaction: a reward that
+/// cannot be written (experience would overflow) rolls everything back, so
+/// the quest stays in progress with no partial payment, and the retry once
+/// the problem is gone completes and pays exactly once.
+#[tokio::test(flavor = "current_thread")]
+async fn qcomplete_is_all_or_nothing() {
+    let Some(fx) = fixture().await else { return };
+    fx.visit_objective(1).await;
+    // Gold first, then the experience that overflows: the gold update is
+    // already done when the transaction fails.
+    for (ty, amount) in [("GOLD", 7), ("EXPERIENCE", 50)] {
+        sqlx::query(
+            "INSERT INTO \"QuestReward\" (quest_zone_id, quest_id, phase_id, reward_type, amount) \
+             VALUES ($1, $2, 1, $3::\"QuestRewardType\", $4)",
+        )
+        .bind(fx.zone)
+        .bind(fx.quest)
+        .bind(ty)
+        .bind(amount)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    }
+    sqlx::query("UPDATE \"Characters\" SET experience = 2147483647 WHERE id = $1")
+        .bind(&fx.char_id)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    let (mut world, player, mut rx) = fx.tick_world(UserRole::Coder);
+    fx.accept().await;
+
+    assert!(super::try_dispatch_async(&mut world, player, &fx.pool, "qcomplete 1").await);
+    let out = drive(&mut world, &mut rx, &fx.pool, "Complete failed").await;
+    assert!(!out.contains("Force-completed"), "{out}");
+    assert_eq!(fx.status().await, "IN_PROGRESS", "the flip was rolled back");
+    assert_eq!(fx.wealth().await, 0, "the gold was rolled back");
+
+    sqlx::query("UPDATE \"Characters\" SET experience = 0 WHERE id = $1")
+        .bind(&fx.char_id)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    assert!(super::try_dispatch_async(&mut world, player, &fx.pool, "qcomplete 1").await);
+    let out = drive(&mut world, &mut rx, &fx.pool, "+7 gold").await;
+    assert!(out.contains("Force-completed quest"), "{out}");
+    assert_eq!(fx.status().await, "COMPLETED");
+    assert_eq!(fx.paid().await, (50, 7), "paid once");
+    fx.end().await;
+}
+
+/// The accept is a task of its own: if the command's watchdog drops the wait
+/// just as the accept commits, the tick is still told the quest started, so
+/// a COLLECT objective counts what the character already carries.
+#[tokio::test(flavor = "current_thread")]
+async fn a_cut_off_qaccept_still_credits_carried_items() {
+    let Some(fx) = fixture().await else { return };
+    let key = fx.collect_objective(1).await;
+    let (mut world, player, _room, _rx) = fx.world();
+    Fx::with_updates(&mut world);
+    Fx::give_item(&mut world, player, key);
+    let tx = world.resource::<super::PlayerUpdateTx>().0.clone();
+
+    // The wait is abandoned after its first poll, before the database has
+    // answered.
+    let cut = tokio::time::timeout(
+        Duration::ZERO,
+        super::quests::accept_work(
+            fx.pool.clone(),
+            Some(tx),
+            fx.char_id.clone(),
+            10,
+            fx.zone,
+            fx.quest,
+        ),
+    )
+    .await;
+    assert!(cut.is_err(), "the wait was cut off");
+
+    assert_eq!(
+        fx.pump_to_status(&mut world, "COMPLETED").await,
+        "COMPLETED",
+        "the carried item was never counted"
+    );
+    fx.end().await;
 }

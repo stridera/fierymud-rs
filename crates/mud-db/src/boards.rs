@@ -153,26 +153,42 @@ pub async fn get_message(pool: &PgPool, message_id: i32) -> sqlx::Result<Option<
 /// `BoardMessageEdit` with the editor's name. Both writes happen in
 /// a single transaction so partial updates can't get into the audit
 /// trail.
+///
+/// The permission check is part of the statement, so it holds at the
+/// moment of the write, not just when the draft was opened: unless
+/// `staff` (board privilege: builders and above), the board must not be
+/// locked now and `editor` must be the poster. Returns the rows changed;
+/// 0 means the edit was refused (or the post is gone) and nothing was
+/// written, audit row included.
 pub async fn update_message(
     pool: &PgPool,
     message_id: i32,
     subject: &str,
     content: &str,
     editor: &str,
+    staff: bool,
 ) -> sqlx::Result<u64> {
     let mut tx = pool.begin().await?;
     let result = sqlx::query!(
         r#"
-        UPDATE "BoardMessage"
+        UPDATE "BoardMessage" m
         SET subject = $1, content = $2, updated_at = NOW()
-        WHERE id = $3
+        FROM "Board" b
+        WHERE m.id = $3
+          AND b.id = m.board_id
+          AND ($5 OR (NOT b.locked AND LOWER(m.poster) = LOWER($4)))
         "#,
         subject,
         content,
         message_id,
+        editor,
+        staff,
     )
     .execute(&mut *tx)
     .await?;
+    if result.rows_affected() == 0 {
+        return Ok(0);
+    }
     sqlx::query!(
         r#"
         INSERT INTO "BoardMessageEdit" (message_id, editor, edited_at)

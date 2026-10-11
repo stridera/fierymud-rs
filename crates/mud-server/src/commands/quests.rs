@@ -396,6 +396,7 @@ pub(crate) async fn cmd_qaccept(
     //     committed cannot accept twice.
     let chain = off_tick::Chain::default();
     let (read_pool, accept_pool) = (pool.clone(), pool.clone());
+    let update_tx = world.get_resource::<PlayerUpdateTx>().map(|t| t.0.clone());
     let read_gate = async move {
         // Availability Lua gate (Wave 4.4): if the quest's
         // `availability_requirement` is non-null, evaluate it against
@@ -426,20 +427,54 @@ pub(crate) async fn cmd_qaccept(
             );
             return;
         }
-        let accept = {
-            let character_id = character_id.clone();
-            async move {
-                mud_db::quests::accept_for_player(&accept_pool, &character_id, level, zone, id)
-                    .await
-                    .map_err(|e| e.to_string())
-            }
-        };
+        let accept = accept_work(
+            accept_pool,
+            update_tx,
+            character_id.clone(),
+            level,
+            zone,
+            id,
+        );
         next.next(world, player, accept, move |world, player, outcome| {
             finish_accept(world, player, &character_id, zone, id, outcome);
         });
     })
     .await;
     chain.settle(world).await;
+}
+
+/// The database half of `qaccept`: take the quest and, once it is committed,
+/// tell the tick it started so COLLECT objectives count what the character
+/// already carries (`QuestPhaseEntered`).
+///
+/// The whole thing runs as a task of its own that the command watchdog cannot
+/// cancel: the job's timeout drops the wait for the result, not this task. If
+/// the accept commits just as the command gives up, the notice is still
+/// sent, so the quest does not sit with carried items uncounted until the
+/// next pickup. (The text for the player is the only thing lost then.)
+pub(crate) async fn accept_work(
+    pool: mud_db::sqlx::PgPool,
+    update_tx: Option<tokio::sync::mpsc::Sender<PendingPlayerUpdate>>,
+    character_id: String,
+    level: i32,
+    zone: i32,
+    id: i32,
+) -> Result<mud_db::quests::AcceptOutcome, String> {
+    tokio::spawn(async move {
+        let outcome = mud_db::quests::accept_for_player(&pool, &character_id, level, zone, id)
+            .await
+            .map_err(|e| e.to_string());
+        if outcome == Ok(mud_db::quests::AcceptOutcome::Accepted)
+            && let Some(tx) = update_tx
+        {
+            let _ = tx
+                .send(PendingPlayerUpdate::QuestPhaseEntered { character_id })
+                .await;
+        }
+        outcome
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// The tick-side half of `qaccept`: say how it went and, when the quest
@@ -989,8 +1024,14 @@ struct Completion {
 /// completion and the reward.
 ///
 /// Exactly once:
-/// * the status flip (`IN_PROGRESS` -> `COMPLETED`) is guarded, so a repeat
-///   command finds nothing to complete and pays nothing;
+/// * queue room for the world updates is reserved first
+///   ([`crate::quest_progress::reserve_under_turn`]), before anything is
+///   written, so the turn is never released between the payment and the
+///   queued updates;
+/// * the status flip (`IN_PROGRESS` -> `COMPLETED`) and every reward are ONE
+///   transaction, guarded on the status: a failure leaves the quest in
+///   progress and unpaid, a repeat command finds nothing to complete and
+///   pays nothing;
 /// * each numeric reward is a relative SQL update (`wealth = wealth + n`),
 ///   so it adds to whatever else changed the row, instead of writing an
 ///   absolute balance that a snapshot could have made stale;
@@ -998,8 +1039,8 @@ struct Completion {
 ///   (after `supersede_earlier_snapshots`), so no snapshot can write the old
 ///   balance over the reward and the next autosave carries it as ordinary
 ///   state, never a second time;
-/// * items are spawned by the tick from the same queue and saved by the
-///   normal save.
+/// * items are spawned by the tick from the same queue, which then saves
+///   the character.
 fn start_completion(
     world: &World,
     c: Completion,
@@ -1011,38 +1052,9 @@ fn start_completion(
         .unwrap_or_default();
     let update_tx = world.get_resource::<PlayerUpdateTx>().map(|t| t.0.clone());
     let character_id = c.character_id.clone();
-    coordinator.spawn_ordered(&character_id, move |mut ordered| async move {
-        let text = match mud_db::quests::admin_complete(&c.pool, &c.row_id).await {
-            Ok(0) => "That quest isn't in-progress; nothing to complete.\r\n".to_string(),
-            Err(e) => format!("Complete failed: {e}\r\n"),
-            Ok(_) => {
-                let mut text = format!("Force-completed quest: {}.\r\n", c.name);
-                if c.pays {
-                    // Same payout as finishing the last objective - for ranks
-                    // trusted with it.
-                    let payout = crate::quest_progress::pay_completion_rewards(
-                        &c.pool,
-                        &c.character_id,
-                        c.zone,
-                        c.quest,
-                    )
-                    .await;
-                    text.push_str(&payout.text());
-                    if !payout.updates.is_empty()
-                        && let Some(tx) = &update_tx
-                    {
-                        ordered.supersede_earlier_snapshots();
-                        crate::quest_progress::deliver_under_turn(ordered, tx, payout.updates)
-                            .await;
-                    }
-                } else {
-                    text.push_str(
-                        "Rewards withheld: paying quest rewards by hand needs coder rank.\r\n",
-                    );
-                }
-                text
-            }
-        };
+    let turns = coordinator.clone();
+    coordinator.spawn_ordered(&character_id, move |ordered| async move {
+        let text = complete_and_pay(&turns, update_tx.as_ref(), ordered, &c).await;
         report(done, update_tx, c.character_id, text).await;
     });
     async move {
@@ -1050,6 +1062,61 @@ fn start_completion(
             .unwrap_or_else(|_| "The completion was interrupted.\r\n".to_string())
     }
 }
+
+/// The work of [`start_completion`], under the character's turn.
+async fn complete_and_pay(
+    coordinator: &crate::autosave::SaveCoordinator,
+    update_tx: Option<&tokio::sync::mpsc::Sender<PendingPlayerUpdate>>,
+    ordered: crate::autosave::OrderedSave,
+    c: &Completion,
+) -> String {
+    use crate::quest_progress::{Payment, Reservation, RewardPlan};
+    if !c.pays {
+        // Withheld below coder rank: only the status flip.
+        return match mud_db::quests::admin_complete(&c.pool, &c.row_id).await {
+            Ok(0) => NOT_IN_PROGRESS.to_string(),
+            Err(e) => format!("Complete failed: {e}\r\n"),
+            Ok(_) => format!(
+                "Force-completed quest: {}.\r\n\
+                 Rewards withheld: paying quest rewards by hand needs coder rank.\r\n",
+                c.name
+            ),
+        };
+    }
+    // Same payout as finishing the last objective - for ranks trusted with it.
+    let plan = RewardPlan::load(&c.pool, c.zone, c.quest).await;
+    let (ordered, reservation) = match update_tx {
+        Some(tx) => {
+            crate::quest_progress::reserve_under_turn(
+                coordinator,
+                &c.character_id,
+                ordered,
+                tx,
+                plan.update_bound(),
+            )
+            .await
+        }
+        None => (ordered, Reservation::none()),
+    };
+    match crate::quest_progress::pay_completion_rewards(
+        &c.pool,
+        &c.character_id,
+        &plan,
+        Some(&c.row_id),
+    )
+    .await
+    {
+        Payment::NotInProgress => NOT_IN_PROGRESS.to_string(),
+        Payment::Failed(e) => format!("Complete failed: {e}\r\n"),
+        Payment::Paid(payout) => {
+            let text = format!("Force-completed quest: {}.\r\n{}", c.name, payout.text());
+            crate::quest_progress::deliver_under_turn(ordered, reservation, payout.updates);
+            text
+        }
+    }
+}
+
+const NOT_IN_PROGRESS: &str = "That quest isn't in-progress; nothing to complete.\r\n";
 
 /// Hand the outcome text to the waiting command. If it gave up (the
 /// watchdog released the player), print it through the update channel
@@ -1622,8 +1689,10 @@ pub(crate) async fn plan_claim(
 /// the character's write turn (see [`start_completion`] for the design; the
 /// claim is `claim_reward`, which locks the quest row, so two simultaneous
 /// claims serialize and only the first wins, and a failed write of the claim
-/// record rolls the grant back). ITEM rewards are spawned by the tick from
-/// the update queue and saved by the normal save.
+/// record rolls the grant back). Queue room for the world updates is reserved
+/// before the claim is written (`reserve_under_turn`). ITEM rewards are
+/// spawned by the tick from the update queue, which then saves the character
+/// (`SpawnItem` requests a background save).
 pub(crate) fn start_claim(
     world: &World,
     pool: mud_db::sqlx::PgPool,
@@ -1639,13 +1708,24 @@ pub(crate) fn start_claim(
         .unwrap_or_default();
     let update_tx = world.get_resource::<PlayerUpdateTx>().map(|t| t.0.clone());
     let turn_for = character_id.clone();
-    coordinator.spawn_ordered(&turn_for, move |mut ordered| async move {
+    let turns = coordinator.clone();
+    coordinator.spawn_ordered(&turn_for, move |ordered| async move {
         let ClaimPlan {
             cqid,
             reward,
             blocking_ids,
             claimed,
         } = plan;
+        // Room for the world updates (the reward, and a house a HOUSING
+        // reward may create) is reserved before the claim is written, so the
+        // turn is never released between the payment and the queued updates.
+        let (ordered, reservation) = match update_tx.as_ref() {
+            Some(tx) => {
+                crate::quest_progress::reserve_under_turn(&turns, &character_id, ordered, tx, 2)
+                    .await
+            }
+            None => (ordered, crate::quest_progress::Reservation::none()),
+        };
         let outcome = match mud_db::quest_objectives::claim_reward(
             &pool,
             &character_id,
@@ -1668,6 +1748,7 @@ pub(crate) fn start_claim(
                         format!("Reward grant failed: {e}\r\n")
                     }
                 };
+                drop(reservation);
                 report(done, update_tx, character_id, text).await;
                 return;
             }
@@ -1682,13 +1763,7 @@ pub(crate) fn start_claim(
             updates.push(granted);
         }
         updates.extend(crate::quest_progress::reward_update(&character_id, &reward));
-        match &update_tx {
-            Some(tx) if !updates.is_empty() => {
-                ordered.supersede_earlier_snapshots();
-                crate::quest_progress::deliver_under_turn(ordered, tx, updates).await;
-            }
-            _ => drop(ordered),
-        }
+        crate::quest_progress::deliver_under_turn(ordered, reservation, updates);
         // The claim was recorded by `claim_reward`; mirror it for the tally.
         let mut new_claimed = claimed;
         new_claimed.push(reward.id);
