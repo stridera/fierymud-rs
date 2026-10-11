@@ -9,7 +9,7 @@ use std::time::Duration;
 use bevy_ecs::prelude::World;
 use mud_db::PoolSettings;
 use mud_db::sqlx::PgPool;
-use mud_world::{PromptLetters, SpellSyllables, StatusFlagValues, SystemMessages};
+use mud_world::{PromptLetters, ReservedNames, SpellSyllables, StatusFlagValues, SystemMessages};
 
 use crate::commands::test_support::{db_test_lock, db_test_pool_settings};
 
@@ -39,6 +39,10 @@ async fn seeded_pool() -> Option<PgPool> {
         .execute(&pool)
         .await
         .ok()?;
+    mud_db::sqlx::query("SELECT name FROM \"ReservedNames\" LIMIT 1")
+        .execute(&pool)
+        .await
+        .ok()?;
     Some(pool)
 }
 
@@ -59,6 +63,14 @@ async fn seeded_rows_reach_their_resources() {
     assert_eq!(flags.value("a_flag_nobody_seeded"), 0);
 
     assert!(!world.resource::<SpellSyllables>().rows.is_empty());
+
+    let reserved = world.resource::<ReservedNames>();
+    assert!(!reserved.names.is_empty());
+    assert!(reserved.contains("Guard"), "seeded curated word");
+    assert!(
+        !reserved.contains("someone"),
+        "command-grammar words stay in code, not the table"
+    );
 
     let messages = world.resource::<SystemMessages>();
     assert_eq!(messages.get("exp_progress").len(), 11);
@@ -108,6 +120,7 @@ async fn missing_tables_degrade_to_empty_resources() {
 
     assert!(world.resource::<StatusFlagValues>().by_flag.is_empty());
     assert!(world.resource::<SpellSyllables>().rows.is_empty());
+    assert!(world.resource::<ReservedNames>().names.is_empty());
     assert!(world.resource::<SystemMessages>().by_key.is_empty());
     assert!(world.resource::<PromptLetters>().by_letter.is_empty());
 

@@ -1,6 +1,7 @@
 //! Small content tables the runtime used to hard-code (data over code):
 //! status flag AI values, spell chant syllables, `SystemMessage` text pools and
-//! the `%d` prompt cooldown letters on `Ability`. Builders edit the rows in
+//! the `%d` prompt cooldown letters on `Ability`, and the reserved character
+//! names. Builders edit the rows in
 //! Muditor; the boot loader reads them into ECS resources. Each table is
 //! created by `fierylib/data/sql/2026-10-09-content-tables.sql`, so the loader
 //! treats a missing table / column as "no rows" rather than a boot failure.
@@ -42,6 +43,26 @@ pub async fn list_spell_syllables(pool: &PgPool) -> sqlx::Result<Vec<SpellSyllab
         SELECT syllable AS "syllable!", replacement AS "replacement!"
         FROM "SpellSyllable"
         ORDER BY sort_order, id
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReservedNameRow {
+    pub name: String,
+}
+
+/// Every word refused as a character name (`ReservedNames` table; created by
+/// `fierylib/data/sql/2026-10-10-reserved-names.sql` or the Muditor schema).
+pub async fn list_reserved_names(pool: &PgPool) -> sqlx::Result<Vec<ReservedNameRow>> {
+    sqlx::query_as!(
+        ReservedNameRow,
+        r#"
+        SELECT name AS "name!"
+        FROM "ReservedNames"
+        ORDER BY name
         "#,
     )
     .fetch_all(pool)

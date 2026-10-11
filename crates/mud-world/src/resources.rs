@@ -286,6 +286,24 @@ pub struct SpellSyllables {
     pub rows: Vec<(String, String)>,
 }
 
+/// Words refused as character names (`ReservedNames` table): staff / system
+/// voices and generic mob words a builder curates in Muditor. Stored
+/// lowercase; lookups ignore case. The command-grammar words (`all`, `self`,
+/// ...) are not here: they stay in code with the command parser. An empty set
+/// (table missing, or a world built without a database) reserves nothing.
+#[derive(Resource, Debug, Default)]
+pub struct ReservedNames {
+    pub names: HashSet<String>,
+}
+
+impl ReservedNames {
+    /// True when `name` (any case, surrounding whitespace ignored) is reserved.
+    #[must_use]
+    pub fn contains(&self, name: &str) -> bool {
+        self.names.contains(&name.trim().to_ascii_lowercase())
+    }
+}
+
 /// `Ability.prompt_letter`: which abilities each `%d<letter>` prompt code
 /// tracks the cooldown of. Entries are in letter order.
 #[derive(Resource, Debug, Default)]

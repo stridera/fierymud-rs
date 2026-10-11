@@ -1,10 +1,12 @@
 //! Words that must not become a character name (or an item keyword).
 //!
-//! DATA-OVER-CODE SCAFFOLDING: these lists are content a builder or admin
-//! may want to edit without a recompile. They live here, in one place, as a
-//! bridge; the follow-up is a `ReservedNames` DB table (Prisma schema,
-//! fierylib seed, loaded into an ECS resource at boot). The mob-proto part
-//! of the check already reads the DB-loaded `MobPrototypes` resource.
+//! Two layers. The command-grammar words ([`TARGET_WORDS`]) are a runtime
+//! invariant tied to the targeting parser and stay in code. Everything
+//! curated (staff / system voices, generic mob words such as "guard") is
+//! content: it lives in the `ReservedNames` table, which builders edit in
+//! Muditor and the boot loader reads into the `ReservedNames` resource; a
+//! missing table boots with an empty list (logged at ERROR). The mob-proto
+//! part of the check reads the DB-loaded `MobPrototypes` resource.
 
 use bevy_ecs::prelude::World;
 
@@ -21,46 +23,19 @@ pub(crate) const TARGET_WORDS: &[&str] = &[
     "here",
 ];
 
-/// Staff / system voices a player must not impersonate.
-pub(crate) const STAFF_NAMES: &[&str] = &[
-    "admin",
-    "administrator",
-    "builder",
-    "god",
-    "gods",
-    "immortal",
-    "implementor",
-    "moderator",
-    "server",
-    "staff",
-    "system",
-];
-
 /// True when `word` (any case) is one of the targeting-grammar words.
 pub(crate) fn is_target_word(word: &str) -> bool {
     TARGET_WORDS.iter().any(|w| w.eq_ignore_ascii_case(word))
 }
 
-/// True when `name` (any case) is a targeting word or a staff/system name.
-pub(crate) fn is_reserved_name(name: &str) -> bool {
-    is_target_word(name) || STAFF_NAMES.iter().any(|w| w.eq_ignore_ascii_case(name))
+/// True when `name` (any case) is a targeting word or a curated reserved
+/// name from the `ReservedNames` table (none when the resource is absent).
+pub(crate) fn is_reserved_name(world: &World, name: &str) -> bool {
+    is_target_word(name)
+        || world
+            .get_resource::<mud_world::ReservedNames>()
+            .is_some_and(|r| r.contains(name))
 }
-
-/// Single words that read as a generic mob and so are refused as player
-/// names, whether or not a prototype of that exact name exists.
-pub(crate) const GENERIC_MOB_WORDS: &[&str] = &[
-    "beggar",
-    "citizen",
-    "cityguard",
-    "corpse",
-    "guard",
-    "guardian",
-    "guardsman",
-    "merchant",
-    "mob",
-    "npc",
-    "shopkeeper",
-];
 
 /// A mob's short name reduced for comparison: lowercase, a leading
 /// article (`a` / `an` / `the` / `some`) removed. "an ebony raven" becomes
@@ -86,17 +61,12 @@ fn mob_short_name(name: &str) -> String {
     lower
 }
 
-/// True when `name` (any case) is a generic mob word or equals a mob
-/// prototype's short name with its article stripped. Keywords are
+/// True when `name` (any case) equals a mob prototype's short name with its
+/// article stripped. Generic mob words ("guard") are curated rows in
+/// `ReservedNames`, checked by [`is_reserved_name`]. Keywords are
 /// deliberately not matched: they include common handles ("bob", "raven",
 /// "shadow") that players are entitled to.
 pub(crate) fn matches_mob_proto(world: &World, name: &str) -> bool {
-    if GENERIC_MOB_WORDS
-        .iter()
-        .any(|w| w.eq_ignore_ascii_case(name))
-    {
-        return true;
-    }
     let Some(protos) = world.get_resource::<mud_world::MobPrototypes>() else {
         return false;
     };
@@ -110,7 +80,7 @@ pub(crate) fn matches_mob_proto(world: &World, name: &str) -> bool {
 /// Why `name` cannot be used for a new character, as a message ready for
 /// the player; `Ok(())` when it is free of reserved words.
 pub(crate) fn check_character_name(world: &World, name: &str) -> Result<(), String> {
-    if is_reserved_name(name) || matches_mob_proto(world, name) {
+    if is_reserved_name(world, name) || matches_mob_proto(world, name) {
         return Err(format!("The name '{name}' is reserved. Pick another."));
     }
     Ok(())
@@ -121,28 +91,44 @@ mod tests {
     use super::*;
     use crate::commands::test_support::mob_proto;
     use mud_db::enums::MobProfession;
-    use mud_world::MobPrototypes;
+    use mud_world::{MobPrototypes, ReservedNames};
 
-    #[test]
-    fn target_and_staff_words_are_reserved_in_any_case() {
-        for n in [
-            "Someone",
-            "SELF",
-            "me",
-            "All",
-            "Here",
-            "Something",
-            "Admin",
-            "System",
-        ] {
-            assert!(is_reserved_name(n), "{n}");
-        }
-        assert!(!is_reserved_name("Strider"));
+    /// A world whose `ReservedNames` resource holds `names`.
+    fn world_reserving(names: &[&str]) -> World {
+        let mut world = World::new();
+        world.insert_resource(ReservedNames {
+            names: names.iter().map(|n| (*n).to_string()).collect(),
+        });
+        world
     }
 
     #[test]
-    fn mob_short_names_and_generic_words_are_reserved_but_keywords_are_not() {
-        let mut world = World::new();
+    fn target_words_are_reserved_in_any_case_without_a_table() {
+        let world = World::new();
+        for n in ["Someone", "SELF", "me", "All", "Here", "Something"] {
+            assert!(is_reserved_name(&world, n), "{n}");
+        }
+        assert!(!is_reserved_name(&world, "Strider"));
+        // The curated words come from the table: absent resource, nothing reserved.
+        assert!(!is_reserved_name(&world, "Admin"));
+    }
+
+    #[test]
+    fn curated_names_come_from_the_resource_in_any_case() {
+        let world = world_reserving(&["admin", "guard"]);
+        for n in ["Admin", "GUARD", " guard "] {
+            assert!(is_reserved_name(&world, n), "{n}");
+        }
+        assert!(!is_reserved_name(&world, "Strider"));
+        // Removing a row (an empty list) frees the word, but not the grammar words.
+        let world = world_reserving(&[]);
+        assert!(!is_reserved_name(&world, "Admin"));
+        assert!(is_reserved_name(&world, "Everyone"));
+    }
+
+    #[test]
+    fn mob_short_names_and_curated_words_are_reserved_but_keywords_are_not() {
+        let mut world = world_reserving(&["guard"]);
         assert!(
             check_character_name(&world, "Guard").is_err(),
             "curated word"

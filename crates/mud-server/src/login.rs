@@ -7753,6 +7753,12 @@ mod tests {
     #[test]
     fn unknown_short_or_reserved_names_never_reach_the_create_offer() {
         let mut world = auth_world(0);
+        world.insert_resource(mud_world::ReservedNames {
+            names: ["guard", "cityguard"]
+                .map(String::from)
+                .into_iter()
+                .collect(),
+        });
         let mut protos = mud_world::MobPrototypes::default();
         let mut p =
             crate::commands::test_support::mob_proto(30, 1, mud_db::enums::MobProfession::Trainer);
@@ -7789,7 +7795,10 @@ mod tests {
 
     #[test]
     fn new_character_name_check_covers_shape_and_reserved_words() {
-        let world = World::new();
+        let mut world = World::new();
+        world.insert_resource(mud_world::ReservedNames {
+            names: ["staff".to_string()].into_iter().collect(),
+        });
         assert!(check_new_character_name(&world, "ab").is_err());
         assert!(check_new_character_name(&world, "Hax0r").is_err());
         assert!(check_new_character_name(&world, "Everyone").is_err());

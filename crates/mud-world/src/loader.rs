@@ -121,9 +121,10 @@ fn rows_or_empty_with_fix<T>(
 }
 
 /// Load the small content tables that used to be hard-coded arrays: status flag
-/// AI values, spell chant syllables, `SystemMessage` text pools and the `%d`
-/// prompt cooldown letters. All are created by the 2026-10-09-content-tables
-/// patch, which prod applies by hand, so a missing table / column logs an ERROR
+/// AI values, spell chant syllables, `SystemMessage` text pools, the `%d`
+/// prompt cooldown letters and the reserved character names. They are created
+/// by the 2026-10-09-content-tables / 2026-10-10-reserved-names patches, which
+/// prod applies by hand, so a missing table / column logs an ERROR
 /// and boots with no rows (call sites fall back to empty text / zero scores)
 /// instead of failing the boot. Every resource is inserted either way.
 ///
@@ -192,6 +193,25 @@ pub async fn load_content_tables(world: &mut World, pool: &PgPool) -> sqlx::Resu
         "PromptLetters loaded"
     );
     world.insert_resource(prompt_letters);
+
+    // Created by the muditor schema / fierylib 2026-10-10-reserved-names patch,
+    // not the content-tables one, so it names its own remedy.
+    let reserved_rows = rows_or_empty_with_fix(
+        content_tables::list_reserved_names(pool).await,
+        "table \"ReservedNames\"",
+        "apply fierylib/data/sql/2026-10-10-reserved-names.sql (and deploy the muditor schema)",
+        "only command words and mob names are refused as character names",
+    )?;
+    let reserved = crate::resources::ReservedNames {
+        names: reserved_rows
+            .into_iter()
+            .map(|r| r.name.trim().to_ascii_lowercase())
+            .filter(|n| !n.is_empty())
+            .collect(),
+    };
+    info!(rows = reserved.names.len(), "ReservedNames loaded");
+    world.insert_resource(reserved);
+
     load_mob_ai_data(world, pool).await?;
     Ok(())
 }
