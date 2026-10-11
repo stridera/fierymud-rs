@@ -1,9 +1,9 @@
 use bevy_ecs::prelude::*;
 use mud_world::{
     AppliedTo, CombatStats, Corpse, CorpseDecay, Description, EffectInstance, EquippedSlot, Exits,
-    Fighting, FromMobReset, Ghost, Guarding, Health, Item, Keywords, KnownAbilities, Located, Mob,
-    MobPrototypes, Named, NaturalDamage, ObjectPrototypes, Player, PlayerFlags, Posture,
-    PostureKind, Slot, Stunned, Wealth, WearableIn, WorldKey, WorldKeyIndex,
+    Fighting, FromMobReset, Ghost, Guarding, Health, Item, Keywords, Located, Mob, MobPrototypes,
+    Named, NaturalDamage, ObjectPrototypes, Player, PlayerFlags, Posture, PostureKind, Slot,
+    Stunned, Wealth, WearableIn, WorldKey, WorldKeyIndex,
 };
 use tracing::info;
 
@@ -315,7 +315,7 @@ fn roll_evasion(world: &World, defender: Entity) -> Option<&'static str> {
         return None;
     }
     let core = world.get_resource::<mud_world::CoreAbilities>()?;
-    let known = world.get::<KnownAbilities>(defender)?;
+    let known = mud_world::known_abilities_of(world, defender)?;
     for (id, kind) in [(core.dodge, "dodge"), (core.parry, "parry")] {
         let Some(id) = id else { continue };
         let prof = known
@@ -386,7 +386,7 @@ fn proto_weapon_family(proto: &mud_world::ObjectProto) -> Option<&'static str> {
 /// and is never counted twice.
 fn passive_skill_bonus(world: &World, entity: Entity, key: &str, family: Option<&str>) -> i32 {
     let (Some(known), Some(abilities), Some(effects)) = (
-        world.get::<KnownAbilities>(entity),
+        mud_world::known_abilities_of(world, entity),
         world.get_resource::<mud_world::AbilityCatalog>(),
         world.get_resource::<mud_world::EffectCatalog>(),
     ) else {
@@ -3420,6 +3420,7 @@ pub(crate) fn level_up_to(world: &mut World, entity: Entity, max_level: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mud_world::KnownAbilities;
 
     #[test]
     fn parse_hit_dice_handles_common_shapes() {

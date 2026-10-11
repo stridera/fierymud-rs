@@ -272,14 +272,7 @@ pub(crate) fn cmd_pick(world: &mut World, player: Entity, args: &str) {
     let proficiency = world
         .get_resource::<mud_world::CoreAbilities>()
         .and_then(|c| c.pick_lock)
-        .and_then(|pick| {
-            world
-                .get::<KnownAbilities>(player)?
-                .entries
-                .iter()
-                .find(|(id, _, _)| *id == pick)
-                .map(|(_, p, _)| *p)
-        });
+        .and_then(|pick| mud_world::proficiency_of(world, player, pick));
     let Some(proficiency) = proficiency else {
         send_to(world, player, "You don't know how to pick locks.\r\n");
         return;
@@ -512,7 +505,8 @@ pub(crate) fn cmd_study(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "You have no profile.\r\n");
         return;
     };
-    let Some(class_id) = profile.class_id else {
+    let god = mud_world::bypasses_restrictions(world, player);
+    let Some(class_id) = profile.class_id.or_else(|| god.then_some(0)) else {
         send_to(world, player, "You have no class.\r\n");
         return;
     };
@@ -530,16 +524,22 @@ pub(crate) fn cmd_study(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, format!("'{key}' isn't a known ability.\r\n"));
         return;
     };
-    if !world
-        .resource::<SpellSlotData>()
-        .ability_circle
-        .contains_key(&(class_id, def.id))
+    if !god
+        && !world
+            .resource::<SpellSlotData>()
+            .ability_circle
+            .contains_key(&(class_id, def.id))
     {
         send_to(
             world,
             player,
             format!("{} isn't on your class's list.\r\n", def.name),
         );
+        return;
+    }
+    // A god already knows every ability; nothing is written for them.
+    if god {
+        send_to(world, player, format!("You already know {}.\r\n", def.name));
         return;
     }
     if let Some(known) = world.get::<KnownAbilities>(player)

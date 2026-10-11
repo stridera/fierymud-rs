@@ -53,8 +53,8 @@
 
 use bevy_ecs::prelude::*;
 use mud_world::{
-    AbilityCatalog, AbilityDef, Account, CastTarget, Casting, CoreStats, Fighting, Health,
-    KnownAbilities, Located, Posture, PostureKind, Profile, SlotHold, SpellSlotData,
+    AbilityCatalog, AbilityDef, Account, CastTarget, Casting, CoreStats, Fighting, Health, Located,
+    Posture, PostureKind, Profile, SlotHold, SpellSlotData,
 };
 
 use crate::commands::{
@@ -306,7 +306,7 @@ pub(crate) fn wind_up_ticks(
     let Some(quick) = catalog.by_name.get(QUICK_CHANT_KEY) else {
         return (unhurried, false);
     };
-    let Some(skill) = world.get::<KnownAbilities>(caster).and_then(|k| {
+    let Some(skill) = mud_world::known_abilities_of(world, caster).and_then(|k| {
         k.entries
             .iter()
             .find(|(id, _, known)| *id == quick.id && *known)
@@ -501,12 +501,7 @@ pub(crate) fn announce_cast_start(
         let staff = is_staff(world, observer);
         let skill = know_spell_id
             .and_then(|id| {
-                world.get::<KnownAbilities>(observer).and_then(|k| {
-                    k.entries
-                        .iter()
-                        .find(|(aid, _, _)| *aid == id)
-                        .map(|(_, p, _)| (p / 10).clamp(0, 100))
-                })
+                mud_world::proficiency_of(world, observer, id).map(|p| (p / 10).clamp(0, 100))
             })
             .unwrap_or(0);
         let knows = staff || rand::random_range(0..=101) <= skill;
@@ -756,6 +751,7 @@ mod tests {
     use crate::commands::test_support::{Rx, ability_def, drain, player_in};
     use crate::commands::{dispatch, invoke_ability};
     use mud_db::abilities::AbilityKind;
+    use mud_world::KnownAbilities;
     use mud_world::{AppliedTo, EffectCatalog, EffectDef, EffectInstance, Mob, Named, SpellSlots};
 
     fn table(rows: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -2269,5 +2265,126 @@ mod tests {
             !cast_lag_active(&world, mortal),
             "a landed spell is no abort"
         );
+    }
+    // ---- gods are never held back by class, race or alignment ----
+
+    fn account(role: mud_db::enums::UserRole) -> mud_world::Account {
+        mud_world::Account {
+            user_id: "u".into(),
+            character_id: "c".into(),
+            role,
+            account_role: role,
+            perms: Vec::new(),
+        }
+    }
+
+    /// `zap` that only an evil caster may cast, plus a good-aligned
+    /// caster of the given rank, and a goblin to hit.
+    fn evil_only_zap(role: mud_db::enums::UserRole, known: bool) -> (World, Entity, Entity, Rx) {
+        let (mut world, room) = world_with_zap();
+        world
+            .resource_mut::<AbilityCatalog>()
+            .restriction_rules
+            .insert(
+                ZAP,
+                vec![
+                    serde_json::json!({"type": "alignment", "value": "evil", "target": "caster",
+                "message": "Only the wicked may cast this.", "required": true}),
+                ],
+            );
+        let (caster, rx) = player_in(&mut world, room);
+        world.entity_mut(caster).insert((
+            Health { hp: 50, max: 50 },
+            mud_world::CombatStats {
+                alignment: 800,
+                ..Default::default()
+            },
+            account(role),
+        ));
+        if known {
+            world.entity_mut(caster).insert(KnownAbilities {
+                entries: vec![(ZAP, 500, true)],
+            });
+        }
+        let (goblin, _) = goblin_with_loot(&mut world, room);
+        (world, caster, goblin, rx)
+    }
+
+    #[test]
+    fn good_mortal_cannot_cast_an_evil_only_spell() {
+        let (mut world, caster, goblin, mut rx) =
+            evil_only_zap(mud_db::enums::UserRole::Player, true);
+        zap(&mut world, caster, "goblin");
+        assert!(world.get_entity(goblin).is_ok(), "the spell never landed");
+        assert!(drain(&mut rx).contains("Only the wicked"));
+    }
+
+    #[test]
+    fn good_god_casts_an_evil_only_spell_without_knowing_it() {
+        // No KnownAbilities row at all: a god knows every ability.
+        let (mut world, caster, goblin, mut rx) =
+            evil_only_zap(mud_db::enums::UserRole::Immortal, false);
+        zap(&mut world, caster, "goblin");
+        let out = drain(&mut rx);
+        assert!(!out.contains("Only the wicked"), "{out}");
+        assert!(!out.contains("don't know"), "{out}");
+        assert!(
+            world.get_entity(goblin).is_err(),
+            "the zap killed it: {out}"
+        );
+        assert!(
+            world.get::<KnownAbilities>(caster).is_none(),
+            "nothing is written for a god"
+        );
+    }
+
+    #[test]
+    fn god_spells_list_shows_spells_of_every_class_and_a_god_needs_no_slot() {
+        let (mut world, caster, _goblin, mut rx) =
+            evil_only_zap(mud_db::enums::UserRole::Immortal, false);
+        dispatch(&mut world, caster, "spells");
+        let out = strip_escapes(&drain(&mut rx));
+        assert!(out.contains("Zap") && out.contains("Mend"), "{out}");
+        // A mortal with no rows sees nothing.
+        let (mut world, mortal, _goblin, mut rx) =
+            evil_only_zap(mud_db::enums::UserRole::Player, false);
+        dispatch(&mut world, mortal, "spells");
+        let out = strip_escapes(&drain(&mut rx));
+        assert!(!out.contains("Zap"), "{out}");
+    }
+
+    #[test]
+    fn a_god_needs_no_spell_slot_but_a_mortal_with_none_is_refused() {
+        for (role, open) in [
+            (mud_db::enums::UserRole::Player, false),
+            (mud_db::enums::UserRole::Immortal, true),
+        ] {
+            let (mut world, caster, _goblin, _rx) = evil_only_zap(role, true);
+            world.entity_mut(caster).insert(mud_world::Profile {
+                level: 50,
+                class_id: Some(1),
+                race: "HUMAN".into(),
+                experience: 0,
+                gender: "neutral".into(),
+            });
+            world
+                .resource_mut::<SpellSlotData>()
+                .ability_circle
+                .insert((1, ZAP), 3);
+            assert_eq!(
+                crate::commands::spell_slot_open(&world, caster, ZAP),
+                open,
+                "{role:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn god_knows_every_ability_at_full_proficiency_virtually() {
+        let (world, god, _goblin, _rx) = evil_only_zap(mud_db::enums::UserRole::Immortal, false);
+        assert_eq!(mud_world::proficiency_of(&world, god, ZAP), Some(1000));
+        let known = mud_world::known_abilities_of(&world, god).unwrap();
+        assert!(known.entries.iter().all(|(_, p, k)| *p == 1000 && *k));
+        assert!(known.has_any(ZAP) && known.has_any(MEND));
     }
 }

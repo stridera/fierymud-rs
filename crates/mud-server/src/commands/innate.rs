@@ -22,19 +22,29 @@ use crate::commands::{invoke_ability_innate, send_to};
 /// The active (non-passive) abilities the caller's race grants, sorted by
 /// name. Empty without a race or without loaded race data.
 pub(crate) fn racial_actives(world: &World, player: Entity) -> Vec<AbilityDef> {
-    let Some(race) = world.get::<Profile>(player).map(|p| p.race.clone()) else {
-        return Vec::new();
-    };
+    // A god has the innate abilities of every race.
+    let god = mud_world::bypasses_restrictions(world, player);
+    let race = world.get::<Profile>(player).map(|p| p.race.clone());
     let (Some(data), Some(catalog)) = (
         world.get_resource::<RaceAbilitiesData>(),
         world.get_resource::<AbilityCatalog>(),
     ) else {
         return Vec::new();
     };
+    let Some(race) = race.or_else(|| god.then(String::new)) else {
+        return Vec::new();
+    };
     let mut out: Vec<AbilityDef> = catalog
         .by_name
         .values()
-        .filter(|d| !d.passive && data.grants(&race, d.id))
+        .filter(|d| {
+            !d.passive
+                && if god {
+                    data.granted_by_any(d.id)
+                } else {
+                    data.grants(&race, d.id)
+                }
+        })
         .cloned()
         .collect();
     out.sort_by_key(|d| d.plain_name.to_ascii_lowercase());
@@ -747,5 +757,22 @@ mod tests {
             let out = cooldown_refusal(&world, elf, &def).unwrap();
             assert!(out.contains(shown), "{millis}ms: {out}");
         }
+    }
+    #[test]
+    fn a_god_has_the_innate_abilities_of_every_race() {
+        let (mut world, _elf, human, _rx) = world_with_races();
+        assert!(racial_actives(&world, human).is_empty());
+        world.entity_mut(human).insert(mud_world::Account {
+            user_id: "u".into(),
+            character_id: "c".into(),
+            role: mud_db::enums::UserRole::Immortal,
+            account_role: mud_db::enums::UserRole::Immortal,
+            perms: Vec::new(),
+        });
+        let ids: Vec<i32> = racial_actives(&world, human).iter().map(|d| d.id).collect();
+        for want in [SYLL, MISSILE, BREATH, DOOR, BARK] {
+            assert!(ids.contains(&want), "{want} missing from {ids:?}");
+        }
+        assert!(!ids.contains(&SLASH), "passive rows are never used");
     }
 }

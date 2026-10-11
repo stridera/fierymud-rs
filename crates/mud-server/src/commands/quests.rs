@@ -588,6 +588,22 @@ pub(crate) async fn cmd_innate(
         crate::commands::innate::use_innate(world, player, args);
         return;
     }
+    if mud_world::bypasses_restrictions(world, player) {
+        let actives = crate::commands::innate::racial_actives(world, player);
+        let mut out = format!(
+            "\r\nInnate abilities of every race ({}):\r\n",
+            actives.len()
+        );
+        let names: Vec<String> = actives.iter().map(|d| d.plain_name.clone()).collect();
+        let width = crate::layout::wrap_width(world, player);
+        let column_width = names.iter().map(String::len).max().unwrap_or(0) + 2;
+        for row in crate::layout::format_grid(&names, column_width, 2, width) {
+            out.push_str(&row);
+            out.push_str("\r\n");
+        }
+        send_to(world, player, out);
+        return;
+    }
     let race = world.get::<Profile>(player).map(|p| p.race.clone());
     let Some(race) = race else {
         send_to(world, player, "You have no race assigned.\r\n");

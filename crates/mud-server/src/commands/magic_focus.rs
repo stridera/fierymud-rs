@@ -11,8 +11,8 @@ use bevy_ecs::prelude::*;
 use mud_db::abilities::AbilityKind;
 use mud_db::enums::{ObjectType, UserRole};
 use mud_world::{
-    AbilityCatalog, CoreStats, EquippedSlot, Fighting, Item, KnownAbilities, Located, Meditating,
-    ObjectPrototypes, Posture, PostureKind, WorldKey,
+    AbilityCatalog, CoreStats, EquippedSlot, Fighting, Item, Located, Meditating, ObjectPrototypes,
+    Posture, PostureKind, WorldKey,
 };
 
 use crate::commands::{
@@ -174,7 +174,7 @@ fn cmd_scribe(world: &mut World, player: Entity, args: &str) {
             .find_by_prefix(
                 &needle,
                 None,
-                world.get::<mud_world::KnownAbilities>(player),
+                mud_world::known_abilities_of(world, player).as_deref(),
             )
             .cloned()
     };
@@ -194,10 +194,7 @@ fn cmd_scribe(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "You need a blank scroll to scribe on.\r\n");
         return;
     }
-    let proficiency = world
-        .get::<KnownAbilities>(player)
-        .and_then(|k| k.entries.iter().find(|(id, _, _)| *id == def.id).copied())
-        .map_or(0, |(_, prof, _)| prof);
+    let proficiency = mud_world::proficiency_of(world, player, def.id).unwrap_or(0);
     if proficiency < SCRIBE_MIN_PROFICIENCY {
         send_to(
             world,
@@ -226,7 +223,7 @@ fn cmd_scribe(world: &mut World, player: Entity, args: &str) {
 mod tests {
     use super::*;
     use crate::commands::test_support::{Rx, ability_def, drain, object_proto, player_in};
-    use mud_world::{Keywords, Named};
+    use mud_world::{Keywords, KnownAbilities, Named};
 
     fn caster(posture: PostureKind, intelligence: i32) -> (World, Entity, Rx) {
         let mut world = World::new();

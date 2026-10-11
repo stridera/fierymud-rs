@@ -274,3 +274,64 @@ fn command_suggestions_use_apostrophes_not_backticks() {
     assert!(seen.contains("Type 'toggle' for the list."), "{seen}");
     assert!(!seen.contains('`'), "{seen}");
 }
+
+/// Gods ignore alignment, class and race gear restrictions; mortals do not.
+#[test]
+fn god_wears_anti_good_class_and_race_restricted_gear_a_mortal_cannot() {
+    for (role, blocked) in [(UserRole::Player, true), (UserRole::Immortal, false)] {
+        let (mut world, p, _rx) = setup();
+        world.entity_mut(p).insert((
+            Account {
+                user_id: "u".into(),
+                character_id: "c".into(),
+                role,
+                account_role: role,
+                perms: vec![],
+            },
+            mud_world::CombatStats {
+                alignment: 800,
+                ..Default::default()
+            },
+            mud_world::Profile {
+                level: 50,
+                class_id: Some(3),
+                race: "ELF".into(),
+                experience: 0,
+                gender: "neutral".into(),
+            },
+        ));
+        let helm = gear(&mut world, p, 7, "a cursed helm", "helm", &[WearFlag::Head]);
+        {
+            let mut protos = world.resource_mut::<ObjectPrototypes>();
+            let proto = protos.by_key.get_mut(&(1, 7)).unwrap();
+            proto.restricted_alignments = vec![mud_db::enums::Alignment::Good];
+            proto.restricted_class_ids = vec![3];
+            proto.restricted_races = vec!["ELF".into()];
+            proto.allowed_races = vec!["DWARF".into()];
+        }
+        let refusal = super::wear_refusal(&world, p, helm, "a cursed helm");
+        assert_eq!(refusal.is_some(), blocked, "{role:?}: {refusal:?}");
+
+        // Each rule alone also holds back a mortal and never a god.
+        for rule in 0..4 {
+            let mut protos = world.resource_mut::<ObjectPrototypes>();
+            let proto = protos.by_key.get_mut(&(1, 7)).unwrap();
+            proto.restricted_alignments.clear();
+            proto.restricted_class_ids.clear();
+            proto.restricted_races.clear();
+            proto.allowed_races.clear();
+            match rule {
+                0 => proto.restricted_alignments = vec![mud_db::enums::Alignment::Good],
+                1 => proto.restricted_class_ids = vec![3],
+                2 => proto.restricted_races = vec!["ELF".into()],
+                _ => proto.allowed_races = vec!["DWARF".into()],
+            }
+            let refusal = super::wear_refusal(&world, p, helm, "a cursed helm");
+            assert_eq!(
+                refusal.is_some(),
+                blocked,
+                "{role:?} rule {rule}: {refusal:?}"
+            );
+        }
+    }
+}

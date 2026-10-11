@@ -1030,8 +1030,7 @@ fn try_switch_opponent(world: &mut World, player: Entity, old: Entity, roll: i32
             .get_resource::<mud_world::CoreAbilities>()
             .and_then(|c| c.switch)
             .and_then(|switch| {
-                world
-                    .get::<mud_world::KnownAbilities>(player)?
+                mud_world::known_abilities_of(world, player)?
                     .entries
                     .iter()
                     .find(|(id, _, known)| *id == switch && *known)

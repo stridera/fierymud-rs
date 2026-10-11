@@ -8206,7 +8206,7 @@ pub(crate) fn send_char_skills_list(world: &World, viewer: Entity) {
     let Some(conn) = world.get::<Connection>(viewer) else {
         return;
     };
-    let Some(known) = world.get::<KnownAbilities>(viewer) else {
+    let Some(known) = mud_world::known_abilities_of(world, viewer) else {
         let empty = "[]";
         let _ = conn
             .0
@@ -8250,7 +8250,7 @@ pub(crate) fn send_char_skills(world: &mut World, viewer: Entity) {
 
 fn build_char_skills(world: &World, viewer: Entity) -> String {
     const EMPTY: &str = r#"{"skills":[]}"#;
-    let Some(known) = world.get::<KnownAbilities>(viewer) else {
+    let Some(known) = mud_world::known_abilities_of(world, viewer) else {
         return EMPTY.to_string();
     };
     let Some(catalog) = world.get_resource::<AbilityCatalog>() else {
@@ -10538,6 +10538,21 @@ pub(crate) fn format_amount(total: i64) -> String {
     format_wealth(total).unwrap_or_else(|| "no coin".to_string())
 }
 
+/// `practice <ability>` for a god: every ability is already at full
+/// mastery, so there is nothing to spend points on.
+fn practice_god(world: &mut World, player: Entity, name: &str) {
+    let found = world
+        .resource::<AbilityCatalog>()
+        .by_name
+        .get(&name.trim().to_ascii_lowercase())
+        .map(|d| d.name.clone());
+    let msg = match found {
+        Some(n) => format!("As a god you already have {n} at full mastery.\r\n"),
+        None => format!("'{name}' isn't a known ability.\r\n"),
+    };
+    send_to(world, player, msg);
+}
+
 /// `practice <ability>`: bump proficiency by 5, capped at the
 /// class's `proficiency_cap`. Refuses unknown abilities, abilities
 /// off the player's class list, abilities not in `KnownAbilities`,
@@ -10547,11 +10562,15 @@ pub(crate) fn practice_one(world: &mut World, player: Entity, name: &str) {
         send_to(world, player, "You have no profile.\r\n");
         return;
     };
+    let key = name.trim().to_ascii_lowercase();
+    if mud_world::bypasses_restrictions(world, player) {
+        practice_god(world, player, name);
+        return;
+    }
     let Some(class_id) = profile.class_id else {
         send_to(world, player, "You have no class.\r\n");
         return;
     };
-    let key = name.trim().to_ascii_lowercase();
     let Some(def) = world
         .resource::<AbilityCatalog>()
         .by_name
@@ -10578,10 +10597,7 @@ pub(crate) fn practice_one(world: &mut World, player: Entity, name: &str) {
         );
         return;
     };
-    let current_prof = world
-        .get::<KnownAbilities>(player)
-        .and_then(|k| k.entries.iter().find(|(id, _, _)| *id == def.id).copied())
-        .map(|(_, p, _)| p);
+    let current_prof = mud_world::proficiency_of(world, player, def.id);
     let Some(current_prof) = current_prof else {
         send_to(
             world,
@@ -13969,7 +13985,7 @@ pub(crate) fn wear_refusal(
     // restriction — typing or test-spawning items shouldn't get
     // blocked by alignment / class / race the world authors set
     // for normal players.
-    let staff_bypass = is_staff(world, player);
+    let staff_bypass = is_staff(world, player) || mud_world::bypasses_restrictions(world, player);
     let (mut alignment_restriction, class_restriction, race_restriction) = if staff_bypass {
         Default::default()
     } else {
@@ -14044,7 +14060,8 @@ pub(crate) fn wear_refusal(
     }
     // B6: inclusive race allow-list. Empty = no opinion;
     // non-empty = wearer must be one of these.
-    if !allowed_races.is_empty()
+    if !staff_bypass
+        && !allowed_races.is_empty()
         && let Some(race) = world.get::<Profile>(player).map(|p| p.race.clone())
         && !allowed_races.iter().any(|r| r.eq_ignore_ascii_case(&race))
     {
@@ -14798,9 +14815,10 @@ fn filter_aoe_by_alignment_rules(
             })
             .collect::<Vec<_>>()
     };
-    if let Some(failed) = alignment_rules("caster")
-        .into_iter()
-        .find(|r| !check_rule_alignment(world, caster, r))
+    if !mud_world::bypasses_restrictions(world, caster)
+        && let Some(failed) = alignment_rules("caster")
+            .into_iter()
+            .find(|r| !check_rule_alignment(world, caster, r))
     {
         let msg = failed
             .get("message")
@@ -14923,6 +14941,10 @@ fn pick_spell_slot(
     caster: Entity,
     ability_id: i32,
 ) -> Option<Result<(i32, i32), (i32, i32, i32)>> {
+    // Gods cast without slots.
+    if mud_world::bypasses_restrictions(world, caster) {
+        return None;
+    }
     let class_id = crate::mob_ai::spell_class_id(world, caster)?;
     let native = world
         .resource::<mud_world::SpellSlotData>()
@@ -16128,9 +16150,7 @@ pub(crate) fn invoke_ability_core(
     // first running `practice`. Tightening skills further requires
     // loading `ClassSkills` so the runtime knows what each class
     // can use at level.
-    let is_staff_caster = world
-        .get::<Account>(player)
-        .is_some_and(|a| a.role.at_least(mud_db::enums::UserRole::Builder));
+    let is_staff_caster = mud_world::bypasses_restrictions(world, player);
     let is_mob_caster = world.get::<Mob>(player).is_some();
     // Item-driven casts (scroll/wand/staff/potion) bypass the
     // KnownAbilities + class-skill gates entirely — the item is the
@@ -16154,7 +16174,7 @@ pub(crate) fn invoke_ability_core(
             );
             return;
         }
-    } else if matches!(kind, mud_db::abilities::AbilityKind::Skill) {
+    } else if !bypass_known_check && matches!(kind, mud_db::abilities::AbilityKind::Skill) {
         // Mortal SKILL gate: check ClassSkills if the caster has
         // a class. The class's row sets the minimum level
         // required; missing row = wrong class for this skill.
@@ -16625,7 +16645,8 @@ pub(crate) fn invoke_ability_core(
     // types (`status`, `modify`, ...) spawn an `EffectInstance` whose
     // duration the effect/regen ticks decrement.
     let caster_level = mud_world::effective_level(world, player).max(1);
-    let known_entries: Option<usize> = world.get::<KnownAbilities>(player).map(|k| k.entries.len());
+    let known_entries: Option<usize> =
+        mud_world::known_abilities_of(world, player).map(|k| k.entries.len());
     // Schema stores proficiency in 0..=1000; spell formulas
     // (`pow(skill, 1.25)`, `(skill*skill)/Y`) were authored against
     // a 0..=100 scale — the same scale `practice` displays. Without
@@ -18591,12 +18612,8 @@ pub(crate) fn invoke_ability_core(
                         }
                         // Skill-based failure: "swirls about and dies away".
                         let roll = rand::random_range(1..=100);
-                        let known_skill = world.get::<KnownAbilities>(player).and_then(|k| {
-                            k.entries
-                                .iter()
-                                .find(|(id, _, _)| *id == def.id)
-                                .map(|(_, p, _)| (*p / 10).clamp(0, 100))
-                        });
+                        let known_skill = mud_world::proficiency_of(world, player, def.id)
+                            .map(|p| (p / 10).clamp(0, 100));
                         let skill =
                             crate::room_access::effective_teleport_skill(known_skill, caster_level);
                         if !crate::room_access::teleport_roll_succeeds(&params, skill, roll) {
@@ -20563,7 +20580,12 @@ pub(crate) fn check_ability_restrictions(
             target
         };
         let passed = match rule_type {
-            "alignment" => check_rule_alignment(world, resolved_target, rule),
+            // A rule about the caster's own alignment ("only evil casters")
+            // never stops a god; a rule about the victim still applies.
+            "alignment" => {
+                (target_kind == Some("caster") && mud_world::bypasses_restrictions(world, caster))
+                    || check_rule_alignment(world, resolved_target, rule)
+            }
             "target_standing" | "position" => check_rule_standing(world, target),
             // Self-state rules: schema convention is for these to refer
             // to the caster (rule messages like "You can't see a thing!"
@@ -20715,6 +20737,10 @@ pub(crate) fn skill_access(world: &World, player: Entity, ability: Option<i32>) 
     let Some(ability) = ability else {
         return SkillAccess::Refused;
     };
+    // Gods have every skill, whatever their class or training.
+    if mud_world::bypasses_restrictions(world, player) {
+        return SkillAccess::Allowed;
+    }
     let known = world.get::<KnownAbilities>(player);
     let practiced = known.is_some_and(|k| k.has_any(ability));
     let profile = world.get::<Profile>(player);
@@ -22474,18 +22500,10 @@ impl FormulaCtx {
 /// `entity`'s proficiency in ability `ability_id` on the 0..=100 scale
 /// spell formulas are written against (the schema stores 0..=1000).
 fn known_skill_pct(world: &World, entity: Entity, ability_id: i32) -> i32 {
-    world
-        .get::<KnownAbilities>(entity)
-        .and_then(|k| {
-            k.entries
-                .iter()
-                .find(|(id, _, _)| *id == ability_id)
-                .map(|(_, p, _)| *p)
-        })
-        .map_or_else(
-            || crate::mob_ai::ai_mob_skill_pct(world, entity),
-            |raw| (raw / 10).clamp(0, 100),
-        )
+    mud_world::proficiency_of(world, entity, ability_id).map_or_else(
+        || crate::mob_ai::ai_mob_skill_pct(world, entity),
+        |raw| (raw / 10).clamp(0, 100),
+    )
 }
 
 /// Caster-only formula symbols for casts that never reach the full

@@ -37,9 +37,7 @@ const PRIVATE_ROOM_MAX_CAPACITY: i32 = 2;
 /// Staff = effective rank Immortal or above. Deliberately ignores
 /// `DevMode`: visibility and entry rules are about who the character *is*.
 pub(crate) fn is_immortal(world: &World, entity: Entity) -> bool {
-    world
-        .get::<Account>(entity)
-        .is_some_and(|a| a.role.at_least(UserRole::Immortal))
+    mud_world::bypasses_restrictions(world, entity)
 }
 
 /// Legacy `rooms.cpp` (can-go-direction): characters at `LVL_GOD` (101) or

@@ -1868,6 +1868,12 @@ impl RaceAbilitiesData {
         self.cooldown.get(&(race.to_ascii_lowercase(), ability_id))
     }
 
+    /// True if any race grants `ability_id`.
+    #[must_use]
+    pub fn granted_by_any(&self, ability_id: i32) -> bool {
+        self.proficiency_cap.keys().any(|(_, id)| *id == ability_id)
+    }
+
     /// True if `race` (any case) grants `ability_id`.
     #[must_use]
     pub fn grants(&self, race: &str, ability_id: i32) -> bool {

@@ -14,8 +14,8 @@
 
 use bevy_ecs::prelude::*;
 use mud_world::{
-    AbilityCatalog, CoreStats, Hiddenness, KnownAbilities, Located, MAX_HIDDENNESS, Mob,
-    Perception, Player, Profile,
+    AbilityCatalog, CoreStats, Hiddenness, Located, MAX_HIDDENNESS, Mob, Perception, Player,
+    Profile,
 };
 
 /// Current hiddenness, 0 when not hidden.
@@ -153,10 +153,7 @@ pub(crate) fn skill_pct(world: &World, e: Entity, name: &str) -> i32 {
     if world.get::<Mob>(e).is_some() {
         return crate::mob_ai::mob_skill_pct(world, e, id);
     }
-    world
-        .get::<KnownAbilities>(e)
-        .and_then(|k| k.entries.iter().find(|(a, _, _)| *a == id))
-        .map_or(0, |(_, raw, _)| (raw / 10).clamp(0, 100))
+    mud_world::proficiency_of(world, e, id).map_or(0, |raw| (raw / 10).clamp(0, 100))
 }
 
 /// Constants of the `hide` roll, from the `HIDE` ability row.

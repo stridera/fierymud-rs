@@ -2802,8 +2802,7 @@ impl UserData for LuaActor {
                     else {
                         return false;
                     };
-                    w.get::<KnownAbilities>(this.entity)
-                        .is_some_and(|ka| ka.has_any(id))
+                    mud_world::known_abilities_of(w, this.entity).is_some_and(|ka| ka.has_any(id))
                 })
             },
         );

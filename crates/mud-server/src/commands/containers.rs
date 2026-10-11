@@ -23,8 +23,7 @@
 use bevy_ecs::prelude::*;
 use mud_db::enums::ObjectType;
 use mud_world::{
-    ContainerState, CoreAbilities, Item, KnownAbilities, Located, ObjectPrototypes, Stamina,
-    WorldKey,
+    ContainerState, CoreAbilities, Item, Located, ObjectPrototypes, Stamina, WorldKey,
 };
 
 use super::item_target::{ItemClass, find_item};
@@ -354,14 +353,7 @@ fn pick(world: &mut World, player: Entity, item: Entity, state: ContainerState) 
     let proficiency = world
         .get_resource::<CoreAbilities>()
         .and_then(|c| c.pick_lock)
-        .and_then(|pick| {
-            world
-                .get::<KnownAbilities>(player)?
-                .entries
-                .iter()
-                .find(|(id, _, _)| *id == pick)
-                .map(|(_, p, _)| *p)
-        });
+        .and_then(|pick| mud_world::proficiency_of(world, player, pick));
     let Some(proficiency) = proficiency else {
         send_to(world, player, "You don't know how to pick locks.\r\n");
         return;

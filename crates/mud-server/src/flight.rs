@@ -19,8 +19,8 @@
 use bevy_ecs::prelude::*;
 use mud_db::enums::{Direction, ExitState, Sector};
 use mud_world::{
-    AppliedTo, EffectInstance, EffectSource, Exits, Falling, Flying, Ghost, Health, KnownAbilities,
-    Located, MovementModeTag, ObjectPrototypes, Player, Posture, PostureKind, RoomSector, Sized,
+    AppliedTo, EffectInstance, EffectSource, Exits, Falling, Flying, Ghost, Health, Located,
+    MovementModeTag, ObjectPrototypes, Player, Posture, PostureKind, RoomSector, Sized,
     effective_level,
 };
 
@@ -133,9 +133,7 @@ fn safefall_skill(world: &World, e: Entity) -> bool {
     else {
         return false;
     };
-    world
-        .get::<KnownAbilities>(e)
-        .is_some_and(|k| k.entries.iter().any(|(id, p, _)| *id == safefall && *p > 0))
+    mud_world::proficiency_of(world, e, safefall).is_some_and(|p| p > 0)
 }
 
 fn gender_of(world: &World, e: Entity) -> String {

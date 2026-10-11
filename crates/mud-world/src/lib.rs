@@ -1,4 +1,5 @@
 pub mod components;
+pub mod god;
 pub mod item_spawn;
 pub mod loader;
 pub mod mob_ai_rules;
@@ -10,6 +11,7 @@ pub mod resources;
 pub mod targeting;
 pub mod wake_effects;
 
+pub use god::{GOD_PROFICIENCY, bypasses_restrictions, known_abilities_of, proficiency_of};
 pub use wake_effects::{RoomWakeRow, WakeEffectCatalog, WakeRow, load_wake_effect_catalog};
 
 pub use components::{

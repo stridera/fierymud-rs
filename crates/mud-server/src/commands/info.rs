@@ -5177,10 +5177,10 @@ pub(crate) fn cmd_practice(world: &mut World, player: Entity, args: &str) {
         }
         return practice_one(world, player, trimmed);
     }
-    let known = world
-        .get::<KnownAbilities>(player)
+    let known = mud_world::known_abilities_of(world, player)
         .map(|k| k.entries.clone())
         .unwrap_or_default();
+    let god = mud_world::bypasses_restrictions(world, player);
     let points = world
         .get::<mud_world::SkillPoints>(player)
         .map_or(0, |s| s.0);
@@ -5217,15 +5217,17 @@ pub(crate) fn cmd_practice(world: &mut World, player: Entity, args: &str) {
         // through ClassSkillsData; spells/chants/songs go through
         // SpellSlotData. None when the player is classless or the
         // ability isn't on the class's sheet.
-        let cap = class_id.and_then(|cid| {
-            if matches!(
-                def.map(|d| d.kind),
-                Some(mud_db::abilities::AbilityKind::Skill)
-            ) {
-                skill_caps.proficiency_cap.get(&(cid, *id)).copied()
-            } else {
-                spell_caps.ability_cap.get(&(cid, *id)).copied()
-            }
+        let cap = god.then_some(mud_world::GOD_PROFICIENCY).or_else(|| {
+            class_id.and_then(|cid| {
+                if matches!(
+                    def.map(|d| d.kind),
+                    Some(mud_db::abilities::AbilityKind::Skill)
+                ) {
+                    skill_caps.proficiency_cap.get(&(cid, *id)).copied()
+                } else {
+                    spell_caps.ability_cap.get(&(cid, *id)).copied()
+                }
+            })
         });
         rows.push((name, kind.to_string(), *prof, *learned, cap));
     }
@@ -5808,9 +5810,7 @@ struct SearchLag {
 
 /// Staff (legacy `GET_LEVEL >= LVL_IMMORT`) always find hidden exits.
 pub(crate) fn is_immortal(world: &World, e: Entity) -> bool {
-    world
-        .get::<Account>(e)
-        .is_some_and(|a| a.role.at_least(UserRole::Immortal))
+    mud_world::bypasses_restrictions(world, e)
 }
 
 /// `cmd_search` with the `random(0, 200)` roll injected: `roll(200)`
@@ -13949,8 +13949,7 @@ pub(crate) fn cmd_spells(world: &mut World, player: Entity, args: &str) {
         None
     } else {
         Some(
-            world
-                .get::<KnownAbilities>(player)
+            mud_world::known_abilities_of(world, player)
                 .map_or_else(std::collections::HashSet::new, |k| {
                     k.entries.iter().map(|(id, _, _)| *id).collect()
                 }),
@@ -15769,8 +15768,7 @@ pub(crate) fn cmd_abilities_kind(
     let prof_by_id: std::collections::HashMap<i32, i32> = if show_all {
         std::collections::HashMap::new()
     } else {
-        world
-            .get::<KnownAbilities>(player)
+        mud_world::known_abilities_of(world, player)
             .map_or_else(std::collections::HashMap::new, |k| {
                 k.entries.iter().map(|(id, p, _)| (*id, *p)).collect()
             })
