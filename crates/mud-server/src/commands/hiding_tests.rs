@@ -1266,3 +1266,37 @@ fn search_with_a_container_argument_looks_only_inside_it() {
     let out = drain(&mut srx);
     assert!(out.contains("You find nothing of interest."), "{out}");
 }
+
+#[test]
+fn a_hidden_proto_item_in_a_carried_bag_is_visible_but_hidden_on_the_floor_until_searched() {
+    let (mut fx, seeker, mut srx, _lurker, _lrx) = searcher_world(200, 0);
+    let a = fx.a;
+    let bag = fx
+        .world
+        .spawn((
+            mud_world::Item,
+            Named {
+                name: "a bag".into(),
+            },
+            Located(seeker),
+        ))
+        .id();
+    let inner = fx
+        .world
+        .spawn((
+            mud_world::Item,
+            Named {
+                name: "a pouch".into(),
+            },
+            Located(bag),
+        ))
+        .id();
+    let carried = hidden_item(&mut fx, "a mossy cache", inner, 900);
+    let floor = hidden_item(&mut fx, "a rusty hinge", a, 350);
+    assert!(super::senses::item_visible_to(&fx.world, seeker, carried));
+    assert!(!super::senses::item_visible_to(&fx.world, seeker, floor));
+    search_with_roll(&mut fx.world, seeker, "", &mut |hi| hi);
+    let out = drain(&mut srx);
+    assert!(out.contains("a rusty hinge"), "{out}");
+    assert!(super::senses::item_visible_to(&fx.world, seeker, floor));
+}

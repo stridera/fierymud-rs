@@ -147,10 +147,27 @@ fn lies_in_water(world: &World, item: Entity) -> bool {
         .is_some_and(|s| matches!(s.0, Sector::Shallows | Sector::Water | Sector::Underwater))
 }
 
+/// True when the outermost holder of `item`, through any depth of nested
+/// containers, is a player or mob: the item is carried or worn (a bag's
+/// contents included), never lying in a room.
+fn held_by_creature(world: &World, item: Entity) -> bool {
+    let mut at = item;
+    for _ in 0..64 {
+        let Some(holder) = world.get::<Located>(at).map(|l| l.0) else {
+            return false;
+        };
+        if world.get::<Player>(holder).is_some() || world.get::<Mob>(holder).is_some() {
+            return true;
+        }
+        at = holder;
+    }
+    false
+}
+
 /// Legacy `OBJ_HIDDEN_TO_CHAR`: `item` carries a [`Hiddenness`] above
 /// `viewer`'s perception. Hiddenness only means something for an item
 /// lying in a room or inside a container: whoever carries or wears it has
-/// it in hand (legacy `unhide_object` clears it on pickup). Legacy also
+/// it in hand, bag contents included (legacy `unhide_object` clears it on pickup). Legacy also
 /// exempts the character who hid it (`last_to_hold`); nothing hides items
 /// in Rust yet, so only authored hiddenness exists and that clause has no
 /// holder to name.
@@ -159,10 +176,7 @@ fn item_hidden_from(world: &World, viewer: Entity, item: Entity) -> bool {
     if hid == 0 {
         return false;
     }
-    let carried = world
-        .get::<Located>(item)
-        .is_some_and(|l| world.get::<Player>(l.0).is_some() || world.get::<Mob>(l.0).is_some());
-    !carried && hid > crate::hiding::perception_of(world, viewer)
+    !held_by_creature(world, item) && hid > crate::hiding::perception_of(world, viewer)
 }
 
 /// Legacy `CAN_SEE_OBJ`: `HOLY_LIGHT` sees everything; otherwise an
