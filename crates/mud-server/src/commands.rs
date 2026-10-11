@@ -558,6 +558,8 @@ mod admin_inspect;
 mod admin_management;
 #[path = "commands/admin_reload.rs"]
 mod admin_reload;
+#[path = "commands/lists.rs"]
+mod lists;
 #[path = "commands/object_spells.rs"]
 mod object_spells;
 #[path = "commands/object_stat.rs"]
@@ -895,6 +897,9 @@ mod exploit_gate_tests;
 #[cfg(test)]
 #[path = "commands/help_tests.rs"]
 mod help_tests;
+#[cfg(test)]
+#[path = "commands/polish_r3_tests.rs"]
+mod polish_r3_tests;
 #[path = "commands/staff_find.rs"]
 mod staff_find;
 #[cfg(test)]

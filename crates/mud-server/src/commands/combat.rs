@@ -189,11 +189,12 @@ inventory::submit! {
     required_perm: None,
     category: Category::Combat,
     help: Help {
-        usage: "kick",
-        summary: "Make an immediate kick attack on your current target.",
+        usage: "kick [<victim>]",
+        summary: "Kick your target, or the one you name (which starts a fight).",
         long: "Extra attack outside the normal combat-tick rhythm. \
                Rolls weapon damage scaled by attack_power, then \
-               adds +4. You must already be fighting someone.",
+               adds +4. With no name it hits your current target; with \
+               one it picks that fight.",
     },
     run: cmd_kick,
     }

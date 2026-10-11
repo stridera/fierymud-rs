@@ -1615,7 +1615,7 @@ inventory::submit! {
                    %r current room, %g on-hand wealth (copper), %t in-game \
                    hour (zero-padded), %s season, %d day/night, %% literal \
                    percent. Examples: \
-                     prompt <%h/%H hp %v/%V mv> \
+                     prompt <%h/%H hp %v/%V st> \
                      prompt [%t %h/%H %d] ",
         },
         run: cmd_prompt,
@@ -2641,11 +2641,30 @@ fn render_social_help(world: &mut World, player: Entity, social: &SocialDef) {
     send_prose(world, player, out);
 }
 
+/// Does `content` carry a legacy header-box row labelled `label`
+/// (`Usage      : kick <victim>`, `Sphere : fire`, ...)? Imported
+/// articles keep the box in the body, so the header must not repeat it.
+fn body_has_row(content: &str, label: &str) -> bool {
+    content.split('\n').any(|line| {
+        let t = line.trim_start();
+        t.get(..label.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(label))
+            && t[label.len()..].trim_start().starts_with(':')
+    })
+}
+
 /// Render a DB-backed `HelpEntry`. Matches the per-command help page
 /// shape so a player can't tell from layout whether they hit a
 /// hand-authored command page or a builder-authored article — same
 /// bold-cyan title, cyan section labels for metadata, body content
-/// last. Usage / Sphere / Duration only render when set on the row.
+/// last. Usage / Sphere / Duration only render when set on the row
+/// and not already in the body's header box.
+///
+/// Usage is printed exactly once. Imported articles usually carry a
+/// legacy header box with its own `Usage :` row, the row also has a
+/// `usage` column, and a same-named command has a registry usage. The
+/// authored article wins, being the richest of the three: the box row
+/// if the body has one, else the `usage` column, else the command's.
 fn render_help_entry(
     world: &mut World,
     player: Entity,
@@ -2653,13 +2672,27 @@ fn render_help_entry(
     command_usage: Option<&str>,
 ) {
     let mut out = format!("\r\n<b:cyan>{}</>\r\n", entry.title);
-    if let Some(usage) = entry.usage.as_ref() {
+    let body_has_usage = body_has_row(&entry.content, "usage");
+    let header_usage = entry
+        .usage
+        .as_deref()
+        .filter(|u| !u.trim().is_empty())
+        .or(command_usage);
+    if !body_has_usage && let Some(usage) = header_usage {
         out.push_str(&format!("\r\n  <cyan>Usage:</> {usage}\r\n"));
     }
-    if let Some(sphere) = entry.sphere.as_ref() {
+    if let Some(sphere) = entry
+        .sphere
+        .as_ref()
+        .filter(|s| !s.trim().is_empty() && !body_has_row(&entry.content, "sphere"))
+    {
         out.push_str(&format!("  <cyan>Sphere:</> {sphere}\r\n"));
     }
-    if let Some(duration) = entry.duration.as_ref() {
+    if let Some(duration) = entry
+        .duration
+        .as_ref()
+        .filter(|s| !s.trim().is_empty() && !body_has_row(&entry.content, "duration"))
+    {
         out.push_str(&format!("  <cyan>Duration:</> {duration}\r\n"));
     }
     out.push_str("\r\n");
@@ -2669,9 +2702,6 @@ fn render_help_entry(
     out.push_str("\r\n");
     if let Some(category) = entry.category.as_ref() {
         out.push_str(&format!("\r\n  <cyan>Category:</> <dim>{category}</>\r\n"));
-    }
-    if let Some(usage) = command_usage {
-        out.push_str(&format!("\r\n<dim>Command usage:</> {usage}\r\n"));
     }
     send_prose(world, player, out);
 }
@@ -7021,6 +7051,8 @@ pub(crate) fn cmd_who(world: &mut World, player: Entity, args: &str) {
             .then_with(|| a.name.cmp(&b.name))
     });
     let mut last_was_staff = None;
+    // Which markers showed up, so the legend below explains only those.
+    let mut seen = [false; WHO_LEGEND.len()];
     for r in &raw_sorted {
         let root = roots.get(&r.entity).copied().unwrap_or(r.entity);
         let in_group = group_size.get(&root).copied().unwrap_or(0) > 1;
@@ -7069,6 +7101,7 @@ pub(crate) fn cmd_who(world: &mut World, player: Entity, args: &str) {
             out.push_str(&format!(" [<b:yellow>{abbrev}</>]"));
         }
         if in_group {
+            seen[0] = true;
             out.push_str(" [<b:green>G</>]");
         }
         // Honor-roll mark for endgame / staff tier. The glyph is
@@ -7076,14 +7109,17 @@ pub(crate) fn cmd_who(world: &mut World, player: Entity, args: &str) {
         // ASCII clients see `*` instead of a character they can't
         // render.
         if is_staff {
+            seen[1] = true;
             out.push_str(" [<b:yellow>\u{2605}</>]");
         }
         if r.afk {
+            seen[2] = true;
             out.push_str(" [<yellow>AFK</>]");
         }
         if let Some(secs) = r.idle
             && secs >= 60
         {
+            seen[3] = true;
             let idle_label = match idle_color(secs) {
                 Some(open) => format!("[{open}idle {}</>]", format_idle(secs)),
                 None => format!("[idle {}]", format_idle(secs)),
@@ -7092,9 +7128,38 @@ pub(crate) fn cmd_who(world: &mut World, player: Entity, args: &str) {
         }
         out.push_str("\r\n");
     }
+    if let Some(legend) = who_legend(seen) {
+        out.push_str(&legend);
+    }
     // Player titles can contain XML-Lite color tags; render before
     // sending so they show as ANSI rather than literal markup.
     send_rendered(world, player, &out);
+}
+
+/// What each `who` row marker means, in the order `cmd_who` records them:
+/// `[G]` grouped, the staff star, `[AFK]`, `[idle ..]`.
+const WHO_LEGEND: [&str; 4] = [
+    "[G] in a group",
+    "[\u{2605}] staff",
+    "[AFK] away from keyboard",
+    "[idle 5m] time since last input",
+];
+
+/// Dim one-line key under the `who` list explaining only the markers that
+/// appear in it (`seen[i]` for `WHO_LEGEND[i]`). `None` when no row carries
+/// a marker.
+fn who_legend(seen: [bool; WHO_LEGEND.len()]) -> Option<String> {
+    let parts: Vec<&str> = WHO_LEGEND
+        .iter()
+        .zip(seen)
+        .filter(|(_, shown)| *shown)
+        .map(|(text, _)| *text)
+        .collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!("\r\n<dim>{}</>\r\n", parts.join("  ")))
+    }
 }
 
 pub(crate) fn cmd_trophy(world: &mut World, player: Entity, args: &str) {
