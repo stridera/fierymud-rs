@@ -8,6 +8,7 @@ use bevy_ecs::prelude::*;
 use mud_db::enums::UserRole;
 use mud_world::{Account, HouseSummary, HousingIndex, WorldKey};
 
+use crate::commands::off_tick;
 use crate::commands::{
     AsyncCommand, Category, Command, Help, cmd_look, cmd_mail_stub, send_msg, send_to,
 };
@@ -54,22 +55,32 @@ inventory::submit! {
 const DEFAULT_HOUSE_EXPAND_BASE_COST: i64 = 50_000;
 const DEFAULT_HOUSE_EXPAND_PER_ROOM: i64 = 25_000;
 
-#[allow(clippy::too_many_lines)]
+/// The refusals a house visit shares with `recall`: a teleport, so the owner's
+/// own house is subject to them as much as a guest's. Sends the reason and
+/// returns true when the visit may not go ahead.
+fn visit_blocked(world: &mut World, player: Entity) -> bool {
+    if crate::commands::refuse_teleport(world, player, "visit a house") {
+        return true;
+    }
+    if let Some(located) = world.get::<mud_world::Located>(player)
+        && world.get::<mud_world::NoRecallRoom>(located.0).is_some()
+    {
+        send_to(world, player, "Some power blocks your passage.\r\n");
+        return true;
+    }
+    false
+}
+
+/// `visit <player>`: the guest-list and house reads run off the tick
+/// ([`fetch_visit`]); the teleport is finished on a later one
+/// ([`finish_visit`]), which checks the refusals again.
 async fn cmd_visit(world: &mut World, player: Entity, pool: &mud_db::sqlx::PgPool, args: &str) {
     let name = args.trim();
     if name.is_empty() {
         send_to(world, player, "Usage: visit <player>\r\n");
         return;
     }
-    // A house visit is a teleport: same refusals as `recall` (including a
-    // no-recall room), for the owner's own house as much as a guest's.
-    if crate::commands::refuse_teleport(world, player, "visit a house") {
-        return;
-    }
-    if let Some(located) = world.get::<mud_world::Located>(player)
-        && world.get::<mud_world::NoRecallRoom>(located.0).is_some()
-    {
-        send_to(world, player, "Some power blocks your passage.\r\n");
+    if visit_blocked(world, player) {
         return;
     }
     // Visitor's own character_id — the guest-list check looks for
@@ -78,56 +89,47 @@ async fn cmd_visit(world: &mut World, player: Entity, pool: &mud_db::sqlx::PgPoo
         send_to(world, player, "You aren't logged in as a character.\r\n");
         return;
     };
+    let fetch = fetch_visit(pool.clone(), name.to_string(), visitor_cid);
+    off_tick::run(world, player, fetch, finish_visit).await;
+}
+
+/// What a visit needs from the database: the owner's name and house, or the
+/// line to show the visitor instead.
+#[allow(clippy::too_many_lines)]
+async fn fetch_visit(
+    pool: mud_db::sqlx::PgPool,
+    name: String,
+    visitor_cid: String,
+) -> Result<(String, HouseSummary), String> {
+    let pool = &pool;
+    let name = name.as_str();
     let target = match mud_db::characters::find_by_name(pool, name).await {
         Ok(Some(c)) => c,
-        Ok(None) => {
-            send_to(world, player, format!("No character named '{name}'.\r\n"));
-            return;
-        }
-        Err(e) => {
-            send_to(world, player, format!("DB error: {e}\r\n"));
-            return;
-        }
+        Ok(None) => return Err(format!("No character named '{name}'.\r\n")),
+        Err(e) => return Err(format!("DB error: {e}\r\n")),
     };
     // Self-visit is always allowed (covers the "lost your house key"
     // case where the owner's online HouseSummary was bumped).
     let is_self = target.id == visitor_cid;
     let house = match mud_db::housing::for_character(pool, &target.id).await {
         Ok(Some(h)) => h,
-        Ok(None) => {
-            send_msg(
-                world,
-                player,
-                format!("{} doesn't own a house.\r\n", target.name),
-            );
-            return;
-        }
-        Err(e) => {
-            send_to(world, player, format!("DB error: {e}\r\n"));
-            return;
-        }
+        Ok(None) => return Err(format!("{} doesn't own a house.\r\n", target.name)),
+        Err(e) => return Err(format!("DB error: {e}\r\n")),
     };
     let guests = mud_db::housing::guests_for_house(pool, house.id)
         .await
         .unwrap_or_default();
     if !is_self && !guests.iter().any(|g| g.character_id == visitor_cid) {
-        send_msg(
-            world,
-            player,
-            format!("{} hasn't added you to their guest list.\r\n", target.name,),
-        );
-        return;
+        return Err(format!(
+            "{} hasn't added you to their guest list.\r\n",
+            target.name
+        ));
     }
     let rooms = mud_db::housing::rooms_for_house(pool, house.id)
         .await
         .unwrap_or_default();
     if rooms.is_empty() {
-        send_msg(
-            world,
-            player,
-            format!("{}'s house has no rooms.\r\n", target.name),
-        );
-        return;
+        return Err(format!("{}'s house has no rooms.\r\n", target.name));
     }
     let exits = mud_db::housing::exits_for_house(pool, house.id)
         .await
@@ -182,6 +184,27 @@ async fn cmd_visit(world: &mut World, player: Entity, pool: &mud_db::sqlx::PgPoo
             })
             .collect(),
     };
+    Ok((target.name, summary))
+}
+
+/// The tick-side half of `visit`: put the visitor in the foyer.
+fn finish_visit(
+    world: &mut World,
+    player: Entity,
+    fetched: Result<(String, HouseSummary), String>,
+) {
+    let (target_name, summary) = match fetched {
+        Ok(found) => found,
+        Err(line) => {
+            send_msg(world, player, line);
+            return;
+        }
+    };
+    // Time has passed since the command was typed: it may have started a
+    // fight or walked into a no-recall room.
+    if visit_blocked(world, player) {
+        return;
+    }
     let foyer_local = summary
         .rooms
         .iter()
@@ -212,7 +235,7 @@ async fn cmd_visit(world: &mut World, player: Entity, pool: &mud_db::sqlx::PgPoo
     send_to(
         world,
         player,
-        format!("You step into {}'s house.\r\n", target.name),
+        format!("You step into {target_name}'s house.\r\n"),
     );
     cmd_look(world, player, "");
 }
@@ -290,16 +313,37 @@ async fn cmd_house_expand(world: &mut World, player: Entity, pool: &mud_db::sqlx
     let new_desc = "An unfurnished new room. Use 'house describe <#> <text>' \
                     or 'house rename <#> <name>' to make it your own."
         .to_string();
-    let result = mud_db::housing::add_room(
-        pool,
-        summary.house_id,
-        foyer.id,
-        "North",
-        "South",
-        &new_name,
-        &new_desc,
-    )
+    // The insert runs off the tick; the copper stays deducted meanwhile (the
+    // player's own commands wait behind it) and is refunded if it fails.
+    let pool = pool.clone();
+    let (house_id, foyer_id) = (summary.house_id, foyer.id);
+    let (name, desc) = (new_name.clone(), new_desc.clone());
+    let insert = async move {
+        mud_db::housing::add_room(&pool, house_id, foyer_id, "North", "South", &name, &desc)
+            .await
+            .map_err(|e| e.to_string())
+    };
+    off_tick::run(world, player, insert, move |world, player, result| {
+        finish_house_expand(
+            world, player, &summary, foyer.id, cost, &new_name, &new_desc, result,
+        );
+    })
     .await;
+}
+
+/// The tick-side half of `house expand`: refund on failure, otherwise record
+/// the new room in the owner's `HouseSummary` and build it in the world.
+#[allow(clippy::too_many_arguments)]
+fn finish_house_expand(
+    world: &mut World,
+    player: Entity,
+    summary: &HouseSummary,
+    foyer_id: i32,
+    cost: i64,
+    new_name: &str,
+    new_desc: &str,
+    result: Result<(i32, i32), String>,
+) {
     let (row_id, local_index) = match result {
         Ok(pair) => pair,
         Err(e) => {
@@ -318,19 +362,19 @@ async fn cmd_house_expand(world: &mut World, player: Entity, pool: &mud_db::sqlx
         s.rooms.push(mud_world::HouseRoomEntry {
             id: row_id,
             local_index,
-            name: new_name.clone(),
-            description: new_desc.clone(),
+            name: new_name.to_string(),
+            description: new_desc.to_string(),
             is_peaceful: false,
             capacity: 20,
         });
         s.exits.push(mud_world::HouseExitEntry {
-            from_room_id: foyer.id,
+            from_room_id: foyer_id,
             to_room_id: row_id,
             direction: "North".to_string(),
         });
         s.exits.push(mud_world::HouseExitEntry {
             from_room_id: row_id,
-            to_room_id: foyer.id,
+            to_room_id: foyer_id,
             direction: "South".to_string(),
         });
     }
@@ -343,7 +387,7 @@ async fn cmd_house_expand(world: &mut World, player: Entity, pool: &mud_db::sqlx
         .by_key
         .contains_key(&(summary.house_id, 0));
     if foyer_already_spawned {
-        synthesize_single_room(world, summary.house_id, local_index, &new_name, &new_desc);
+        synthesize_single_room(world, summary.house_id, local_index, new_name, new_desc);
     } else {
         // Cheap path — first call into this house since boot.
         // Re-read the summary (we just mutated it) and synth all.

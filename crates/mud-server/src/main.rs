@@ -595,6 +595,10 @@ async fn main() {
         player_update_rx,
     )));
 
+    // Database work of commands that must not hold the tick (`save`, ...):
+    // finished by `drain_command_jobs` at the start of every tick.
+    world.init_resource::<commands::off_tick::CommandJobs>();
+
     let mut router = ConnRouter::new();
     // Completion channel for off-thread password hashing / verification
     // (bcrypt runs on the blocking pool; see login.rs `AuthDone`).

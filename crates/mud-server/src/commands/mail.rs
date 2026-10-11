@@ -9,6 +9,7 @@
 use bevy_ecs::prelude::{Entity, World};
 use mud_db::enums::UserRole;
 
+use crate::commands::off_tick;
 use crate::commands::*;
 
 inventory::submit! {
@@ -107,6 +108,12 @@ pub(crate) async fn compose_mail_step(
     line: &str,
 ) {
     let trimmed = line.trim();
+    // A `.send` is still reaching the database: the draft is not ours to
+    // change until it has landed.
+    if off_tick::is_busy(world, player) {
+        send_to(world, player, "Your mail is still being sent.\r\n");
+        return;
+    }
     if trimmed.eq_ignore_ascii_case(".abort") {
         try_remove::<MailDraft>(world, player);
         send_to(world, player, "Mail composition aborted.\r\n");
@@ -168,15 +175,16 @@ pub(crate) async fn compose_mail_step(
             return;
         };
         let sender_user_id = sender.user_id;
-        match mud_db::mail::send(
-            pool,
-            &sender_user_id,
-            &draft.recipient_user_id,
-            &subject,
-            &body,
-        )
-        .await
-        {
+        let pool = pool.clone();
+        let send = {
+            let (recipient, subject) = (draft.recipient_user_id.clone(), subject.clone());
+            async move {
+                mud_db::mail::send(&pool, &sender_user_id, &recipient, &subject, &body)
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+        };
+        off_tick::run(world, player, send, move |world, player, sent| match sent {
             Ok(_id) => {
                 try_remove::<MailDraft>(world, player);
                 send_to(
@@ -186,10 +194,9 @@ pub(crate) async fn compose_mail_step(
                 );
                 notify_new_mail(world, &draft.recipient_user_id);
             }
-            Err(e) => {
-                send_to(world, player, format!("Send failed: {e}\r\n"));
-            }
-        }
+            Err(e) => send_to(world, player, format!("Send failed: {e}\r\n")),
+        })
+        .await;
         return;
     }
     // Plain content line: first non-blank line is the subject; rest
@@ -275,41 +282,53 @@ pub(crate) async fn cmd_mail(
     if require_linked_account(world, player, "mail").is_none() {
         return;
     }
-    let resolved = match mud_db::mail::user_for_character_name(pool, arg).await {
-        Ok(r) => r,
-        Err(e) => {
-            send_to(world, player, format!("Lookup failed: {e}\r\n"));
-            return;
+    let (pool, arg) = (pool.clone(), arg.to_string());
+    let lookup = {
+        let arg = arg.clone();
+        async move {
+            mud_db::mail::user_for_character_name(&pool, &arg)
+                .await
+                .map_err(|e| e.to_string())
         }
     };
-    let Some((user_id, name)) = resolved else {
+    off_tick::run(world, player, lookup, move |world, player, resolved| {
+        let (user_id, name) = match resolved {
+            Ok(Some(found)) => found,
+            Ok(None) => {
+                send_to(
+                    world,
+                    player,
+                    format!("No character named '{arg}' on this realm.\r\n"),
+                );
+                return;
+            }
+            Err(e) => {
+                send_to(world, player, format!("Lookup failed: {e}\r\n"));
+                return;
+            }
+        };
+        try_insert(
+            world,
+            player,
+            MailDraft {
+                recipient_user_id: user_id,
+                recipient_label: name.clone(),
+                subject: None,
+                body: Vec::new(),
+            },
+        );
         send_to(
             world,
             player,
-            format!("No character named '{arg}' on this realm.\r\n"),
+            format!(
+                "Composing mail to {name}.\r\n\
+                 First line is the subject. Then type the body, one line at a time.\r\n\
+                 '.send' ships it; '.abort' cancels; '.preview' shows the draft; \
+                 '.clear' wipes and starts over.\r\n"
+            ),
         );
-        return;
-    };
-    try_insert(
-        world,
-        player,
-        MailDraft {
-            recipient_user_id: user_id,
-            recipient_label: name.clone(),
-            subject: None,
-            body: Vec::new(),
-        },
-    );
-    send_to(
-        world,
-        player,
-        format!(
-            "Composing mail to {name}.\r\n\
-             First line is the subject. Then type the body, one line at a time.\r\n\
-             '.send' ships it; '.abort' cancels; '.preview' shows the draft; \
-             '.clear' wipes and starts over.\r\n"
-        ),
-    );
+    })
+    .await;
 }
 
 /// Stub registered as the sync `run` of every async-only command (mail,
@@ -389,31 +408,34 @@ pub(crate) async fn cmd_readmail(
         return;
     };
     let user_id = account.user_id;
-    let rows = match mud_db::mail::inbox_for(pool, &user_id).await {
-        Ok(r) => r,
-        Err(e) => {
-            send_to(world, player, format!("Mail fetch failed: {e}\r\n"));
-            return;
+    let pool = pool.clone();
+    let read = async move {
+        let rows = mud_db::mail::inbox_for(&pool, &user_id)
+            .await
+            .map_err(|e| format!("Mail fetch failed: {e}\r\n"))?;
+        let Some(row) = rows.get(slot - 1) else {
+            return Err(format!("No mail at slot {slot}.\r\n"));
+        };
+        let mut out = String::from("\r\n");
+        out.push_str(&format!("From:    {}\r\n", row.sender_display_name));
+        out.push_str(&format!("Subject: {}\r\n", row.subject));
+        out.push_str(&format!(
+            "Sent:    {}\r\n",
+            row.sent_at.format("%Y-%m-%d %H:%M")
+        ));
+        out.push_str("---\r\n");
+        out.push_str(row.body.trim_end());
+        out.push_str("\r\n---\r\n");
+        if let Err(e) = mud_db::mail::mark_read(&pool, row.id).await {
+            tracing::warn!(error = %e, mail_id = row.id, "mark_read failed");
         }
+        Ok(out)
     };
-    let Some(row) = rows.get(slot - 1) else {
-        send_to(world, player, format!("No mail at slot {slot}.\r\n"));
-        return;
-    };
-    let mut out = String::from("\r\n");
-    out.push_str(&format!("From:    {}\r\n", row.sender_display_name));
-    out.push_str(&format!("Subject: {}\r\n", row.subject));
-    out.push_str(&format!(
-        "Sent:    {}\r\n",
-        row.sent_at.format("%Y-%m-%d %H:%M")
-    ));
-    out.push_str("---\r\n");
-    out.push_str(row.body.trim_end());
-    out.push_str("\r\n---\r\n");
-    crate::commands::send_prose(world, player, out);
-    if let Err(e) = mud_db::mail::mark_read(pool, row.id).await {
-        tracing::warn!(error = %e, mail_id = row.id, "mark_read failed");
-    }
+    off_tick::run(world, player, read, |world, player, text| match text {
+        Ok(out) => crate::commands::send_prose(world, player, out),
+        Err(line) => send_to(world, player, line),
+    })
+    .await;
 }
 
 /// `delmail <#>`: soft-delete the slot-numbered mail.
@@ -440,26 +462,23 @@ pub(crate) async fn cmd_delmail(
         return;
     };
     let user_id = account.user_id;
-    let rows = match mud_db::mail::inbox_for(pool, &user_id).await {
-        Ok(r) => r,
-        Err(e) => {
-            send_to(world, player, format!("Mail fetch failed: {e}\r\n"));
-            return;
-        }
+    let pool = pool.clone();
+    let delete = async move {
+        let rows = mud_db::mail::inbox_for(&pool, &user_id)
+            .await
+            .map_err(|e| format!("Mail fetch failed: {e}\r\n"))?;
+        let Some(row) = rows.get(slot - 1) else {
+            return Err(format!("No mail at slot {slot}.\r\n"));
+        };
+        mud_db::mail::soft_delete(&pool, row.id)
+            .await
+            .map_err(|e| format!("Delete failed: {e}\r\n"))?;
+        Ok(format!("Deleted mail #{slot}: \"{}\".\r\n", row.subject))
     };
-    let Some(row) = rows.get(slot - 1) else {
-        send_to(world, player, format!("No mail at slot {slot}.\r\n"));
-        return;
-    };
-    if let Err(e) = mud_db::mail::soft_delete(pool, row.id).await {
-        send_to(world, player, format!("Delete failed: {e}\r\n"));
-        return;
-    }
-    send_to(
-        world,
-        player,
-        format!("Deleted mail #{slot}: \"{}\".\r\n", row.subject),
-    );
+    off_tick::run(world, player, delete, |world, player, text| {
+        send_to(world, player, text.unwrap_or_else(|line| line));
+    })
+    .await;
 }
 
 #[cfg(test)]

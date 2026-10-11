@@ -52,6 +52,32 @@ pub struct AdminInbox(pub Mutex<mpsc::Receiver<AdminCommand>>);
 #[derive(Resource, Default)]
 struct AdminDeferred(Mutex<Option<AdminCommand>>);
 
+/// A command whose database work is still running off the tick when its
+/// dispatch returned (see `commands::off_tick`).
+struct Waiting {
+    executor: String,
+    entity: Entity,
+    command: String,
+    pending_output: String,
+    deadline: std::time::Instant,
+}
+
+/// A [`Waiting`] command plus the HTTP request to answer once it settles.
+struct Parked {
+    waiting: Waiting,
+    reply: oneshot::Sender<AdminResponse>,
+}
+
+/// Commands waiting for their session's off-tick work; answered by
+/// [`answer_parked`] at the start of a tick. The tick never waits for them.
+#[derive(Resource, Default)]
+struct AdminParked(Mutex<Vec<Parked>>);
+
+enum CommandRun {
+    Done(AdminResponse),
+    Waiting(Waiting),
+}
+
 /// Cap for the admin command channel. The control plane is shared-
 /// secret only and very low-traffic; 256 in-flight commands is
 /// generous. On overflow `enqueue` returns 503 — caller can retry.
@@ -994,6 +1020,11 @@ pub async fn drain_admin_requests(world: &mut World, pool: &PgPool) {
 /// least one request when any is waiting, so the queue makes progress.
 async fn drain_within(world: &mut World, pool: &PgPool, budget: std::time::Duration) {
     world.init_resource::<AdminDeferred>();
+    world.init_resource::<AdminParked>();
+    // Finish what the previous tick's off-tick work produced, then answer
+    // the commands that were waiting on it.
+    commands::off_tick::drain_command_jobs(world);
+    answer_parked(world);
     let started = std::time::Instant::now();
     for taken in 0..MAX_PER_TICK {
         if taken > 0 && started.elapsed() >= budget {
@@ -1025,15 +1056,29 @@ async fn drain_within(world: &mut World, pool: &PgPool, budget: std::time::Durat
                 .expect("admin deferred poisoned") = Some(cmd);
             break;
         }
-        let resp = match cmd.request {
+        let AdminCommand { request, reply } = cmd;
+        let resp = match request {
             // Player commands take the same async path as a telnet line
             // (aliases, async-only commands, shared pre-gate).
             AdminRequest::Command { executor, command } => {
-                run_command(world, pool, &executor, &command).await
+                match start_command(world, pool, &executor, &command).await {
+                    CommandRun::Done(resp) => resp,
+                    CommandRun::Waiting(waiting) => {
+                        // Its database work runs off the tick: answer the
+                        // request when that has landed, not now.
+                        world
+                            .resource::<AdminParked>()
+                            .0
+                            .lock()
+                            .expect("admin parked poisoned")
+                            .push(Parked { waiting, reply });
+                        continue;
+                    }
+                }
             }
             other => service(world, other),
         };
-        let _ = cmd.reply.send(resp);
+        let _ = reply.send(resp);
         if heavy {
             break;
         }
@@ -2141,27 +2186,28 @@ fn mark_pending_save(world: &mut World, player_name: &str) -> AdminResponse {
 }
 
 /// Longest an admin-issued command may run before the request is answered
-/// with a timeout. Async handlers (DB saves, mail, houses) normally finish
-/// in milliseconds; this only bounds a stuck database call so it can't
-/// hold the tick loop for long.
+/// with a timeout. Commands whose database work runs off the tick (`save`,
+/// `visit`, mail, ...) wait parked for it; this bounds that wait, and a
+/// stuck handler that still awaits inline, so it can't hold the tick loop
+/// for long.
 const COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
-async fn run_command(
+async fn start_command(
     world: &mut World,
     pool: &PgPool,
     executor: &str,
     command_line: &str,
-) -> AdminResponse {
+) -> CommandRun {
     let entity = {
         let sessions = world.resource::<VirtualSessions>();
         let by_name = sessions.by_name.lock().expect("sessions poisoned");
         by_name.get(executor).map(|s| s.entity)
     };
     let Some(entity) = entity else {
-        return Err((
+        return CommandRun::Done(Err((
             StatusCode::NOT_FOUND,
             format!("no virtual session for '{executor}'; create one first"),
-        ));
+        )));
     };
     // Anything already queued for the session (mob arrivals, combat rounds,
     // channel chatter since the last command) is not this command's output.
@@ -2183,20 +2229,96 @@ async fn run_command(
     // sitting in the receiver.
     let output = drain_session_output(world, executor);
     if timed_out {
-        return Err((
-            StatusCode::GATEWAY_TIMEOUT,
-            format!(
-                "command '{command_line}' timed out after {}s; partial output: {output}",
-                COMMAND_TIMEOUT.as_secs()
-            ),
-        ));
+        return CommandRun::Done(Err(command_timed_out(command_line, &output)));
     }
-    Ok(json!({
+    // The command (or an earlier one it queued behind) started database work
+    // that finishes on a later tick: its output is not here yet.
+    if commands::off_tick::is_busy(world, entity) {
+        return CommandRun::Waiting(Waiting {
+            executor: executor.to_string(),
+            entity,
+            command: command_line.to_string(),
+            pending_output: format!("{pending_output}{output}"),
+            deadline: std::time::Instant::now() + COMMAND_TIMEOUT,
+        });
+    }
+    CommandRun::Done(Ok(command_response(command_line, &pending_output, &output)))
+}
+
+fn command_timed_out(command_line: &str, output: &str) -> (StatusCode, String) {
+    (
+        StatusCode::GATEWAY_TIMEOUT,
+        format!(
+            "command '{command_line}' timed out after {}s; partial output: {output}",
+            COMMAND_TIMEOUT.as_secs()
+        ),
+    )
+}
+
+fn command_response(command_line: &str, pending_output: &str, output: &str) -> Value {
+    json!({
         "success": true,
         "command": command_line,
         "pending_output": pending_output,
         "output": output,
-    }))
+    })
+}
+
+/// Answer every parked command whose session has settled (no off-tick work
+/// left, no queued line still to run) or whose [`COMMAND_TIMEOUT`] is up. A
+/// command that timed out is still running: what it prints later arrives as
+/// `pending_output` of the session's next command.
+fn answer_parked(world: &mut World) {
+    let parked = std::mem::take(
+        &mut *world
+            .resource::<AdminParked>()
+            .0
+            .lock()
+            .expect("admin parked poisoned"),
+    );
+    let mut still_waiting = Vec::new();
+    for Parked { waiting, reply } in parked {
+        let gone = world.get_entity(waiting.entity).is_err();
+        let busy = commands::off_tick::is_busy(world, waiting.entity);
+        let settled = gone || (!busy && !commands::has_queued_input(world, waiting.entity));
+        let expired = std::time::Instant::now() >= waiting.deadline;
+        if !settled && !expired {
+            still_waiting.push(Parked { waiting, reply });
+            continue;
+        }
+        let output = drain_session_output(world, &waiting.executor);
+        let resp = if busy && !settled {
+            Err(command_timed_out(&waiting.command, &output))
+        } else {
+            Ok(command_response(
+                &waiting.command,
+                &waiting.pending_output,
+                &output,
+            ))
+        };
+        let _ = reply.send(resp);
+    }
+    world
+        .resource::<AdminParked>()
+        .0
+        .lock()
+        .expect("admin parked poisoned")
+        .extend(still_waiting);
+}
+
+/// [`start_command`] for callers that need the answer in hand: a world with
+/// no off-tick jobs never parks a command.
+#[cfg(test)]
+async fn run_command(
+    world: &mut World,
+    pool: &PgPool,
+    executor: &str,
+    command_line: &str,
+) -> AdminResponse {
+    match start_command(world, pool, executor, command_line).await {
+        CommandRun::Done(resp) => resp,
+        CommandRun::Waiting(_) => panic!("command parked in a world without off-tick jobs"),
+    }
 }
 
 /// Everything the virtual session's receiver has accumulated, decoded.
@@ -2834,6 +2956,79 @@ mod command_dispatch_tests {
             .await
             .expect("command ok");
         assert_eq!(resp["pending_output"].as_str().unwrap(), "");
+    }
+
+    /// Queue one `command` request for "Tester" and hand back its reply.
+    fn queue_command(world: &mut World, command: &str) -> oneshot::Receiver<AdminResponse> {
+        let (tx, rx) = mpsc::channel(ADMIN_QUEUE_CAP);
+        let (reply, reply_rx) = oneshot::channel();
+        tx.try_send(AdminCommand {
+            request: AdminRequest::Command {
+                executor: "Tester".into(),
+                command: command.into(),
+            },
+            reply,
+        })
+        .ok()
+        .unwrap();
+        world.insert_resource(AdminInbox(Mutex::new(rx)));
+        reply_rx
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_off_tick_command_is_answered_when_its_work_lands_not_before() {
+        let (mut world, _player) = world_with_session();
+        world.init_resource::<commands::off_tick::CommandJobs>();
+        world.init_resource::<crate::autosave::SaveCoordinator>();
+        world.insert_resource(WorldPause::default());
+        // `save` writes to an unreachable database: the pool gives up after
+        // 200 ms, off the tick.
+        let mut reply = queue_command(&mut world, "save");
+        let started = std::time::Instant::now();
+        drain_admin_requests(&mut world, &pool()).await;
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(100),
+            "the tick waited for the database: {:?}",
+            started.elapsed()
+        );
+        assert!(reply.try_recv().is_err(), "answered before the work landed");
+        // A later tick finds the work done and answers with the output.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        drain_admin_requests(&mut world, &pool()).await;
+        let resp = reply.try_recv().expect("answered").expect("command ok");
+        assert_eq!(resp["pending_output"], "");
+        let out = resp["output"].as_str().unwrap();
+        assert!(out.contains("Save failed"), "{out}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_command_that_outlives_the_timeout_gets_a_gateway_timeout() {
+        let (mut world, player) = world_with_session();
+        world.init_resource::<AdminParked>();
+        world
+            .entity_mut(player)
+            .insert(commands::off_tick::AsyncBusy);
+        let (reply, mut rx) = oneshot::channel();
+        world
+            .resource::<AdminParked>()
+            .0
+            .lock()
+            .unwrap()
+            .push(Parked {
+                waiting: Waiting {
+                    executor: "Tester".into(),
+                    entity: player,
+                    command: "save".into(),
+                    pending_output: String::new(),
+                    deadline: std::time::Instant::now()
+                        .checked_sub(std::time::Duration::from_secs(1))
+                        .unwrap(),
+                },
+                reply,
+            });
+        answer_parked(&mut world);
+        let err = rx.try_recv().expect("answered").unwrap_err();
+        assert_eq!(err.0, StatusCode::GATEWAY_TIMEOUT);
     }
 
     #[tokio::test(flavor = "current_thread")]

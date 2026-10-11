@@ -392,6 +392,55 @@ impl SaveCoordinator {
         });
     }
 
+    /// Write a snapshot taken for an explicit `save` from a spawned task and
+    /// report whether it committed. Like [`Self::spawn_final_save`] the caller
+    /// took the turn ([`Self::try_begin_ordered`]) and the snapshot with it on
+    /// the world thread; unlike it, a failed write is not retried (the player
+    /// is told and tries again) and `notify` is called with the outcome once
+    /// the turn is released. A commit is already in the completion list when
+    /// `notify` runs, so the next [`Self::apply_completions`] folds it into
+    /// the world. Must be called inside a tokio runtime.
+    pub(crate) fn spawn_checkpoint<W, Fut, N>(
+        &self,
+        mut ordered: OrderedSave,
+        snapshot: PlayerSaveSnapshot,
+        writer: W,
+        notify: N,
+    ) where
+        W: FnOnce(Arc<PlayerSaveSnapshot>) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<HashMap<usize, i32>, String>> + Send + 'static,
+        N: FnOnce(bool) + Send + 'static,
+    {
+        let slot = Arc::clone(&ordered.slot);
+        let shared = Arc::clone(&self.0);
+        shared.pending.fetch_add(1, Ordering::SeqCst);
+        slot.outstanding.fetch_add(1, Ordering::SeqCst);
+        let guard = PendingGuard(Arc::clone(&shared), Arc::clone(&slot));
+        let snap = Arc::new(snapshot);
+        tokio::spawn(async move {
+            let _guard = guard;
+            let committed = match writer(Arc::clone(&snap)).await {
+                Ok(assigned) => {
+                    ordered.record_commit(snap.generation);
+                    shared.done.lock().expect("done lock").push(Completion {
+                        snapshot: Arc::clone(&snap),
+                        slot: Arc::clone(&slot),
+                        outcome: Outcome::Committed(assigned),
+                        owns_in_flight: false,
+                    });
+                    true
+                }
+                Err(e) => {
+                    warn!(character_id = %snap.character_id, error = %e,
+                        "save tx failed; rolled back");
+                    false
+                }
+            };
+            drop(ordered);
+            notify(committed);
+        });
+    }
+
     /// Queue a character's write turn NOW and run `work` once it is granted.
     ///
     /// Unlike spawning a task that calls [`Self::begin_ordered`] itself, the

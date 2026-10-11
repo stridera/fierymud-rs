@@ -18,6 +18,9 @@
 //!   throw the pending lines away. Death, a dropped link, a reconnect or
 //!   takeover, `quit` and a completed `camp` throw them away too, so a chain
 //!   never runs on after the respawn or into the next session.
+//! * While a command's database work runs off the tick (`off_tick`) the
+//!   player is busy and every line they type joins the queue, so commands
+//!   keep their order across the wait.
 //! * [`run_queued_input`] (driven once per tick by the router) releases at
 //!   most one line per player per tick, and only when it is no longer held by
 //!   the cast lock. Released lines were already alias-expanded and are never
@@ -196,6 +199,13 @@ pub(super) fn defer_if_needed(
         }
         return false;
     }
+    // A command's database work is still running off the tick: this line
+    // waits its turn behind it, whatever it is (see `off_tick`).
+    if super::off_tick::is_busy(world, player) {
+        push(world, player, line);
+        run.deferred = true;
+        return true;
+    }
     if !run.in_expansion() && !queued {
         // A lone typed line: the cast lock refuses it as before.
         return false;
@@ -218,6 +228,10 @@ fn take_ready(world: &mut World, player: Entity) -> Option<String> {
     // A line typed while composing a mail / board post is post text; leave
     // anything queued until the draft is done.
     if world.get::<MailDraft>(player).is_some() || world.get::<BoardDraft>(player).is_some() {
+        return None;
+    }
+    // Held until the previous command's database work has landed.
+    if super::off_tick::is_busy(world, player) {
         return None;
     }
     let front = world.get::<InputQueue>(player)?.lines.front()?.clone();

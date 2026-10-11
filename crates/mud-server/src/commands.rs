@@ -564,6 +564,8 @@ mod lists;
 mod object_spells;
 #[path = "commands/object_stat.rs"]
 mod object_stat;
+#[path = "commands/off_tick.rs"]
+pub(crate) mod off_tick;
 pub(crate) use admin_reload::shutdown_poll;
 #[path = "commands/admin_world.rs"]
 mod admin_world;
