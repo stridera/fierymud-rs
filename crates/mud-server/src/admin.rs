@@ -46,6 +46,12 @@ use crate::commands::{self, name_of};
 #[derive(Resource)]
 pub struct AdminInbox(pub Mutex<mpsc::Receiver<AdminCommand>>);
 
+/// A heavy request pulled off the inbox while the tick had already done
+/// other admin work: it waits here and runs first thing next tick, alone.
+/// Created on demand by the drain, so boot code needs no extra wiring.
+#[derive(Resource, Default)]
+struct AdminDeferred(Mutex<Option<AdminCommand>>);
+
 /// Cap for the admin command channel. The control plane is shared-
 /// secret only and very low-traffic; 256 in-flight commands is
 /// generous. On overflow `enqueue` returns 503 — caller can retry.
@@ -971,6 +977,15 @@ const MAX_PER_TICK: usize = 32;
 /// capped by [`COMMAND_TIMEOUT`]), so a tick overshoots by at most that.
 const DRAIN_BUDGET: std::time::Duration = std::time::Duration::from_millis(50);
 
+/// Requests whose world-side work is large enough to spend a whole tick's
+/// admin budget on their own. Creating a session spawns a player entity and
+/// its entire inventory in one go (its database reads already happened in
+/// the HTTP handler, off the tick). A heavy request never shares a tick with
+/// other admin work: it runs first in a tick, and nothing follows it.
+fn is_heavy(request: &AdminRequest) -> bool {
+    matches!(request, AdminRequest::SessionCreate { .. })
+}
+
 pub async fn drain_admin_requests(world: &mut World, pool: &PgPool) {
     drain_within(world, pool, DRAIN_BUDGET).await;
 }
@@ -978,18 +993,38 @@ pub async fn drain_admin_requests(world: &mut World, pool: &PgPool) {
 /// [`drain_admin_requests`] with an explicit budget. Always services at
 /// least one request when any is waiting, so the queue makes progress.
 async fn drain_within(world: &mut World, pool: &PgPool, budget: std::time::Duration) {
+    world.init_resource::<AdminDeferred>();
     let started = std::time::Instant::now();
     for taken in 0..MAX_PER_TICK {
         if taken > 0 && started.elapsed() >= budget {
             break;
         }
-        // The guard is dropped before the request is serviced (it may await).
-        let next = {
+        // The guards are dropped before the request is serviced (it may await).
+        let deferred = world
+            .resource::<AdminDeferred>()
+            .0
+            .lock()
+            .expect("admin deferred poisoned")
+            .take();
+        let next = if let Some(cmd) = deferred {
+            Ok(cmd)
+        } else {
             let inbox = world.resource::<AdminInbox>();
             let mut rx = inbox.0.lock().expect("admin inbox poisoned");
             rx.try_recv()
         };
         let Ok(cmd) = next else { break };
+        let heavy = is_heavy(&cmd.request);
+        if heavy && taken > 0 {
+            // Other admin work already ran this tick: start this one next
+            // tick, on a fresh budget.
+            *world
+                .resource::<AdminDeferred>()
+                .0
+                .lock()
+                .expect("admin deferred poisoned") = Some(cmd);
+            break;
+        }
         let resp = match cmd.request {
             // Player commands take the same async path as a telnet line
             // (aliases, async-only commands, shared pre-gate).
@@ -999,6 +1034,9 @@ async fn drain_within(world: &mut World, pool: &PgPool, budget: std::time::Durat
             other => service(world, other),
         };
         let _ = cmd.reply.send(resp);
+        if heavy {
+            break;
+        }
     }
 }
 
@@ -1818,6 +1856,12 @@ pub(crate) fn inspect_actor(world: &mut World, name: &str) -> AdminResponse {
     }))
 }
 
+/// World-side time of one session create above which a breakdown is logged.
+const SLOW_SESSION_CREATE: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// The tick-side half of `session/create`: spawn the player and its items
+/// from rows the HTTP handler already read from the database. Takes no pool
+/// and awaits nothing, so it cannot wait on the database from the tick.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_lines)]
 fn session_create(
@@ -1867,10 +1911,13 @@ fn session_create(
     // spawn_inventory rehydrates carried + worn items including
     // the proto-derived component set (LiquidContainer, WearableIn,
     // BoardLink, AttachedTriggers — see commit c332609).
+    let started = std::time::Instant::now();
     let (tx, rx) = mpsc::channel::<Vec<u8>>(mud_net::OUTBOUND_QUEUE_CAP);
     let outbound: Outbound = tx;
     let entity = crate::login::spawn_player(world, user, character, outbound);
+    let player_done = started.elapsed();
     let item_count = crate::login::spawn_inventory(world, entity, items);
+    let inventory_done = started.elapsed();
     // Apply gear stat bonuses for every item that respawned with
     // an EquippedSlot. Mirrors the recompute pass in
     // login::complete_login so virtual sessions land with the same
@@ -2001,6 +2048,20 @@ fn session_create(
         .lock()
         .expect("sessions poisoned");
     by_name.insert(player_name.to_string(), VirtualSession { entity, rx });
+    let total = started.elapsed();
+    if total >= SLOW_SESSION_CREATE {
+        // Everything here runs on the world tick; the breakdown says which
+        // stage to look at when a session create shows up in a slow tick.
+        warn!(
+            player = player_name,
+            items = item_count,
+            total_ms = total.as_millis(),
+            spawn_player_ms = player_done.as_millis(),
+            spawn_inventory_ms = inventory_done.saturating_sub(player_done).as_millis(),
+            rest_ms = total.saturating_sub(inventory_done).as_millis(),
+            "virtual session spawn is slow on the tick"
+        );
+    }
     Ok(json!({
         "success": true,
         "player_name": player_name,
@@ -2833,5 +2894,189 @@ mod drain_budget_tests {
         let (mut world, mut replies, pool) = setup(MAX_PER_TICK + 3);
         drain_admin_requests(&mut world, &pool).await;
         assert_eq!(answered(&mut replies), MAX_PER_TICK);
+    }
+}
+
+#[cfg(test)]
+mod session_create_tests {
+    use super::*;
+    use mud_world::{Named, Room, WorldKeyIndex};
+
+    fn pool() -> PgPool {
+        mud_db::sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://nobody:nopass@127.0.0.1:1/none")
+            .unwrap()
+    }
+
+    fn user() -> User {
+        User {
+            id: "u".into(),
+            email: "e".into(),
+            display_name: String::new(),
+            role: mud_db::enums::UserRole::Player,
+            failed_login_attempts: 0,
+            locked_until: None,
+            account_wealth: 0,
+        }
+    }
+
+    /// A world with the resources a session create reads, one room at (30, 1)
+    /// and `n_protos` weapon prototypes (30, `0..n_protos`).
+    fn world(n_protos: i32) -> World {
+        let mut world = World::new();
+        world.init_resource::<VirtualSessions>();
+        world.init_resource::<mud_world::RaceDefaults>();
+        world.init_resource::<mud_world::RaceCatalog>();
+        world.init_resource::<WorldKeyIndex>();
+        world.init_resource::<mud_world::ObjectPrototypes>();
+        world.init_resource::<mud_world::TriggerCatalog>();
+        world.init_resource::<mud_world::ObjectAbilityCatalog>();
+        let room = world.spawn((Room, Named { name: "r".into() })).id();
+        world
+            .resource_mut::<WorldKeyIndex>()
+            .rooms
+            .insert((30, 1), room);
+        for i in 0..n_protos {
+            let proto = crate::commands::test_support::object_proto(
+                30,
+                i,
+                mud_db::enums::ObjectType::Weapon,
+            );
+            world
+                .resource_mut::<mud_world::ObjectPrototypes>()
+                .by_key
+                .insert((30, i), proto);
+        }
+        world
+    }
+
+    fn item_rows(n: i32, worn: i32) -> Vec<character_items::CharacterItemRow> {
+        (0..n)
+            .map(|i| {
+                serde_json::from_value(json!({
+                    "id": i + 1,
+                    "character_id": "c",
+                    "object_zone_id": 30,
+                    "object_id": i,
+                    "container_id": null,
+                    "equipped_location": if i < worn { json!("BODY") } else { json!(null) },
+                    "charges": -1,
+                    "liquid_remaining": 0,
+                    "liquid_type": null,
+                    "lit": false,
+                    "custom_name": null,
+                    "custom_examine_description": null,
+                    "custom_keywords": null,
+                    "custom_curse": null,
+                    "custom_container": null,
+                }))
+                .unwrap()
+            })
+            .collect()
+    }
+
+    fn create_request(name: &str, items: Vec<character_items::CharacterItemRow>) -> AdminRequest {
+        let mut character = crate::login::tests::row(Some((30, 1)), None);
+        character.name = name.into();
+        AdminRequest::SessionCreate {
+            player_name: name.into(),
+            user: Box::new(user()),
+            character: Box::new(character),
+            items,
+            abilities: vec![],
+            aliases: vec![],
+            achievements: vec![],
+            script_vars_json: None,
+            trophy_json: None,
+            spell_cooldowns_json: None,
+            cooldowns_json: None,
+            ignore_list_json: None,
+            command_grants_json: None,
+            effect_instances_json: None,
+        }
+    }
+
+    fn queue(
+        world: &mut World,
+        requests: Vec<AdminRequest>,
+    ) -> Vec<oneshot::Receiver<AdminResponse>> {
+        let (tx, rx) = mpsc::channel(ADMIN_QUEUE_CAP);
+        world.insert_resource(AdminInbox(Mutex::new(rx)));
+        world.insert_resource(WorldPause::default());
+        requests
+            .into_iter()
+            .map(|request| {
+                let (reply, rx) = oneshot::channel();
+                tx.try_send(AdminCommand { request, reply }).ok().unwrap();
+                rx
+            })
+            .collect()
+    }
+
+    fn answered(replies: &mut [oneshot::Receiver<AdminResponse>]) -> usize {
+        replies.iter_mut().filter_map(|r| r.try_recv().ok()).count()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn creating_a_session_spawns_the_player_and_every_item() {
+        let mut world = world(71);
+        let mut replies = queue(&mut world, vec![create_request("Probe", item_rows(71, 20))]);
+        drain_admin_requests(&mut world, &pool()).await;
+        let resp = replies[0].try_recv().expect("answered").expect("created");
+        assert_eq!(resp["items_loaded"], 71);
+        let entity = {
+            let sessions = world.resource::<VirtualSessions>();
+            sessions
+                .by_name
+                .lock()
+                .unwrap()
+                .get("Probe")
+                .unwrap()
+                .entity
+        };
+        let mut carried = world.query_filtered::<&mud_world::Located, With<mud_world::Item>>();
+        assert_eq!(carried.iter(&world).filter(|l| l.0 == entity).count(), 71);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_session_create_never_shares_a_tick_with_other_admin_work() {
+        let mut world = world(2);
+        let mut replies = queue(
+            &mut world,
+            vec![
+                AdminRequest::PauseWorld,
+                create_request("Probe", item_rows(2, 0)),
+                AdminRequest::UnpauseWorld,
+            ],
+        );
+        // Tick 1: the pause runs; the create is held back, the unpause waits
+        // behind it.
+        drain_admin_requests(&mut world, &pool()).await;
+        assert_eq!(answered(&mut replies[..1]), 1);
+        assert!(replies[1].try_recv().is_err(), "create must wait a tick");
+        assert!(replies[2].try_recv().is_err());
+        // Tick 2: the create runs alone.
+        drain_admin_requests(&mut world, &pool()).await;
+        assert!(replies[1].try_recv().expect("answered").is_ok());
+        assert!(replies[2].try_recv().is_err(), "nothing rides along");
+        // Tick 3: the rest of the queue.
+        drain_admin_requests(&mut world, &pool()).await;
+        assert!(replies[2].try_recv().expect("answered").is_ok());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn queued_creates_run_one_per_tick() {
+        let mut world = world(1);
+        let mut replies = queue(
+            &mut world,
+            vec![
+                create_request("One", item_rows(1, 0)),
+                create_request("Two", item_rows(1, 0)),
+            ],
+        );
+        drain_admin_requests(&mut world, &pool()).await;
+        assert_eq!(answered(&mut replies), 1);
+        drain_admin_requests(&mut world, &pool()).await;
+        assert_eq!(answered(&mut replies), 1);
     }
 }

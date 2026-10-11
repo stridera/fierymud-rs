@@ -7026,7 +7026,7 @@ fn accrue_repose(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -7043,7 +7043,7 @@ mod tests {
         assert_eq!(discord["invite_url"], bad);
     }
 
-    fn row(cur: Option<(i32, i32)>, recall: Option<(i32, i32)>) -> CharacterRow {
+    pub(crate) fn row(cur: Option<(i32, i32)>, recall: Option<(i32, i32)>) -> CharacterRow {
         CharacterRow {
             id: "c".into(),
             name: "Tester".into(),
