@@ -11,7 +11,7 @@ const ITEMS_PER_ROOM: i32 = 6;
 
 /// A world shaped like prod: ~5.5k mobs and ~3k items over 500 rooms, a
 /// player and a rider-less mob in room `(99, 1)`.
-fn big_world() -> (World, Entity) {
+pub(crate) fn big_world() -> (World, Entity) {
     let mut world = World::new();
     let mut index = WorldKeyIndex::default();
     let mut first_mob = None;

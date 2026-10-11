@@ -617,29 +617,30 @@ pub(crate) fn resolve_destroy_name(world: &mut World, from: Entity, name: &str) 
         return None;
     }
     let room = enclosing_room(world, from);
-    let mut q = world.query::<(
-        Entity,
-        &Located,
-        &Named,
-        Option<&mud_world::components::Keywords>,
-        Has<Item>,
-        Has<Player>,
-    )>();
     // (priority, entity): carried item 0, room item 1, room character 2.
+    // Candidates come straight off the `Contents` index of `from` and its
+    // room, not a scan of every located entity in the world.
+    let mut candidates: Vec<(u8, Entity)> = super::contents_of(world, from)
+        .into_iter()
+        .filter(|&e| world.get::<Item>(e).is_some())
+        .map(|e| (0, e))
+        .collect();
+    if let Some(room) = room {
+        candidates.extend(
+            super::contents_of(world, room)
+                .into_iter()
+                .map(|e| (if world.get::<Item>(e).is_some() { 1 } else { 2 }, e)),
+        );
+    }
     let mut best: Option<(u8, bool, Entity)> = None;
-    for (e, l, n, kw, is_item, is_player) in q.iter(world) {
-        if is_player || e == from {
+    for (rank, e) in candidates {
+        if e == from || world.get::<Player>(e).is_some() {
             continue;
         }
-        let rank = if is_item && l.0 == from {
-            0
-        } else if is_item && Some(l.0) == room {
-            1
-        } else if !is_item && Some(l.0) == room {
-            2
-        } else {
+        let Some(n) = world.get::<Named>(e) else {
             continue;
         };
+        let kw = world.get::<mud_world::components::Keywords>(e);
         let whole = n.name.eq_ignore_ascii_case(&needle);
         if !whole
             && !mud_world::targeting::entity_matches(&needle, &n.name, kw.map(|k| k.0.as_slice()))
@@ -682,13 +683,13 @@ fn legacy_vnum(zone: i32, id: i32) -> i64 {
 /// vnum (`wearing[18880]`, the DG form) with the item as the value, so
 /// `if actor.wearing[id] then` and `pairs(actor.wearing)` both work.
 fn wearing_table(lua: &Lua, entity: Entity) -> mlua::Result<Value> {
-    let worn: Vec<(i64, Entity)> = world_mut_from_lua(lua, |w| {
-        let mut q =
-            w.query_filtered::<(Entity, &Located, &WorldKey), (With<Item>, With<EquippedSlot>)>();
-        let mut v: Vec<(i64, Entity)> = q
-            .iter(w)
-            .filter(|(_, l, _)| l.0 == entity)
-            .map(|(e, _, wk)| (legacy_vnum(wk.zone, wk.id), e))
+    let worn: Vec<(i64, Entity)> = world_from_lua(lua, |w| {
+        let mut v: Vec<(i64, Entity)> = super::carried_items(w, entity)
+            .filter(|&e| w.get::<EquippedSlot>(e).is_some())
+            .filter_map(|e| {
+                let wk = w.get::<WorldKey>(e)?;
+                Some((legacy_vnum(wk.zone, wk.id), e))
+            })
             .collect();
         v.sort_unstable();
         v

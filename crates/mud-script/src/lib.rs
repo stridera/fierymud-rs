@@ -2212,6 +2212,23 @@ pub(crate) fn contents_of(world: &World, container: Entity) -> Vec<Entity> {
         .unwrap_or_default()
 }
 
+/// Items directly carried (or worn) by `who`, in `Contents` order. Items
+/// inside a carried bag are not included.
+pub(crate) fn carried_items(world: &World, who: Entity) -> impl Iterator<Item = Entity> + '_ {
+    world
+        .get::<mud_world::Contents>(who)
+        .into_iter()
+        .flat_map(bevy_ecs::relationship::RelationshipTarget::iter)
+        .filter(|&e| world.get::<Item>(e).is_some())
+}
+
+/// Whether `item` is an instance of prototype `(zone, id)`.
+fn item_is(world: &World, item: Entity, zone: i32, id: i32) -> bool {
+    world
+        .get::<WorldKey>(item)
+        .is_some_and(|wk| wk.zone == zone && wk.id == id)
+}
+
 /// Characters (anything that is not an item) in `room`, in `Contents` order.
 pub(crate) fn characters_in(world: &World, room: Entity) -> Vec<Entity> {
     let mut v = contents_of(world, room);
@@ -2370,23 +2387,15 @@ fn destroy_item(lua: &Lua, actor: Entity, needle: &str) -> mlua::Result<()> {
     }
     world_mut_from_lua(lua, |world| {
         let mut to_remove: Vec<Entity> = Vec::new();
-        {
-            let mut q =
-                world.query_filtered::<(Entity, &Located, Option<&Keywords>, &Named), With<Item>>();
-            for (e, l, kw, n) in q.iter(world) {
-                if l.0 != actor {
-                    continue;
-                }
-                let matches = mud_world::targeting::entity_matches(
-                    &keyword,
-                    &n.name,
-                    kw.map(|k| k.0.as_slice()),
-                );
-                if matches {
-                    to_remove.push(e);
-                    if !all {
-                        break;
-                    }
+        for e in carried_items(world, actor) {
+            let Some(n) = world.get::<Named>(e) else {
+                continue;
+            };
+            let kw = world.get::<Keywords>(e).map(|k| k.0.as_slice());
+            if mud_world::targeting::entity_matches(&keyword, &n.name, kw) {
+                to_remove.push(e);
+                if !all {
+                    break;
                 }
             }
         }
@@ -2919,10 +2928,8 @@ impl UserData for LuaActor {
         methods.add_method(
             "has_item",
             |lua, this, (zone, id): (i32, i32)| -> mlua::Result<bool> {
-                world_mut_from_lua(lua, |w| {
-                    let mut q = w.query_filtered::<(&Located, &WorldKey), With<Item>>();
-                    q.iter(w)
-                        .any(|(l, wk)| l.0 == this.entity && wk.zone == zone && wk.id == id)
+                world_from_lua(lua, |w| {
+                    carried_items(w, this.entity).any(|e| item_is(w, e, zone, id))
                 })
             },
         );
@@ -2933,12 +2940,9 @@ impl UserData for LuaActor {
         methods.add_method(
             "has_equipped",
             |lua, this, (zone, id): (i32, i32)| -> mlua::Result<bool> {
-                world_mut_from_lua(lua, |w| {
-                    let mut q = w
-                        .query_filtered::<(&Located, &WorldKey), (With<Item>, With<EquippedSlot>)>(
-                        );
-                    q.iter(w)
-                        .any(|(l, wk)| l.0 == this.entity && wk.zone == zone && wk.id == id)
+                world_from_lua(lua, |w| {
+                    carried_items(w, this.entity)
+                        .any(|e| w.get::<EquippedSlot>(e).is_some() && item_is(w, e, zone, id))
                 })
             },
         );
@@ -2958,11 +2962,9 @@ impl UserData for LuaActor {
                 let Some(slot) = mud_world::Slot::from_label(&slot_label) else {
                     return Ok(Value::Nil);
                 };
-                let entity = world_mut_from_lua(lua, |w| -> Option<Entity> {
-                    let mut q = w.query_filtered::<(Entity, &Located, &EquippedSlot), With<Item>>();
-                    q.iter(w)
-                        .find(|(_, l, eq)| l.0 == this.entity && eq.0 == slot)
-                        .map(|(e, _, _)| e)
+                let entity = world_from_lua(lua, |w| -> Option<Entity> {
+                    carried_items(w, this.entity)
+                        .find(|&e| w.get::<EquippedSlot>(e).is_some_and(|eq| eq.0 == slot))
                 })?;
                 match entity {
                     Some(e) => Ok(Value::UserData(
@@ -6468,3 +6470,6 @@ mod script_hooks_tests;
 
 #[cfg(test)]
 mod room_scan_tests;
+
+#[cfg(test)]
+mod actor_scan_tests;
