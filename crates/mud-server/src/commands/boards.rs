@@ -687,15 +687,39 @@ async fn board_listing_text(pool: &mud_db::sqlx::PgPool, board_id: i32, title: &
         Ok(m) => m,
         Err(e) => return format!("Message fetch failed: {e}\r\n"),
     };
+    render_board_listing(
+        title,
+        &messages,
+        1,
+        "Use 'read <#>' to read a message, or 'post' to add one.",
+        "board page",
+    )
+}
+
+/// One page (newest first, [`crate::commands::info::PAGE_ROWS`] rows) of a
+/// board's message list. `read_hint` closes the listing; `page_cmd` is the
+/// command prefix the footer tells the player to add a page number to.
+pub(crate) fn render_board_listing(
+    title: &str,
+    messages: &[mud_db::boards::BoardMessage],
+    page: usize,
+    read_hint: &str,
+    page_cmd: &str,
+) -> String {
+    use crate::commands::info::{PAGE_ROWS, page_window};
     if messages.is_empty() {
         return format!("\r\n{title} has no messages.\r\n");
     }
+    let (start, end, pages) = match page_window(messages.len(), page, PAGE_ROWS) {
+        Ok(w) => w,
+        Err(pages) => return format!("{title} only has {pages} page(s).\r\n"),
+    };
     let mut out = format!(
         "\r\n{title} ({} message{}):\r\n",
         messages.len(),
         if messages.len() == 1 { "" } else { "s" },
     );
-    for (i, msg) in messages.iter().enumerate() {
+    for (i, msg) in messages.iter().enumerate().take(end).skip(start) {
         let stickymark = if msg.sticky { "*" } else { " " };
         let when = msg.posted_at.format("%Y-%m-%d");
         out.push_str(&format!(
@@ -706,7 +730,14 @@ async fn board_listing_text(pool: &mud_db::sqlx::PgPool, board_id: i32, title: &
             msg.subject,
         ));
     }
-    out.push_str("\r\nUse 'read <#>' to read a message, or 'post' to add one.\r\n");
+    if pages > 1 {
+        out.push_str(&format!("  (page {page} of {pages}"));
+        if page < pages {
+            out.push_str(&format!("; '{page_cmd} {}' for more", page + 1));
+        }
+        out.push_str(")\r\n");
+    }
+    out.push_str(&format!("\r\n{read_hint}\r\n"));
     out
 }
 
@@ -781,7 +812,8 @@ pub(crate) async fn cmd_board(
     pool: &mud_db::sqlx::PgPool,
     args: &str,
 ) {
-    let trimmed = args.trim();
+    let (trimmed, page) = crate::commands::info::split_page_arg(args.trim());
+    let trimmed = trimmed.as_str();
     // No args / `board list` → default to the in-room board.
     let resolved_args = if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("list") {
         if let Some((_, alias)) = in_room_board_alias(world, player) {
@@ -876,33 +908,12 @@ pub(crate) async fn cmd_board(
         send_prose(world, player, out);
         return;
     }
-    if messages.is_empty() {
-        send_to(
-            world,
-            player,
-            format!("\r\n{} has no messages.\r\n", board.title),
-        );
-        return;
-    }
-    let mut out = format!(
-        "\r\n{} ({} message{}):\r\n",
-        board.title,
-        messages.len(),
-        if messages.len() == 1 { "" } else { "s" },
+    let out = render_board_listing(
+        &board.title,
+        &messages,
+        page,
+        &format!("Use 'board {alias} <#>' to read a message."),
+        &format!("board {alias} page"),
     );
-    for (i, msg) in messages.iter().enumerate() {
-        let stickymark = if msg.sticky { "*" } else { " " };
-        let when = msg.posted_at.format("%Y-%m-%d");
-        out.push_str(&format!(
-            "  {:<3} {} {when}  {:<20} {}\r\n",
-            i + 1,
-            stickymark,
-            msg.poster,
-            msg.subject,
-        ));
-    }
-    out.push_str(&format!(
-        "\r\nUse 'board {alias} <#>' to read a message.\r\n"
-    ));
     send_to(world, player, out);
 }

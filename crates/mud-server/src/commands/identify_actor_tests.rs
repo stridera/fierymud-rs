@@ -108,6 +108,12 @@ fn carry(world: &mut World, holder: Entity, name: &str, kw: &str, key: (i32, i32
     e.id()
 }
 
+fn hold(world: &mut World, item: Entity) {
+    world
+        .entity_mut(item)
+        .insert(mud_world::EquippedSlot(mud_world::Slot::Hold));
+}
+
 fn alive(world: &World, e: Entity) -> bool {
     world.get_entity(e).is_ok()
 }
@@ -191,23 +197,25 @@ fn recite_at_a_mob_identifies_it_and_uses_up_the_scroll() {
 }
 
 #[test]
-fn wave_wand_with_no_target_keeps_its_charge() {
+fn use_wand_with_no_target_keeps_its_charge() {
     let (mut world, _room, caster, mut rx) = world_with_identify();
     let wand = carry(&mut world, caster, "a wand of identify", "wand", (30, 2));
-    dispatch(&mut world, caster, "wave wand");
+    hold(&mut world, wand);
+    dispatch(&mut world, caster, "use wand");
     let out = drain(&mut rx);
     assert!(out.contains("At what should"), "{out}");
     assert_eq!(world.get::<Charges>(wand).map(|c| c.0), Some(3));
-    dispatch(&mut world, caster, "wave wand nobody");
+    dispatch(&mut world, caster, "use wand nobody");
     assert_eq!(world.get::<Charges>(wand).map(|c| c.0), Some(3));
 }
 
 #[test]
-fn wave_wand_at_a_mob_spends_a_charge() {
+fn use_wand_at_a_mob_spends_a_charge() {
     let (mut world, room, caster, mut rx) = world_with_identify();
     goblin(&mut world, room);
     let wand = carry(&mut world, caster, "a wand of identify", "wand", (30, 2));
-    dispatch(&mut world, caster, "wave wand goblin");
+    hold(&mut world, wand);
+    dispatch(&mut world, caster, "use wand goblin");
     let out = drain(&mut rx);
     assert!(out.contains("Name: a snarling goblin"), "{out}");
     assert_eq!(world.get::<Charges>(wand).map(|c| c.0), Some(2));
@@ -252,7 +260,6 @@ fn the_wait_after_a_broken_cast_blocks_every_kind_of_cast_but_not_movement() {
         "chant dirge",
         "perform aria",
         "recite scroll goblin",
-        "wave wand goblin",
         "tap wand",
         "use rod goblin",
     ] {

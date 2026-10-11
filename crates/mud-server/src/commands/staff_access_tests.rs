@@ -146,7 +146,7 @@ fn mortals_need_the_key_but_immortals_unlock_without_one() {
         ExitState::Closed,
         "both sides unlock"
     );
-    assert!(drain(&mut rx).contains("You unlock the way north."));
+    assert!(drain(&mut rx).contains("You unlock the door."));
 
     // Keyless (no keyhole) door too.
     let (mut world, imm, a, _b, _rx) = door_world(100, ExitState::Locked);

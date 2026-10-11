@@ -9,7 +9,7 @@ use mud_world::{
     ShopAcceptRule, ShopCatalog, ShopDef, ShopOffering, ShopPetOffering, Shopkeeper, Wealth,
 };
 
-use super::info::{cmd_buy, cmd_inspect, cmd_list, cmd_mount, cmd_sell, cmd_wealth};
+use super::info::{cmd_buy, cmd_give, cmd_inspect, cmd_list, cmd_mount, cmd_sell, cmd_wealth};
 use super::test_support::{Rx, drain, mob_proto, object_proto, player_in};
 
 const SHOP: (i32, i32) = (30, 91);
@@ -678,4 +678,127 @@ fn negative_cost_never_pays_the_buyer_or_the_seller() {
     assert!(out.contains("worthless"), "{out}");
     assert_eq!(world.get::<Wealth>(player).unwrap().0, before);
     assert_eq!(carried_swords(&mut world, player), 1);
+}
+
+fn strip_ansi(raw: &str) -> String {
+    let mut out = String::new();
+    let mut chars = raw.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            for n in chars.by_ref() {
+                if n.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[test]
+fn list_filters_by_keyword() {
+    let (mut world, player, mut rx) = world_with_shop(mixed_shop(), 1_000);
+    cmd_list(&mut world, player, "sword");
+    let out = drain(&mut rx);
+    assert!(out.contains("a steel sword"), "{out}");
+    assert!(
+        !out.contains("a stout mare") && !out.contains("a kitten"),
+        "{out}"
+    );
+    // The shop's own numbering is kept so `buy <#>` still lines up.
+    cmd_list(&mut world, player, "kitten");
+    let out = drain(&mut rx);
+    assert!(
+        out.contains("a kitten") && !out.contains("a steel sword"),
+        "{out}"
+    );
+    let row = out.lines().find(|l| l.contains("a kitten")).unwrap();
+    assert_eq!(row.split_whitespace().next(), Some("3"), "{out}");
+    cmd_list(&mut world, player, "zzz");
+    assert!(drain(&mut rx).contains("nothing like 'zzz'"));
+}
+
+#[test]
+fn list_pads_by_visible_width_not_tag_length() {
+    let (mut world, player, mut rx) = world_with_shop(mixed_shop(), 1_000);
+    edit_sword(&mut world, |p| p.name = "<red>a steel sword</>".to_string());
+    cmd_list(&mut world, player, "");
+    let out = strip_ansi(&drain(&mut rx));
+    let header = out.lines().find(|l| l.contains("Price")).unwrap();
+    let sword = out.lines().find(|l| l.contains("a steel sword")).unwrap();
+    let mare = out.lines().find(|l| l.contains("a stout mare")).unwrap();
+    // Price column starts at the same offset on every row.
+    assert_eq!(header.find("Price"), sword.find("1 gold"), "{out}");
+    assert_eq!(sword.find("1 gold"), mare.find("4 gold"), "{out}");
+}
+
+#[test]
+fn buy_with_a_count_buys_that_many() {
+    let (mut world, player, mut rx) = world_with_shop(shop_def(sword_offer(0), Vec::new()), 1_000);
+    cmd_buy(&mut world, player, "3 sword");
+    let out = drain(&mut rx);
+    assert!(out.contains("a steel sword (x3)"), "{out}");
+    assert_eq!(world.get::<Wealth>(player).unwrap().0, 700);
+    assert_eq!(carried_swords(&mut world, player), 3);
+}
+
+#[test]
+fn buy_with_a_count_stops_at_what_you_can_afford() {
+    let (mut world, player, mut rx) = world_with_shop(shop_def(sword_offer(0), Vec::new()), 250);
+    cmd_buy(&mut world, player, "5 sword");
+    let out = drain(&mut rx);
+    assert!(out.contains("You can only afford 2 of those."), "{out}");
+    assert_eq!(world.get::<Wealth>(player).unwrap().0, 50);
+    assert_eq!(carried_swords(&mut world, player), 2);
+}
+
+#[test]
+fn buy_with_a_count_respects_the_weight_limit() {
+    let (mut world, player, mut rx) =
+        world_with_shop(shop_def(sword_offer(0), Vec::new()), 100_000);
+    let cap = super::carry_capacity(&world, player);
+    edit_sword(&mut world, |p| p.weight = cap / 2.5);
+    cmd_buy(&mut world, player, "10 sword");
+    let out = drain(&mut rx);
+    assert!(out.contains("You can only carry 2 of those."), "{out}");
+    assert_eq!(carried_swords(&mut world, player), 2);
+}
+
+#[test]
+fn buy_with_a_count_respects_finite_stock() {
+    let mut offer = sword_offer(0);
+    offer[0].amount = 2;
+    let (mut world, player, mut rx) = world_with_shop(shop_def(offer, Vec::new()), 1_000);
+    cmd_buy(&mut world, player, "5 sword");
+    let out = drain(&mut rx);
+    assert!(out.contains("only has 2 of those"), "{out}");
+    assert_eq!(carried_swords(&mut world, player), 2);
+}
+
+#[test]
+fn give_coins_to_a_player_moves_the_money() {
+    let (mut world, player, mut rx) = world_with_shop(shop_def(sword_offer(0), Vec::new()), 1_000);
+    let room = world.get::<Located>(player).unwrap().0;
+    let (tx, mut brx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+    let bob = world
+        .spawn((
+            mud_world::Player,
+            Named {
+                name: "Bob".to_string(),
+            },
+            Located(room),
+            super::Connection(tx),
+        ))
+        .id();
+    cmd_give(&mut world, player, "5 gold bob");
+    let out = drain(&mut rx);
+    assert!(out.contains("You give Bob"), "{out}");
+    assert!(drain(&mut brx).contains("Tester gives you"));
+    assert_eq!(world.get::<Wealth>(player).unwrap().0, 500);
+    assert_eq!(world.get::<Wealth>(bob).unwrap().0, 500);
+    cmd_give(&mut world, player, "9999 gold to bob");
+    assert!(drain(&mut rx).contains("You don't have that many coins!"));
+    assert_eq!(world.get::<Wealth>(player).unwrap().0, 500);
 }

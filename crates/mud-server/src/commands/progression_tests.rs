@@ -338,3 +338,26 @@ fn immortals_get_no_level_progress_rows() {
         assert!(!out.contains("to go"), "{line}: {out}");
     }
 }
+
+#[test]
+fn level_and_experience_agree_on_xp_to_go() {
+    let mut world = world();
+    // Level 5 -> 6 costs 5000 total; 4500 earned leaves 500, however the
+    // bracket is measured.
+    let (player, mut rx) = spawn(&mut world, "Reader", 5, 4_500, CLERIC);
+    dispatch(&mut world, player, "level");
+    let level = strip_ansi(&drain(&mut rx));
+    dispatch(&mut world, player, "experience");
+    let exp = strip_ansi(&drain(&mut rx));
+    assert!(level.contains("(500 XP to level 6)"), "{level}");
+    assert!(exp.contains("(500 to go)"), "{exp}");
+    // A character whose XP has fallen below their level's floor still
+    // gets the same number from both.
+    world.get_mut::<Profile>(player).unwrap().experience = 0;
+    dispatch(&mut world, player, "level");
+    let level = strip_ansi(&drain(&mut rx));
+    dispatch(&mut world, player, "experience");
+    let exp = strip_ansi(&drain(&mut rx));
+    assert!(level.contains("(5000 XP to level 6)"), "{level}");
+    assert!(exp.contains("(5000 to go)"), "{exp}");
+}

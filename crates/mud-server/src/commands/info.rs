@@ -921,23 +921,6 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
-        names: &["wave"],
-        min_role: UserRole::Player,
-        required_perm: None,
-        category: Category::Settings,
-        help: Help {
-            usage: "wave <wand> [<target>]",
-            summary: "Wave a wand to cast its bound spell.",
-            long: "Decrements the wand's Charges component on each use; \
-                   wand crumbles when charges hit 0. Refused on depleted \
-                   wands. Item type must be WAND.",
-        },
-        run: cmd_wave,
-    }
-}
-
-inventory::submit! {
-    Command {
         names: &["use"],
         min_role: UserRole::Player,
         required_perm: None,
@@ -2062,9 +2045,10 @@ inventory::submit! {
         category: Category::Quest,
         help: Help {
             usage: "quest",
-            summary: "Toggle quest mode (placeholder; gates quest zones).",
-            long: "Sets QUEST. The quest system is unimplemented; this \
-                   ensures the flag persists for content that gates on it.",
+            summary: "Join or leave the Quest event.",
+            long: "Toggles your QUEST flag, which marks you as taking part \
+                   in staff-run quest events. Use 'quests' to see your \
+                   own quests.",
         },
         run: cmd_quest_flag,
     }
@@ -2235,7 +2219,7 @@ inventory::submit! {
         names: &["stand"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Settings,
+        category: Category::Movement,
         help: Help {
             usage: "stand",
             summary: "Get to your feet.",
@@ -2267,7 +2251,7 @@ inventory::submit! {
         names: &["sit"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Settings,
+        category: Category::Movement,
         help: Help {
             usage: "sit",
             summary: "Sit down.",
@@ -2282,7 +2266,7 @@ inventory::submit! {
         names: &["kneel"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Settings,
+        category: Category::Movement,
         help: Help {
             usage: "kneel",
             summary: "Kneel — lower-profile but still alert.",
@@ -2300,7 +2284,7 @@ inventory::submit! {
         names: &["rest", "recline"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Settings,
+        category: Category::Movement,
         help: Help {
             usage: "rest",
             summary: "Rest in place.",
@@ -2336,7 +2320,7 @@ inventory::submit! {
         names: &["sleep"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Settings,
+        category: Category::Movement,
         help: Help {
             usage: "sleep",
             summary: "Lie down and sleep.",
@@ -2352,7 +2336,7 @@ inventory::submit! {
         names: &["wake"],
         min_role: UserRole::Player,
         required_perm: None,
-        category: Category::Settings,
+        category: Category::Movement,
         help: Help {
             usage: "wake [target]",
             summary: "Wake yourself, or rouse a sleeping companion.",
@@ -3874,8 +3858,11 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
         // Surface item weight so a player can judge whether to pick
         // it up before bumping into the encumbrance gate. Skipped
         // for synthetic items that have no proto weight.
+        // Fixtures (NO_TAKE) carry a sentinel "immovable" weight, so the
+        // line is noise for them.
         let weight = item_weight(world, target);
-        if weight > 0.0 {
+        if weight > 0.0 && !has_restriction(world, target, mud_db::enums::ObjectRestriction::NoTake)
+        {
             out.push_str(&format!("It weighs about <dim>{weight:.1} lbs.</>\r\n"));
         }
         // Atmospheric notes on proto-derived flags. GLOW / MAGIC
@@ -3977,7 +3964,10 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
             stack_entries(names, has_flag(world, player, PlayerFlag::ExpandObjs))
         };
         if !contents.is_empty() {
-            out.push_str(&format!("\r\n<cyan>{name_rendered} contains:</>\r\n"));
+            out.push_str(&format!(
+                "\r\n<cyan>{} contains:</>\r\n",
+                crate::commands::cap_sentence_start(&name_rendered)
+            ));
             for (item_name, count) in contents {
                 let rendered = render_color_tags(&item_name, mode);
                 if count > 1 {
@@ -4066,6 +4056,12 @@ pub(crate) fn cmd_description(world: &mut World, player: Entity, args: &str) {
     send_to(world, player, "Description set.\r\n");
 }
 
+/// XP still needed for the next level: threshold minus current XP,
+/// never negative. Shared by `level` and `experience` so the two agree.
+fn xp_to_go(p: &crate::commands::LevelProgress) -> i64 {
+    (p.next_level_xp - p.current_xp).max(0)
+}
+
 /// `experience` / `exp` / `xp`: print level and total XP from Profile.
 /// Standalone readout for the same numbers `score` already shows; the
 /// loose level→required-XP table will join later.
@@ -4078,7 +4074,7 @@ pub(crate) fn cmd_experience(world: &mut World, player: Entity, _args: &str) {
     if let Some(lp) = crate::commands::level_progress_for(world, player, &p) {
         let into_bracket = (lp.current_xp - lp.level_floor_xp).max(0);
         let bracket = (lp.next_level_xp - lp.level_floor_xp).max(1);
-        let to_go = (bracket - into_bracket).max(0);
+        let to_go = xp_to_go(&lp);
         out.push_str(&format!(
             "Level {} to {}:  {} / {}  {} {}%  ({} to go)\r\n",
             p.level,
@@ -4251,7 +4247,8 @@ fn shopkeeper_sees_customer(
 /// falls back to the proto's base `cost * buy_profit` when the row's
 /// override is `0`. No-op when no shopkeeper present.
 #[allow(clippy::too_many_lines)]
-pub(crate) fn cmd_list(world: &mut World, player: Entity, _args: &str) {
+pub(crate) fn cmd_list(world: &mut World, player: Entity, args: &str) {
+    let filter = args.trim().to_ascii_lowercase();
     let Some(located) = world.get::<Located>(player).copied() else {
         send_to(world, player, "You are nowhere.\r\n");
         return;
@@ -4290,13 +4287,61 @@ pub(crate) fn cmd_list(world: &mut World, player: Entity, _args: &str) {
     let mob_protos = world.resource::<MobPrototypes>().by_key.clone();
 
     let mut out = String::new();
-    if !shop.items.is_empty() {
-        out.push_str(&format!("\r\n{keeper_name} offers:\r\n"));
+    // `list <word>` narrows to wares whose name / keywords match; the
+    // numbers stay the shop's own so `buy <#>` still lines up.
+    let wanted = |name: &str, keywords: Option<&[String]>| {
+        filter.is_empty() || mud_world::targeting::entity_matches(&filter, name, keywords)
+    };
+    let item_rows: Vec<(usize, &mud_world::ShopOffering)> = shop
+        .items
+        .iter()
+        .enumerate()
+        .filter(|(_, o)| {
+            if filter.is_empty() {
+                return true;
+            }
+            object_protos
+                .get(&(o.object_zone_id, o.object_id))
+                .is_some_and(|p| wanted(&p.name, Some(&p.keywords)))
+        })
+        .collect();
+    let pet_rows: Vec<(usize, &mud_world::ShopPetOffering)> = shop
+        .pets
+        .iter()
+        .enumerate()
+        .filter(|(_, o)| {
+            if filter.is_empty() {
+                return true;
+            }
+            mob_protos
+                .get(&(o.mob_zone_id, o.mob_id))
+                .is_some_and(|p| wanted(&p.name, Some(&p.keywords)))
+        })
+        .collect();
+    if !filter.is_empty() && item_rows.is_empty() && pet_rows.is_empty() {
+        send_msg(
+            world,
+            player,
+            format!(
+                "{keeper_name} has nothing like '{}' for sale.\r\n",
+                args.trim()
+            ),
+        );
+        return;
+    }
+    if !item_rows.is_empty() {
         out.push_str(&format!(
-            "  {:<3} {:<40} {:<28} {}\r\n",
-            "#", "Item", "Price", "Stock"
+            "\r\n{} offers:\r\n",
+            crate::commands::cap_sentence_start(&keeper_name)
         ));
-        for (i, offer) in shop.items.iter().enumerate() {
+        out.push_str(&format!(
+            "  {:<3} {} {} {}\r\n",
+            "#",
+            pad_visible("Item", 40),
+            pad_visible("Price", 28),
+            "Stock"
+        ));
+        for (i, offer) in item_rows {
             let proto = object_protos.get(&(offer.object_zone_id, offer.object_id));
             let item_name = proto.map_or_else(
                 || format!("(missing {}/{})", offer.object_zone_id, offer.object_id),
@@ -4311,21 +4356,24 @@ pub(crate) fn cmd_list(world: &mut World, player: Entity, _args: &str) {
                 offer.amount.to_string()
             };
             out.push_str(&format!(
-                "  {:<3} {:<40} {:<28} {}\r\n",
+                "  {:<3} {} {} {}\r\n",
                 i + 1,
-                item_name,
-                price_str,
+                pad_visible(&item_name, 40),
+                pad_visible(&price_str, 28),
                 stock_str
             ));
         }
     }
-    if !shop.pets.is_empty() {
+    if !pet_rows.is_empty() {
         out.push_str(&format!("\r\n{keeper_name} also has pets for hire:\r\n"));
         out.push_str(&format!(
-            "  {:<3} {:<40} {:<28} {}\r\n",
-            "#", "Mob", "Price", "Stock"
+            "  {:<3} {} {} {}\r\n",
+            "#",
+            pad_visible("Mob", 40),
+            pad_visible("Price", 28),
+            "Stock"
         ));
-        for (i, offer) in shop.pets.iter().enumerate() {
+        for (i, offer) in pet_rows {
             let proto = mob_protos.get(&(offer.mob_zone_id, offer.mob_id));
             let mob_name = proto.map_or_else(
                 || format!("(missing {}/{})", offer.mob_zone_id, offer.mob_id),
@@ -4345,10 +4393,10 @@ pub(crate) fn cmd_list(world: &mut World, player: Entity, _args: &str) {
                 offer.amount.to_string()
             };
             out.push_str(&format!(
-                "  {:<3} {:<40} {:<28} {}\r\n",
+                "  {:<3} {} {} {}\r\n",
                 shop.items.len() + i + 1,
-                mob_name,
-                price_str,
+                pad_visible(&mob_name, 40),
+                pad_visible(&price_str, 28),
                 stock_str
             ));
         }
@@ -4679,6 +4727,13 @@ pub(crate) fn cmd_buy(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let object_protos = world.resource::<ObjectPrototypes>().by_key.clone();
+    // `buy 3 dagger`: a leading count followed by an item word. A lone
+    // number (`buy 3`) stays the 1-based list index.
+    let (qty, arg) = parse_buy_quantity(arg);
+    if qty == 0 {
+        send_to(world, player, "Buy how many?\r\n");
+        return;
+    }
     // Parse: integer = 1-based index; otherwise prefix match on proto name/keywords.
     let offer_idx: Option<usize> = if let Ok(n) = arg.parse::<usize>() {
         if n == 0 || n > shop.items.len() {
@@ -4732,10 +4787,31 @@ pub(crate) fn cmd_buy(world: &mut World, player: Entity, args: &str) {
         );
         return;
     }
-    // Encumbrance gate (same rule as `get`), checked before any coin moves.
-    if !crate::commands::is_staff(world, player)
-        && carried_weight(world, player) + proto.weight > carry_capacity(world, player)
-    {
+    // How many can actually be bought: limited by finite stock, by the
+    // same encumbrance rule `get` applies, and by the coin on hand. The
+    // first limit that stops even one purchase explains itself, exactly
+    // as a single `buy` always did.
+    let staff = crate::commands::is_staff(world, player);
+    let stock_cap = if offer.amount > 0 {
+        usize::try_from(offer.amount).unwrap_or(usize::MAX)
+    } else {
+        usize::MAX
+    };
+    let weight_cap = if staff || proto.weight <= 0.0 {
+        usize::MAX
+    } else {
+        let room_left = carry_capacity(world, player) - carried_weight(world, player);
+        if room_left < proto.weight {
+            0
+        } else {
+            // Truncation is the point: whole items only. The ratio is
+            // positive and bounded by the carry capacity.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let fit = (room_left / proto.weight).floor() as usize;
+            fit
+        }
+    };
+    if weight_cap == 0 {
         send_rendered(
             world,
             player,
@@ -4758,9 +4834,24 @@ pub(crate) fn cmd_buy(world: &mut World, player: Entity, args: &str) {
         );
         return;
     }
-    // Deduct coin, decrement stock (if finite), and spawn the item.
+    let coin_cap = usize::try_from(on_hand / price_copper).unwrap_or(usize::MAX);
+    let count = qty.min(stock_cap).min(weight_cap).min(coin_cap).min(100);
+    if count < qty {
+        let why = if count == stock_cap {
+            format!("{keeper_name} only has {count} of those.")
+        } else if count == weight_cap {
+            format!("You can only carry {count} of those.")
+        } else if count == coin_cap {
+            format!("You can only afford {count} of those.")
+        } else {
+            format!("You can only buy {count} at a time.")
+        };
+        send_msg(world, player, format!("{why}\r\n"));
+    }
+    let total = price_copper * i64::try_from(count).unwrap_or(1);
+    // Deduct coin, decrement stock (if finite), and spawn the items.
     if let Some(mut w) = world.get_mut::<Wealth>(player) {
-        w.0 = w.0.saturating_sub(price_copper);
+        w.0 = w.0.saturating_sub(total);
     }
     if offer.amount > 0
         && let Some(def) = world
@@ -4769,11 +4860,17 @@ pub(crate) fn cmd_buy(world: &mut World, player: Entity, args: &str) {
             .get_mut(&(keeper_marker.shop_zone_id, keeper_marker.shop_id))
         && let Some(off) = def.items.get_mut(idx)
     {
-        off.amount = (off.amount - 1).max(0);
+        off.amount = (off.amount - i32::try_from(count).unwrap_or(i32::MAX)).max(0);
     }
-    crate::item_spawn::spawn_item_from_proto(world, &proto, player);
-    let price_str = format_wealth(price_copper).unwrap_or_else(|| "free".to_string());
-    let item_name = proto.name.clone();
+    for _ in 0..count {
+        crate::item_spawn::spawn_item_from_proto(world, &proto, player);
+    }
+    let price_str = format_wealth(total).unwrap_or_else(|| "free".to_string());
+    let item_name = if count > 1 {
+        format!("{} (x{count})", proto.name)
+    } else {
+        proto.name.clone()
+    };
     send_rendered(
         world,
         player,
@@ -4786,6 +4883,18 @@ pub(crate) fn cmd_buy(world: &mut World, player: Entity, args: &str) {
         &[player],
         &format!("{player_name} buys {item_name}.\r\n"),
     );
+}
+
+/// Split a leading purchase count off `buy` arguments: `3 dagger` is
+/// `(3, "dagger")`; a lone number or a plain keyword is `(1, whole)`.
+fn parse_buy_quantity(arg: &str) -> (usize, &str) {
+    if let Some((first, rest)) = arg.split_once(char::is_whitespace)
+        && let Ok(n) = first.parse::<usize>()
+        && !rest.trim().is_empty()
+    {
+        return (n, rest.trim());
+    }
+    (1, arg)
 }
 
 /// `hire <#|name>`: hire a pet from a pet-shop keeper. Spawns a fresh
@@ -5112,14 +5221,15 @@ pub(crate) fn cmd_value(world: &mut World, player: Entity, args: &str) {
             .cloned()
     });
     let item_name = name_of(world, target);
+    let item_cap = crate::commands::cap_sentence_start(&item_name);
     let mut msg = if let Some(p) = &proto {
         if let Some(parts) = format_wealth(i64::from(p.cost)) {
-            format!("{item_name} is worth {parts}.\r\n")
+            format!("{item_cap} is worth {parts}.\r\n")
         } else {
-            format!("{item_name} is worthless.\r\n")
+            format!("{item_cap} is worthless.\r\n")
         }
     } else {
-        format!("{item_name} has no proto data; treat as worthless.\r\n")
+        format!("{item_cap} has no proto data; treat as worthless.\r\n")
     };
     if let Some(p) = &proto {
         // Weight + level give the player the rest of the
@@ -6157,6 +6267,18 @@ inventory::submit! {
 /// `condition_label` `glance` does. Self target also surfaces raw
 /// HP / Stamina numbers; targets stay private (other players /
 /// mobs only get the descriptive band, no exact values).
+/// Re-conjugate a third-person condition phrase ("is dying", "has some
+/// scrapes", "looks fine") for "You": "are dying", "have some scrapes",
+/// "look fine".
+fn second_person_condition(cond: &str) -> String {
+    for (third, second) in [("is ", "are "), ("has ", "have "), ("looks ", "look ")] {
+        if let Some(rest) = cond.strip_prefix(third) {
+            return format!("{second}{rest}");
+        }
+    }
+    cond.to_string()
+}
+
 pub(crate) fn cmd_diagnose(world: &mut World, player: Entity, args: &str) {
     let target_word = args.trim();
     let (target, is_self) = if target_word.is_empty() {
@@ -6185,6 +6307,7 @@ pub(crate) fn cmd_diagnose(world: &mut World, player: Entity, args: &str) {
         .map_or("standing", |p| p.0.label());
     let mut out = String::from("\r\n");
     if is_self {
+        let cond = second_person_condition(cond);
         out.push_str(&format!("You diagnose yourself:\r\n  You {cond}.\r\n"));
         if let Some(hp) = world.get::<Health>(player).copied() {
             out.push_str(&format!("  HP: {} / {}\r\n", hp.hp, hp.max));
@@ -7982,7 +8105,23 @@ pub(crate) fn cmd_wake(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
     if arg.is_empty() {
         if world.get::<Posture>(player).map(|p| p.0) == Some(PostureKind::Sleeping) {
-            set_posture(world, player, PostureKind::Standing);
+            // Legacy do_wake: a magical sleep holds; otherwise you
+            // awaken and end up sitting, not standing.
+            if crate::effects::has_sleep_effect(world, player) {
+                send_to(world, player, "You can't wake up!\r\n");
+                return;
+            }
+            try_insert(world, player, Posture(PostureKind::Sitting));
+            send_to(world, player, "You awaken, and sit up.\r\n");
+            if let Some(located) = world.get::<Located>(player).copied() {
+                let name = name_of(world, player);
+                broadcast_room_except_players_rendered(
+                    world,
+                    located.0,
+                    &[player],
+                    &format!("{name} awakens.\r\n"),
+                );
+            }
         } else {
             send_to(world, player, "You aren't asleep.\r\n");
         }
@@ -8016,7 +8155,7 @@ pub(crate) fn cmd_wake(world: &mut World, player: Entity, args: &str) {
         );
         return;
     }
-    try_insert(world, target, Posture(PostureKind::Standing));
+    try_insert(world, target, Posture(PostureKind::Sitting));
     let player_name = name_of(world, player);
     send_rendered(world, player, &format!("You wake {target_name}.\r\n"));
     send_msg(world, target, format!("{player_name} wakes you up.\r\n"));
@@ -8949,8 +9088,8 @@ pub(crate) fn cmd_quest_flag(world: &mut World, player: Entity, _args: &str) {
         world,
         player,
         PlayerFlag::Quest,
-        "Quest mode enabled — you'll be flagged for quest-only zones once those land.",
-        "Quest mode disabled.",
+        "Okay, you are part of the Quest!",
+        "You are no longer part of the Quest.",
     );
 }
 
@@ -9008,6 +9147,12 @@ pub(crate) fn cmd_exits(world: &mut World, player: Entity, _args: &str) {
         send_to(world, player, "You are nowhere.\r\n");
         return;
     };
+    // Legacy do_exits: no light and no dark-vision means no destination
+    // names ("Too dark to tell."), same gate `look` uses.
+    if !crate::commands::gmcp::viewer_sees_room(world, player, located.0) {
+        send_to(world, player, "Too dark to tell.\r\n");
+        return;
+    }
     let Some(exits) = world.get::<Exits>(located.0).cloned() else {
         send_to(world, player, "\r\nNo exits.\r\n");
         return;
@@ -9092,6 +9237,45 @@ pub(crate) fn cmd_exits(world: &mut World, player: Entity, _args: &str) {
     send_to(world, player, out);
 }
 
+/// "The doors are locked" for the exit at `dir` (agreeing verb).
+pub(crate) fn door_sentence(
+    world: &World,
+    room: Entity,
+    dir: Direction,
+    state_word: &str,
+) -> String {
+    world
+        .get::<Exits>(room)
+        .and_then(|e| e.0.get(&dir).map(|ed| exit_state_sentence(ed, state_word)))
+        .unwrap_or_else(|| format!("The way is {state_word}"))
+}
+
+/// Lower-case object phrase for a door in action feedback ("the grate",
+/// "the doors"). A builder-set keyword reads as itself; a keyword-less
+/// exit falls back to "the door <dir>" (never "the way <dir>").
+pub(crate) fn door_phrase(world: &World, room: Entity, dir: Direction) -> String {
+    let ed = world.get::<Exits>(room).and_then(|e| e.0.get(&dir));
+    ed.filter(|ed| {
+        ed.keywords
+            .iter()
+            .any(|k| k.split_whitespace().next().is_some())
+    })
+    .map_or_else(
+        || format!("the door {}", direction_name(dir)),
+        |ed| exit_noun_phrase(ed).replacen("The", "the", 1),
+    )
+}
+
+/// "The doors are locked" / "The grate is closed": noun phrase plus a
+/// verb that agrees with a plural keyword ("doors", "gates").
+#[must_use]
+pub(crate) fn exit_state_sentence(ed: &mud_world::ExitData, state_word: &str) -> String {
+    let noun = exit_noun_phrase(ed);
+    let last = noun.rsplit(' ').next().unwrap_or("").to_ascii_lowercase();
+    let plural = last.ends_with('s') && !last.ends_with("ss") && !last.ends_with("us");
+    format!("{noun} {} {state_word}", if plural { "are" } else { "is" })
+}
+
 /// `unlock <direction>`: find a key item in inventory whose name or
 /// keyword matches the exit's `key` and flip Locked → Closed (still
 /// needs `open` afterward). Two-sided sync.
@@ -9159,29 +9343,20 @@ pub(crate) fn cmd_unlock(world: &mut World, player: Entity, args: &str) {
             // naming the key short-circuits the hunt. Players see only
             // that the door is locked, picking up the exit's keyword so
             // a curtain reads as a curtain.
-            let noun = world
-                .get::<Exits>(room)
-                .and_then(|e| e.0.get(&dir).map(exit_noun_phrase))
-                .unwrap_or_else(|| "The way".to_string());
-            send_msg(world, player, format!("{noun} is locked.\r\n"));
+            let line = door_sentence(world, room, dir, "locked");
+            send_msg(world, player, format!("{line}.\r\n"));
             return;
         }
     }
     flip_door_both_sides(world, room, dir, ExitState::Closed);
-    send_to(
-        world,
-        player,
-        format!("You unlock the way {}.\r\n", direction_name(dir)),
-    );
+    let door = door_phrase(world, room, dir);
+    send_to(world, player, format!("You unlock {door}.\r\n"));
     let player_name = name_of(world, player);
     broadcast_room_except_players_rendered(
         world,
         room,
         &[player],
-        &format!(
-            "{player_name} unlocks the door {}.\r\n",
-            direction_name(dir)
-        ),
+        &format!("{player_name} unlocks {door}.\r\n"),
     );
 }
 
@@ -9221,35 +9396,26 @@ pub(crate) fn cmd_open(world: &mut World, player: Entity, args: &str) {
     };
     match state {
         ExitState::Open => {
-            send_to(
-                world,
-                player,
-                format!("It's already open {}.\r\n", direction_name(dir)),
-            );
+            let line = door_sentence(world, room, dir, "already open");
+            send_to(world, player, format!("{line}.\r\n"));
             return;
         }
         ExitState::Locked => {
-            send_to(
-                world,
-                player,
-                format!("It's locked {}.\r\n", direction_name(dir)),
-            );
+            let line = door_sentence(world, room, dir, "locked");
+            send_to(world, player, format!("{line}.\r\n"));
             return;
         }
         ExitState::Closed => {}
     }
     flip_door_both_sides(world, room, dir, ExitState::Open);
-    send_to(
-        world,
-        player,
-        format!("You open the way {}.\r\n", direction_name(dir)),
-    );
+    let door = door_phrase(world, room, dir);
+    send_to(world, player, format!("You open {door}.\r\n"));
     let player_name = name_of(world, player);
     broadcast_room_except_players_rendered(
         world,
         room,
         &[player],
-        &format!("{player_name} opens the door {}.\r\n", direction_name(dir)),
+        &format!("{player_name} opens {door}.\r\n"),
     );
 }
 
@@ -9289,27 +9455,21 @@ pub(crate) fn cmd_close(world: &mut World, player: Entity, args: &str) {
     };
     match state {
         ExitState::Closed | ExitState::Locked => {
-            send_to(
-                world,
-                player,
-                format!("It's already closed {}.\r\n", direction_name(dir)),
-            );
+            let line = door_sentence(world, room, dir, "already closed");
+            send_to(world, player, format!("{line}.\r\n"));
             return;
         }
         ExitState::Open => {}
     }
     flip_door_both_sides(world, room, dir, ExitState::Closed);
-    send_to(
-        world,
-        player,
-        format!("You close the way {}.\r\n", direction_name(dir)),
-    );
+    let door = door_phrase(world, room, dir);
+    send_to(world, player, format!("You close {door}.\r\n"));
     let player_name = name_of(world, player);
     broadcast_room_except_players_rendered(
         world,
         room,
         &[player],
-        &format!("{player_name} closes the door {}.\r\n", direction_name(dir)),
+        &format!("{player_name} closes {door}.\r\n"),
     );
 }
 
@@ -9395,17 +9555,14 @@ pub(crate) fn cmd_lock(world: &mut World, player: Entity, args: &str) {
         return;
     }
     flip_door_both_sides(world, room, dir, ExitState::Locked);
-    send_to(
-        world,
-        player,
-        format!("You lock the way {}.\r\n", direction_name(dir)),
-    );
+    let door = door_phrase(world, room, dir);
+    send_to(world, player, format!("You lock {door}.\r\n"));
     let player_name = name_of(world, player);
     broadcast_room_except_players_rendered(
         world,
         room,
         &[player],
-        &format!("{player_name} locks the door {}.\r\n", direction_name(dir)),
+        &format!("{player_name} locks {door}.\r\n"),
     );
 }
 
@@ -10327,13 +10484,19 @@ pub(crate) fn cmd_inventory(world: &mut World, player: Entity, args: &str) {
         }
     } else if filter.is_empty() {
         format!(
-            "\r\n<b:cyan>You are carrying {} item(s):</>\r\n",
-            items.len()
+            "\r\n<b:cyan>You are carrying {} {}:</>\r\n",
+            items.len(),
+            if items.len() == 1 { "item" } else { "items" }
         )
     } else {
         format!(
-            "\r\n<b:cyan>{} item(s) match '{filter}':</>\r\n",
+            "\r\n<b:cyan>{} {} '{filter}':</>\r\n",
             items.len(),
+            if items.len() == 1 {
+                "item matches"
+            } else {
+                "items match"
+            }
         )
     };
     for (name, n) in &stacked {
@@ -10359,7 +10522,7 @@ pub(crate) fn cmd_inventory(world: &mut World, player: Entity, args: &str) {
                 (t.to_string(), "</>".to_string())
             });
         raw.push_str(&format!(
-            "\r\nTotal weight carried: {open}{weight:.1}{close} / {cap:.0} lbs.  ({open}{band}{close})\r\n",
+            "\r\nTotal weight carried (with worn gear): {open}{weight:.1}{close} / {cap:.0} lbs.  ({open}{band}{close})\r\n",
         ));
     }
     send_rendered(world, player, &raw);
@@ -10541,6 +10704,12 @@ pub(crate) fn cmd_put(world: &mut World, player: Entity, args: &str) {
 
 /// `give [N] <item> [to] <target>`.
 pub(crate) fn cmd_give(world: &mut World, player: Entity, args: &str) {
+    // `give 5 gold bob`, `give 2 silver 3 copper to bob` (legacy
+    // `parse_money`): coins are not carried items.
+    if let Some((copper, rest)) = parse_coin_amounts(args.trim()) {
+        give_coins(world, player, copper, rest);
+        return;
+    }
     let (count, rest) = parse_count_prefix(args.trim());
     let Some(n) = count else {
         give_plain(world, player, rest);
@@ -10548,6 +10717,120 @@ pub(crate) fn cmd_give(world: &mut World, player: Entity, args: &str) {
     };
     let (item_word, _) = split_give_args(rest).unwrap_or((rest, ""));
     repeat_carried(world, player, item_word, n, |w, p| give_plain(w, p, rest));
+}
+
+/// Leading run of `<N> <platinum|gold|silver|copper>` pairs (legacy
+/// `parse_money`; any non-empty prefix of a coin name counts). Returns the
+/// total in copper and the remaining text, or `None` when the arguments do
+/// not start with a coin amount.
+fn parse_coin_amounts(args: &str) -> Option<(i64, &str)> {
+    let mut rest = args.trim_start();
+    let mut total: i64 = 0;
+    let mut found = false;
+    loop {
+        let Some((num, after_num)) = rest.split_once(char::is_whitespace) else {
+            break;
+        };
+        let Ok(n) = num.parse::<i64>() else {
+            break;
+        };
+        let after_num = after_num.trim_start();
+        let (unit, after_unit) = after_num
+            .split_once(char::is_whitespace)
+            .unwrap_or((after_num, ""));
+        let unit = unit.to_ascii_lowercase();
+        let scale = if unit.is_empty() {
+            None
+        } else {
+            [
+                (1000_i64, "platinum"),
+                (100, "gold"),
+                (10, "silver"),
+                (1, "copper"),
+            ]
+            .iter()
+            .find(|(_, name)| name.starts_with(&unit))
+            .map(|(scale, _)| *scale)
+        };
+        let Some(scale) = scale else {
+            break;
+        };
+        total = total.saturating_add(n.saturating_mul(scale));
+        found = true;
+        rest = after_unit.trim_start();
+    }
+    found.then_some((total, rest))
+}
+
+/// `give <coins> [to] <target>`: hand coin to another character. Mobs go
+/// through `bribe` (so BRIBE triggers fire); players get the legacy
+/// `perform_give_money` messages. Staff keep their purse, as in legacy.
+fn give_coins(world: &mut World, player: Entity, copper: i64, rest: &str) {
+    let rest = rest.trim();
+    let target_word = rest.strip_prefix("to ").map_or(rest, str::trim).trim();
+    if target_word.is_empty() {
+        send_to(world, player, "Give it to whom?\r\n");
+        return;
+    }
+    if copper <= 0 {
+        send_to(
+            world,
+            player,
+            "Heh heh heh ... we are jolly funny today, eh?\r\n",
+        );
+        return;
+    }
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let Some(target) = find_actor_in_room(world, target_word, located.0, player) else {
+        send_rendered(
+            world,
+            player,
+            &format!("You don't see '{target_word}' here.\r\n"),
+        );
+        return;
+    };
+    if target == player {
+        send_to(world, player, "What's the point of that?\r\n");
+        return;
+    }
+    let staff = crate::commands::is_staff(world, player);
+    if !staff && world.get::<Wealth>(player).map_or(0, |w| w.0) < copper {
+        send_to(world, player, "You don't have that many coins!\r\n");
+        return;
+    }
+    if world.get::<Mob>(target).is_some() {
+        cmd_bribe(world, player, &format!("{copper} {target_word}"));
+        return;
+    }
+    if !staff && let Some(mut w) = world.get_mut::<Wealth>(player) {
+        w.0 -= copper;
+    }
+    if let Some(mut w) = world.get_mut::<Wealth>(target) {
+        w.0 += copper;
+    } else {
+        world.entity_mut(target).insert(Wealth(copper));
+    }
+    let target_name = name_of(world, target);
+    let player_name = name_of(world, player);
+    let amount = format_amount(copper);
+    send_rendered(
+        world,
+        player,
+        &format!("You give {target_name} {amount}.\r\n"),
+    );
+    send_msg(
+        world,
+        target,
+        format!("{player_name} gives you {amount}.\r\n"),
+    );
+    broadcast_room_except_rendered(
+        world,
+        located.0,
+        &[player, target],
+        &format!("{player_name} gives some coins to {target_name}.\r\n"),
+    );
 }
 
 /// Split `put` arguments into `(item, container)`.
@@ -11089,6 +11372,7 @@ fn get_all_from_floor(world: &mut World, player: Entity, room: Entity, filter: &
     let mut running = carried_weight(world, player);
     let mut moved = 0usize;
     let mut skipped = 0usize;
+    let mut blocked = 0usize;
     let bypass_encumbrance = crate::commands::is_staff(world, player);
     for (item, item_name) in &items {
         if let Some(amount) = take_loose_coins(world, player, *item) {
@@ -11110,11 +11394,13 @@ fn get_all_from_floor(world: &mut World, player: Entity, room: Entity, filter: &
         // singular `get <item>` path surfaces the message. Staff
         // bypass mirrors the singular path: builders sometimes
         // need to relocate fixtures via a `loadobj`-and-`get`
-        // chain. (No "blocked" counter line; sweeps are common
-        // and a tail-count would spam.)
+        // chain. (No per-item line; sweeps are common and a line per
+        // fixture would spam. A sweep that takes nothing at all gets one
+        // summary line below.)
         if !bypass_encumbrance
             && has_restriction(world, *item, mud_db::enums::ObjectRestriction::NoTake)
         {
+            blocked += 1;
             continue;
         }
         let w = item_weight(world, *item);
@@ -11133,6 +11419,18 @@ fn get_all_from_floor(world: &mut World, player: Entity, room: Entity, filter: &
             bump_collect_quest_progress(world, player, key.zone, key.id);
         }
         moved += 1;
+    }
+    if moved == 0 && skipped == 0 && blocked > 0 {
+        // Every candidate was fixed in place: never answer with silence.
+        send_to(
+            world,
+            player,
+            if needle.is_empty() {
+                "You can't take that!\r\n".to_string()
+            } else {
+                format!("You can't take anything matching '{filter}'.\r\n")
+            },
+        );
     }
     if moved > 0 {
         let suffix = if moved == 1 { "" } else { "s" };
@@ -12878,18 +13176,6 @@ pub(crate) fn cmd_recite(world: &mut World, player: Entity, args: &str) {
     );
 }
 
-pub(crate) fn cmd_wave(world: &mut World, player: Entity, args: &str) {
-    invoke_object_abilities(
-        world,
-        player,
-        args,
-        mud_db::enums::ObjectType::Wand,
-        "wave",
-        "You wave",
-        false,
-    );
-}
-
 pub(crate) fn cmd_tap(world: &mut World, player: Entity, args: &str) {
     invoke_object_abilities(
         world,
@@ -13216,11 +13502,9 @@ pub(crate) fn cmd_equipment(world: &mut World, player: Entity, _args: &str) {
     for (slot, name, weight) in &by_slot {
         // Slot label dimmed so the eye lands on the item name.
         // Weight in parentheses also dimmed — supplemental data.
-        let weight_label = if *weight > 0.0 {
-            format!(" <dim>({weight:.1} lbs)</>")
-        } else {
-            String::new()
-        };
+        // Every row carries one, even a weightless item, so the column
+        // reads uniformly.
+        let weight_label = format!(" <dim>({weight:.1} lbs)</>");
         out.push_str(&format!(
             "  <cyan>{:>14}</>: {}{}\r\n",
             slot.label(),
@@ -13535,7 +13819,15 @@ pub(crate) fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
     let mut out = if active.is_empty() {
         "\r\nYou have no active effects.\r\n".to_string()
     } else {
-        format!("\r\n<b:cyan>{} active effect(s):</>\r\n", active.len())
+        format!(
+            "\r\n<b:cyan>{} active {}:</>\r\n",
+            active.len(),
+            if active.len() == 1 {
+                "effect"
+            } else {
+                "effects"
+            }
+        )
     };
     for row in active {
         let ActiveEffectRow {
@@ -13597,9 +13889,42 @@ pub(crate) fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
 /// category. Unlocked ones show their title + description; locked
 /// (and not hidden) ones show a placeholder; hidden ones are
 /// suppressed until unlocked.
+/// Rows per page for long listings (`achievements`, `board`).
+pub(crate) const PAGE_ROWS: usize = 25;
+
+/// Split a trailing `page <N>` off `args`: `"combat page 2"` is
+/// `("combat", 2)`, `"page 3"` is `("", 3)`, anything else is `(args, 1)`.
+/// Page numbers are 1-based; `page 0` reads as page 1.
+pub(crate) fn split_page_arg(args: &str) -> (String, usize) {
+    let words: Vec<&str> = args.split_whitespace().collect();
+    if let [rest @ .., kw, n] = words.as_slice()
+        && kw.eq_ignore_ascii_case("page")
+        && let Ok(n) = n.parse::<usize>()
+    {
+        return (rest.join(" "), n.max(1));
+    }
+    (words.join(" "), 1)
+}
+
+/// Row range for 1-based `page` of `total` rows at `per` rows a page, plus
+/// the page count. `Err(pages)` when `page` is past the end.
+pub(crate) fn page_window(
+    total: usize,
+    page: usize,
+    per: usize,
+) -> Result<(usize, usize, usize), usize> {
+    let pages = total.div_ceil(per).max(1);
+    if page > pages {
+        return Err(pages);
+    }
+    let start = (page - 1) * per;
+    Ok((start, total.min(start + per), pages))
+}
+
 pub(crate) fn cmd_achievements(world: &mut World, player: Entity, args: &str) {
     use mud_db::enums::AchievementCategory;
-    let filter = args.trim().to_ascii_lowercase();
+    let (filter, page) = split_page_arg(args);
+    let filter = filter.to_ascii_lowercase();
     let unlocked: std::collections::HashMap<i32, chrono::DateTime<chrono::Utc>> = world
         .get::<mud_world::CharacterAchievements>(player)
         .map(|c| c.unlocked.clone())
@@ -13625,7 +13950,7 @@ pub(crate) fn cmd_achievements(world: &mut World, player: Entity, args: &str) {
             return;
         }
     };
-    let mut out = String::from("\r\nAchievements:\r\n");
+    let mut rows: Vec<String> = Vec::new();
     let mut current_cat: Option<AchievementCategory> = None;
     let mut shown = 0;
     let total_unlocked = unlocked.len();
@@ -13642,24 +13967,47 @@ pub(crate) fn cmd_achievements(world: &mut World, player: Entity, args: &str) {
         }
         if current_cat != Some(def.category) {
             current_cat = Some(def.category);
-            out.push_str(&format!("\r\n  --- {} ---\r\n", def.category.label()));
+            rows.push(format!("\r\n  --- {} ---\r\n", def.category.label()));
         }
         let mark = if is_unlocked { "[*]" } else { "[ ]" };
         let when = unlocked_at
             .map(|t| format!("  <dim>(unlocked {})</>", t.format("%Y-%m-%d")))
             .unwrap_or_default();
-        out.push_str(&format!(
+        rows.push(format!(
             "  {mark} {} — {}{when}\r\n",
             def.title, def.description,
         ));
         shown += 1;
     }
+    let total_defs = catalog.by_id.len();
+    let mut out = String::from("\r\nAchievements:\r\n");
     if shown == 0 {
         out.push_str("  (none visible)\r\n");
+    } else {
+        let (start, end, pages) = match page_window(rows.len(), page, PAGE_ROWS) {
+            Ok(w) => w,
+            Err(pages) => {
+                send_to(
+                    world,
+                    player,
+                    format!("There are only {pages} page(s) of achievements.\r\n"),
+                );
+                return;
+            }
+        };
+        for row in &rows[start..end] {
+            out.push_str(row);
+        }
+        if pages > 1 {
+            out.push_str(&format!("\r\n  <dim>(page {page} of {pages}"));
+            if page < pages {
+                out.push_str(&format!("; add 'page {}' for more", page + 1));
+            }
+            out.push_str(")</>\r\n");
+        }
     }
     out.push_str(&format!(
-        "\r\n{total_unlocked} unlocked of {} total.\r\n",
-        catalog.by_id.len()
+        "\r\n{total_unlocked} unlocked of {total_defs} total.\r\n"
     ));
     send_to(world, player, out);
 }
@@ -13805,7 +14153,7 @@ pub(crate) fn render_level_report(r: &LevelReport<'_>) -> String {
         out.push_str(crate::commands::MAX_MORTAL_EXP_MESSAGE);
         out.push_str("\r\n");
     } else if let Some(p) = r.progress {
-        let to_go = (p.next_level_xp - p.current_xp).max(0);
+        let to_go = xp_to_go(&p);
         out.push_str(&format!(
             "Progress: {} {}%  ({to_go} XP to level {})\r\n",
             crate::commands::progress_bar(p.percent),
@@ -14929,23 +15277,18 @@ pub(crate) fn render_identify_block(
         return None;
     };
     let mode = color_mode_for(world, player);
-    // Header — boxed item title with type badge. Width chosen to
+    // Header — item title over a rule. Width chosen to
     // match common 80-column game windows; the strip-color length
     // matters for the corner alignment, not the rendered width.
     let title_name = cap_sentence_start(&p.name);
     let plain_name = render_color_tags(&title_name, ColorMode::Strip);
-    let title_inner = format!(" {plain_name} ");
-    let bar_width = title_inner.chars().count().max(40);
-    let bar = "─".repeat(bar_width);
+    // Plain ASCII header like every other readout (no box art).
+    let bar = "-".repeat(plain_name.chars().count().max(40));
     let mut out = String::new();
-    out.push_str(&format!("\r\n<b:cyan>╭{bar}╮</>\r\n"));
-    let pad = bar_width.saturating_sub(title_inner.chars().count());
     out.push_str(&format!(
-        "<b:cyan>│</> <b:white>{}</><b:cyan>{}│</>\r\n",
+        "\r\n<b:white>{}</>\r\n<b:cyan>{bar}</>\r\n",
         render_color_tags(&title_name, mode),
-        " ".repeat(pad + 1),
     ));
-    out.push_str(&format!("<b:cyan>╰{bar}╯</>\r\n"));
 
     // Properties block — basics that apply to almost every item.
     out.push_str("  <b:cyan>Properties</>\r\n");
@@ -16804,5 +17147,484 @@ mod prompt_template_tests {
         assert!(prompt_templates(&world).is_empty(), "no row");
         world.insert_resource(config("not json"));
         assert!(prompt_templates(&world).is_empty(), "malformed row");
+    }
+}
+
+/// Playtest 2026-10-11 fixes that live in this file: door wording, dark
+/// `exits`, `get all`, `wake`, command categories, plurals, paging and the
+/// item readouts.
+#[cfg(test)]
+mod playtest_2026_10_11_tests {
+    use std::collections::HashMap;
+
+    use bevy_ecs::prelude::*;
+    use mud_db::enums::{Direction, ExitState, ObjectRestriction, ObjectType, Sector};
+    use mud_world::{
+        Exits, Health, Item, Keywords, Located, Named, ObjectPrototypes, ObjectRestrictions,
+        Posture, PostureKind, Room, RoomSector, WorldKey,
+    };
+
+    use super::{
+        PAGE_ROWS, cmd_achievements, cmd_diagnose, cmd_equipment, cmd_get, cmd_inventory, cmd_look,
+        cmd_wake, exit_state_sentence, page_window, parse_buy_quantity, parse_coin_amounts,
+        second_person_condition, split_page_arg,
+    };
+    use crate::commands::dispatch;
+    use crate::commands::test_support::{Rx, drain, object_proto, player_in};
+
+    fn exit(to: Entity, state: ExitState, keywords: &[&str]) -> mud_world::ExitData {
+        mud_world::ExitData {
+            to: Some(to),
+            state,
+            key: None,
+            description: None,
+            keywords: keywords.iter().map(|k| (*k).to_string()).collect(),
+            is_hidden: false,
+            is_pickproof: false,
+            is_bashable: false,
+            hit_points: None,
+        }
+    }
+
+    /// Give a player the account `dispatch` needs to find commands.
+    fn with_account(world: &mut World, p: Entity) {
+        world.entity_mut(p).insert(mud_world::Account {
+            user_id: String::new(),
+            character_id: String::new(),
+            role: mud_db::enums::UserRole::Player,
+            account_role: mud_db::enums::UserRole::Player,
+            perms: vec![],
+        });
+    }
+
+    /// Rooms A and B joined by a north door; a player in A.
+    fn door_world(state: ExitState, keywords: &[&str]) -> (World, Entity, Rx) {
+        let mut world = World::new();
+        world.insert_resource(ObjectPrototypes::default());
+        world.insert_resource(mud_world::RaceCatalog::default());
+        let a = world.spawn((Room, Exits::default())).id();
+        let b = world.spawn((Room, Exits::default())).id();
+        world.entity_mut(a).insert(Exits(HashMap::from([(
+            Direction::North,
+            exit(b, state, keywords),
+        )])));
+        world.entity_mut(b).insert(Exits(HashMap::from([(
+            Direction::South,
+            exit(a, state, keywords),
+        )])));
+        let (p, rx) = player_in(&mut world, a);
+        with_account(&mut world, p);
+        (world, p, rx)
+    }
+
+    // #18 / #19: door messages use the door's own noun and agree in number.
+
+    #[test]
+    fn exit_sentence_agrees_with_plural_keywords() {
+        let plural = exit(Entity::PLACEHOLDER, ExitState::Locked, &["doors"]);
+        assert_eq!(
+            exit_state_sentence(&plural, "locked"),
+            "The doors are locked"
+        );
+        let single = exit(Entity::PLACEHOLDER, ExitState::Locked, &["grate iron"]);
+        assert_eq!(
+            exit_state_sentence(&single, "closed"),
+            "The grate is closed"
+        );
+        let glass = exit(Entity::PLACEHOLDER, ExitState::Closed, &["glass"]);
+        assert_eq!(exit_state_sentence(&glass, "closed"), "The glass is closed");
+        let bare = exit(Entity::PLACEHOLDER, ExitState::Closed, &[]);
+        assert_eq!(exit_state_sentence(&bare, "closed"), "The way is closed");
+    }
+
+    #[test]
+    fn open_and_close_name_the_door_not_the_way() {
+        let (mut world, p, mut rx) = door_world(ExitState::Closed, &["grate"]);
+        dispatch(&mut world, p, "open north");
+        let out = drain(&mut rx);
+        assert!(out.contains("You open the grate."), "{out}");
+        assert!(!out.contains("the way"), "{out}");
+        dispatch(&mut world, p, "open north");
+        assert!(drain(&mut rx).contains("The grate is already open."));
+        dispatch(&mut world, p, "close north");
+        assert!(drain(&mut rx).contains("You close the grate."));
+        dispatch(&mut world, p, "close north");
+        assert!(drain(&mut rx).contains("The grate is already closed."));
+    }
+
+    #[test]
+    fn keywordless_door_falls_back_to_the_door_with_direction() {
+        let (mut world, p, mut rx) = door_world(ExitState::Closed, &[]);
+        dispatch(&mut world, p, "open north");
+        let out = drain(&mut rx);
+        assert!(out.contains("You open the door north."), "{out}");
+    }
+
+    #[test]
+    fn locked_plural_door_agrees_when_opening_and_walking() {
+        let (mut world, p, mut rx) = door_world(ExitState::Locked, &["doors"]);
+        for line in ["open north", "north"] {
+            dispatch(&mut world, p, line);
+            let out = drain(&mut rx);
+            assert!(out.contains("The doors are locked."), "{line}: {out}");
+            assert!(!out.contains("is locked"), "{line}: {out}");
+        }
+    }
+
+    // #20: `exits` in the dark.
+
+    #[test]
+    fn exits_in_a_dark_room_hides_destinations() {
+        let (mut world, p, mut rx) = door_world(ExitState::Open, &[]);
+        let room = world.get::<Located>(p).unwrap().0;
+        world
+            .entity_mut(room)
+            .insert(mud_world::RoomMagicalDarkness);
+        dispatch(&mut world, p, "exits");
+        let out = drain(&mut rx);
+        assert!(out.contains("Too dark to tell."), "{out}");
+        assert!(!out.contains("north"), "{out}");
+    }
+
+    // #21: `get all` always answers.
+
+    fn fixture(world: &mut World, room: Entity, name: &str, kw: &str) -> Entity {
+        world
+            .spawn((
+                Item,
+                Named { name: name.into() },
+                Keywords(vec![kw.into()]),
+                Located(room),
+                ObjectRestrictions(vec![ObjectRestriction::NoTake]),
+            ))
+            .id()
+    }
+
+    #[test]
+    fn get_all_with_only_fixtures_says_so() {
+        let mut world = World::new();
+        world.insert_resource(ObjectPrototypes::default());
+        let room = world.spawn((Room, RoomSector(Sector::Field))).id();
+        let (p, mut rx) = player_in(&mut world, room);
+        fixture(&mut world, room, "a marble fountain", "fountain");
+        cmd_get(&mut world, p, "all");
+        let out = drain(&mut rx);
+        assert!(out.contains("You can't take that!"), "{out}");
+        cmd_get(&mut world, p, "all.fountain");
+        let out = drain(&mut rx);
+        assert!(
+            out.contains("You can't take anything matching 'fountain'."),
+            "{out}"
+        );
+    }
+
+    // #22: wake.
+
+    #[test]
+    fn wake_ends_sitting_with_the_legacy_line() {
+        let mut world = World::new();
+        let room = world.spawn((Room, RoomSector(Sector::Field))).id();
+        let (p, mut rx) = player_in(&mut world, room);
+        world.entity_mut(p).insert(Posture(PostureKind::Sleeping));
+        cmd_wake(&mut world, p, "");
+        let out = drain(&mut rx);
+        assert!(out.contains("You awaken, and sit up."), "{out}");
+        assert_eq!(
+            world.get::<Posture>(p).map(|x| x.0),
+            Some(PostureKind::Sitting)
+        );
+        cmd_wake(&mut world, p, "");
+        assert!(drain(&mut rx).contains("You aren't asleep."));
+    }
+
+    // #23 / #35: command table.
+
+    fn command(name: &str) -> Option<&'static crate::commands::Command> {
+        crate::commands::all_commands().find(|c| c.names.contains(&name))
+    }
+
+    #[test]
+    fn wave_is_left_to_the_social_and_wands_use_use() {
+        assert!(command("wave").is_none(), "wave must not shadow the social");
+        assert!(command("use").is_some());
+    }
+
+    #[test]
+    fn posture_commands_are_not_filed_under_settings() {
+        use crate::commands::Category;
+        for name in ["rest", "sit", "stand", "sleep", "wake", "kneel"] {
+            let c = command(name).unwrap_or_else(|| panic!("no {name} command"));
+            assert_eq!(c.category, Category::Movement, "{name}");
+        }
+    }
+
+    // #24: capitalised sentence starts.
+
+    #[test]
+    fn value_line_starts_with_a_capital() {
+        let mut world = World::new();
+        let mut protos = ObjectPrototypes::default();
+        let mut claymore = object_proto(30, 7, ObjectType::Weapon);
+        claymore.name = "a claymore".into();
+        claymore.cost = 800;
+        protos.by_key.insert((30, 7), claymore);
+        world.insert_resource(protos);
+        let room = world.spawn((Room, RoomSector(Sector::Field))).id();
+        let (p, mut rx) = player_in(&mut world, room);
+        with_account(&mut world, p);
+        world.spawn((
+            Item,
+            Named {
+                name: "a claymore".into(),
+            },
+            Keywords(vec!["claymore".into()]),
+            Located(room),
+            WorldKey { zone: 30, id: 7 },
+        ));
+        dispatch(&mut world, p, "value claymore");
+        let out = drain(&mut rx);
+        assert!(out.contains("A claymore is worth"), "{out}");
+    }
+
+    // #26: grammar.
+
+    #[test]
+    fn diagnose_conjugates_for_you() {
+        assert_eq!(
+            second_person_condition("has some scrapes"),
+            "have some scrapes"
+        );
+        assert_eq!(second_person_condition("is dying"), "are dying");
+        assert_eq!(second_person_condition("looks fine"), "look fine");
+        let mut world = World::new();
+        let room = world.spawn((Room, RoomSector(Sector::Field))).id();
+        let (p, mut rx) = player_in(&mut world, room);
+        world.entity_mut(p).insert(Health { hp: 70, max: 100 });
+        cmd_diagnose(&mut world, p, "");
+        let out = drain(&mut rx);
+        assert!(out.contains("You have some scrapes."), "{out}");
+        assert!(!out.contains("You has"), "{out}");
+    }
+
+    #[test]
+    fn inventory_count_is_singular_for_one_item() {
+        let mut world = World::new();
+        world.insert_resource(ObjectPrototypes::default());
+        let room = world.spawn((Room, RoomSector(Sector::Field))).id();
+        let (p, mut rx) = player_in(&mut world, room);
+        world.spawn((
+            Item,
+            Named {
+                name: "a sword".into(),
+            },
+            Keywords(vec!["sword".into()]),
+            Located(p),
+        ));
+        cmd_inventory(&mut world, p, "");
+        let out = drain(&mut rx);
+        assert!(out.contains("You are carrying 1 item:"), "{out}");
+        world.spawn((
+            Item,
+            Named {
+                name: "a dagger".into(),
+            },
+            Keywords(vec!["dagger".into()]),
+            Located(p),
+        ));
+        cmd_inventory(&mut world, p, "");
+        assert!(drain(&mut rx).contains("You are carrying 2 items:"));
+    }
+
+    // #27: no weight line for fixtures.
+
+    #[test]
+    fn looking_at_a_fixture_shows_no_weight() {
+        let mut world = World::new();
+        let mut protos = ObjectPrototypes::default();
+        let mut stone = object_proto(30, 6, ObjectType::Fountain);
+        stone.name = "a marble fountain".into();
+        stone.weight = 2_147_483_648.0;
+        protos.by_key.insert((30, 6), stone);
+        let mut rock = object_proto(30, 8, ObjectType::Other);
+        rock.name = "a rock".into();
+        rock.weight = 5.0;
+        protos.by_key.insert((30, 8), rock);
+        world.insert_resource(protos);
+        let room = world.spawn((Room, RoomSector(Sector::Field))).id();
+        let (p, mut rx) = player_in(&mut world, room);
+        let fountain = fixture(&mut world, room, "a marble fountain", "fountain");
+        world
+            .entity_mut(fountain)
+            .insert(WorldKey { zone: 30, id: 6 });
+        world.spawn((
+            Item,
+            Named {
+                name: "a rock".into(),
+            },
+            Keywords(vec!["rock".into()]),
+            Located(room),
+            WorldKey { zone: 30, id: 8 },
+        ));
+        cmd_look(&mut world, p, "fountain");
+        let out = drain(&mut rx);
+        assert!(!out.contains("weighs"), "{out}");
+        cmd_look(&mut world, p, "rock");
+        assert!(drain(&mut rx).contains("It weighs about"));
+    }
+
+    // #29 helpers / #30 parsing.
+
+    #[test]
+    fn buy_quantity_needs_an_item_word() {
+        assert_eq!(parse_buy_quantity("3 dagger"), (3, "dagger"));
+        assert_eq!(parse_buy_quantity("3"), (1, "3"));
+        assert_eq!(parse_buy_quantity("dagger"), (1, "dagger"));
+        assert_eq!(
+            parse_buy_quantity("2 leather water skin"),
+            (2, "leather water skin")
+        );
+    }
+
+    #[test]
+    fn coin_amounts_parse_like_legacy_parse_money() {
+        assert_eq!(parse_coin_amounts("5 gold bob"), Some((500, "bob")));
+        assert_eq!(
+            parse_coin_amounts("2 silver 3 copper to bob"),
+            Some((23, "to bob"))
+        );
+        assert_eq!(parse_coin_amounts("1 platinum bob"), Some((1000, "bob")));
+        assert_eq!(parse_coin_amounts("3 dagger bob"), None);
+        assert_eq!(parse_coin_amounts("sword bob"), None);
+    }
+
+    // #37: paging.
+
+    #[test]
+    fn page_argument_is_split_off() {
+        assert_eq!(split_page_arg("combat page 2"), ("combat".to_string(), 2));
+        assert_eq!(split_page_arg("page 3"), (String::new(), 3));
+        assert_eq!(split_page_arg("combat"), ("combat".to_string(), 1));
+        assert_eq!(split_page_arg("page 0"), (String::new(), 1));
+    }
+
+    #[test]
+    fn page_window_bounds_and_overflow() {
+        assert_eq!(page_window(60, 1, 25), Ok((0, 25, 3)));
+        assert_eq!(page_window(60, 3, 25), Ok((50, 60, 3)));
+        assert_eq!(page_window(60, 4, 25), Err(3));
+        assert_eq!(page_window(0, 1, 25), Ok((0, 0, 1)));
+    }
+
+    #[test]
+    fn achievements_are_paged() {
+        let mut world = World::new();
+        let mut catalog = mud_world::AchievementCatalog::default();
+        for id in 1..=60 {
+            let def = mud_world::AchievementDef {
+                id,
+                code: format!("walk_{id}"),
+                title: format!("Walked: Zone {id:02}"),
+                description: "Visit it.".into(),
+                category: mud_db::enums::AchievementCategory::Exploration,
+                hidden: false,
+                sort_order: id,
+            };
+            catalog.by_id.insert(id, def.clone());
+            catalog.by_code.insert(def.code.clone(), def);
+        }
+        world.insert_resource(catalog);
+        let room = world.spawn((Room, RoomSector(Sector::Field))).id();
+        let (p, mut rx) = player_in(&mut world, room);
+        cmd_achievements(&mut world, p, "");
+        let first = drain(&mut rx);
+        assert!(first.contains("Zone 01"), "{first}");
+        assert!(!first.contains("Zone 40"), "{first}");
+        assert!(first.contains("add 'page 2' for more"), "{first}");
+        assert!(first.matches("Walked:").count() <= PAGE_ROWS, "{first}");
+        cmd_achievements(&mut world, p, "page 3");
+        let last = drain(&mut rx);
+        assert!(last.contains("Zone 60"), "{last}");
+        cmd_achievements(&mut world, p, "page 9");
+        assert!(drain(&mut rx).contains("only 3 page(s)"));
+    }
+
+    #[test]
+    fn board_listing_shows_one_page_with_a_footer() {
+        use crate::commands::boards::render_board_listing;
+        let messages: Vec<mud_db::boards::BoardMessage> = (1..=60)
+            .map(|i| mud_db::boards::BoardMessage {
+                id: i,
+                board_id: 1,
+                poster: "Strider".into(),
+                poster_level: 50,
+                posted_at: chrono::NaiveDate::from_ymd_opt(2026, 10, 11)
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap(),
+                subject: format!("Subject {i:02}"),
+                content: String::new(),
+                sticky: false,
+            })
+            .collect();
+        let p1 = render_board_listing("Mortal board", &messages, 1, "hint", "board page");
+        assert!(
+            p1.contains("Subject 01") && !p1.contains("Subject 26"),
+            "{p1}"
+        );
+        assert!(
+            p1.contains("(page 1 of 3; 'board page 2' for more)"),
+            "{p1}"
+        );
+        let p3 = render_board_listing("Mortal board", &messages, 3, "hint", "board page");
+        assert!(
+            p3.contains("Subject 60") && p3.contains("(page 3 of 3)"),
+            "{p3}"
+        );
+        let past = render_board_listing("Mortal board", &messages, 9, "hint", "board page");
+        assert!(past.contains("only has 3 page(s)"), "{past}");
+    }
+
+    // #38: no stub text.
+
+    #[test]
+    fn quest_toggle_uses_the_legacy_wording() {
+        let mut world = World::new();
+        let room = world.spawn((Room, RoomSector(Sector::Field))).id();
+        let (p, mut rx) = player_in(&mut world, room);
+        with_account(&mut world, p);
+        world
+            .entity_mut(p)
+            .insert(mud_world::PlayerFlags::default());
+        dispatch(&mut world, p, "quest");
+        let out = drain(&mut rx);
+        assert!(out.contains("Okay, you are part of the Quest!"), "{out}");
+        assert!(!out.contains("once those land"), "{out}");
+        dispatch(&mut world, p, "quest");
+        assert!(drain(&mut rx).contains("You are no longer part of the Quest."));
+    }
+
+    // #32: uniform equipment rows.
+
+    #[test]
+    fn equipment_rows_all_show_a_weight() {
+        let mut world = World::new();
+        world.insert_resource(ObjectPrototypes::default());
+        let room = world.spawn((Room, RoomSector(Sector::Field))).id();
+        let (p, mut rx) = player_in(&mut world, room);
+        world.spawn((
+            Item,
+            Named {
+                name: "a felt hat".into(),
+            },
+            Keywords(vec!["hat".into()]),
+            Located(p),
+            mud_world::EquippedSlot(mud_world::Slot::Head),
+        ));
+        cmd_equipment(&mut world, p, "");
+        let out = drain(&mut rx);
+        assert!(
+            out.contains("a felt hat") && out.contains("(0.0 lbs)"),
+            "{out}"
+        );
     }
 }

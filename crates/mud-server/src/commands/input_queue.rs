@@ -47,7 +47,7 @@ const FLUSH_VERBS: &[&str] = &["abort", "flee", "disengage"];
 /// `casting::cast_lag_active`): the casts themselves and the item verbs
 /// that cast.
 const LAG_HELD_VERBS: &[&str] = &[
-    "cast", "chant", "perform", "recite", "quaff", "use", "zap", "wave", "tap", "play",
+    "cast", "chant", "perform", "recite", "quaff", "use", "zap", "tap", "play",
 ];
 
 /// Lines waiting for the player's cast lock to lift, oldest first.

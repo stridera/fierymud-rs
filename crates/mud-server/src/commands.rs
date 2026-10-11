@@ -12720,10 +12720,11 @@ pub(crate) fn look_direction(world: &mut World, player: Entity, dir: Direction) 
         // colors so the player learns one palette. Builder-set
         // keyword swaps in for "The way" so a curtain reads as a
         // curtain.
-        let noun = exit_noun_phrase(&ed);
         let line = match ed.state {
-            mud_db::enums::ExitState::Locked => format!("<red>{noun} is locked.</>"),
-            _ => format!("<yellow>{noun} is closed.</>"),
+            mud_db::enums::ExitState::Locked => {
+                format!("<red>{}.</>", info::exit_state_sentence(&ed, "locked"))
+            }
+            _ => format!("<yellow>{}.</>", info::exit_state_sentence(&ed, "closed")),
         };
         send_msg(
             world,
@@ -25107,12 +25108,15 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         return;
     }
     if exit.state != ExitState::Open && !crate::room_access::can_pass_closed_doors(world, player) {
-        let noun = exit_noun_phrase(&exit);
         let verb = match exit.state {
             ExitState::Locked => "locked",
             _ => "closed",
         };
-        send_msg(world, player, format!("{noun} is {verb}.\r\n"));
+        send_msg(
+            world,
+            player,
+            format!("{}.\r\n", info::exit_state_sentence(&exit, verb)),
+        );
         return;
     }
     let Some(target) = exit.to else {
@@ -25247,7 +25251,7 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
                 send_msg(
                     world,
                     f,
-                    format!("{} is {verb}.\r\n", exit_noun_phrase(&exit)),
+                    format!("{}.\r\n", info::exit_state_sentence(&exit, verb)),
                 );
                 continue;
             }

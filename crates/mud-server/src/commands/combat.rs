@@ -889,11 +889,8 @@ pub(crate) fn cmd_doorbash(world: &mut World, player: Entity, args: &str) {
         return;
     };
     if state == ExitState::Open {
-        send_to(
-            world,
-            player,
-            format!("It's already open {}.\r\n", direction_name(dir)),
-        );
+        let line = crate::commands::info::door_sentence(world, room, dir, "already open");
+        send_to(world, player, format!("{line}.\r\n"));
         return;
     }
     if !is_bashable {
@@ -901,8 +898,13 @@ pub(crate) fn cmd_doorbash(world: &mut World, player: Entity, args: &str) {
             world,
             player,
             format!(
-                "The way {} is sealed by something stronger than your shoulder.\r\n",
-                direction_name(dir)
+                "{}.\r\n",
+                crate::commands::info::door_sentence(
+                    world,
+                    room,
+                    dir,
+                    "sealed by something stronger than your shoulder"
+                )
             ),
         );
         return;
@@ -927,22 +929,17 @@ pub(crate) fn cmd_doorbash(world: &mut World, player: Entity, args: &str) {
         {
             ed.hit_points = Some(50);
         }
+        let door = crate::commands::info::door_phrase(world, room, dir);
         send_to(
             world,
             player,
-            format!(
-                "You bash open the way {} with a splintering crash!\r\n",
-                direction_name(dir),
-            ),
+            format!("You bash open {door} with a splintering crash!\r\n"),
         );
         broadcast_room_except_players_rendered(
             world,
             room,
             &[player],
-            &format!(
-                "{player_name} bashes the door {} wide open!\r\n",
-                direction_name(dir)
-            ),
+            &format!("{player_name} bashes {door} wide open!\r\n"),
         );
     } else {
         if let Some(mut exits) = world.get_mut::<Exits>(room)

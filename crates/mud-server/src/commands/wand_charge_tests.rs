@@ -77,10 +77,13 @@ fn a_reset_spawned_wand_has_the_prototypes_charges_and_runs_out() {
             .expect("the wand reached the player's pack")
     };
     assert_eq!(fx.world.get::<Charges>(wand).map(|c| c.0), Some(2));
+    fx.world
+        .entity_mut(wand)
+        .insert(mud_world::EquippedSlot(mud_world::Slot::Hold));
 
     let mut zap = |fx: &mut super::gmcp_tests::Fx| {
         let _ = drain(&mut rx);
-        dispatch(&mut fx.world, p, "wave wand caster");
+        dispatch(&mut fx.world, p, "use wand caster");
         for _ in 0..10 {
             crate::casting::casting_tick(&mut fx.world);
         }

@@ -305,3 +305,14 @@ fn score_and_prompt_use_the_spell_name_for_invisibility() {
         .clone();
     assert_eq!(super::info::effect_label(&world, &inst), "Invisibility");
 }
+
+#[test]
+fn effect_count_is_singular_for_one_effect() {
+    let (mut world, player, mut rx) = setup();
+    add_effect(&mut world, player, "cha", 750, Some(1));
+    let out = effects_output(&mut world, player, &mut rx);
+    assert!(out.contains("1 active effect:"), "{out}");
+    add_effect(&mut world, player, "wis", 750, None);
+    let out = effects_output(&mut world, player, &mut rx);
+    assert!(out.contains("2 active effects:"), "{out}");
+}
