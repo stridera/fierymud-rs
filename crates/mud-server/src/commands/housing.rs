@@ -305,25 +305,44 @@ async fn cmd_house_expand(world: &mut World, player: Entity, pool: &mud_db::sqlx
         );
         return;
     }
-    // Deduct sync — async DB error path will roll back if needed.
-    if let Some(mut w) = world.get_mut::<mud_world::Wealth>(player) {
-        w.0 -= cost;
-    }
     let new_name = format!("Empty Room #{}", summary.rooms.len());
     let new_desc = "An unfurnished new room. Use 'house describe <#> <text>' \
                     or 'house rename <#> <name>' to make it your own."
         .to_string();
-    // The insert runs off the tick; the copper stays deducted meanwhile (the
-    // player's own commands wait behind it) and is refunded if it fails.
-    let pool = pool.clone();
-    let (house_id, foyer_id) = (summary.house_id, foyer.id);
-    let (name, desc) = (new_name.clone(), new_desc.clone());
-    let insert = async move {
-        mud_db::housing::add_room(&pool, house_id, foyer_id, "North", "South", &name, &desc)
-            .await
-            .map_err(|e| e.to_string())
+    let Some(character_id) = world.get::<Account>(player).map(|a| a.character_id.clone()) else {
+        send_to(world, player, "You aren't logged in as a character.\r\n");
+        return;
     };
-    off_tick::run(world, player, insert, move |world, player, result| {
+    // The copper and the room commit together, in the database, under the
+    // character's save-order turn; the in-memory wealth follows through the
+    // update channel while that turn is still held (see `charge_and_add_room`).
+    // Nothing is deducted here, so a job that never reports back (watchdog,
+    // dropped link) cannot lose copper or leave a room unpaid.
+    let (paid, paid_rx) = tokio::sync::oneshot::channel();
+    let charge = RoomCharge {
+        pool: pool.clone(),
+        coordinator: world
+            .get_resource::<crate::autosave::SaveCoordinator>()
+            .cloned()
+            .unwrap_or_default(),
+        update_tx: world
+            .get_resource::<crate::commands::PlayerUpdateTx>()
+            .map(|t| t.0.clone()),
+        character_id,
+        cost,
+        wealth_after: on_hand - cost,
+        house_id: summary.house_id,
+        from_room_id: foyer.id,
+        name: new_name.clone(),
+        description: new_desc.clone(),
+    };
+    charge_and_add_room(charge, paid);
+    let wait = async move {
+        paid_rx
+            .await
+            .unwrap_or_else(|_| Err("the expansion was interrupted".to_string()))
+    };
+    off_tick::run(world, player, wait, move |world, player, result| {
         finish_house_expand(
             world, player, &summary, foyer.id, cost, &new_name, &new_desc, result,
         );
@@ -331,8 +350,77 @@ async fn cmd_house_expand(world: &mut World, player: Entity, pool: &mud_db::sqlx
     .await;
 }
 
-/// The tick-side half of `house expand`: refund on failure, otherwise record
-/// the new room in the owner's `HouseSummary` and build it in the world.
+/// Everything the paid room insert needs, owned, for its spawned task.
+struct RoomCharge {
+    pool: mud_db::sqlx::PgPool,
+    coordinator: crate::autosave::SaveCoordinator,
+    update_tx: Option<tokio::sync::mpsc::Sender<crate::commands::PendingPlayerUpdate>>,
+    character_id: String,
+    cost: i64,
+    wealth_after: i64,
+    house_id: i32,
+    from_room_id: i32,
+    name: String,
+    description: String,
+}
+
+/// What a finished room charge reports: the new room's `(id, local_index)` and
+/// whether the charge already reached the in-memory wealth through the update
+/// channel, or is left for the finish step to apply.
+type RoomCharged = Result<((i32, i32), bool), String>;
+
+/// Insert the room and take the copper in one transaction, from a task that
+/// holds the character's write turn ([`SaveCoordinator::spawn_ordered`]). The
+/// task is not part of the command's job, so the job's watchdog cannot cut it
+/// off between the commit and what follows it.
+///
+/// Wealth is database-first money, like quest gold: after the commit, and
+/// still holding the turn, the charge is queued on the player-update channel.
+/// Every snapshot taken under the turn (save, quit, checkpoint) and every
+/// background one drains that channel first, so none can write the old
+/// balance back; snapshots taken earlier are made stale by
+/// `supersede_earlier_snapshots`.
+fn charge_and_add_room(c: RoomCharge, paid: tokio::sync::oneshot::Sender<RoomCharged>) {
+    let coordinator = c.coordinator.clone();
+    let character_id = c.character_id.clone();
+    coordinator.spawn_ordered(&character_id, move |mut ordered| async move {
+        let added = mud_db::housing::add_room_paid(
+            &c.pool,
+            &c.character_id,
+            c.wealth_after,
+            c.house_id,
+            c.from_room_id,
+            "North",
+            "South",
+            &c.name,
+            &c.description,
+        )
+        .await;
+        let reply = match added {
+            Ok(room) => {
+                let applied = match &c.update_tx {
+                    Some(tx) => tx
+                        .send(crate::commands::PendingPlayerUpdate::WealthDelta {
+                            character_id: c.character_id.clone(),
+                            amount: -c.cost,
+                        })
+                        .await
+                        .is_ok(),
+                    None => false,
+                };
+                ordered.supersede_earlier_snapshots();
+                Ok((room, applied))
+            }
+            Err(e) => Err(e.to_string()),
+        };
+        drop(ordered);
+        let _ = paid.send(reply);
+    });
+}
+
+/// The tick-side half of `house expand`: record the new room in the owner's
+/// `HouseSummary` and build it in the world. The copper was taken by the
+/// database transaction; a failed insert took none.
 #[allow(clippy::too_many_arguments)]
 fn finish_house_expand(
     world: &mut World,
@@ -342,20 +430,19 @@ fn finish_house_expand(
     cost: i64,
     new_name: &str,
     new_desc: &str,
-    result: Result<(i32, i32), String>,
+    result: RoomCharged,
 ) {
-    let (row_id, local_index) = match result {
-        Ok(pair) => pair,
+    let ((row_id, local_index), applied) = match result {
+        Ok(done) => done,
         Err(e) => {
-            // Refund: the DB write didn't take, so the player keeps
-            // their copper.
-            if let Some(mut w) = world.get_mut::<mud_world::Wealth>(player) {
-                w.0 += cost;
-            }
             send_to(world, player, format!("Expansion failed: {e}\r\n"));
             return;
         }
     };
+    if !applied && let Some(mut w) = world.get_mut::<mud_world::Wealth>(player) {
+        // No update channel to carry the charge: apply it here.
+        w.0 -= cost;
+    }
     // Update the in-memory summary so subsequent `house rooms` /
     // `house info` show the new room without a relog.
     if let Some(mut s) = world.get_mut::<HouseSummary>(player) {
@@ -475,5 +562,100 @@ fn synthesize_single_room(
                 },
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod expand_tests {
+    use super::*;
+    use crate::commands::test_support::player_in;
+    use mud_world::{HouseRoomEntry, Wealth};
+
+    fn world_with_owner() -> (World, Entity, HouseSummary) {
+        let mut world = World::new();
+        world.init_resource::<HousingIndex>();
+        let room = world.spawn_empty().id();
+        let (player, _rx) = player_in(&mut world, room);
+        let summary = HouseSummary {
+            house_id: 9,
+            entrance_room: WorldKey { zone: 30, id: 1 },
+            return_room: None,
+            rooms: vec![HouseRoomEntry {
+                id: 100,
+                local_index: 0,
+                name: "Foyer".into(),
+                description: String::new(),
+                is_peaceful: true,
+                capacity: 20,
+            }],
+            exits: vec![],
+            items: vec![],
+            guests: vec![],
+        };
+        world
+            .entity_mut(player)
+            .insert((Wealth(10_000), summary.clone()));
+        (world, player, summary)
+    }
+
+    fn finish(world: &mut World, player: Entity, summary: &HouseSummary, r: RoomCharged) {
+        finish_house_expand(world, player, summary, 100, 4_000, "Room", "desc", r);
+    }
+
+    /// The database transaction already took the copper. When the charge went
+    /// out on the update channel the finish step must not take it again.
+    #[test]
+    fn a_charge_already_on_the_update_channel_is_not_taken_twice() {
+        let (mut world, player, summary) = world_with_owner();
+        finish(&mut world, player, &summary, Ok(((101, 1), true)));
+        assert_eq!(world.get::<Wealth>(player).unwrap().0, 10_000);
+        assert_eq!(world.get::<HouseSummary>(player).unwrap().rooms.len(), 2);
+    }
+
+    #[test]
+    fn without_an_update_channel_the_finish_step_applies_the_charge() {
+        let (mut world, player, summary) = world_with_owner();
+        finish(&mut world, player, &summary, Ok(((101, 1), false)));
+        assert_eq!(world.get::<Wealth>(player).unwrap().0, 6_000);
+    }
+
+    /// A failed insert took nothing and so refunds nothing.
+    #[test]
+    fn a_failed_expansion_leaves_the_wealth_alone() {
+        let (mut world, player, summary) = world_with_owner();
+        finish(&mut world, player, &summary, Err("db down".into()));
+        assert_eq!(world.get::<Wealth>(player).unwrap().0, 10_000);
+        assert_eq!(world.get::<HouseSummary>(player).unwrap().rooms.len(), 1);
+    }
+
+    /// The insert that fails charges nothing: no update reaches the player,
+    /// and the write turn is given back.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_failed_insert_queues_no_charge_and_frees_the_turn() {
+        let pool = mud_db::sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(100))
+            .connect_lazy("postgres://nobody:nopass@127.0.0.1:1/none")
+            .unwrap();
+        let coordinator = crate::autosave::SaveCoordinator::default();
+        let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(8);
+        let (paid, paid_rx) = tokio::sync::oneshot::channel();
+        charge_and_add_room(
+            RoomCharge {
+                pool,
+                coordinator: coordinator.clone(),
+                update_tx: Some(update_tx),
+                character_id: "c-house".into(),
+                cost: 4_000,
+                wealth_after: 6_000,
+                house_id: 9,
+                from_room_id: 100,
+                name: "Room".into(),
+                description: String::new(),
+            },
+            paid,
+        );
+        assert!(paid_rx.await.unwrap().is_err());
+        assert!(update_rx.try_recv().is_err(), "no charge was queued");
+        assert!(coordinator.try_begin_ordered("c-house").is_some());
     }
 }

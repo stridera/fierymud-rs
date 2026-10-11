@@ -10,6 +10,7 @@ use bevy_ecs::prelude::{Entity, World};
 use mud_db::enums::UserRole;
 use mud_world::*;
 
+use crate::commands::off_tick;
 use crate::commands::*;
 
 inventory::submit! {
@@ -238,9 +239,14 @@ pub(crate) async fn cmd_quests(world: &mut World, player: Entity, pool: &mud_db:
         .get::<Account>(player)
         .map_or(UserRole::Player, |a| a.role);
     let pool = pool.clone();
-    reply_from_task(world, player, async move {
-        quests_text(&pool, &character_id, viewer_role).await
-    })
+    // Off the tick, and ordered: whatever the player types next waits for
+    // the listing instead of overtaking it.
+    off_tick::run(
+        world,
+        player,
+        async move { quests_text(&pool, &character_id, viewer_role).await },
+        |world, player, text| send_to(world, player, text),
+    )
     .await;
 }
 
@@ -1851,5 +1857,57 @@ mod innate_listing_tests {
         let out = drain(&mut rx);
         assert!(out.contains("Innate Sylvan"), "{out}");
         assert!(!out.contains("INN_SYLL"), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod off_tick_tests {
+    use super::*;
+    use crate::commands::off_tick::{CommandJobs, drain_command_jobs, is_busy};
+    use crate::commands::test_support::{drain, player_in};
+
+    /// `quests` hits the database off the tick and the player's next line
+    /// waits for the listing. The unreachable pool fails the lookup after
+    /// 200 ms, which is the slow database here.
+    #[tokio::test(flavor = "current_thread")]
+    async fn quests_answers_off_the_tick_and_keeps_the_next_line_behind_it() {
+        let mut world = World::new();
+        world.init_resource::<CommandJobs>();
+        world.init_resource::<mud_world::SocialRegistry>();
+        let room = world
+            .spawn((
+                Room,
+                Named {
+                    name: "A quiet hall".into(),
+                },
+            ))
+            .id();
+        let (player, mut rx) = player_in(&mut world, room);
+        world.entity_mut(player).insert(Account {
+            user_id: "u".into(),
+            character_id: "c-quests".into(),
+            role: UserRole::Player,
+            account_role: UserRole::Player,
+            perms: vec![],
+        });
+        let pool = mud_db::sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(200))
+            .connect_lazy("postgres://nobody:nopass@127.0.0.1:1/none")
+            .unwrap();
+        let started = std::time::Instant::now();
+        crate::commands::dispatch_with_async(&mut world, player, &pool, "questlog").await;
+        crate::commands::dispatch_with_async(&mut world, player, &pool, "look").await;
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+        assert_eq!(
+            drain(&mut rx),
+            "",
+            "nothing yet, and look has not overtaken it"
+        );
+        assert!(is_busy(&world, player));
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        drain_command_jobs(&mut world);
+        assert!(drain(&mut rx).contains("Quest fetch failed"));
+        assert!(crate::commands::run_queued_input(&mut world, player, &pool).await);
+        assert!(drain(&mut rx).contains("A quiet hall"));
     }
 }

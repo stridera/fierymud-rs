@@ -116,7 +116,19 @@ where
         .get_resource::<SaveCoordinator>()
         .cloned()
         .unwrap_or_default();
-    let Some(ordered) = coordinator.try_begin_ordered(&character_id) else {
+    let taken = coordinator
+        .try_begin_ordered(&character_id)
+        .and_then(|ordered| {
+            // Fold in the write that just released the turn first: that is
+            // what settles its `in_flight` claim.
+            coordinator.apply_completions(world);
+            // A background snapshot can be queued for the turn already (it
+            // claimed `in_flight` when it was taken): a second snapshot now
+            // would carry the same one-shot work (a death's corpse insert,
+            // corpse coin takes) and write it twice.
+            ordered.claim_in_flight().then_some(ordered)
+        });
+    let Some(ordered) = taken else {
         if retries == 0 {
             send_to(
                 world,
@@ -125,6 +137,7 @@ where
             );
             return;
         }
+        // Wait for whoever has the turn off the tick, then look again.
         let turns = coordinator;
         off_tick::spawn(
             world,
@@ -134,14 +147,14 @@ where
         );
         return;
     };
-    // Same prelude as `save_player`: fold in the write that just released
-    // the turn, then the database-first updates not yet on the character.
-    coordinator.apply_completions(world);
+    // The database-first updates not yet on the character (quest gold, a
+    // failed house placement's item) are applied before the snapshot.
     if world.contains_resource::<PlayerUpdateInbox>() {
         drain_player_updates(world);
     }
     let generation = ordered.next_generation();
     let Some(snapshot) = snapshot_player(world, player, generation) else {
+        ordered.release_in_flight();
         send_to(world, player, NOTHING_TO_SAVE);
         return;
     };
@@ -338,6 +351,88 @@ mod tests {
         assert!(run_queued_input(&mut world, player, &pool).await);
         assert!(!crate::commands::has_queued_input(&world, player));
         assert!(off_tick::is_busy(&world, player));
+    }
+
+    /// A death's corpse insert and a corpse's coin takes ride in every
+    /// snapshot until one commits. A checkpoint save owns the character's
+    /// `in_flight` claim, so no background snapshot may carry them a second
+    /// time while it writes.
+    #[tokio::test(flavor = "current_thread")]
+    async fn no_background_snapshot_runs_alongside_a_checkpoint() {
+        let (mut world, player, _rx) = world_with_player();
+        world
+            .entity_mut(player)
+            .insert(crate::corpses::PendingCorpseCoinTakes(vec![(7, 25)]));
+        let written = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counting = {
+            let written = Arc::clone(&written);
+            move |snap: Arc<PlayerSaveSnapshot>| -> WriteFuture {
+                let written = Arc::clone(&written);
+                Box::pin(async move {
+                    written.fetch_add(
+                        snap.corpse_coin_takes.len(),
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    tokio::time::sleep(WRITE_DELAY).await;
+                    Ok(HashMap::new())
+                })
+            }
+        };
+        start_save(&mut world, player, counting.clone(), SAVE_TURN_RETRIES);
+        // Autosave, a quest save and Lua `save()` all start here: refused
+        // while the checkpoint is unsettled, even after its turn is free.
+        assert!(!crate::login::spawn_background_save(
+            &mut world,
+            player,
+            &pool()
+        ));
+        settle().await;
+        assert!(
+            !crate::login::spawn_background_save(&mut world, player, &pool()),
+            "the checkpoint's commit is not folded in yet"
+        );
+        // The tick folds the commit in (the coin takes are settled) and only
+        // then may the next snapshot go.
+        drain_command_jobs(&mut world);
+        assert!(
+            world
+                .get::<crate::corpses::PendingCorpseCoinTakes>(player)
+                .is_none()
+        );
+        let later = world.resource::<SaveCoordinator>().clone();
+        assert!(later.request_background(
+            "c-save-test",
+            |g| snapshot_player(&mut world, player, g),
+            counting,
+        ));
+        settle().await;
+        assert_eq!(
+            written.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the coin takes were written once"
+        );
+    }
+
+    /// A checkpoint whose writer panics must not strand the claim.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_panicking_checkpoint_writer_releases_the_claim() {
+        let (mut world, player, _rx) = world_with_player();
+        let writer = |_snap: Arc<PlayerSaveSnapshot>| -> WriteFuture {
+            Box::pin(async { panic!("writer blew up") })
+        };
+        start_save(&mut world, player, writer, SAVE_TURN_RETRIES);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drain_command_jobs(&mut world);
+        world
+            .resource::<SaveCoordinator>()
+            .clone()
+            .apply_completions(&mut world);
+        let coordinator = world.resource::<SaveCoordinator>().clone();
+        assert!(coordinator.request_background(
+            "c-save-test",
+            |g| snapshot_player(&mut world, player, g),
+            |_| async { Ok(HashMap::new()) },
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]

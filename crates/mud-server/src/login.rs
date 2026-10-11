@@ -5280,7 +5280,7 @@ pub(crate) struct PlayerSaveSnapshot {
     pub(crate) death: Option<crate::corpses::DeathPersist>,
     /// Coins taken from player corpses since the last committed save,
     /// debited from those corpses in this write's transaction.
-    corpse_coin_takes: Vec<(i32, i64)>,
+    pub(crate) corpse_coin_takes: Vec<(i32, i64)>,
     /// Corpses a resurrection emptied into this player: deleted in this
     /// write's transaction, after their items are re-homed.
     retired_corpses: Vec<i32>,
@@ -6499,6 +6499,12 @@ pub(crate) fn spawn_background_save(world: &mut World, entity: Entity, pool: &Pg
     let started = coordinator.request_background(
         &character_id,
         |generation| {
+            // Database-first updates (quest gold, a paid house room) that
+            // are queued but not yet on the character go in before the
+            // snapshot, or this write would put the old value back.
+            if world.contains_resource::<commands::PlayerUpdateInbox>() {
+                commands::drain_player_updates(world);
+            }
             let mut snap = snapshot_player(world, entity, generation)?;
             snap.resume_pending_save = had_pending_save;
             Some(snap)

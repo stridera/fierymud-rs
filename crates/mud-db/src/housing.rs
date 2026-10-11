@@ -435,6 +435,66 @@ pub async fn add_room(
     description: &str,
 ) -> sqlx::Result<(i32, i32)> {
     let mut tx = pool.begin().await?;
+    let added = insert_room(
+        &mut tx,
+        house_id,
+        from_room_id,
+        direction,
+        opposite,
+        name,
+        description,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(added)
+}
+
+/// [`add_room`] that also writes the character's on-hand wealth, in the same
+/// transaction: the room cannot exist without the copper having been taken,
+/// nor the copper be taken without the room. `new_wealth` is the value after
+/// the charge (the caller checked the balance against the live character, the
+/// source of truth for on-hand coin between saves).
+#[allow(clippy::too_many_arguments)]
+pub async fn add_room_paid(
+    pool: &PgPool,
+    character_id: &str,
+    new_wealth: i64,
+    house_id: i32,
+    from_room_id: i32,
+    direction: &str,
+    opposite: &str,
+    name: &str,
+    description: &str,
+) -> sqlx::Result<(i32, i32)> {
+    let mut tx = pool.begin().await?;
+    sqlx::query(r#"UPDATE "Characters" SET wealth = $1 WHERE id = $2"#)
+        .bind(new_wealth)
+        .bind(character_id)
+        .execute(&mut *tx)
+        .await?;
+    let added = insert_room(
+        &mut tx,
+        house_id,
+        from_room_id,
+        direction,
+        opposite,
+        name,
+        description,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(added)
+}
+
+async fn insert_room(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    house_id: i32,
+    from_room_id: i32,
+    direction: &str,
+    opposite: &str,
+    name: &str,
+    description: &str,
+) -> sqlx::Result<(i32, i32)> {
     let next_local = sqlx::query!(
         r#"
         SELECT COALESCE(MAX(local_index), -1) + 1 AS "next!: i32"
@@ -443,7 +503,7 @@ pub async fn add_room(
         "#,
         house_id,
     )
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await?
     .next;
     let new_room = sqlx::query!(
@@ -457,7 +517,7 @@ pub async fn add_room(
         name,
         description,
     )
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await?;
     sqlx::query(
         r#"
@@ -469,9 +529,8 @@ pub async fn add_room(
     .bind(new_room.id)
     .bind(direction)
     .bind(opposite)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
-    tx.commit().await?;
     Ok((new_room.id, next_local))
 }
 

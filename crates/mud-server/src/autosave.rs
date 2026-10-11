@@ -210,6 +210,21 @@ impl OrderedSave {
         self.slot.touch();
     }
 
+    /// Claim the character's `in_flight` flag for a snapshot this turn is
+    /// about to take, exactly as [`SaveCoordinator::request_background`] does.
+    /// False when a background snapshot of the character is still unsettled:
+    /// a second snapshot would carry the same one-shot work (a death's corpse
+    /// insert, corpse coin takes) and write it twice.
+    pub(crate) fn claim_in_flight(&self) -> bool {
+        !self.slot.in_flight.swap(true, Ordering::SeqCst)
+    }
+
+    /// Give back a claim ([`Self::claim_in_flight`]) whose snapshot never
+    /// got taken.
+    pub(crate) fn release_in_flight(&self) {
+        self.slot.in_flight.store(false, Ordering::SeqCst);
+    }
+
     /// For a direct inventory-row write that is not a snapshot commit
     /// (account-chest deposit / withdraw): mark every snapshot taken so far
     /// stale, so a background write already queued behind this turn cannot
@@ -397,9 +412,16 @@ impl SaveCoordinator {
     /// took the turn ([`Self::try_begin_ordered`]) and the snapshot with it on
     /// the world thread; unlike it, a failed write is not retried (the player
     /// is told and tries again) and `notify` is called with the outcome once
-    /// the turn is released. A commit is already in the completion list when
-    /// `notify` runs, so the next [`Self::apply_completions`] folds it into
-    /// the world. Must be called inside a tokio runtime.
+    /// the turn is released.
+    ///
+    /// The caller also holds the character's `in_flight` claim
+    /// ([`OrderedSave::claim_in_flight`]), which this write owns like a
+    /// background one: the completion it publishes (commit or failure) is
+    /// what releases it, when the next [`Self::apply_completions`] folds it
+    /// into the world. That keeps every other snapshot of the character
+    /// (autosave, quest save, Lua `save()`) out until then. The completion is
+    /// already in the list when `notify` runs. Must be called inside a tokio
+    /// runtime.
     pub(crate) fn spawn_checkpoint<W, Fut, N>(
         &self,
         mut ordered: OrderedSave,
@@ -415,24 +437,26 @@ impl SaveCoordinator {
         let shared = Arc::clone(&self.0);
         shared.pending.fetch_add(1, Ordering::SeqCst);
         slot.outstanding.fetch_add(1, Ordering::SeqCst);
-        let guard = PendingGuard(Arc::clone(&shared), Arc::clone(&slot));
         let snap = Arc::new(snapshot);
+        // Publishes a failure too if the writer panics, so the claim is
+        // never stranded.
+        let mut guard = TaskGuard {
+            shared,
+            snapshot: Arc::clone(&snap),
+            slot,
+            finished: false,
+        };
         tokio::spawn(async move {
-            let _guard = guard;
             let committed = match writer(Arc::clone(&snap)).await {
                 Ok(assigned) => {
                     ordered.record_commit(snap.generation);
-                    shared.done.lock().expect("done lock").push(Completion {
-                        snapshot: Arc::clone(&snap),
-                        slot: Arc::clone(&slot),
-                        outcome: Outcome::Committed(assigned),
-                        owns_in_flight: false,
-                    });
+                    guard.finish(Outcome::Committed(assigned));
                     true
                 }
                 Err(e) => {
                     warn!(character_id = %snap.character_id, error = %e,
                         "save tx failed; rolled back");
+                    guard.finish(Outcome::Failed(e));
                     false
                 }
             };

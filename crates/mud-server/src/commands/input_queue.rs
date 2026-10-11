@@ -162,7 +162,6 @@ pub(crate) fn seed_for_test(world: &mut World, player: Entity, lines: &[&str]) {
 }
 
 /// How many lines are waiting.
-#[cfg(test)]
 pub(crate) fn queued_len(world: &World, player: Entity) -> usize {
     world.get::<InputQueue>(player).map_or(0, |q| q.lines.len())
 }

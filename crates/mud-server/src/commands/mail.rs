@@ -108,12 +108,6 @@ pub(crate) async fn compose_mail_step(
     line: &str,
 ) {
     let trimmed = line.trim();
-    // A `.send` is still reaching the database: the draft is not ours to
-    // change until it has landed.
-    if off_tick::is_busy(world, player) {
-        send_to(world, player, "Your mail is still being sent.\r\n");
-        return;
-    }
     if trimmed.eq_ignore_ascii_case(".abort") {
         try_remove::<MailDraft>(world, player);
         send_to(world, player, "Mail composition aborted.\r\n");
@@ -158,7 +152,7 @@ pub(crate) async fn compose_mail_step(
         let Some(draft) = world.get::<MailDraft>(player).cloned() else {
             return;
         };
-        let Some(subject) = draft.subject else {
+        let Some(subject) = draft.subject.clone() else {
             send_to(
                 world,
                 player,
@@ -184,9 +178,13 @@ pub(crate) async fn compose_mail_step(
                     .map_err(|e| e.to_string())
             }
         };
+        // The draft leaves the player now, not when the insert is confirmed:
+        // if the answer never comes back (a stuck database, a dropped link)
+        // the mail may or may not have been stored, and a draft left behind
+        // would be sent a second time. A failed send hands it back.
+        try_remove::<MailDraft>(world, player);
         off_tick::run(world, player, send, move |world, player, sent| match sent {
             Ok(_id) => {
-                try_remove::<MailDraft>(world, player);
                 send_to(
                     world,
                     player,
@@ -194,7 +192,10 @@ pub(crate) async fn compose_mail_step(
                 );
                 notify_new_mail(world, &draft.recipient_user_id);
             }
-            Err(e) => send_to(world, player, format!("Send failed: {e}\r\n")),
+            Err(e) => {
+                try_insert(world, player, draft);
+                send_to(world, player, format!("Send failed: {e}\r\n"));
+            }
         })
         .await;
         return;
@@ -519,5 +520,46 @@ mod notify_tests {
             drain(&mut frx).is_empty(),
             "offline characters are not told"
         );
+    }
+
+    /// The draft leaves the player when `.send` starts, so a send whose
+    /// answer never comes back cannot be sent twice; a failed one returns it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn send_takes_the_draft_and_a_failure_gives_it_back() {
+        let mut world = World::new();
+        world.init_resource::<crate::commands::off_tick::CommandJobs>();
+        let room = world.spawn_empty().id();
+        let (player, mut rx) = player_in(&mut world, room);
+        world.entity_mut(player).insert((
+            Account {
+                user_id: "u-sender".into(),
+                character_id: "c".into(),
+                role: UserRole::Player,
+                account_role: UserRole::Player,
+                perms: vec![],
+            },
+            MailDraft {
+                recipient_user_id: "u-rcpt".into(),
+                recipient_label: "Rcpt".into(),
+                subject: Some("hi".into()),
+                body: vec!["hello".into()],
+            },
+        ));
+        let pool = mud_db::sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(100))
+            .connect_lazy("postgres://nobody:nopass@127.0.0.1:1/none")
+            .unwrap();
+        compose_mail_step(&mut world, player, &pool, ".send").await;
+        assert!(
+            world.get::<MailDraft>(player).is_none(),
+            "a draft left behind could be sent twice"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        crate::commands::off_tick::drain_command_jobs(&mut world);
+        assert!(
+            world.get::<MailDraft>(player).is_some(),
+            "failed send keeps the draft"
+        );
+        assert!(drain(&mut rx).contains("Send failed"));
     }
 }

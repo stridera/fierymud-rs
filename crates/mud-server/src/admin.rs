@@ -60,6 +60,9 @@ struct Waiting {
     command: String,
     pending_output: String,
     deadline: std::time::Instant,
+    /// The line itself went into the session's input queue (an earlier
+    /// command's off-tick work was still out), so it has not run yet.
+    own_line_queued: bool,
 }
 
 /// A [`Waiting`] command plus the HTTP request to answer once it settles.
@@ -2219,6 +2222,7 @@ async fn start_command(
     // send_to / send_rendered the dispatch performs flows through the
     // entity's Connection (which we replaced on session_create) into our
     // captured rx.
+    let queued_before = commands::input_queue::queued_len(world, entity);
     let timed_out = tokio::time::timeout(
         COMMAND_TIMEOUT,
         commands::dispatch_with_async(world, entity, pool, command_line),
@@ -2240,6 +2244,7 @@ async fn start_command(
             command: command_line.to_string(),
             pending_output: format!("{pending_output}{output}"),
             deadline: std::time::Instant::now() + COMMAND_TIMEOUT,
+            own_line_queued: commands::input_queue::queued_len(world, entity) > queued_before,
         });
     }
     CommandRun::Done(Ok(command_response(command_line, &pending_output, &output)))
@@ -2264,10 +2269,14 @@ fn command_response(command_line: &str, pending_output: &str, output: &str) -> V
     })
 }
 
-/// Answer every parked command whose session has settled (no off-tick work
-/// left, no queued line still to run) or whose [`COMMAND_TIMEOUT`] is up. A
-/// command that timed out is still running: what it prints later arrives as
-/// `pending_output` of the session's next command.
+/// Answer the parked commands whose work has landed, or whose
+/// [`COMMAND_TIMEOUT`] is up. One reply per session per pass, oldest first: a
+/// session's output is one stream, so a command is answered with what the
+/// session has printed since the one before it was, never with the next
+/// command's. A command is settled once the session has no off-tick work out
+/// and, if its own line had to wait in the input queue, that queue has run.
+/// A command that timed out is still running: what it prints later arrives
+/// as `pending_output` of the session's next command.
 fn answer_parked(world: &mut World) {
     let parked = std::mem::take(
         &mut *world
@@ -2277,10 +2286,23 @@ fn answer_parked(world: &mut World) {
             .expect("admin parked poisoned"),
     );
     let mut still_waiting = Vec::new();
+    let mut answered: Vec<Entity> = Vec::new();
     for Parked { waiting, reply } in parked {
+        // The session's earlier command is still waiting, or was answered
+        // this very pass: this one is next.
+        if still_waiting
+            .iter()
+            .any(|p: &Parked| p.waiting.entity == waiting.entity)
+            || answered.contains(&waiting.entity)
+        {
+            still_waiting.push(Parked { waiting, reply });
+            continue;
+        }
         let gone = world.get_entity(waiting.entity).is_err();
         let busy = commands::off_tick::is_busy(world, waiting.entity);
-        let settled = gone || (!busy && !commands::has_queued_input(world, waiting.entity));
+        let line_pending =
+            waiting.own_line_queued && commands::has_queued_input(world, waiting.entity);
+        let settled = gone || (!busy && !line_pending);
         let expired = std::time::Instant::now() >= waiting.deadline;
         if !settled && !expired {
             still_waiting.push(Parked { waiting, reply });
@@ -2297,6 +2319,7 @@ fn answer_parked(world: &mut World) {
             ))
         };
         let _ = reply.send(resp);
+        answered.push(waiting.entity);
     }
     world
         .resource::<AdminParked>()
@@ -2958,21 +2981,30 @@ mod command_dispatch_tests {
         assert_eq!(resp["pending_output"].as_str().unwrap(), "");
     }
 
-    /// Queue one `command` request for "Tester" and hand back its reply.
-    fn queue_command(world: &mut World, command: &str) -> oneshot::Receiver<AdminResponse> {
+    /// Queue `command` requests for "Tester" and hand back their replies.
+    fn queue_commands(
+        world: &mut World,
+        commands: &[&str],
+    ) -> Vec<oneshot::Receiver<AdminResponse>> {
         let (tx, rx) = mpsc::channel(ADMIN_QUEUE_CAP);
-        let (reply, reply_rx) = oneshot::channel();
-        tx.try_send(AdminCommand {
-            request: AdminRequest::Command {
-                executor: "Tester".into(),
-                command: command.into(),
-            },
-            reply,
-        })
-        .ok()
-        .unwrap();
+        let replies = commands
+            .iter()
+            .map(|command| {
+                let (reply, reply_rx) = oneshot::channel();
+                tx.try_send(AdminCommand {
+                    request: AdminRequest::Command {
+                        executor: "Tester".into(),
+                        command: (*command).into(),
+                    },
+                    reply,
+                })
+                .ok()
+                .unwrap();
+                reply_rx
+            })
+            .collect();
         world.insert_resource(AdminInbox(Mutex::new(rx)));
-        reply_rx
+        replies
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2983,7 +3015,7 @@ mod command_dispatch_tests {
         world.insert_resource(WorldPause::default());
         // `save` writes to an unreachable database: the pool gives up after
         // 200 ms, off the tick.
-        let mut reply = queue_command(&mut world, "save");
+        let mut reply = queue_commands(&mut world, &["save"]).remove(0);
         let started = std::time::Instant::now();
         drain_admin_requests(&mut world, &pool()).await;
         assert!(
@@ -2999,6 +3031,37 @@ mod command_dispatch_tests {
         assert_eq!(resp["pending_output"], "");
         let out = resp["output"].as_str().unwrap();
         assert!(out.contains("Save failed"), "{out}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn two_commands_for_one_session_each_get_their_own_output() {
+        let (mut world, player) = world_with_session();
+        world.init_resource::<commands::off_tick::CommandJobs>();
+        world.init_resource::<crate::autosave::SaveCoordinator>();
+        world.insert_resource(WorldPause::default());
+        let mut replies = queue_commands(&mut world, &["save", "look"]);
+        drain_admin_requests(&mut world, &pool()).await;
+        assert!(replies.iter_mut().all(|r| r.try_recv().is_err()));
+        // The save lands; `look` is still queued behind it. The first reply
+        // is the save's alone.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        drain_admin_requests(&mut world, &pool()).await;
+        let first = replies[0].try_recv().expect("save answered").unwrap();
+        let out = first["output"].as_str().unwrap();
+        assert!(
+            out.contains("Save failed") && !out.contains("A quiet hall"),
+            "{out}"
+        );
+        assert!(replies[1].try_recv().is_err(), "look has not run yet");
+        // The input queue releases `look`; the next pass answers it.
+        assert!(commands::run_queued_input(&mut world, player, &pool()).await);
+        drain_admin_requests(&mut world, &pool()).await;
+        let second = replies[1].try_recv().expect("look answered").unwrap();
+        let out = second["output"].as_str().unwrap();
+        assert!(
+            out.contains("A quiet hall") && !out.contains("Save failed"),
+            "{out}"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -3020,6 +3083,7 @@ mod command_dispatch_tests {
                     entity: player,
                     command: "save".into(),
                     pending_output: String::new(),
+                    own_line_queued: false,
                     deadline: std::time::Instant::now()
                         .checked_sub(std::time::Duration::from_secs(1))
                         .unwrap(),
