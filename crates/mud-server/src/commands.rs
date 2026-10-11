@@ -24294,6 +24294,9 @@ pub(crate) fn apply_attacker_damage(
     attacker: Entity,
 ) -> (bool, Option<&'static str>) {
     if amount > 0 && attacker != target {
+        // Legacy `damage()`: spell and skill damage makes an idle victim
+        // fight back, same as a melee swing.
+        crate::combat::victim_fights_back(world, target, attacker);
         crate::combat::record_damager(world, target, attacker);
         // Legacy `damage()` -> `appear()`: dealing damage of any kind
         // (melee, skills, spells) breaks the attacker's invisibility.
@@ -25643,8 +25646,10 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
                     .is_none_or(|a| a.role.rank() <= UserRole::Player.rank())
         })
         .collect();
+    let mut died_in_dt: Vec<Entity> = Vec::new();
     if !dt_victims.is_empty() && world.get::<mud_world::DeathTrap>(target).is_some() {
         for victim in dt_victims {
+            died_in_dt.push(victim);
             send_to(
                 world,
                 victim,
@@ -25661,11 +25666,10 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         if i > 0 {
             send_to(world, mover, "You follow.\r\n");
         }
-        // Ghost movers from the DT branch above don't see a look —
-        // they're already dead. handle_death applied Ghost; skip the
-        // per-mover render for any Ghost so the death message
-        // isn't immediately drowned by a room description.
-        if world.get::<Ghost>(mover).is_none() {
+        // Movers killed by the DT branch above don't see a look so the
+        // death message isn't drowned by a room description. A ghost that
+        // simply walked (ghost_allowed lets them) still sees where it went.
+        if !died_in_dt.contains(&mover) {
             info::look_after_move(world, mover);
         }
     }

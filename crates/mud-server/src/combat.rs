@@ -1439,6 +1439,33 @@ pub(crate) fn engage_swing_now(world: &mut World, attacker: Entity, target: Enti
     );
 }
 
+/// Legacy `damage()` (fight.cpp, "Start the attacker fighting the victim"):
+/// a victim that is idle and above stunned starts fighting its attacker, so
+/// a player hit by a second mob after killing the first keeps swinging at it.
+/// Players and mobs alike; skipped for ghosts, held / frozen / downed
+/// victims, and attackers that are not in the victim's room.
+pub(crate) fn victim_fights_back(world: &mut World, victim: Entity, attacker: Entity) {
+    if victim == attacker
+        || world.get::<Fighting>(victim).is_some()
+        || world.get::<Ghost>(victim).is_some()
+        || world.get::<Stunned>(victim).is_some()
+        || world.get::<mud_world::Frozen>(victim).is_some()
+        || world.get::<Ghost>(attacker).is_some()
+        || world.get::<Health>(victim).is_none_or(|h| h.hp <= 0)
+    {
+        return;
+    }
+    let (Some(vr), Some(ar)) = (
+        world.get::<Located>(victim).map(|l| l.0),
+        world.get::<Located>(attacker).map(|l| l.0),
+    ) else {
+        return;
+    };
+    if vr == ar {
+        try_insert(world, victim, Fighting(attacker));
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn apply_swing(world: &mut World, s: &Swing) {
     // Target may have been despawned earlier in this same tick.
@@ -1478,6 +1505,8 @@ fn apply_swing(world: &mut World, s: &Swing) {
         try_remove::<Fighting>(world, s.attacker);
         return;
     }
+    // Legacy `damage()` runs for misses too: the victim fights back either way.
+    victim_fights_back(world, s.target, s.attacker);
     let was_sleeping = world.get::<Posture>(s.target).map(|p| p.0) == Some(PostureKind::Sleeping);
     // posture-and-lifestate.md: a defender attacked while RESTING
     // auto-stands on the hit. Sleeping has its own jolt-awake path
@@ -2390,6 +2419,10 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
         }
         // The dead don't ride: the mount (if any) keeps its place in the room.
         clear_mount_links(world, victim);
+        // Legacy `extract_char` -> `ungroup(ch, true, false)`: the dead leave
+        // their group. A leader hands it to the next member (or the group
+        // disbands when only one other is left), with the legacy notices.
+        crate::commands::ungroup(world, victim, true, false);
         // Lines queued behind a cast (an alias chain) must not run after the
         // respawn: the dead player's plans died with them.
         crate::commands::input_queue::clear(world, victim);
@@ -5839,6 +5872,146 @@ mod tests {
                 Fighting(target),
             ))
             .id()
+    }
+
+    /// Playtest #41: a player who kills one of two attackers must fight the
+    /// other (legacy `damage()` makes an idle victim fight back).
+    #[test]
+    fn player_fights_back_after_killing_one_of_two_attackers() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let goblin = credit_goblin(&mut world, room, 0, None);
+        let player = credit_player(&mut world, room, "Hero", 0);
+        let other = make_attacker(&mut world, room, player, 1);
+        try_remove::<Fighting>(&mut world, other);
+        world.entity_mut(player).insert(Fighting(goblin));
+        run_combat_tick(&mut world);
+        assert!(world.get_entity(goblin).is_err(), "goblin died");
+        assert!(world.get::<Fighting>(player).is_none(), "fight over");
+        // The second attacker now swings at the idle player.
+        world.entity_mut(other).insert(Fighting(player));
+        run_combat_tick(&mut world);
+        assert_eq!(
+            world.get::<Fighting>(player).map(|f| f.0),
+            Some(other),
+            "the player fights the mob that is hitting them"
+        );
+    }
+
+    #[test]
+    fn victim_fights_back_skips_busy_ghost_stunned_and_absent_attackers() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let elsewhere = make_room(&mut world);
+        let attacker = world.spawn((Located(room), Health { hp: 9, max: 9 })).id();
+        let far = world
+            .spawn((Located(elsewhere), Health { hp: 9, max: 9 }))
+            .id();
+        let busy_target = world.spawn_empty().id();
+        let new_victim = |w: &mut World| w.spawn((Located(room), Health { hp: 9, max: 9 })).id();
+
+        let v = new_victim(&mut world);
+        victim_fights_back(&mut world, v, attacker);
+        assert_eq!(world.get::<Fighting>(v).map(|f| f.0), Some(attacker));
+
+        let v = new_victim(&mut world);
+        world.entity_mut(v).insert(Fighting(busy_target));
+        victim_fights_back(&mut world, v, attacker);
+        assert_eq!(world.get::<Fighting>(v).map(|f| f.0), Some(busy_target));
+
+        let v = new_victim(&mut world);
+        world.entity_mut(v).insert(Ghost);
+        victim_fights_back(&mut world, v, attacker);
+        assert!(world.get::<Fighting>(v).is_none(), "ghost");
+
+        let v = new_victim(&mut world);
+        world.entity_mut(v).insert(Stunned);
+        victim_fights_back(&mut world, v, attacker);
+        assert!(world.get::<Fighting>(v).is_none(), "stunned");
+
+        let v = new_victim(&mut world);
+        world.entity_mut(v).insert(Health { hp: 0, max: 9 });
+        victim_fights_back(&mut world, v, attacker);
+        assert!(world.get::<Fighting>(v).is_none(), "incapacitated");
+
+        let v = new_victim(&mut world);
+        victim_fights_back(&mut world, v, far);
+        assert!(
+            world.get::<Fighting>(v).is_none(),
+            "attacker in another room"
+        );
+    }
+
+    /// Spell and skill damage goes through `apply_damage_from`, the legacy
+    /// `damage()` of the port: an idle player fights back there too.
+    #[test]
+    fn spell_damage_makes_an_idle_victim_fight_back() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let caster = credit_player(&mut world, room, "Caster", 0);
+        let victim = credit_player(&mut world, room, "Victim", 0);
+        let (dead, _) = crate::commands::apply_damage_from(&mut world, victim, 7, caster);
+        assert!(!dead);
+        assert_eq!(world.get::<Fighting>(victim).map(|f| f.0), Some(caster));
+    }
+
+    /// Playtest #45: legacy `extract_char` -> `ungroup`. A dying leader hands
+    /// the group to the next member; a two-person group is disbanded.
+    #[test]
+    fn leader_death_passes_the_group_on_or_disbands_it() {
+        use crate::commands::test_support::drain;
+        let mut fx = crate::commands::gmcp_tests::fixture();
+        let room = fx.a;
+        fx.world.insert_resource(TickCount(0));
+        let (leader, mut lrx) = crate::commands::gmcp_tests::player(&mut fx.world, room, "Lead");
+        let (m1, mut m1rx) = crate::commands::gmcp_tests::player(&mut fx.world, room, "Alpha");
+        let (m2, mut m2rx) = crate::commands::gmcp_tests::player(&mut fx.world, room, "Beta");
+        for m in [m1, m2] {
+            fx.world
+                .entity_mut(m)
+                .insert(mud_world::GroupMember(leader));
+        }
+        let world = &mut fx.world;
+        handle_death(world, leader, "Lead", room);
+        assert!(world.get::<Ghost>(leader).is_some());
+        assert!(
+            world.get::<mud_world::GroupMember>(m1).is_none(),
+            "m1 leads now"
+        );
+        assert_eq!(
+            world.get::<mud_world::GroupMember>(m2).map(|g| g.0),
+            Some(m1)
+        );
+        assert!(drain(&mut lrx).contains("no longer leading your group"));
+        assert!(drain(&mut m1rx).contains("You're now leading the group!"));
+        assert!(drain(&mut m2rx).contains("Alpha is now leading your group!"));
+
+        // Two-person group: the member dying disbands it.
+        handle_death(world, m2, "Beta", room);
+        assert!(world.get::<mud_world::GroupMember>(m2).is_none());
+        assert!(drain(&mut m1rx).contains("The group has been disbanded"));
+    }
+
+    /// Playtest #45: a ghost walking an open exit must see the new room.
+    #[test]
+    fn ghost_movement_shows_the_new_room() {
+        use crate::commands::test_support::drain;
+        let mut fx = crate::commands::gmcp_tests::fixture();
+        let (a, b) = (fx.a, fx.b);
+        fx.world.get_mut::<Exits>(a).unwrap().0.insert(
+            mud_db::enums::Direction::North,
+            crate::commands::gmcp_tests::exit(b, mud_db::enums::ExitState::Open, false, &[]),
+        );
+        let (ghost, mut rx) = crate::commands::gmcp_tests::player(&mut fx.world, a, "Spirit");
+        fx.world.entity_mut(ghost).insert((
+            Ghost,
+            Health { hp: 0, max: 50 },
+            Posture(PostureKind::Standing),
+        ));
+        crate::commands::dispatch(&mut fx.world, ghost, "n");
+        assert_eq!(fx.world.get::<Located>(ghost).map(|l| l.0), Some(b));
+        let text = drain(&mut rx);
+        assert!(text.contains("Another room."), "{text}");
     }
 
     fn alignment_of(world: &World, e: Entity) -> i32 {

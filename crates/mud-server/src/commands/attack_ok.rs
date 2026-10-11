@@ -615,20 +615,9 @@ mod tests {
         assert!(hp(&world, rat) < 50, "plain mobs are still hit");
     }
 
-    #[test]
-    fn rescue_from_a_player_obeys_the_pk_rule() {
+    /// Install the `rescue` skill (a redirect effect) and let `rescuer` use it.
+    fn install_rescue(world: &mut World, rescuer: Entity) {
         use mud_db::abilities::AbilityKind;
-        let (mut world, rescuer, attacker, mut rx) = duo();
-        let room = world.get::<Located>(rescuer).unwrap().0;
-        let (ally, _arx) = player_in(&mut world, room);
-        world.entity_mut(ally).insert(Named {
-            name: "Ally".into(),
-        });
-        world
-            .entity_mut(ally)
-            .insert(mud_world::Keywords(vec!["ally".into()]));
-        world.entity_mut(attacker).insert(Fighting(ally));
-        world.entity_mut(ally).insert(Fighting(attacker));
         let mut abilities = mud_world::AbilityCatalog::default();
         let def = crate::commands::test_support::ability_def(900, "Rescue", AbilityKind::Skill);
         abilities.by_name.insert("rescue".to_string(), def);
@@ -661,10 +650,89 @@ mod tests {
         world.entity_mut(rescuer).insert(mud_world::KnownAbilities {
             entries: vec![(900, 1000, true)],
         });
+    }
+
+    #[test]
+    fn rescue_from_a_player_obeys_the_pk_rule() {
+        let (mut world, rescuer, attacker, mut rx) = duo();
+        let room = world.get::<Located>(rescuer).unwrap().0;
+        let (ally, _arx) = player_in(&mut world, room);
+        world.entity_mut(ally).insert(Named {
+            name: "Ally".into(),
+        });
+        world
+            .entity_mut(ally)
+            .insert(mud_world::Keywords(vec!["ally".into()]));
+        world.entity_mut(attacker).insert(Fighting(ally));
+        world.entity_mut(ally).insert(Fighting(attacker));
+        install_rescue(&mut world, rescuer);
         crate::commands::combat_commands::cmd_rescue(&mut world, rescuer, "ally");
         let text = drain(&mut rx);
         assert!(text.contains("You must turn on PK first"), "{text}");
         assert!(world.get::<Fighting>(rescuer).is_none());
         assert!(world.get::<Fighting>(attacker).is_some_and(|f| f.0 == ally));
+    }
+
+    /// A mob `Y` fighting `ally`, both in `room`; returns `(ally, Y)`.
+    fn ally_under_attack(world: &mut World, room: Entity) -> (Entity, Entity) {
+        let (ally, _arx) = player_in(world, room);
+        world.entity_mut(ally).insert((
+            Named {
+                name: "Ally".into(),
+            },
+            mud_world::Keywords(vec!["ally".into()]),
+        ));
+        let y = world
+            .spawn((Named { name: "Y".into() }, Located(room), Fighting(ally)))
+            .id();
+        world.entity_mut(ally).insert(Fighting(y));
+        (ally, y)
+    }
+
+    #[test]
+    fn rescue_works_while_fighting_someone_else() {
+        let (mut world, rescuer, _b, mut rx) = duo();
+        let room = world.get::<Located>(rescuer).unwrap().0;
+        let (ally, y) = ally_under_attack(&mut world, room);
+        let x = world
+            .spawn((Named { name: "X".into() }, Located(room), Fighting(rescuer)))
+            .id();
+        world.entity_mut(rescuer).insert(Fighting(x));
+        install_rescue(&mut world, rescuer);
+        crate::commands::combat_commands::cmd_rescue(&mut world, rescuer, "ally");
+        let text = drain(&mut rx);
+        assert!(!text.contains("already fighting"), "{text}");
+        assert!(world.get::<Fighting>(rescuer).is_some_and(|f| f.0 == y));
+        assert!(world.get::<Fighting>(y).is_some_and(|f| f.0 == rescuer));
+        assert!(world.get::<Fighting>(ally).is_none());
+    }
+
+    #[test]
+    fn rescue_refuses_the_person_you_are_fighting() {
+        let (mut world, rescuer, _b, mut rx) = duo();
+        let room = world.get::<Located>(rescuer).unwrap().0;
+        let (ally, y) = ally_under_attack(&mut world, room);
+        world.entity_mut(rescuer).insert(Fighting(ally));
+        install_rescue(&mut world, rescuer);
+        crate::commands::combat_commands::cmd_rescue(&mut world, rescuer, "ally");
+        let text = drain(&mut rx);
+        assert!(text.contains("trying to kill"), "{text}");
+        assert!(world.get::<Fighting>(rescuer).is_some_and(|f| f.0 == ally));
+        assert!(world.get::<Fighting>(y).is_some_and(|f| f.0 == ally));
+    }
+
+    #[test]
+    fn bash_with_no_argument_uses_the_current_opponent() {
+        use crate::commands::combat_commands::cmd_bash;
+        let (mut world, a, b, mut rx) = duo();
+        cmd_bash(&mut world, a, "");
+        let text = drain(&mut rx);
+        assert!(text.contains("Bash what?"), "idle: {text}");
+        world.entity_mut(a).insert(Fighting(b));
+        cmd_bash(&mut world, a, "");
+        let text = drain(&mut rx);
+        assert!(!text.contains("Bash what?"), "{text}");
+        // The opponent was resolved: the PK rule for a player target fired.
+        assert!(text.contains("You must turn on PK first"), "{text}");
     }
 }

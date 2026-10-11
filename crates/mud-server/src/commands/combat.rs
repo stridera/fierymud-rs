@@ -2964,10 +2964,6 @@ pub(crate) fn cmd_rescue(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "rescue") {
         return;
     }
-    if world.get::<Fighting>(player).is_some() {
-        send_to(world, player, "You're already fighting.\r\n");
-        return;
-    }
     let arg = args.trim();
     if arg.is_empty() {
         send_to(world, player, "Rescue whom?\r\n");
@@ -2978,6 +2974,19 @@ pub(crate) fn cmd_rescue(world: &mut World, player: Entity, args: &str) {
     // the cost otherwise).
     if arg.eq_ignore_ascii_case("me") || arg.eq_ignore_ascii_case("self") {
         send_to(world, player, "You can't rescue yourself.\r\n");
+        return;
+    }
+    // Legacy `do_rescue` allows rescuing mid-fight; it only refuses when you
+    // are fighting the very person you would rescue.
+    if let Some(Fighting(current)) = world.get::<Fighting>(player).copied()
+        && let Some(located) = world.get::<Located>(player).copied()
+        && find_actor_in_room(world, arg, located.0, player) == Some(current)
+    {
+        send_to(
+            world,
+            player,
+            "How can you rescue someone you are trying to kill?\r\n",
+        );
         return;
     }
     let cost = skill_stamina_cost(world, "rescue", RESCUE_COST);
@@ -3322,14 +3331,24 @@ pub(crate) fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
         return;
     }
     let target_word = target_word.trim();
-    if target_word.is_empty() {
-        send_to(world, player, "Bash what?\r\n");
-        return;
-    }
     let Some(located) = world.get::<Located>(player).copied() else {
         return;
     };
-    let target = find_actor_in_room(world, target_word, located.0, player);
+    let target = if target_word.is_empty() {
+        // No argument: bash the current opponent, like kick.
+        let Some(Fighting(current)) = world.get::<Fighting>(player).copied() else {
+            send_to(world, player, "Bash what?\r\n");
+            return;
+        };
+        if world.get_entity(current).is_err() {
+            try_remove::<Fighting>(world, player);
+            send_to(world, player, "Your target is gone.\r\n");
+            return;
+        }
+        Some(current)
+    } else {
+        find_actor_in_room(world, target_word, located.0, player)
+    };
     let Some(target) = target else {
         send_to(
             world,
