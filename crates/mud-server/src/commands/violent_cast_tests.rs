@@ -17,7 +17,7 @@ const BUFF: i32 = 4;
 const MODIFY: i32 = 7;
 const DISPEL_FX: i32 = 8;
 
-fn effect_def(id: i32, name: &str) -> EffectDef {
+pub(super) fn effect_def(id: i32, name: &str) -> EffectDef {
     EffectDef {
         id,
         name: name.to_string(),
@@ -39,7 +39,7 @@ fn effect_def(id: i32, name: &str) -> EffectDef {
     }
 }
 
-fn spell(catalog: &mut AbilityCatalog, id: i32, plain: &str, violent: bool, fx: i32) {
+pub(super) fn spell(catalog: &mut AbilityCatalog, id: i32, plain: &str, violent: bool, fx: i32) {
     let mut def = ability_def(id, plain, AbilityKind::Spell);
     def.violent = violent;
     def.cast_time_rounds = 0;

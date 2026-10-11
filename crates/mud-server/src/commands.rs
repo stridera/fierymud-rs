@@ -608,6 +608,9 @@ mod lua_safety_tests;
 #[path = "commands/playtest_b1_tests.rs"]
 mod playtest_b1_tests;
 #[cfg(test)]
+#[path = "commands/playtest_r2_tests.rs"]
+mod playtest_r2_tests;
+#[cfg(test)]
 #[path = "commands/violent_cast_tests.rs"]
 mod violent_cast_tests;
 #[cfg(test)]
@@ -10813,11 +10816,10 @@ pub(crate) fn practice_one(world: &mut World, player: Entity, name: &str) {
 }
 
 /// `train [<stat>]`: bump a `CoreStat` by 1 in exchange for one
-/// `SkillPoints`. Hard-capped at 18 per legacy `CircleMUD`
-/// convention — characters with rolled stats above 18 (e.g. magical
-/// bonuses) can't be trained higher than 18, but their existing
-/// values aren't clamped.
-const TRAIN_STAT_CAP: i32 = 18;
+/// `SkillPoints`. Stats run 0-100 here (the legacy 18 cap was on the
+/// 3-18 scale), so this is only the scale ceiling; the effective cap is
+/// the lower of it and the race's `max_*` column (`cmd_train`).
+const TRAIN_STAT_CAP: i32 = 100;
 
 pub(crate) fn direction_rank(d: Direction) -> u8 {
     match d {
@@ -12739,6 +12741,13 @@ pub(crate) fn look_at_sky(world: &mut World, player: Entity) {
     send_to(world, player, out);
 }
 
+/// The builder-authored description of an exit, or `None` when it is unset or
+/// blank. Legacy import left `''` in most `RoomExit` rows, which must read as
+/// "no description" rather than print empty lines.
+pub(crate) fn exit_description(ed: &mud_world::ExitData) -> Option<&str> {
+    ed.description.as_deref().filter(|d| !d.trim().is_empty())
+}
+
 /// Peek at a neighboring room through the named exit. Reports whether
 /// the exit is closed/locked, and otherwise prints the target room's
 /// name and description (no occupants — that requires actually being
@@ -12769,7 +12778,7 @@ pub(crate) fn look_direction(world: &mut World, player: Entity, dir: Direction) 
     // closed / locked, since that's exactly when the description
     // matters most.
     let mode_pre = color_mode_for(world, player);
-    if let Some(desc) = ed.description.as_ref() {
+    if let Some(desc) = exit_description(&ed) {
         send_prose(world, player, format!("\r\n{}\r\n", desc.trim_end()));
         if matches!(
             ed.state,
@@ -17860,7 +17869,7 @@ pub(crate) fn invoke_ability_core(
                             && target_entity != player
                             && let Some(room) = world.get::<Located>(target_entity).map(|l| l.0)
                         {
-                            engage_combat(world, player, target_entity, room);
+                            engage_combat_quiet(world, player, target_entity, room);
                         }
                         if dead && let Some(located) = world.get::<Located>(target_entity).copied()
                         {
@@ -20506,10 +20515,9 @@ pub(crate) fn invoke_ability_core(
             )
         } else {
             format!(
-                "{} {verb}s {} on you. ({} effect(s))",
+                "{} {verb}s {} on you.",
                 cap_sentence_start(&actor_name),
-                def.name,
-                applied_msgs.len()
+                def.name
             )
         };
         send_msg(world, target_entity, format!("{line}\r\n"));
@@ -20678,7 +20686,7 @@ fn engage_after_violent_cast(
             try_insert(world, target, Fighting(caster));
         }
     } else {
-        engage_combat(world, caster, target, target_room);
+        engage_combat_quiet(world, caster, target, target_room);
     }
 }
 
@@ -25804,6 +25812,29 @@ pub(crate) fn skill_stamina_cost(world: &World, skill: &str, default: i32) -> i3
 /// any other path that wants to start hostilities programmatically
 /// (respawn into an occupied room, scripted ambush, etc).
 pub(crate) fn engage_combat(world: &mut World, attacker: Entity, defender: Entity, room: Entity) {
+    engage_combat_impl(world, attacker, defender, room, true);
+}
+
+/// Same engagement as [`engage_combat`] without the mob-aggro "X sees Y and
+/// attacks!" lines. For fights a player starts themselves (an offensive
+/// spell): the spell's own messages already announce the act, and the
+/// aggro line would claim the player "sees" and "attacks" their own target.
+pub(crate) fn engage_combat_quiet(
+    world: &mut World,
+    attacker: Entity,
+    defender: Entity,
+    room: Entity,
+) {
+    engage_combat_impl(world, attacker, defender, room, false);
+}
+
+fn engage_combat_impl(
+    world: &mut World,
+    attacker: Entity,
+    defender: Entity,
+    room: Entity,
+    announce: bool,
+) {
     // PeacefulRoom blocks every auto-engage path that routes
     // through this helper — remembered grudges, alignment aggro,
     // scripted ambushes. The defender doesn't even see a swing
@@ -25835,7 +25866,8 @@ pub(crate) fn engage_combat(world: &mut World, attacker: Entity, defender: Entit
     try_insert(world, defender, Fighting(attacker));
     // A mob that is hiding or sneaking keeps quiet about it (legacy
     // `memory_attack_announce`); its first swing gives it away.
-    if crate::hiding::is_hidden(world, attacker)
+    if !announce
+        || crate::hiding::is_hidden(world, attacker)
         || world.get::<mud_world::Sneaking>(attacker).is_some()
     {
         return;
