@@ -9185,6 +9185,7 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
         .to_string();
         gmcp::send_if_changed(world, target, "Char.Status", &payload, false);
     }
+    gmcp::send_char_worth_and_slots(world, target);
     let mut discord_payload: Option<String> = None;
     // External.Discord.Status — Discord rich-presence frame.
     // Drives the "Playing fierymud-rs — Lvl X Class" overlay

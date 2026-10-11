@@ -68,6 +68,37 @@ the client reads the cached `gmcp.Char.Vitals` on `onPrompt`.
 
 ---
 
+### `Char.Worth`  — **Live**
+
+Coin on hand and in the bank, legacy shape.
+
+```ts
+{
+  Carried: { platinum: number, gold: number, silver: number, copper: number },
+  Bank:    { platinum: number, gold: number, silver: number, copper: number },
+  Account?: { platinum: number, gold: number, silver: number, copper: number },
+}
+```
+
+`Bank` is the character's own bank balance; `Account` (new, not in
+legacy) is the account-shared bank pool and is a separate balance.
+
+**Cadence:** On change only (plus after renegotiation).
+
+### `Char.SpellSlots`  — **Live**
+
+Free spell slots per circle, legacy shape: a flat array, index 0 =
+circle 1 through index 13 = circle 14. A circle the class cannot
+reach yet reads 0.
+
+```ts
+number[14]
+```
+
+**Cadence:** On change only (a slot spent or recovered).
+
+---
+
 ## Combat
 
 ### `Char.Combat`  — **Live**
@@ -134,7 +165,7 @@ Array<{
   name: string,        // display label ("Stone Skin"); may be reworded, don't key on it
   ability: string,     // originating spell's display name ("Stone Skin"), "" when none
   duration: number,    // seconds remaining; -1 = permanent
-  source: string,      // who cast it ("Self", "Mejna", etc.)
+  source: string,      // origin tag: "spell" | "item" | "room" | "admin" | "other"
   strength: number,    // 1..n stacking strength
 }>
 ```

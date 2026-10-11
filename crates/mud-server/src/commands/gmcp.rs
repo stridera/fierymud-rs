@@ -12,8 +12,8 @@ use std::hash::{Hash, Hasher};
 
 use bevy_ecs::prelude::*;
 use mud_world::{
-    AppliedTo, EffectInstance, EffectSource, Exits, Located, Named, RoomSector, WorldKey,
-    WorldKeyIndex,
+    AccountWealth, AppliedTo, BankWealth, EffectInstance, EffectSource, Exits, Located, Named,
+    Profile, RoomSector, SpellSlotData, SpellSlots, Wealth, WorldKey, WorldKeyIndex,
 };
 use serde_json::{Value, json};
 
@@ -378,6 +378,72 @@ pub(crate) fn push_effect_changes(world: &mut World) {
     for p in todo {
         let payload = build_char_effects(world, p);
         send_if_changed(world, p, "Char.Effects", &payload, false);
+    }
+}
+
+/// Copper split into the four denominations, as legacy `Char.Worth` did.
+fn coins_json(copper: i64) -> Value {
+    let c = crate::prompt::Coins::from_copper(copper);
+    json!({
+        "platinum": c.platinum,
+        "gold": c.gold,
+        "silver": c.silver,
+        "copper": c.copper,
+    })
+}
+
+/// The `Char.Worth` payload, legacy shape (`comm.cpp` `send_gmcp_prompt`):
+/// `Carried` is the coin on hand, `Bank` the character's own bank balance,
+/// each split into platinum/gold/silver/copper. `Account` (not in legacy)
+/// is the account-shared bank pool, present only for characters on an
+/// account; it is a separate balance, so it is not folded into `Bank`.
+pub(crate) fn build_char_worth(world: &World, target: Entity) -> String {
+    let mut worth = json!({
+        "Carried": coins_json(world.get::<Wealth>(target).map_or(0, |w| w.0)),
+        "Bank": coins_json(world.get::<BankWealth>(target).map_or(0, |w| w.0)),
+    });
+    if let Some(account) = world.get::<AccountWealth>(target) {
+        worth["Account"] = coins_json(account.0);
+    }
+    worth.to_string()
+}
+
+/// Highest spell circle reported in `Char.SpellSlots` (legacy
+/// `NUM_SPELL_CIRCLES`).
+const SPELL_CIRCLES: usize = 14;
+
+/// The `Char.SpellSlots` payload, legacy shape (`get_spell_slots_available`):
+/// a flat array of free slots, index 0 = circle 1 through index 13 =
+/// circle 14. A circle the class cannot reach yet reads 0.
+pub(crate) fn build_char_spell_slots(world: &World, target: Entity) -> String {
+    let mut free = [0i32; SPELL_CIRCLES];
+    let class_id = world.get::<Profile>(target).and_then(|p| p.class_id);
+    if let (Some(class_id), Some(data)) = (class_id, world.get_resource::<SpellSlotData>()) {
+        let level = mud_world::effective_level(world, target);
+        let slots = world.get::<SpellSlots>(target);
+        for (circle, max) in data.slots_for(class_id, level) {
+            let Some(i) = usize::try_from(circle - 1)
+                .ok()
+                .filter(|i| *i < SPELL_CIRCLES)
+            else {
+                continue;
+            };
+            let used = slots.map_or(0, |s| s.used_in_circle(circle));
+            free[i] = (max - used).max(0);
+        }
+    }
+    json!(free).to_string()
+}
+
+/// Send `Char.Worth` and `Char.SpellSlots` for a player, each only when
+/// its content changed since the last send. Classless players still
+/// get an all-zero `SpellSlots`.
+pub(crate) fn send_char_worth_and_slots(world: &mut World, target: Entity) {
+    let worth = build_char_worth(world, target);
+    send_if_changed(world, target, "Char.Worth", &worth, false);
+    if world.get::<Profile>(target).is_some() {
+        let slots = build_char_spell_slots(world, target);
+        send_if_changed(world, target, "Char.SpellSlots", &slots, false);
     }
 }
 

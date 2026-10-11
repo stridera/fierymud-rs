@@ -831,3 +831,201 @@ fn group_frame_survives_hostile_names() {
     assert_eq!(group["members"][0]["race"], "Human");
     assert_eq!(group["members"][0]["with_leader"], true);
 }
+
+// ---- Char.Worth (#116) ----
+
+#[test]
+fn char_worth_reports_carried_and_bank_coins_in_legacy_shape() {
+    let mut fx = fixture();
+    let a = fx.a;
+    let (p, mut rx) = player(&mut fx.world, a, "Banker");
+    fx.world.entity_mut(p).insert((
+        mud_world::Wealth(1234),
+        mud_world::BankWealth(56_789),
+        Health { hp: 10, max: 10 },
+    ));
+    super::send_prompt(&mut fx.world, p);
+    let fr = frames(&drain_bytes(&mut rx));
+    let worth = of(&fr, "Char.Worth");
+    assert_eq!(worth.len(), 1, "{fr:?}");
+    let v: Value = serde_json::from_str(&worth[0]).unwrap();
+    assert_eq!(
+        v["Carried"],
+        serde_json::json!({"platinum": 1, "gold": 2, "silver": 3, "copper": 4})
+    );
+    assert_eq!(
+        v["Bank"],
+        serde_json::json!({"platinum": 56, "gold": 7, "silver": 8, "copper": 9})
+    );
+    // No account on this character: no Account block.
+    assert!(v.get("Account").is_none(), "{v}");
+}
+
+#[test]
+fn char_worth_is_change_gated_and_includes_the_account_pool() {
+    let mut fx = fixture();
+    let a = fx.a;
+    let (p, mut rx) = player(&mut fx.world, a, "Banker");
+    fx.world.entity_mut(p).insert((
+        mud_world::Wealth(5),
+        mud_world::BankWealth(0),
+        mud_world::AccountWealth(2000),
+        Health { hp: 10, max: 10 },
+    ));
+    super::send_prompt(&mut fx.world, p);
+    let fr = frames(&drain_bytes(&mut rx));
+    let v: Value = serde_json::from_str(&of(&fr, "Char.Worth")[0]).unwrap();
+    assert_eq!(v["Account"]["platinum"], 2);
+    // Nothing changed: not resent.
+    super::send_prompt(&mut fx.world, p);
+    assert!(of(&frames(&drain_bytes(&mut rx)), "Char.Worth").is_empty());
+    // A coin pickup resends it.
+    fx.world.entity_mut(p).insert(mud_world::Wealth(15));
+    super::send_prompt(&mut fx.world, p);
+    let fr = frames(&drain_bytes(&mut rx));
+    let w = of(&fr, "Char.Worth");
+    assert_eq!(w.len(), 1, "{fr:?}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&w[0]).unwrap()["Carried"]["silver"],
+        1
+    );
+}
+
+// ---- Char.SpellSlots (#119) ----
+
+fn caster_with_slots() -> (Fx, Entity, Rx) {
+    let mut fx = fixture();
+    let mut data = mud_world::SpellSlotData::default();
+    data.class_circles.insert(7, vec![(1, 1), (2, 3), (9, 25)]);
+    data.progression.insert((20, 1), 4);
+    data.progression.insert((20, 2), 2);
+    data.progression.insert((20, 9), 1);
+    fx.world.insert_resource(data);
+    let a = fx.a;
+    let (p, rx) = player(&mut fx.world, a, "Slotter");
+    fx.world.get_mut::<Profile>(p).unwrap().class_id = Some(7);
+    (fx, p, rx)
+}
+
+#[test]
+fn char_spell_slots_is_a_free_slot_array_indexed_by_circle() {
+    let (mut fx, p, mut rx) = caster_with_slots();
+    super::send_prompt(&mut fx.world, p);
+    let fr = frames(&drain_bytes(&mut rx));
+    let slots = of(&fr, "Char.SpellSlots");
+    assert_eq!(slots.len(), 1, "{fr:?}");
+    let v: Value = serde_json::from_str(&slots[0]).unwrap();
+    let arr = v.as_array().expect("array, as legacy sent it");
+    assert_eq!(arr.len(), 14, "one entry per circle");
+    assert_eq!(arr[0], 4, "circle 1");
+    assert_eq!(arr[1], 2, "circle 2");
+    // Circle 9 needs level 25: unreachable at 20, so zero.
+    assert_eq!(arr[8], 0);
+    assert!(arr[2..].iter().all(|n| *n == 0), "{arr:?}");
+}
+
+#[test]
+fn char_spell_slots_resends_only_when_a_slot_is_spent_or_recovers() {
+    let (mut fx, p, mut rx) = caster_with_slots();
+    super::send_prompt(&mut fx.world, p);
+    drain_bytes(&mut rx);
+    super::send_prompt(&mut fx.world, p);
+    assert!(
+        of(&frames(&drain_bytes(&mut rx)), "Char.SpellSlots").is_empty(),
+        "unchanged"
+    );
+    let mut spent = mud_world::SpellSlots::default();
+    spent.in_flight.push(mud_world::SpellCooldown {
+        circle: 1,
+        secs_remaining: 30,
+        total_secs: 30,
+    });
+    fx.world.entity_mut(p).insert(spent);
+    super::send_prompt(&mut fx.world, p);
+    let fr = frames(&drain_bytes(&mut rx));
+    let slots = of(&fr, "Char.SpellSlots");
+    assert_eq!(slots.len(), 1, "{fr:?}");
+    assert_eq!(serde_json::from_str::<Value>(&slots[0]).unwrap()[0], 3);
+    // Recovery sends the restored count.
+    fx.world
+        .entity_mut(p)
+        .insert(mud_world::SpellSlots::default());
+    super::send_prompt(&mut fx.world, p);
+    let slots = of(&frames(&drain_bytes(&mut rx)), "Char.SpellSlots");
+    assert_eq!(serde_json::from_str::<Value>(&slots[0]).unwrap()[0], 4);
+}
+
+// ---- Char.Effects (#50) ----
+
+#[test]
+fn char_effects_reports_the_same_effects_as_the_effects_command() {
+    let (mut fx, p, mut rx) = world_with_armor();
+    dispatch(&mut fx.world, p, "cast 'armor'");
+    for _ in 0..10 {
+        crate::casting::casting_tick(&mut fx.world);
+    }
+    drain_bytes(&mut rx);
+    dispatch(&mut fx.world, p, "effects");
+    let listing = String::from_utf8_lossy(&drain_bytes(&mut rx)).into_owned();
+    super::send_prompt(&mut fx.world, p);
+    let fr = frames(&drain_bytes(&mut rx));
+    let v: Value = serde_json::from_str(&of(&fr, "Char.Effects")[0]).unwrap();
+    let arr = v.as_array().unwrap();
+    assert!(!arr.is_empty());
+    for e in arr {
+        let name = e["name"].as_str().unwrap();
+        assert!(listing.contains(name), "{name} not in effects: {listing}");
+        // Every field the Mudlet client reads is present and typed.
+        assert!(e["duration"].is_number() && e["strength"].is_number());
+        assert!(e["ability"].is_string() && e["source"].is_string());
+    }
+}
+
+#[test]
+fn char_effects_pushed_when_an_effect_expires_without_other_output() {
+    let (mut fx, p, mut rx) = world_with_armor();
+    super::send_prompt(&mut fx.world, p);
+    super::push_effect_changes(&mut fx.world);
+    dispatch(&mut fx.world, p, "cast 'armor'");
+    for _ in 0..10 {
+        crate::casting::casting_tick(&mut fx.world);
+    }
+    super::send_prompt(&mut fx.world, p);
+    super::push_effect_changes(&mut fx.world);
+    drain_bytes(&mut rx);
+    // Let the real effect tick run the buff out.
+    {
+        let mut q = fx.world.query::<&mut mud_world::EffectInstance>();
+        for mut i in q.iter_mut(&mut fx.world) {
+            i.remaining_secs = 1;
+        }
+    }
+    fx.world.insert_resource(crate::TickCount(10));
+    crate::effects::effects_tick(&mut fx.world);
+    drain_bytes(&mut rx);
+    super::push_effect_changes(&mut fx.world);
+    let fr = frames(&drain_bytes(&mut rx));
+    assert_eq!(of(&fr, "Char.Effects"), vec!["[]".to_string()], "{fr:?}");
+}
+
+#[test]
+fn char_effects_includes_effects_restored_at_login() {
+    let (mut fx, p, mut rx) = world_with_armor();
+    let persisted: crate::login::PersistedEffects = serde_json::from_value(serde_json::json!({
+        "saved_at_unix": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        "effects": [{
+            "kind": 1, "name": "ARMOR", "strength": 1, "remaining_secs": 300,
+            "source": "Spell", "ability_id": ARMOR, "modify_delta": null,
+        }],
+    }))
+    .unwrap();
+    crate::login::restore_persisted_effects(&mut fx.world, p, persisted);
+    super::send_prompt(&mut fx.world, p);
+    let fr = frames(&drain_bytes(&mut rx));
+    let v: Value = serde_json::from_str(&of(&fr, "Char.Effects")[0]).unwrap();
+    assert_eq!(v.as_array().unwrap().len(), 1, "{fr:?}");
+    assert_eq!(v[0]["id"], "armor");
+}

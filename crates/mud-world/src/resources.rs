@@ -476,13 +476,13 @@ pub enum HelpLookup {
     /// Multiple matching entries — the caller renders the titles so
     /// the player can `help <title>` to disambiguate.
     AmbiguousMatches(Vec<String>),
-    /// No keyword or title-prefix match the viewer can see.
+    /// No keyword, title-prefix or keyword-prefix match the viewer can see.
     NotFound,
 }
 
 impl HelpCatalog {
-    /// Find an entry by exact keyword match (case-insensitive) or
-    /// by case-insensitive title-prefix when no keyword hits. Entries
+    /// Find an entry by exact keyword match (case-insensitive), then
+    /// case-insensitive title prefix, then keyword prefix. Entries
     /// the viewer can't see (their `min_level` exceeds `viewer_level`)
     /// are filtered before the ambiguity check, so a low-level player
     /// asking for `"slay"` skips over a staff-only `SLAY` entry instead
@@ -531,6 +531,23 @@ impl HelpCatalog {
             .filter(|e| e.title.to_ascii_lowercase().starts_with(&lower))
             .collect();
         matches.sort_by(|a, b| a.title.cmp(&b.title));
+        if matches.is_empty() {
+            // 3) Keyword-prefix fallback (`help spell_cryo` finds the
+            //    article keyworded `SPELL_CRYOMANCER` whose title is
+            //    something else entirely).
+            matches = self
+                .entries
+                .values()
+                .filter(|e| viewer_level >= e.min_level)
+                .filter(|e| {
+                    e.keywords
+                        .iter()
+                        .any(|k| k.to_ascii_lowercase().starts_with(&lower))
+                })
+                .collect();
+            matches.sort_by(|a, b| a.title.cmp(&b.title).then(a.id.cmp(&b.id)));
+            matches.dedup_by(|a, b| a.title == b.title);
+        }
         match matches.len() {
             0 => HelpLookup::NotFound,
             1 => HelpLookup::Found(matches[0].clone()),
@@ -4057,6 +4074,60 @@ mod tests {
         // Ambiguous distinct titles under one keyword: no exact winner.
         insert_help(&mut cat, help_entry(4, "Other Quest", &["QUEST"], 0));
         assert!(cat.lookup_exact_keyword("quest", 1).is_none());
+    }
+
+    #[test]
+    fn help_lookup_falls_back_to_keyword_prefix() {
+        // Issue #124: `help spell_cryo` must find the article keyworded
+        // SPELL_CRYOMANCER even though no title starts with it.
+        let mut cat = HelpCatalog::default();
+        insert_help(
+            &mut cat,
+            help_entry(1, "Cryomancer Spells", &["SPELL_CRYOMANCER"], 0),
+        );
+        insert_help(&mut cat, help_entry(2, "Spells", &["SPELLS"], 0));
+        match cat.lookup("spell_cryo", 50) {
+            HelpLookup::Found(e) => assert_eq!(e.title, "Cryomancer Spells"),
+            other => panic!("expected keyword-prefix Found, got {other:?}"),
+        }
+        // Level-gated like every other tier.
+        insert_help(&mut cat, help_entry(3, "Staff Only", &["GODSTUFF"], 90));
+        assert!(matches!(cat.lookup("godst", 1), HelpLookup::NotFound));
+        assert!(matches!(cat.lookup("godst", 95), HelpLookup::Found(_)));
+        // Two articles sharing the prefix are listed, not guessed.
+        insert_help(
+            &mut cat,
+            help_entry(4, "Pyromancer Spells", &["SPELL_PYROMANCER"], 0),
+        );
+        match cat.lookup("spell_", 50) {
+            HelpLookup::AmbiguousMatches(t) => {
+                assert_eq!(t, vec!["Cryomancer Spells", "Pyromancer Spells"]);
+            }
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn help_lookup_order_is_exact_keyword_then_title_then_keyword_prefix() {
+        let mut cat = HelpCatalog::default();
+        insert_help(&mut cat, help_entry(1, "Spell Index", &["SPELLS"], 0));
+        insert_help(&mut cat, help_entry(2, "Cryo", &["SPELL_CRYO"], 0));
+        insert_help(&mut cat, help_entry(3, "Spellbook", &["BOOK"], 0));
+        // Exact keyword beats everything.
+        match cat.lookup("spells", 50) {
+            HelpLookup::Found(e) => assert_eq!(e.id, 1),
+            other => panic!("{other:?}"),
+        }
+        // Title prefix (Spell Index, Spellbook) beats keyword prefix (Cryo).
+        match cat.lookup("spell", 50) {
+            HelpLookup::AmbiguousMatches(t) => assert_eq!(t, vec!["Spell Index", "Spellbook"]),
+            other => panic!("{other:?}"),
+        }
+        // Keyword prefix only when no title matches.
+        match cat.lookup("spell_c", 50) {
+            HelpLookup::Found(e) => assert_eq!(e.id, 2),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
