@@ -5367,8 +5367,9 @@ pub(crate) fn cmd_train(world: &mut World, player: Entity, args: &str) {
 /// `track <target>` / `hunt <target>`: BFS through open exits up to
 /// 50 rooms looking for a player or mob whose name matches.
 /// Reports the first direction to head and the distance.
-/// Closed/locked exits block the scan; flying / hidden mobs are
-/// matched normally (no perception roll yet).
+/// Closed/locked exits block the scan; only characters and mobs the
+/// tracker can see are matched (never items), and there is no perception
+/// roll for the visible ones yet.
 pub(crate) fn cmd_track(world: &mut World, player: Entity, args: &str) {
     use std::collections::{HashSet, VecDeque};
     const MAX_DEPTH: i32 = 50;
@@ -5396,15 +5397,20 @@ pub(crate) fn cmd_track(world: &mut World, player: Entity, args: &str) {
         return;
     }
 
-    // Collect every room->target candidate in one pass: any entity
-    // with Named matching the needle (excluding the player), keyed
-    // by their current room. Then BFS rooms until we hit one in the
+    // Collect every room->target candidate in one pass: any character
+    // or mob matching the needle (excluding the player and anyone the
+    // tracker can't see), keyed by their current room. Items, rooms and
+    // zones are never tracked. Then BFS rooms until we hit one in the
     // candidate map.
     let candidate_rooms: HashSet<Entity> = {
-        let mut q = world.query::<(Entity, &Located, &Named, Option<&Keywords>)>();
+        let mut q = world.query_filtered::<
+            (Entity, &Located, &Named, Option<&Keywords>),
+            Or<(With<Player>, With<Mob>)>,
+        >();
         q.iter(world)
             .filter(|(e, _, n, kw)| {
                 *e != player
+                    && can_see_player(world, player, *e)
                     && mud_world::targeting::entity_matches(
                         &needle,
                         &n.name,
@@ -9112,6 +9118,9 @@ pub(crate) fn cmd_unlock(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let room = located.0;
+    if refuse_hidden_exit(world, player, room, dir) {
+        return;
+    }
     let Some((state, key_req)) = world
         .get::<Exits>(room)
         .and_then(|e| e.0.get(&dir).map(|ed| (ed.state, ed.key)))
@@ -9201,6 +9210,9 @@ pub(crate) fn cmd_open(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let room = located.0;
+    if refuse_hidden_exit(world, player, room, dir) {
+        return;
+    }
     let cur_state = world
         .get::<Exits>(room)
         .and_then(|e| e.0.get(&dir).map(|ed| ed.state));
@@ -9266,6 +9278,9 @@ pub(crate) fn cmd_close(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let room = located.0;
+    if refuse_hidden_exit(world, player, room, dir) {
+        return;
+    }
     let cur_state = world
         .get::<Exits>(room)
         .and_then(|e| e.0.get(&dir).map(|ed| ed.state));
@@ -9324,6 +9339,9 @@ pub(crate) fn cmd_lock(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let room = located.0;
+    if refuse_hidden_exit(world, player, room, dir) {
+        return;
+    }
     let Some((state, key_req)) = world
         .get::<Exits>(room)
         .and_then(|e| e.0.get(&dir).map(|ed| (ed.state, ed.key)))

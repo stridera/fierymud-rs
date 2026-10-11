@@ -366,6 +366,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                     name: z.name.clone(),
                 },
                 ZoneClimate(z.climate),
+                crate::ZoneDoorReset::new(z.reset_mode, z.lifespan, 0),
             ))
             .id();
         if z.is_god_zone {
@@ -433,6 +434,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         // required Object proto.
         let direction = e.direction;
         let data = exit_data_from_row(e, target);
+        record_exit_default(world, source, direction, (data.state, data.hit_points));
         if let Some(mut exits) = world.get_mut::<Exits>(source) {
             exits.0.insert(direction, data);
         }
@@ -2108,6 +2110,22 @@ fn apply_room_flags(world: &mut World, entity: Entity, r: &rooms::Room) {
     }
 }
 
+/// Remember the as-authored door state so the zone reset pass can restore it.
+fn record_exit_default(
+    world: &mut World,
+    room: Entity,
+    dir: mud_db::enums::Direction,
+    default: (mud_db::enums::ExitState, Option<i32>),
+) {
+    if let Some(mut defaults) = world.get_mut::<crate::ExitDefaults>(room) {
+        defaults.0.insert(dir, default);
+    } else if let Ok(mut em) = world.get_entity_mut(room) {
+        let mut defaults = crate::ExitDefaults::default();
+        defaults.0.insert(dir, default);
+        em.insert(defaults);
+    }
+}
+
 /// Build the runtime [`ExitData`] for one `RoomExits` row whose target (if any)
 /// has already been resolved to an entity. Shared by the boot loader and the
 /// zone reload path.
@@ -2746,6 +2764,12 @@ pub async fn reload_zones(
                 },
                 ZoneClimate(z.climate),
             ));
+            let last_reset = em.get::<crate::ZoneDoorReset>().map_or(0, |r| r.last_reset);
+            em.insert(crate::ZoneDoorReset::new(
+                z.reset_mode,
+                z.lifespan,
+                last_reset,
+            ));
             if z.is_god_zone {
                 em.insert(crate::GodZone);
             } else {
@@ -2761,6 +2785,7 @@ pub async fn reload_zones(
                         name: z.name.clone(),
                     },
                     ZoneClimate(z.climate),
+                    crate::ZoneDoorReset::new(z.reset_mode, z.lifespan, 0),
                 ))
                 .id();
             if z.is_god_zone {
@@ -2848,6 +2873,7 @@ pub async fn reload_zones(
             && let Some(mut exits) = world.get_mut::<Exits>(entity)
         {
             exits.0.clear();
+            world.entity_mut(entity).remove::<crate::ExitDefaults>();
         }
     }
     // Exits from rooms in OTHER zones that point into the reloaded zone
@@ -2870,6 +2896,7 @@ pub async fn reload_zones(
         };
         let direction = e.direction;
         let data = exit_data_from_row(e, target);
+        record_exit_default(world, source, direction, (data.state, data.hit_points));
         if let Some(mut exits) = world.get_mut::<Exits>(source) {
             exits.0.insert(direction, data);
         }

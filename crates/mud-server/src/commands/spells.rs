@@ -12,7 +12,7 @@ use mud_world::{
 
 use crate::commands::{
     Category, Command, Help, broadcast_room_except_players_rendered, direction_name,
-    flip_door_both_sides, invoke_ability, name_of, parse_direction, send_to,
+    flip_door_both_sides, invoke_ability, name_of, parse_direction, refuse_hidden_exit, send_to,
 };
 
 inventory::submit! {
@@ -226,6 +226,9 @@ pub(crate) fn cmd_pick(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let room = located.0;
+    if refuse_hidden_exit(world, player, room, dir) {
+        return;
+    }
     let Some((state, key_req, is_pickproof)) = world
         .get::<Exits>(room)
         .and_then(|e| e.0.get(&dir).map(|ed| (ed.state, ed.key, ed.is_pickproof)))

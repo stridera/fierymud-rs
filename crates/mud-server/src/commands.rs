@@ -576,6 +576,9 @@ pub(crate) use banish::extract_mob;
 #[path = "commands/boards.rs"]
 mod boards;
 pub(crate) use boards::compose_board_step;
+#[cfg(test)]
+#[path = "commands/buff_strip_gate_tests.rs"]
+mod buff_strip_gate_tests;
 #[path = "commands/channels.rs"]
 mod channels;
 #[path = "commands/clan_chat.rs"]
@@ -866,6 +869,9 @@ mod staff_move_tests;
 mod status_lists;
 #[path = "commands/subclass.rs"]
 mod subclass;
+#[cfg(test)]
+#[path = "commands/target_visibility_tests.rs"]
+mod target_visibility_tests;
 
 #[cfg(test)]
 #[path = "commands/belt_slot_tests.rs"]
@@ -14351,7 +14357,10 @@ pub(crate) fn mobs_before_players_key(world: &World, e: Entity) -> bool {
 /// non-co-located target. Match semantics: case-insensitive prefix
 /// against the displayed `Named.name`. We *don't* honor `Keywords`
 /// here — a SUMMON target is a specific player, not a generic
-/// keyword match.
+/// keyword match. `exclude` is the seeker: players it can't see (invisible,
+/// hidden, wizinvis, or any target while blind) are not candidates, so an
+/// unseen name can't be summoned or travelled to, or probed through the
+/// ambiguity refusal.
 pub(crate) fn find_online_player_anywhere(
     world: &mut World,
     needle: &str,
@@ -14368,7 +14377,7 @@ pub(crate) fn find_online_player_anywhere(
     )>();
     let cands: Vec<(Entity, &str)> = q
         .iter(world)
-        .filter(|(e, _)| *e != exclude)
+        .filter(|(e, _)| *e != exclude && can_see_player(world, exclude, *e))
         .map(|(e, n)| (e, n.name.as_str()))
         .collect();
     // An exact name wins outright (`Sam` while `Samui` is also online).
@@ -15394,6 +15403,26 @@ pub(crate) fn ability_is_hostile(world: &World, def: &mud_world::AbilityDef) -> 
     }
 }
 
+/// True when the ability carries a `dispel` effect that can remove beneficial
+/// effects from its target (any filter but `debuff`, which only cleans
+/// harmful ones). Such an ability is an attack on a player even when its
+/// own flags say non-violent (Extinguish, Douse).
+pub(crate) fn ability_strips_buffs(world: &World, def: &mud_world::AbilityDef) -> bool {
+    let Some(mappings) = world.resource::<AbilityCatalog>().effects_for.get(&def.id) else {
+        return false;
+    };
+    let effects = world.resource::<EffectCatalog>();
+    mappings.iter().any(|(id, override_params)| {
+        effects.by_id.get(id).is_some_and(|e| {
+            e.effect_type == "dispel" && {
+                let filter =
+                    resolve_dispel_filter(override_params.as_ref(), Some(&e.default_params));
+                !filter.is_empty() && filter != "debuff"
+            }
+        })
+    })
+}
+
 /// Stats Enhance Ability can raise: full name (what the caster may abbreviate)
 /// and the modify-effect target key.
 const ENHANCE_STATS: [(&str, &str); 6] = [
@@ -15839,6 +15868,19 @@ fn resolve_and_gate_target(
         && target_entity != player
         && (world.get::<Player>(target_entity).is_some()
             || world.get::<Mob>(target_entity).is_some())
+        && !attack_ok::attack_ok(world, player, target_entity, true)
+    {
+        return None;
+    }
+    // A non-violent buff-strip (Extinguish, Douse) aimed at another player
+    // is an attack in all but name: it takes the same PK / consent /
+    // peaceful-room gate. Group mates are exempt (a cleric may strip an
+    // ally's unwanted buff).
+    if !is_hostile_ability
+        && target_entity != player
+        && world.get::<Player>(target_entity).is_some()
+        && !crate::hiding::same_group(world, player, target_entity)
+        && ability_strips_buffs(world, def)
         && !attack_ok::attack_ok(world, player, target_entity, true)
     {
         return None;
@@ -23177,6 +23219,30 @@ pub(crate) fn exit_is_hidden_to(
     !world
         .get::<mud_world::RevealedExits>(player)
         .is_some_and(|r| r.set.contains(&(room, dir)))
+}
+
+/// Door-verb gate: when the typed direction names an exit this player
+/// can't see (undiscovered secret door, god-zone link), answer exactly
+/// like a missing exit and return `true` so the caller bails. Without
+/// this, `open north` beside an unfound secret door confirms it exists.
+pub(crate) fn refuse_hidden_exit(
+    world: &mut World,
+    player: Entity,
+    room: Entity,
+    dir: Direction,
+) -> bool {
+    let hidden = world
+        .get::<Exits>(room)
+        .and_then(|e| e.0.get(&dir))
+        .is_some_and(|ed| exit_is_hidden_to(world, player, room, dir, ed));
+    if hidden {
+        send_to(
+            world,
+            player,
+            format!("No exit {}.\r\n", direction_name(dir)),
+        );
+    }
+    hidden
 }
 
 /// Insert (or replace) a component on an entity, silently no-op'ing if

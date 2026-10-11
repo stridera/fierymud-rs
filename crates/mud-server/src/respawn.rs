@@ -10,12 +10,14 @@
 //! text per-row to differentiate PERSISTENT from ONCE etc., but the
 //! runtime today treats every row as PERSISTENT.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bevy_ecs::prelude::*;
+use mud_db::enums::{Direction, ResetMode};
 use mud_world::{
-    AttachedTriggers, Item, Mob, MobGearCatalog, MobPrototypes, MobResetCatalog, ObjectPrototypes,
-    ObjectResetCatalog, WorldKey, fill_container, object_world_counts, outfit_mob,
+    AttachedTriggers, ExitDefaults, Exits, Item, Located, Mob, MobGearCatalog, MobPrototypes,
+    MobResetCatalog, ObjectPrototypes, ObjectResetCatalog, Player, Room, WorldKey, ZoneDoorReset,
+    fill_container, object_world_counts, outfit_mob,
 };
 use mud_world::{FromMobReset, FromObjectReset};
 use tracing::info;
@@ -46,12 +48,136 @@ pub struct MobRespawnTimers {
     pub last_death_tick: HashMap<i32, u64>,
 }
 
+/// How soon a zone retries its door reset after skipping a door because a
+/// player stood beside it (5 minutes of 10 Hz ticks).
+const DOOR_RESET_RETRY_TICKS: u64 = 3000;
+
+/// Restore every door in each zone whose `lifespan` has elapsed to its
+/// as-authored state (`RoomExits.default_state`), like legacy `reset_zone`'s
+/// `D` commands. Only due zones are touched; the per-pass cost for idle
+/// zones is one comparison per zone entity.
+///
+/// Kinder than legacy: a door is left alone while a player stands in either
+/// room it joins, and the zone retries after `DOOR_RESET_RETRY_TICKS`.
+/// `ResetMode::Empty` zones wait until no player is inside; `Never` zones
+/// (clan halls, quest zones) keep their doors as players left them.
+pub(crate) fn door_reset_pass(world: &mut World, tick: u64) {
+    let mut due: Vec<(Entity, ResetMode, u64)> = Vec::new();
+    {
+        let mut q = world.query::<(Entity, &ZoneDoorReset)>();
+        for (zone, r) in q.iter(world) {
+            if r.mode != ResetMode::Never && tick.saturating_sub(r.last_reset) >= r.period_ticks {
+                due.push((zone, r.mode, r.period_ticks));
+            }
+        }
+    }
+    if due.is_empty() {
+        return;
+    }
+    let occupied: HashSet<Entity> = world
+        .query_filtered::<&Located, With<Player>>()
+        .iter(world)
+        .map(|l| l.0)
+        .collect();
+    for (zone, mode, period) in due {
+        if mode == ResetMode::Empty
+            && occupied
+                .iter()
+                .any(|&room| world.get::<Located>(room).is_some_and(|l| l.0 == zone))
+        {
+            continue;
+        }
+        let skipped = reset_zone_doors(world, zone, &occupied);
+        let next = if skipped {
+            tick.saturating_sub(period)
+                .saturating_add(DOOR_RESET_RETRY_TICKS.min(period))
+        } else {
+            tick
+        };
+        if let Some(mut r) = world.get_mut::<ZoneDoorReset>(zone) {
+            r.last_reset = next;
+        }
+    }
+}
+
+/// Reset the doors of the rooms in `zone`. Both sides of a two-way door
+/// are restored together (the far room may sit in another zone, as in
+/// legacy). Returns true when a door was skipped because of a player.
+fn reset_zone_doors(world: &mut World, zone: Entity, occupied: &HashSet<Entity>) -> bool {
+    let rooms: Vec<Entity> = world
+        .query_filtered::<(Entity, &Located), (With<Room>, With<ExitDefaults>)>()
+        .iter(world)
+        .filter(|(_, l)| l.0 == zone)
+        .map(|(e, _)| e)
+        .collect();
+    let mut skipped = false;
+    let mut done: HashSet<(Entity, Direction)> = HashSet::new();
+    for room in rooms {
+        let Some(defaults) = world.get::<ExitDefaults>(room).map(|d| d.0.clone()) else {
+            continue;
+        };
+        for (dir, (state, hp)) in defaults {
+            if done.contains(&(room, dir)) {
+                continue;
+            }
+            let Some((cur_state, cur_hp, far)) = world
+                .get::<Exits>(room)
+                .and_then(|e| e.0.get(&dir))
+                .map(|ed| (ed.state, ed.hit_points, ed.to))
+            else {
+                continue;
+            };
+            let far_side = far.and_then(|f| {
+                let opp = crate::commands::opposite(dir)?;
+                let back = world.get::<Exits>(f)?.0.get(&opp)?;
+                (back.to == Some(room)).then_some((f, opp))
+            });
+            let touches_player = occupied.contains(&room)
+                || far_side.is_some_and(|(f, _)| occupied.contains(&f))
+                || far.is_some_and(|f| occupied.contains(&f));
+            let far_differs = far_side.is_some_and(|(f, opp)| {
+                world
+                    .get::<Exits>(f)
+                    .and_then(|e| e.0.get(&opp))
+                    .is_some_and(|ed| ed.state != state)
+            });
+            if cur_state == state && cur_hp == hp && !far_differs {
+                continue;
+            }
+            if touches_player {
+                skipped = true;
+                continue;
+            }
+            if let Some(mut exits) = world.get_mut::<Exits>(room)
+                && let Some(ed) = exits.0.get_mut(&dir)
+            {
+                ed.state = state;
+                ed.hit_points = hp;
+            }
+            if let Some((f, opp)) = far_side {
+                if let Some(mut exits) = world.get_mut::<Exits>(f)
+                    && let Some(ed) = exits.0.get_mut(&opp)
+                {
+                    ed.state = state;
+                    if hp.is_some() {
+                        ed.hit_points = hp;
+                    }
+                }
+                done.insert((f, opp));
+            }
+        }
+    }
+    skipped
+}
+
 #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
 pub fn respawn_tick(world: &mut World) {
     let tick = world.resource::<TickCount>().0;
     if !tick.is_multiple_of(RESPAWN_PERIOD_TICKS) {
         return;
     }
+
+    door_reset_pass(world, tick);
 
     // Snapshot live world-counts per (zone, id) for the global cap
     // check, plus the set of reset_ids whose mob is alive. Same
@@ -1025,5 +1151,167 @@ mod tests {
             assert!(refill.as_millis() < 20, "refill pass took {refill:?}");
             assert!(steady.as_millis() < 20, "steady pass took {steady:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod door_reset_tests {
+    use super::*;
+    use mud_db::enums::ExitState;
+    use mud_world::{ExitData, Named};
+
+    const PERIOD: u64 = 600 * 30;
+
+    fn door(to: Entity, state: ExitState) -> ExitData {
+        ExitData {
+            to: Some(to),
+            state,
+            key: None,
+            description: None,
+            keywords: vec!["door".into()],
+            is_hidden: false,
+            is_pickproof: false,
+            is_bashable: true,
+            hit_points: Some(50),
+        }
+    }
+
+    /// Two rooms joined by an east/west door, both authored Locked, in
+    /// separate zones when `second_zone` is set.
+    fn world_with_door(mode: ResetMode, second_zone: bool) -> (World, Entity, Entity, Entity) {
+        let mut world = World::new();
+        let zone = world
+            .spawn((Named { name: "z".into() }, ZoneDoorReset::new(mode, 30, 0)))
+            .id();
+        let zone_b = if second_zone {
+            world
+                .spawn((Named { name: "y".into() }, ZoneDoorReset::new(mode, 30, 0)))
+                .id()
+        } else {
+            zone
+        };
+        let a = world.spawn((Room, Located(zone))).id();
+        let b = world.spawn((Room, Located(zone_b))).id();
+        for (room, dir, to) in [(a, Direction::East, b), (b, Direction::West, a)] {
+            let mut exits = Exits::default();
+            exits.0.insert(dir, door(to, ExitState::Locked));
+            let mut defaults = ExitDefaults::default();
+            defaults.0.insert(dir, (ExitState::Locked, Some(50)));
+            world.entity_mut(room).insert((exits, defaults));
+        }
+        (world, zone, a, b)
+    }
+
+    fn state(world: &World, room: Entity, dir: Direction) -> ExitState {
+        world.get::<Exits>(room).unwrap().0[&dir].state
+    }
+
+    fn open_both(world: &mut World, a: Entity, b: Entity) {
+        world
+            .get_mut::<Exits>(a)
+            .unwrap()
+            .0
+            .get_mut(&Direction::East)
+            .unwrap()
+            .state = ExitState::Open;
+        let mut eb = world.get_mut::<Exits>(b).unwrap();
+        let w = eb.0.get_mut(&Direction::West).unwrap();
+        w.state = ExitState::Open;
+        w.hit_points = Some(5);
+    }
+
+    #[test]
+    fn not_due_until_the_lifespan_passes() {
+        let (mut world, _z, a, b) = world_with_door(ResetMode::Normal, false);
+        open_both(&mut world, a, b);
+        door_reset_pass(&mut world, PERIOD - 1);
+        assert_eq!(state(&world, a, Direction::East), ExitState::Open);
+        door_reset_pass(&mut world, PERIOD);
+        assert_eq!(state(&world, a, Direction::East), ExitState::Locked);
+        assert_eq!(state(&world, b, Direction::West), ExitState::Locked);
+        assert_eq!(
+            world.get::<Exits>(b).unwrap().0[&Direction::West].hit_points,
+            Some(50),
+            "bash damage is repaired"
+        );
+    }
+
+    #[test]
+    fn one_sided_change_restores_both_sides_across_zones() {
+        let (mut world, zone, a, b) = world_with_door(ResetMode::Normal, true);
+        // Only room `a` (zone 1) deviates; the far side is in zone 2.
+        world
+            .get_mut::<Exits>(a)
+            .unwrap()
+            .0
+            .get_mut(&Direction::East)
+            .unwrap()
+            .state = ExitState::Closed;
+        world.get_mut::<ZoneDoorReset>(zone).unwrap().last_reset = 0;
+        door_reset_pass(&mut world, PERIOD);
+        assert_eq!(state(&world, a, Direction::East), ExitState::Locked);
+        assert_eq!(state(&world, b, Direction::West), ExitState::Locked);
+    }
+
+    #[test]
+    fn a_player_in_either_room_defers_the_door() {
+        for occupied_side in 0..2 {
+            let (mut world, zone, a, b) = world_with_door(ResetMode::Normal, false);
+            open_both(&mut world, a, b);
+            let visitor = world
+                .spawn((Player, Located(if occupied_side == 0 { a } else { b })))
+                .id();
+            door_reset_pass(&mut world, PERIOD);
+            assert_eq!(state(&world, a, Direction::East), ExitState::Open);
+            assert_eq!(state(&world, b, Direction::West), ExitState::Open);
+            // Retried after the short delay, not a whole lifespan later.
+            let sched = *world.get::<ZoneDoorReset>(zone).unwrap();
+            assert_eq!(
+                sched.last_reset + sched.period_ticks,
+                PERIOD + DOOR_RESET_RETRY_TICKS
+            );
+            world.despawn(visitor);
+            door_reset_pass(&mut world, PERIOD + DOOR_RESET_RETRY_TICKS - 1);
+            assert_eq!(state(&world, a, Direction::East), ExitState::Open);
+            door_reset_pass(&mut world, PERIOD + DOOR_RESET_RETRY_TICKS);
+            assert_eq!(state(&world, a, Direction::East), ExitState::Locked);
+            assert_eq!(state(&world, b, Direction::West), ExitState::Locked);
+        }
+    }
+
+    #[test]
+    fn empty_zones_wait_for_everyone_to_leave_and_never_zones_never_reset() {
+        let (mut world, _z, a, b) = world_with_door(ResetMode::Empty, false);
+        open_both(&mut world, a, b);
+        // A player far from the door but inside the zone blocks an Empty zone.
+        let elsewhere = world
+            .spawn((Room, Located(world.get::<Located>(a).unwrap().0)))
+            .id();
+        let p = world.spawn((Player, Located(elsewhere))).id();
+        door_reset_pass(&mut world, PERIOD);
+        assert_eq!(state(&world, a, Direction::East), ExitState::Open);
+        world.despawn(p);
+        door_reset_pass(&mut world, PERIOD + 60);
+        assert_eq!(state(&world, a, Direction::East), ExitState::Locked);
+
+        let (mut world, _z, a, b) = world_with_door(ResetMode::Never, false);
+        open_both(&mut world, a, b);
+        door_reset_pass(&mut world, PERIOD * 100);
+        assert_eq!(state(&world, a, Direction::East), ExitState::Open);
+    }
+
+    #[test]
+    fn only_the_due_zone_is_touched() {
+        let (mut world, zone, a, b) = world_with_door(ResetMode::Normal, true);
+        open_both(&mut world, a, b);
+        // Zone of room `b` was reset just now; zone of `a` is due. The
+        // shared door still restores because the due side owns it.
+        let zb = world.get::<Located>(b).unwrap().0;
+        world.get_mut::<ZoneDoorReset>(zb).unwrap().last_reset = PERIOD;
+        door_reset_pass(&mut world, PERIOD);
+        assert_eq!(state(&world, a, Direction::East), ExitState::Locked);
+        assert_eq!(state(&world, b, Direction::West), ExitState::Locked);
+        assert_eq!(world.get::<ZoneDoorReset>(zone).unwrap().last_reset, PERIOD);
+        assert_eq!(world.get::<ZoneDoorReset>(zb).unwrap().last_reset, PERIOD);
     }
 }

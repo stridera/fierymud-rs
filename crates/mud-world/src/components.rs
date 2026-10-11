@@ -3225,6 +3225,36 @@ pub struct ExitData {
 #[derive(Component, Debug, Clone, Default)]
 pub struct Exits(pub HashMap<Direction, ExitData>);
 
+/// As-authored `(default_state, hit_points)` per direction, stamped at load
+/// so the zone door-reset pass can restore doors that players opened, closed,
+/// locked, picked or bashed. Absent on rooms without exits.
+#[derive(Component, Debug, Clone, Default)]
+pub struct ExitDefaults(pub HashMap<Direction, (ExitState, Option<i32>)>);
+
+/// Door-reset schedule on a zone entity, from `Zones.lifespan` /
+/// `Zones.resetMode` (legacy `reset_zone` cadence: every `lifespan` minutes;
+/// `Empty` waits for no players in the zone; `Never` never resets).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct ZoneDoorReset {
+    pub mode: mud_db::enums::ResetMode,
+    /// `lifespan` minutes in 10 Hz ticks (at least one minute).
+    pub period_ticks: u64,
+    /// `TickCount` of the last pass (0 = boot).
+    pub last_reset: u64,
+}
+
+impl ZoneDoorReset {
+    #[must_use]
+    pub fn new(mode: mud_db::enums::ResetMode, lifespan_minutes: i32, last_reset: u64) -> Self {
+        let minutes = u64::try_from(lifespan_minutes.max(1)).unwrap_or(1);
+        Self {
+            mode,
+            period_ticks: minutes * 600,
+            last_reset,
+        }
+    }
+}
+
 /// Real-time syslog subscription marker. Builder+ players carrying
 /// this component receive a one-line push every time a tracing
 /// event fires at or above `min_level`. Set / cleared via

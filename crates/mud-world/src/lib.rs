@@ -19,9 +19,9 @@ pub use components::{
     ClientWidth, CoinPile, CombatStats, CommandGrants, CompositionOverride, ContainerState,
     Contents, Cooldowns, CoreStats, Corpse, CorpseDecay, CorpseOriginLevel, DeathTrap, Decomposing,
     Description, DetectAlign, DetectInvis, Drunkenness, EffectInstance, EffectSource, Empowered,
-    EntryRestriction, EquippedSlot, ExamineText, ExitData, Exits, Falling, Familiar, Farsee,
-    Feared, Fighting, Flying, Focus, Follower, FromMobReset, FromObjectReset, Frozen, Ghost,
-    GodZone, GrantEntry, GrantUsability, GrantedByItem, GroupInvite, GroupMember, Guarding,
+    EntryRestriction, EquippedSlot, ExamineText, ExitData, ExitDefaults, Exits, Falling, Familiar,
+    Farsee, Feared, Fighting, Flying, Focus, Follower, FromMobReset, FromObjectReset, Frozen,
+    Ghost, GodZone, GrantEntry, GrantUsability, GrantedByItem, GroupInvite, GroupMember, Guarding,
     GuildhallRoom, Haste, Health, Hiddenness, HouseExitEntry, HouseGuestEntry, HouseItem,
     HouseItemEntry, HousePlacement, HouseRoom, HouseRoomEntry, HouseSummary, Hunger, Identified,
     IgnoreList, IndoorRoom, Infravision, InnRoom, InnTier, Invisible, InvisibleSource, Item,
@@ -44,8 +44,8 @@ pub use components::{
     SwitchedFrom, SwitchedInto, SyslogMinLevel, TellLog, Thirst, TimePlayed, Title, Trophy,
     TrophyEntry, TrophyKind, UiStyle, UnarmedDamage, WallTraversal, WatchingSyslog, WaterWalk,
     Wealth, WeaponHitroll, WearableIn, WimpyThreshold, WizInvis, WorldKey, Zone, ZoneClimate,
-    ZoneVisits, group_members, group_root, innate_cooldown_key, is_lit, room_in_god_zone,
-    wear_keyword_slot, zone_is_god,
+    ZoneDoorReset, ZoneVisits, group_members, group_root, innate_cooldown_key, is_lit,
+    room_in_god_zone, wear_keyword_slot, zone_is_god,
 };
 pub use item_spawn::{SECS_PER_MUD_HOUR, attach_timer_if_decaying, spawn_item_from_proto};
 pub use loader::{

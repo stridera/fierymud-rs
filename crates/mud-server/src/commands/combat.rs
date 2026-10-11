@@ -17,8 +17,8 @@ use crate::commands::{
     cmd_look, consider_verdict_color, direction_name, drain_stamina, engage_skill_shim,
     find_actor_in_room, flip_door_both_sides, hit_chance_color, invoke_ability, invoke_ability_aoe,
     invoke_ability_targeting, mob_helpers_engage, name_of, name_or, opposite, parse_direction,
-    remove_effect_named, require_alert_posture, send_rendered, send_to, skill_stamina_cost,
-    try_insert, try_remove,
+    refuse_hidden_exit, remove_effect_named, require_alert_posture, send_rendered, send_to,
+    skill_stamina_cost, try_insert, try_remove,
 };
 
 inventory::submit! {
@@ -800,6 +800,9 @@ pub(crate) fn cmd_doorbash(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let room = located.0;
+    if refuse_hidden_exit(world, player, room, dir) {
+        return;
+    }
     // Wall-bash gate. If a WALL_OF_STONE / WALL_OF_ICE blocks this
     // direction, the swing slams into the wall instead of the door
     // beyond. Deduct STR-scaled damage from the per-direction HP
@@ -2970,6 +2973,9 @@ pub(crate) fn cmd_retreat(world: &mut World, player: Entity, args: &str) {
         return;
     };
     let from_room = located.0;
+    if refuse_hidden_exit(world, player, from_room, dir) {
+        return;
+    }
     let Some(exits) = world.get::<Exits>(from_room).cloned() else {
         send_to(world, player, "No exits here.\r\n");
         return;

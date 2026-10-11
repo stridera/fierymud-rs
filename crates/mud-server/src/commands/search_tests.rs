@@ -324,3 +324,60 @@ fn staff_always_find_hidden_exits_and_are_not_lagged() {
     super::info::search_with_roll(&mut world, p, "", &mut |_| 200);
     assert!(revealed(&world, p, tunnel, Direction::West));
 }
+
+/// Every door verb must answer an undiscovered secret door exactly like a
+/// missing exit, and leave the door untouched.
+#[test]
+fn door_verbs_treat_an_undiscovered_exit_like_a_missing_one() {
+    for verb in [
+        "open", "close", "lock", "unlock", "pick", "doorbash", "retreat",
+    ] {
+        let (mut world, tunnel, ice) = world_with_rooms();
+        let mut door = hidden_door(ice, ExitState::Locked);
+        door.key = Some((1, 1));
+        door.is_bashable = true;
+        world
+            .get_mut::<Exits>(tunnel)
+            .unwrap()
+            .0
+            .insert(Direction::East, door);
+        let (p, mut rx) = player(&mut world, tunnel);
+        world.entity_mut(p).insert(mud_world::Stamina {
+            current: 50,
+            max: 50,
+        });
+
+        dispatch(&mut world, p, &format!("{verb} east"));
+        let hidden_out = drain(&mut rx);
+        // `north` has no exit at all: the reference answer.
+        dispatch(&mut world, p, &format!("{verb} north"));
+        let missing_out = drain(&mut rx).replace("north", "east");
+        assert_eq!(hidden_out, missing_out, "{verb}: hidden != missing");
+        assert!(hidden_out.contains("No exit east."), "{verb}: {hidden_out}");
+        assert_eq!(
+            world.get::<Exits>(tunnel).unwrap().0[&Direction::East].state,
+            ExitState::Locked,
+            "{verb} touched the hidden door"
+        );
+        assert_eq!(world.get::<Located>(p).unwrap().0, tunnel, "{verb} moved");
+    }
+}
+
+#[test]
+fn door_verbs_work_on_a_revealed_secret_door() {
+    let (mut world, tunnel, ice) = world_with_rooms();
+    world
+        .get_mut::<Exits>(tunnel)
+        .unwrap()
+        .0
+        .insert(Direction::East, hidden_door(ice, ExitState::Closed));
+    let (p, mut rx) = player(&mut world, tunnel);
+    dispatch(&mut world, p, "search monolith");
+    drain(&mut rx);
+    dispatch(&mut world, p, "open east");
+    drain(&mut rx);
+    assert_eq!(
+        world.get::<Exits>(tunnel).unwrap().0[&Direction::East].state,
+        ExitState::Open
+    );
+}
