@@ -1337,6 +1337,9 @@ fn hand_pet_gear_to_owner(world: &mut World, owner: Entity) {
             if let Ok(mut e) = world.get_entity_mut(item) {
                 e.insert(Located(owner));
             }
+            // A placed house item the pet picked up kept its house row; now
+            // that it sits in the owner's pack the owner's save deletes it.
+            crate::house_items::release_house_items_within(world, item);
         }
     }
 }
@@ -11705,6 +11708,97 @@ mod tests {
             world
                 .get::<crate::house_items::PendingHouseDeletes>(player)
                 .is_none()
+        );
+    }
+
+    /// A pet picking up a placed house item must not hand the row delete to
+    /// the owner's save (the item is not in that save): the row stays until
+    /// the pet's gear reaches the owner's pack, and an item the pet loses
+    /// some other way is released then.
+    #[test]
+    fn pet_pickup_of_a_house_item_keeps_the_row_until_it_reaches_the_pack() {
+        let mut world = World::new();
+        crate::house_items::register_observers(&mut world);
+        let room = world.spawn_empty().id();
+        let house_room = world
+            .spawn(mud_world::HouseRoom {
+                house_id: 1,
+                local_index: 0,
+            })
+            .id();
+        let me = spawn_player_for(&mut world, "pc-pet", room);
+        let wolf = world
+            .spawn((
+                Mob,
+                Located(house_room),
+                Follower(me),
+                mud_world::PersistentPet,
+            ))
+            .id();
+        let item = world
+            .spawn((Item, mud_world::HouseItem(9), Located(house_room)))
+            .id();
+        let bag = world.spawn((Item, Located(wolf))).id();
+        let nested = world
+            .spawn((Item, mud_world::HouseItem(10), Located(house_room)))
+            .id();
+
+        world.entity_mut(item).insert(Located(wolf));
+        world.entity_mut(nested).insert(Located(bag));
+        assert!(
+            world.get::<mud_world::HouseItem>(item).is_some(),
+            "the row stays tracked while the pet holds it"
+        );
+        assert!(
+            world.get::<mud_world::HouseItem>(nested).is_some(),
+            "also inside a bag the pet carries"
+        );
+        assert!(
+            world
+                .get::<crate::house_items::PendingHouseDeletes>(me)
+                .is_none(),
+            "the owner's save must not carry a delete for an item it lacks"
+        );
+
+        // The owner leaves: the pet's gear moves into the pack.
+        hand_pet_gear_to_owner(&mut world, me);
+        assert_eq!(world.get::<Located>(item).map(|l| l.0), Some(me));
+        let mut queued = world
+            .get::<crate::house_items::PendingHouseDeletes>(me)
+            .map(|p| p.0.clone())
+            .unwrap_or_default();
+        queued.sort_unstable();
+        assert_eq!(queued, vec![9, 10], "both rows ride on the owner's save");
+        assert!(world.get::<mud_world::HouseItem>(item).is_none());
+        assert!(world.get::<mud_world::HouseItem>(nested).is_none());
+    }
+
+    /// An item a pet drops (or loses to its death) goes back to being a
+    /// plain released house item: the row delete is not stuck on the pet.
+    #[test]
+    fn pet_dropping_a_house_item_releases_it() {
+        let mut world = World::new();
+        crate::house_items::register_observers(&mut world);
+        let room = world.spawn_empty().id();
+        let house_room = world
+            .spawn(mud_world::HouseRoom {
+                house_id: 1,
+                local_index: 0,
+            })
+            .id();
+        let me = spawn_player_for(&mut world, "pc-pet2", room);
+        let wolf = world
+            .spawn((Mob, Located(room), Follower(me), mud_world::PersistentPet))
+            .id();
+        let item = world
+            .spawn((Item, mud_world::HouseItem(9), Located(house_room)))
+            .id();
+        world.entity_mut(item).insert(Located(wolf));
+        assert!(world.get::<mud_world::HouseItem>(item).is_some());
+        world.entity_mut(item).insert(Located(room));
+        assert!(
+            world.get::<mud_world::HouseItem>(item).is_none(),
+            "released once it left the pet"
         );
     }
 

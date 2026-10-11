@@ -1927,3 +1927,51 @@ fn gear_offset_ignores_clamp_overflow_that_came_from_effects() {
     assert_eq!(gear_offsets(&world2, p2), off);
     assert_eq!(world2.get::<Health>(p2).unwrap().hp, saved);
 }
+
+#[test]
+fn wear_remove_cycle_never_heals() {
+    // 50/100 wearing and removing a +25 max_hp ring used to net +25 hp each
+    // time round (75/125, then 75/100).
+    let (mut world, p, mut rx) = setup();
+    *world.get_mut::<Health>(p).unwrap() = Health { hp: 50, max: 100 };
+    ring(&mut world, p, 10, "vital", vec![modify("max_hp", 25)]);
+    for _ in 0..3 {
+        dispatch(&mut world, p, "wear vital");
+        let h = world.get::<Health>(p).unwrap();
+        assert_eq!((h.hp, h.max), (50, 125), "gear raises max, not current");
+        dispatch(&mut world, p, "remove vital");
+        let h = world.get::<Health>(p).unwrap();
+        assert_eq!((h.hp, h.max), (50, 100), "no net heal");
+    }
+    let _ = drain(&mut rx);
+    assert!(
+        crate::commands::stat_overflow_entries(&world, p).is_empty(),
+        "ledger untouched"
+    );
+}
+
+#[test]
+fn removing_gear_still_trims_hp_above_the_new_max() {
+    let (mut world, p, _rx) = setup();
+    ring(&mut world, p, 10, "vital", vec![modify("max_hp", 25)]);
+    dispatch(&mut world, p, "wear vital");
+    world.get_mut::<Health>(p).unwrap().hp = 125;
+    dispatch(&mut world, p, "remove vital");
+    let h = world.get::<Health>(p).unwrap();
+    assert_eq!((h.hp, h.max), (100, 100));
+}
+
+#[test]
+fn max_hp_buff_raises_the_maximum_only_and_expiry_is_exact() {
+    let (mut world, p, _rx) = setup();
+    *world.get_mut::<Health>(p).unwrap() = Health { hp: 40, max: 100 };
+    assert!(crate::commands::apply_modify_delta(
+        &mut world, p, "max_hp", 30
+    ));
+    let h = world.get::<Health>(p).unwrap();
+    assert_eq!((h.hp, h.max), (40, 130), "a buff does not heal");
+    crate::commands::reverse_modify_delta(&mut world, p, "max_hp", 30);
+    let h = world.get::<Health>(p).unwrap();
+    assert_eq!((h.hp, h.max), (40, 100));
+    assert!(crate::commands::stat_overflow_entries(&world, p).is_empty());
+}

@@ -59,6 +59,17 @@ async fn cmd_visit(world: &mut World, player: Entity, pool: &mud_db::sqlx::PgPoo
         send_to(world, player, "Usage: visit <player>\r\n");
         return;
     }
+    // A house visit is a teleport: same refusals as `recall` (including a
+    // no-recall room), for the owner's own house as much as a guest's.
+    if crate::commands::refuse_teleport(world, player, "visit a house") {
+        return;
+    }
+    if let Some(located) = world.get::<mud_world::Located>(player)
+        && world.get::<mud_world::NoRecallRoom>(located.0).is_some()
+    {
+        send_to(world, player, "Some power blocks your passage.\r\n");
+        return;
+    }
     // Visitor's own character_id — the guest-list check looks for
     // it in the owner's PlayerHouseGuests rows.
     let Some(visitor_cid) = world.get::<Account>(player).map(|a| a.character_id.clone()) else {
@@ -190,6 +201,9 @@ async fn cmd_visit(world: &mut World, player: Entity, pool: &mud_db::sqlx::PgPoo
         send_to(world, player, "Couldn't resolve the house foyer.\r\n");
         return;
     };
+    if crate::room_access::refuse_entry(world, player, foyer_entity) {
+        return;
+    }
     crate::combat::relocate(world, player, foyer_entity);
     send_to(
         world,

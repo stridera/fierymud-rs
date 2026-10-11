@@ -791,11 +791,25 @@ pub fn recompute_equipped_for(world: &mut World, wearer: Entity) {
                 .collect()
         })
         .unwrap_or_default();
+    // Gear no longer tops up current points when it raises a maximum, so a
+    // freshly loaded mob that was at full health stays full once its worn
+    // +HP / +stamina lands. (Players re-applying gear at login restore their
+    // saved values on top: `recompute_equipped_keeping_vitals`.)
+    let hp_full = world.get::<Health>(wearer).is_some_and(|h| h.hp >= h.max);
+    let stamina_full = world
+        .get::<Stamina>(wearer)
+        .is_some_and(|s| s.current >= s.max);
     for item in equipped {
         if world.get::<GrantedDeltas>(item).is_some() {
             continue;
         }
         apply_object_to_wearer(world, item, wearer);
+    }
+    if hp_full && let Some(mut h) = world.get_mut::<Health>(wearer) {
+        h.hp = h.max;
+    }
+    if stamina_full && let Some(mut s) = world.get_mut::<Stamina>(wearer) {
+        s.current = s.max;
     }
 }
 
@@ -1000,7 +1014,7 @@ mod tests {
         assert_eq!(cs.armor_pct, 50, "armor_pct +50 applied");
         let hp = world.get::<Health>(wearer).unwrap();
         assert_eq!(hp.max, 125, "max_hp +25 raised max HP");
-        assert_eq!(hp.hp, 125, "max_hp +25 also bumped current HP");
+        assert_eq!(hp.hp, 100, "max_hp +25 raises the maximum only, no heal");
         let core = world.get::<CoreStats>(wearer).unwrap();
         assert_eq!(core.strength, 15, "str_bonus +2 raised strength");
 

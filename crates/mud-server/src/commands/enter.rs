@@ -71,6 +71,9 @@ fn cmd_enter(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "You can't slip into a portal mid-fight.\r\n");
         return;
     }
+    if crate::commands::refuse_teleport(world, player, "enter a portal") {
+        return;
+    }
     let Some(located) = world.get::<Located>(player).copied() else {
         send_to(world, player, "You are nowhere.\r\n");
         return;

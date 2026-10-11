@@ -877,6 +877,9 @@ mod subclass;
 mod belt_slot_tests;
 
 #[cfg(test)]
+#[path = "commands/exploit_gate_tests.rs"]
+mod exploit_gate_tests;
+#[cfg(test)]
 #[path = "commands/help_tests.rs"]
 mod help_tests;
 #[path = "commands/staff_find.rs"]
@@ -1045,12 +1048,27 @@ static REGISTRY: LazyLock<HashMap<&'static str, &'static Command>> = LazyLock::n
 /// this is just the mail commands (`mailbox` / `readmail` / `delmail`
 /// / `mail`). Returns true when the input was handled here; false
 /// to fall through to the sync `dispatch`.
-#[allow(clippy::too_many_lines)]
+#[cfg(test)]
 pub async fn try_dispatch_async(
     world: &mut World,
     player: Entity,
     pool: &mud_db::sqlx::PgPool,
     line: &str,
+) -> bool {
+    let mut pre_gated = false;
+    try_dispatch_async_gated(world, player, pool, line, &mut pre_gated).await
+}
+
+/// [`try_dispatch_async`] that also reports (`pre_gated`) whether the shared
+/// pre-gate (frozen, ghost, room COMMAND triggers) already ran for a line it
+/// did not claim, so the sync dispatcher doesn't fire the triggers again.
+#[allow(clippy::too_many_lines)]
+async fn try_dispatch_async_gated(
+    world: &mut World,
+    player: Entity,
+    pool: &mud_db::sqlx::PgPool,
+    line: &str,
+    pre_gated: &mut bool,
 ) -> bool {
     let trimmed = line.trim();
     if trimmed.is_empty() {
@@ -1073,6 +1091,20 @@ pub async fn try_dispatch_async(
     if world.get::<BoardDraft>(player).is_some() {
         compose_board_step(world, player, pool, trimmed).await;
         return true;
+    }
+
+    // Same frozen / ghost gates and room COMMAND triggers the sync
+    // dispatcher applies, before any async handler can claim the line.
+    {
+        let split_line = split_symbol_command(trimmed);
+        let lower = split_line.to_ascii_lowercase();
+        let tokens: Vec<&str> = lower.split_whitespace().collect();
+        if !tokens.is_empty() {
+            if pre_gate(world, player, &tokens, split_line.as_ref(), true) {
+                return true;
+            }
+            *pre_gated = true;
+        }
     }
 
     let mut parts = trimmed.splitn(2, char::is_whitespace);
@@ -1117,6 +1149,9 @@ pub async fn try_dispatch_async(
     if let Some(cmd) = REGISTRY.get(head.as_str()) {
         if !command_permitted(world, player, cmd) {
             send_to(world, player, "You can't do that.\r\n");
+            return true;
+        }
+        if hold_gate(world, player, cmd) {
             return true;
         }
         if casting_blocks(world, player, cmd) {
@@ -1248,10 +1283,102 @@ fn dispatch_async_line<'a>(
         if !composing && input_queue::defer_if_needed(world, player, line, run) {
             return;
         }
-        if !try_dispatch_async(world, player, pool, line).await {
+        let mut pre_gated = false;
+        if !try_dispatch_async_gated(world, player, pool, line, &mut pre_gated).await {
+            run.pre_gated = pre_gated;
             dispatch_line(world, player, line, run);
         }
     })
+}
+
+/// Gates every typed line passes before a command is resolved, shared by the
+/// sync and async dispatchers: the frozen refusal, the ghost allow-list and
+/// (when `fire_triggers`) the room's COMMAND-flagged triggers. Returns true
+/// when the line was consumed.
+fn pre_gate(
+    world: &mut World,
+    player: Entity,
+    tokens: &[&str],
+    trimmed: &str,
+    fire_triggers: bool,
+) -> bool {
+    // Frozen players: refuse anything except `quit` (always-allowed escape
+    // hatch so the player isn't trapped indefinitely if the admin forgets).
+    if world.get::<Frozen>(player).is_some() && tokens[0] != "quit" {
+        send_to(
+            world,
+            player,
+            "You are frozen by an Implementor and cannot act. \
+             Type 'quit' to disconnect, or wait to be thawed.\r\n",
+        );
+        return true;
+    }
+
+    // Ghost gate: dead-but-incorporeal players can perceive the world
+    // and communicate but can't interact with it physically. Whitelist
+    // the verbs that ARE allowed; everything else gets a "you can't do
+    // that as a ghost" reply pointing them at `release`.
+    if world.get::<mud_world::Ghost>(player).is_some() && !ghost_allowed(tokens[0]) {
+        send_to(
+            world,
+            player,
+            "Your spirit can't act on the world while disembodied. \
+             Type 'release' to return to your recall point, or wait \
+             for someone to resurrect you.\r\n",
+        );
+        return true;
+    }
+
+    // Fire COMMAND-flagged triggers in the player's room first.
+    // If any trigger returns `false`, the command is consumed (a
+    // mob intercepted it) and we stop dispatch here.
+    if fire_triggers && let Some(located) = world.get::<Located>(player).copied() {
+        let cmd_word = trigger_command_word(world, player, tokens);
+        let cmd_args = skip_n_tokens(trimmed, 1).to_string();
+        if crate::triggers::fire_command_in_room(world, player, located.0, &cmd_word, &cmd_args) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Commands a paralysed character may still run: legacy flags only `look`,
+/// `say` and `return` `CMD_MINOR_PARA` (`return` also `CMD_MAJOR_PARA`).
+/// Rust has a single `paralyzed` effect, so it takes the minor list.
+const PARALYSIS_ALLOWED: &[&str] = &["look", "say", "return"];
+
+/// Legacy `command_interpreter` paralysis / mesmerize gate: a paralysed
+/// character may run only [`PARALYSIS_ALLOWED`]; a mesmerized one (below
+/// level 100) nothing at all. Sends the refusal and returns true when the
+/// command is blocked.
+fn hold_gate(world: &mut World, player: Entity, cmd: &Command) -> bool {
+    let (mut paralyzed, mut mesmerized) = (false, false);
+    {
+        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+        for (eff, applied) in q.iter(world) {
+            if applied.0 != player {
+                continue;
+            }
+            if eff.name.eq_ignore_ascii_case("paralyzed") {
+                paralyzed = true;
+            } else if eff.name.eq_ignore_ascii_case("mesmerized") {
+                mesmerized = true;
+            }
+        }
+    }
+    if paralyzed && !cmd.names.iter().any(|n| PARALYSIS_ALLOWED.contains(n)) {
+        send_to(world, player, "You're paralyzed to the bone!\r\n");
+        return true;
+    }
+    if mesmerized && world.get::<Profile>(player).is_none_or(|p| p.level < 100) {
+        send_to(
+            world,
+            player,
+            "You are too preoccupied with pretty illusions to do anything.\r\n",
+        );
+        return true;
+    }
+    false
 }
 
 /// Alias expansion bookkeeping for one typed line: which aliases are
@@ -1272,6 +1399,10 @@ struct AliasRun {
     /// Bytes of expanded command text produced so far across every
     /// alias level of this typed line (see [`MAX_ALIAS_RUN_BYTES`]).
     bytes: usize,
+    /// The async hook already ran the frozen / ghost gates and room COMMAND
+    /// triggers for the line about to go to `dispatch_line`, so it must not
+    /// fire the triggers a second time.
+    pre_gated: bool,
 }
 
 impl AliasRun {
@@ -1349,6 +1480,8 @@ fn dispatch_line(world: &mut World, player: Entity, line: &str, run: &mut AliasR
     // typing player gets a prompt at end-of-turn via flush_prompts. Marking
     // here also dedupes against any send_to(player, …) inside the handler.
     mark_for_prompt(player);
+    // The async hook already ran the pre-gate for this very line.
+    let triggers_done = std::mem::take(&mut run.pre_gated);
     // Stamp activity even for empty input — pressing return to "wake up" a
     // session counts as activity for idle-timer purposes.
     try_insert(world, player, LastInputAt(std::time::Instant::now()));
@@ -1467,42 +1600,10 @@ fn dispatch_line(world: &mut World, player: Entity, line: &str, run: &mut AliasR
         }
     }
 
-    // Frozen players: refuse anything except `quit` (always-allowed escape
-    // hatch so the player isn't trapped indefinitely if the admin forgets).
-    if world.get::<Frozen>(player).is_some() && tokens[0] != "quit" {
-        send_to(
-            world,
-            player,
-            "You are frozen by an Implementor and cannot act. \
-             Type 'quit' to disconnect, or wait to be thawed.\r\n",
-        );
+    // Frozen / ghost gates and room COMMAND triggers (shared with the async
+    // dispatcher; a line the async hook already ran them for skips them).
+    if pre_gate(world, player, &tokens, trimmed, !triggers_done) {
         return;
-    }
-
-    // Ghost gate: dead-but-incorporeal players can perceive the world
-    // and communicate but can't interact with it physically. Whitelist
-    // the verbs that ARE allowed; everything else gets a "you can't do
-    // that as a ghost" reply pointing them at `release`.
-    if world.get::<mud_world::Ghost>(player).is_some() && !ghost_allowed(tokens[0]) {
-        send_to(
-            world,
-            player,
-            "Your spirit can't act on the world while disembodied. \
-             Type 'release' to return to your recall point, or wait \
-             for someone to resurrect you.\r\n",
-        );
-        return;
-    }
-
-    // Fire COMMAND-flagged triggers in the player's room first.
-    // If any trigger returns `false`, the command is consumed (a
-    // mob intercepted it) and we stop dispatch here.
-    if let Some(located) = world.get::<Located>(player).copied() {
-        let cmd_word = trigger_command_word(world, player, &tokens);
-        let cmd_args = skip_n_tokens(trimmed, 1).to_string();
-        if crate::triggers::fire_command_in_room(world, player, located.0, &cmd_word, &cmd_args) {
-            return;
-        }
     }
 
     // Exact name first (longest multi-word name wins), then an exact social,
@@ -1595,6 +1696,11 @@ fn dispatch_line(world: &mut World, player: Entity, line: &str, run: &mut AliasR
     // not Lua trigger sandboxing. See ``DevMode`` in main.rs.
     if !command_permitted(world, player, cmd) {
         send_to(world, player, "You can't do that.\r\n");
+        return;
+    }
+
+    // Paralysis / mesmerize gate (legacy `command_interpreter`).
+    if hold_gate(world, player, cmd) {
         return;
     }
 
@@ -21172,12 +21278,12 @@ pub(crate) fn apply_modify_delta(
                     return true;
                 };
                 h.max = new;
-                if new > cur {
-                    h.hp = h.hp.saturating_add(new - cur);
-                } else if h.hp > h.max {
-                    // Removing a +HP buff/item: clamp current HP
-                    // to the new (smaller) max so a wearer doesn't
-                    // walk around with hp > max.
+                // Legacy `affect_modify` raises the maximum only: a +HP
+                // item or buff must not heal (wear / remove would loop
+                // into a free full heal). A lowered maximum still clamps
+                // current HP so the wearer never has hp > max. Level-up
+                // sets hp to the new maximum itself.
+                if h.hp > h.max {
                     h.hp = h.max;
                 }
             }
@@ -21190,9 +21296,8 @@ pub(crate) fn apply_modify_delta(
                     return true;
                 };
                 s.max = new;
-                if new > cur {
-                    s.current = s.current.saturating_add(new - cur);
-                } else if s.current > s.max {
+                // Raising the maximum never refills (see `max_hp`).
+                if s.current > s.max {
                     s.current = s.max;
                 }
             }
@@ -21571,6 +21676,10 @@ fn flag_prevents(flag: &str, kind: Prevent) -> bool {
                 | "sleeping"
                 | "paralyzed"
                 | "mesmerized"
+                | "held"
+                | "hold_person"
+                | "webbed"
+                | "entangled"
         ),
         Prevent::Speaking => matches!(
             f.as_str(),
@@ -23507,6 +23616,42 @@ pub(crate) fn require_alert_posture(world: &mut World, player: Entity, action: &
         }
         _ => true,
     }
+}
+
+/// Refusals shared by every self-teleport (`recall`, `enter <portal>`,
+/// `visit`): frozen, ghost, fighting, held / stunned / webbed, asleep (a
+/// sitting or resting traveller stands up first, like `cmd_move`). Sends
+/// the reason and returns true when the character must stay put.
+pub(crate) fn refuse_teleport(world: &mut World, player: Entity, action: &str) -> bool {
+    if world.get::<Frozen>(player).is_some() {
+        send_to(
+            world,
+            player,
+            format!("You can't {action} while frozen.\r\n"),
+        );
+        return true;
+    }
+    if world.get::<Ghost>(player).is_some() {
+        send_to(
+            world,
+            player,
+            format!("You can't {action} while disembodied.\r\n"),
+        );
+        return true;
+    }
+    if in_combat(world, player) {
+        send_to(
+            world,
+            player,
+            format!("You can't {action} while fighting!\r\n"),
+        );
+        return true;
+    }
+    if is_immobilized(world, player) {
+        send_to(world, player, "You can't move right now.\r\n");
+        return true;
+    }
+    !require_alert_posture(world, player, action)
 }
 
 thread_local! {

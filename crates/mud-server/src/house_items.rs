@@ -15,12 +15,16 @@
 //! the insert marks the slot released and the insert task deletes the row
 //! it just wrote.
 //!
-//! The row delete is tied to the picker's persistence. When a player (or a
-//! player's pet) takes the item, the row id rides on the player as
-//! [`PendingHouseDeletes`] and the player's next save snapshot carries it:
-//! the save deletes the house row in the same transaction that inserts the
-//! item into the pack, so the item is never in both places and never in
-//! neither. A picker that is not a player's (a scavenger mob) has no save to
+//! The row delete is tied to the picker's persistence. When a player takes
+//! the item, the row id rides on the player as [`PendingHouseDeletes`] and
+//! the player's next save snapshot carries it: the save deletes the house
+//! row in the same transaction that inserts the item into the pack, so the
+//! item is never in both places and never in neither. A persistent pet is
+//! not a save target (the save records a pet as prototype, name and hp
+//! only), so an item a pet picks up stays tracked, row and all, until it
+//! reaches a saved pack (`hand_pet_gear_to_owner` when the owner leaves) or
+//! leaves the pet some other way; a crash meanwhile just leaves it in the
+//! house. A picker that is not a player's (a scavenger mob) has no save to
 //! ride on; its delete is a tracked task that retries until it succeeds and
 //! that shutdown waits for.
 
@@ -75,8 +79,8 @@ pub(crate) fn detach_house_item(world: &mut World, item: Entity) -> Detached {
 pub(crate) struct PendingHouseDeletes(pub Vec<i32>);
 
 /// The player whose save should carry the row delete for `item`: whoever
-/// holds it (directly or inside carried containers), or the owner of the
-/// persistent pet holding it. `None` when no player's save will include it.
+/// holds it (directly or inside carried containers). `None` when no
+/// player's save will include it.
 fn save_owner(world: &World, item: Entity) -> Option<Entity> {
     let mut cur = item;
     // Real nesting is a handful of bags; the cap guards a malformed cycle.
@@ -85,15 +89,50 @@ fn save_owner(world: &World, item: Entity) -> Option<Entity> {
         if world.get::<Account>(holder).is_some() {
             return Some(holder);
         }
-        if world.get::<PersistentPet>(holder).is_some()
-            && let Some(owner) = world.get::<Follower>(holder).map(|f| f.0)
-            && world.get::<Account>(owner).is_some()
-        {
-            return Some(owner);
-        }
         cur = holder;
     }
     None
+}
+
+/// True when `item` is carried (directly or inside carried containers) by a
+/// player's persistent pet: not in any save until the pet's gear is handed
+/// to the owner.
+fn held_by_player_pet(world: &World, item: Entity) -> bool {
+    let mut cur = item;
+    for _ in 0..16 {
+        let Some(holder) = world.get::<Located>(cur).map(|l| l.0) else {
+            return false;
+        };
+        if world.get::<Account>(holder).is_some() {
+            return false;
+        }
+        if world.get::<PersistentPet>(holder).is_some()
+            && world
+                .get::<Follower>(holder)
+                .is_some_and(|f| world.get::<Account>(f.0).is_some())
+        {
+            return true;
+        }
+        cur = holder;
+    }
+    false
+}
+
+/// Release every still-tracked house item at or below `root` (an item and
+/// whatever it contains). Used once a pet's gear reaches the owner's pack,
+/// so a house item nested in a carried bag gets its row deleted too.
+pub(crate) fn release_house_items_within(world: &mut World, root: Entity) {
+    let mut stack = vec![(root, 0_u8)];
+    while let Some((item, depth)) = stack.pop() {
+        let children: Vec<Entity> = world
+            .get::<mud_world::Contents>(item)
+            .map(|c| c.iter().collect())
+            .unwrap_or_default();
+        release_house_item(world, item);
+        if depth < 16 {
+            stack.extend(children.into_iter().map(|c| (c, depth + 1)));
+        }
+    }
 }
 
 /// The one way an item stops being a house item: strips its markers and
@@ -101,6 +140,11 @@ fn save_owner(world: &World, item: Entity) -> Option<Entity> {
 /// `house take` and by the `Located` observer, so every pickup behaves
 /// identically.
 pub(crate) fn release_house_item(world: &mut World, item: Entity) -> bool {
+    // A pet's pack is not saved: stay tracked (row intact) until the item
+    // reaches the owner's pack or leaves the pet.
+    if held_by_player_pet(world, item) {
+        return false;
+    }
     let id = match detach_house_item(world, item) {
         Detached::NotHouseItem => return false,
         Detached::InFlight => None,

@@ -2,7 +2,7 @@
 
 use bevy_ecs::prelude::*;
 use mud_db::enums::UserRole;
-use mud_world::{Fighting, Located, Mounted, Profile, RaceDefaults, RecallPoint, WorldKeyIndex};
+use mud_world::{Located, Mounted, Profile, RaceDefaults, RecallPoint, WorldKeyIndex};
 
 use crate::commands::{Category, Command, Help, cmd_look, name_of, send_to, try_remove};
 
@@ -47,8 +47,7 @@ pub(crate) fn recall_room(world: &World, player: Entity) -> Option<Entity> {
 }
 
 fn cmd_recall(world: &mut World, player: Entity, _args: &str) {
-    if world.get::<Fighting>(player).is_some() {
-        send_to(world, player, "You can't recall while fighting!\r\n");
+    if crate::commands::refuse_teleport(world, player, "recall") {
         return;
     }
     // NoRecallRoom gate — `Room.allows_recall = false` blocks the
