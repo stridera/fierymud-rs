@@ -45,37 +45,43 @@ pub fn spawn_mob_from_proto(
     let trigger_keys = world
         .get_resource::<TriggerCatalog>()
         .and_then(|c| c.mob_attachments.get(&proto_key).cloned());
-    let mut em = world.spawn((
-        Mob,
-        Named {
-            name: proto.name.clone(),
-        },
-        Keywords(proto.keywords.clone()),
-        Description(proto.room_description.clone()),
-        WorldKey {
-            zone: proto.zone_id,
-            id: proto.id,
-        },
-        Located(room),
-        Health { hp, max: hp },
-        proto.derived_combat_stats(),
-        Posture(Posture::from_default_position(proto.default_position)),
-        NaturalDamage {
-            num: proto.damage_dice_num,
-            size: proto.damage_dice_size,
-            bonus: proto.damage_dice_bonus,
-        },
-    ));
-    if let Some(reset_id) = reset_id {
-        em.insert(FromMobReset(reset_id));
-    }
-    em.insert((
-        Sized(proto.size),
-        LifeForceTag(proto.life_force),
-        NaturalAttackType(proto.damage_type),
-        MobTraits(proto.traits.clone()),
-        MovementModeTag(proto.default_movement_mode),
-    ));
+    // Everything every mob has goes in one spawn: each later `insert` is a
+    // structural move, and the first move out of each of a prod world's
+    // thousands of archetypes builds the target archetype and its table.
+    let base = (
+        (
+            Mob,
+            Named {
+                name: proto.name.clone(),
+            },
+            Keywords(proto.keywords.clone()),
+            Description(proto.room_description.clone()),
+            WorldKey {
+                zone: proto.zone_id,
+                id: proto.id,
+            },
+            Located(room),
+            Health { hp, max: hp },
+            proto.derived_combat_stats(),
+            Posture(Posture::from_default_position(proto.default_position)),
+            NaturalDamage {
+                num: proto.damage_dice_num,
+                size: proto.damage_dice_size,
+                bonus: proto.damage_dice_bonus,
+            },
+        ),
+        (
+            Sized(proto.size),
+            LifeForceTag(proto.life_force),
+            NaturalAttackType(proto.damage_type),
+            MobTraits(proto.traits.clone()),
+            MovementModeTag(proto.default_movement_mode),
+        ),
+    );
+    let mut em = match reset_id {
+        Some(reset_id) => world.spawn((base, FromMobReset(reset_id))),
+        None => world.spawn(base),
+    };
     // Zero movement points = "unconstrained" per legacy.
     if proto.move_points > 0 {
         em.insert(MovementPoints {
@@ -112,8 +118,8 @@ pub fn spawn_mob_from_proto(
         ));
     }
     let mob = em.id();
-    crate::mob_effects::apply_mob_default_effects(world, mob, proto_key);
-    crate::mob_effects::apply_race_effects(world, mob, &proto.race);
+    let default_flags = crate::mob_effects::apply_mob_default_effects(world, mob, proto_key);
+    crate::mob_effects::apply_race_effects_to_new_mob(world, mob, &proto.race, &default_flags);
     // Spawned into an air room without wings (or a fly effect): it drops.
     crate::movement::begin_fall_if_unsupported(world, mob);
     attach_mob_ai(world, mob, proto);

@@ -17,8 +17,8 @@ use crate::reset_gear::{
 };
 
 use crate::components::{
-    AttachedTriggers, Description, ExitData, Exits, FromObjectReset, Located, Named, Room,
-    RoomSector, WorldKey, Zone, ZoneClimate,
+    AttachedTriggers, Description, ExitData, Exits, Located, Named, Room, RoomSector, WorldKey,
+    Zone, ZoneClimate,
 };
 use crate::resources::{
     AbilityCatalog, AbilityDef, AbilityMessageSet, BoardCatalog, BoardSummary, ClassCatalog,
@@ -1504,8 +1504,8 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         if current >= r.max_instances.max(1) {
             continue;
         }
-        let spawned_item = crate::item_spawn::spawn_item_from_proto(world, &proto, room_entity);
-        world.entity_mut(spawned_item).insert(FromObjectReset(r.id));
+        let spawned_item =
+            crate::item_spawn::spawn_item_for_reset(world, &proto, room_entity, r.id);
         objects_by_reset.insert(r.id, vec![spawned_item]);
         stats.object_resets_spawned += 1;
         *object_world_count.entry(proto_key).or_insert(0) += 1;

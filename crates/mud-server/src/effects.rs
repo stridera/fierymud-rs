@@ -9,12 +9,14 @@ use crate::commands::{
     apply_damage, drain_lua_outbox, name_of, name_or, send_msg, send_to, try_insert, try_remove,
 };
 
-/// Marker added to an `EffectInstance` after its `on_apply` Lua
-/// hook has fired. Lets the lifecycle scan distinguish "freshly
-/// spawned" effects from ones the loop has already seen, without
-/// needing every spawn site to call into Lua synchronously.
-#[derive(Component, Debug, Clone, Copy)]
-pub struct EffectInstanceApplied;
+/// Effect instances whose `on_apply` Lua hook has fired. Lets the
+/// lifecycle scan distinguish "freshly spawned" effects from ones the loop
+/// has already seen, without needing every spawn site to call into Lua
+/// synchronously. A set, not a marker component: tagging every instance
+/// (all the permanent mob and race effects at the first sweep after a
+/// boot, then every spell cast) is a structural move per instance.
+#[derive(Resource, Default, Debug)]
+pub struct HookedEffects(std::collections::HashSet<Entity>);
 
 /// What lifecycle hook to fire. Picked off the `EffectDef` field
 /// of the matching name; missing or blank hooks are silently
@@ -634,23 +636,31 @@ pub fn effects_tick(world: &mut World) {
     sync_stunned_all(world);
 
     // Pre-pass: fire `on_apply` hooks for any EffectInstance that
-    // hasn't been seen yet, then mark it `EffectInstanceApplied`.
+    // hasn't been seen yet, then record it in `HookedEffects`.
     // Spawn sites are too scattered to thread the hook through;
-    // a once-per-second sweep with a marker is correct enough and
+    // a once-per-second sweep with a set is correct enough and
     // doesn't push a Lua call into every callsite.
-    let fresh: Vec<(Entity, Entity, String)> = {
-        let mut q = world.query_filtered::<
-            (Entity, &EffectInstance, &AppliedTo),
-            Without<EffectInstanceApplied>,
-        >();
-        q.iter(world)
+    let mut hooked = world.remove_resource::<HookedEffects>().unwrap_or_default();
+    let (fresh, total) = {
+        let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
+        let mut total = 0usize;
+        let fresh: Vec<(Entity, Entity, String)> = q
+            .iter(world)
+            .inspect(|_| total += 1)
+            .filter(|(eff, _, _)| !hooked.0.contains(eff))
             .map(|(eff, inst, applied)| (eff, applied.0, inst.name.clone()))
-            .collect()
+            .collect();
+        (fresh, total)
     };
+    // Forget instances that have been despawned since the last sweep.
+    if hooked.0.len() > total + 64 {
+        hooked.0.retain(|e| world.get_entity(*e).is_ok());
+    }
     for (eff_entity, target, name) in fresh {
         run_effect_hook(world, EffectHook::OnApply, target, &name);
-        try_insert(world, eff_entity, EffectInstanceApplied);
+        hooked.0.insert(eff_entity);
     }
+    world.insert_resource(hooked);
 
     // Snapshot all active effects: (effect_entity, target_entity, remaining_secs, name, ability_id).
     // Doing this in a scoped block releases the query borrow before we mutate.

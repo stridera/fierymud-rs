@@ -473,13 +473,18 @@ pub fn row_flags(
 ///   skipped.
 ///
 /// Rows whose effect is missing from the catalog are skipped.
-pub fn apply_mob_default_effects(world: &mut World, mob: Entity, proto_key: (i32, i32)) {
+pub fn apply_mob_default_effects(
+    world: &mut World,
+    mob: Entity,
+    proto_key: (i32, i32),
+) -> Vec<String> {
     let Some(rows) = world
         .get_resource::<MobDefaultEffectCatalog>()
         .and_then(|c| c.by_key.get(&proto_key).cloned())
     else {
-        return;
+        return Vec::new();
     };
+    let mut granted: Vec<GrantedFlag> = Vec::new();
     for row in rows {
         let Some(def) = world
             .get_resource::<EffectCatalog>()
@@ -494,8 +499,7 @@ pub fn apply_mob_default_effects(world: &mut World, mob: Entity, proto_key: (i32
             continue;
         };
         for flag in row_flags(&row.modifier_data, &def.default_params) {
-            let installed = install_flag_marker(world, mob, &flag) || is_name_behaviour_flag(&flag);
-            if !installed {
+            if marker_for(&flag).is_none() && !is_name_behaviour_flag(&flag) {
                 tracing::debug!(
                     zone = proto_key.0,
                     id = proto_key.1,
@@ -504,21 +508,78 @@ pub fn apply_mob_default_effects(world: &mut World, mob: Entity, proto_key: (i32
                 );
                 continue;
             }
-            let effect = world
-                .spawn((
-                    EffectInstance {
-                        kind: def.id,
-                        name: flag.clone(),
-                        strength: row.strength.max(1),
-                        remaining_secs: -1,
-                        source: EffectSource::Other("mob_default".to_string()),
-                        ability_id: None,
-                    },
-                    AppliedTo(mob),
-                ))
-                .id();
-            tag_flag_instance(world, effect, &flag);
+            granted.push(GrantedFlag {
+                flag,
+                kind: def.id,
+                strength: row.strength.max(1),
+            });
         }
+    }
+    install_markers_in_order(world, mob, granted.iter().map(|g| g.flag.as_str()));
+    let mut names = Vec::with_capacity(granted.len());
+    for g in granted {
+        spawn_permanent_instance(
+            world,
+            mob,
+            &g,
+            EffectSource::Other("mob_default".to_string()),
+        );
+        names.push(g.flag);
+    }
+    names
+}
+
+/// One flag a spawn grants as a permanent effect.
+struct GrantedFlag {
+    flag: String,
+    kind: i32,
+    strength: i32,
+}
+
+/// Spawn the permanent (`remaining_secs = -1`) instance for `granted` on
+/// `target`, tagged for its flag.
+fn spawn_permanent_instance(
+    world: &mut World,
+    target: Entity,
+    granted: &GrantedFlag,
+    source: EffectSource,
+) {
+    let effect = world
+        .spawn((
+            EffectInstance {
+                kind: granted.kind,
+                name: granted.flag.clone(),
+                strength: granted.strength,
+                remaining_secs: -1,
+                source,
+                ability_id: None,
+            },
+            AppliedTo(target),
+        ))
+        .id();
+    tag_flag_instance(world, effect, &granted.flag);
+}
+
+/// Install the markers for `flags` in marker-table order, whatever order
+/// the rows named them in. Every marker is a structural move, and the
+/// first move into each archetype builds it: in a fixed order mobs with
+/// the same flags share their intermediate archetypes instead of each
+/// row order making its own chain.
+fn install_markers_in_order<'a>(
+    world: &mut World,
+    target: Entity,
+    flags: impl Iterator<Item = &'a str>,
+) {
+    let mut slots: Vec<usize> = flags
+        .filter_map(|f| FLAG_MARKERS.iter().position(|m| m.flags.contains(&f)))
+        .collect();
+    slots.sort_unstable();
+    slots.dedup();
+    let Ok(mut em) = world.get_entity_mut(target) else {
+        return;
+    };
+    for slot in slots {
+        (FLAG_MARKERS[slot].insert)(&mut em);
     }
 }
 
@@ -583,16 +644,41 @@ const DISPLAY_ONLY_FLAGS: &[&str] = &["ultravision", "detect_poison", "detect_hi
 /// Race effects are never saved with a character, so relogging cannot
 /// stack them. Rows whose effect is missing from the catalog are skipped.
 pub fn apply_race_effects(world: &mut World, entity: Entity, race: &str) {
+    apply_race_effects_inner(world, entity, race, None);
+}
+
+/// [`apply_race_effects`] for a mob that has just been spawned and holds
+/// no effects but `existing_permanent` (the flags its `MobDefaultEffects`
+/// granted). Knowing that, it skips the two scans over every effect
+/// instance in the world that the general form makes per spawn and per
+/// flag, which put a respawn wave at O(mobs x effects).
+pub fn apply_race_effects_to_new_mob(
+    world: &mut World,
+    mob: Entity,
+    race: &str,
+    existing_permanent: &[String],
+) {
+    apply_race_effects_inner(world, mob, race, Some(existing_permanent));
+}
+
+fn apply_race_effects_inner(
+    world: &mut World,
+    entity: Entity,
+    race: &str,
+    fresh_with: Option<&[String]>,
+) {
     // Drop the previous application first so calling twice never doubles.
-    let stale: Vec<Entity> = {
-        let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
-        q.iter(world)
-            .filter(|(_, inst, applied)| applied.0 == entity && is_race_effect(&inst.source))
-            .map(|(e, _, _)| e)
-            .collect()
-    };
-    for e in stale {
-        world.despawn(e);
+    if fresh_with.is_none() {
+        let stale: Vec<Entity> = {
+            let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
+            q.iter(world)
+                .filter(|(_, inst, applied)| applied.0 == entity && is_race_effect(&inst.source))
+                .map(|(e, _, _)| e)
+                .collect()
+        };
+        for e in stale {
+            world.despawn(e);
+        }
     }
     let Some(rows) = world
         .get_resource::<RaceEffectCatalog>()
@@ -600,6 +686,8 @@ pub fn apply_race_effects(world: &mut World, entity: Entity, race: &str) {
     else {
         return;
     };
+    let mut known: Vec<String> = fresh_with.map(<[String]>::to_vec).unwrap_or_default();
+    let mut granted: Vec<GrantedFlag> = Vec::new();
     for row in rows {
         let Some(def) = world
             .get_resource::<EffectCatalog>()
@@ -613,38 +701,40 @@ pub fn apply_race_effects(world: &mut World, entity: Entity, race: &str) {
             continue;
         };
         for flag in row_flags(&row.modifier_data, &def.default_params) {
-            let already = {
+            let already = if fresh_with.is_some() {
+                known.iter().any(|k| k.eq_ignore_ascii_case(&flag))
+            } else {
                 let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
                 q.iter(world).any(|(inst, applied)| {
                     applied.0 == entity
                         && inst.remaining_secs < 0
                         && !is_worn_item_effect(&inst.source)
                         && inst.name.eq_ignore_ascii_case(&flag)
-                })
+                }) || granted.iter().any(|g| g.flag.eq_ignore_ascii_case(&flag))
             };
             if already {
                 continue;
             }
-            let marked = install_flag_marker(world, entity, &flag);
-            if !marked && !is_instance_only_flag(&flag) {
+            if marker_for(&flag).is_none() && !is_instance_only_flag(&flag) {
                 tracing::debug!(race, flag = %flag, "RaceEffects flag has no marker component; ignored");
                 continue;
             }
-            let effect = world
-                .spawn((
-                    EffectInstance {
-                        kind: def.id,
-                        name: flag.clone(),
-                        strength: row.strength.max(1),
-                        remaining_secs: -1,
-                        source: EffectSource::Other(RACE_EFFECT_SOURCE.to_string()),
-                        ability_id: None,
-                    },
-                    AppliedTo(entity),
-                ))
-                .id();
-            tag_flag_instance(world, effect, &flag);
+            known.push(flag.clone());
+            granted.push(GrantedFlag {
+                flag,
+                kind: def.id,
+                strength: row.strength.max(1),
+            });
         }
+    }
+    install_markers_in_order(world, entity, granted.iter().map(|g| g.flag.as_str()));
+    for g in granted {
+        spawn_permanent_instance(
+            world,
+            entity,
+            &g,
+            EffectSource::Other(RACE_EFFECT_SOURCE.to_string()),
+        );
     }
 }
 

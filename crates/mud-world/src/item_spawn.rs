@@ -16,8 +16,8 @@ use bevy_ecs::prelude::*;
 use mud_db::enums::ObjectFlag;
 
 use crate::components::{
-    AttachedTriggers, BoardLink, Description, Item, ItemTimer, Keywords, LiquidContainer, Located,
-    Mob, Named, ObjectFlags, ObjectRestrictions, Player, WorldKey,
+    AttachedTriggers, BoardLink, Description, FromObjectReset, Item, ItemTimer, Keywords,
+    LiquidContainer, Located, Mob, Named, ObjectFlags, ObjectRestrictions, Player, WorldKey,
 };
 use crate::resources::{ObjectProto, TriggerCatalog};
 
@@ -69,13 +69,34 @@ fn held_by_creature_chain(world: &World, holder: Entity) -> bool {
 /// Spawn one instance of `proto` located in `location` (a room, a
 /// carrier, or a container) with every proto-derived component.
 pub fn spawn_item_from_proto(world: &mut World, proto: &ObjectProto, location: Entity) -> Entity {
+    spawn_item(world, proto, location, None)
+}
+
+/// [`spawn_item_from_proto`] for an item owned by the `ObjectResets` row
+/// `reset_id`. The tag goes in with the spawn: adding it afterwards is a
+/// second structural move for every refilled item.
+pub fn spawn_item_for_reset(
+    world: &mut World,
+    proto: &ObjectProto,
+    location: Entity,
+    reset_id: i32,
+) -> Entity {
+    spawn_item(world, proto, location, Some(reset_id))
+}
+
+fn spawn_item(
+    world: &mut World,
+    proto: &ObjectProto,
+    location: Entity,
+    reset_id: Option<i32>,
+) -> Entity {
     let trigger_keys = world.get_resource::<TriggerCatalog>().and_then(|c| {
         c.object_attachments
             .get(&(proto.zone_id, proto.id))
             .cloned()
     });
     let primary_slot = crate::loader::wear_flags_primary_slot(&proto.wear_flags);
-    let mut bundle = world.spawn((
+    let base = (
         Item,
         Named {
             name: proto.name.clone(),
@@ -86,7 +107,11 @@ pub fn spawn_item_from_proto(world: &mut World, proto: &ObjectProto, location: E
             id: proto.id,
         },
         Located(location),
-    ));
+    );
+    let mut bundle = match reset_id {
+        Some(id) => world.spawn((base, FromObjectReset(id))),
+        None => world.spawn(base),
+    };
     if let Some(desc) = proto.examine_description.clone() {
         bundle.insert(Description(desc));
     }

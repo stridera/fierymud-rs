@@ -5,6 +5,10 @@
 
 mod admin;
 mod aggression;
+#[cfg(test)]
+mod archetype_churn_tests;
+#[cfg(test)]
+mod archetype_noise;
 mod autosave;
 mod camp;
 mod casting;

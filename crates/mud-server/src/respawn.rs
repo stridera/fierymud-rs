@@ -341,10 +341,8 @@ pub fn respawn_tick(world: &mut World) {
             .get(&proto_key)
             .cloned();
         let Some(proto) = proto else { continue };
-        let spawned = crate::item_spawn::spawn_item_from_proto(world, &proto, entry.room_entity);
-        world
-            .entity_mut(spawned)
-            .insert(FromObjectReset(entry.reset_id));
+        let spawned =
+            mud_world::spawn_item_for_reset(world, &proto, entry.room_entity, entry.reset_id);
         // A container that comes back gets its authored contents again,
         // minus any whose world-wide cap is already met. The container
         // is counted first (a container may hold copies of itself) and

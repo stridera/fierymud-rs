@@ -494,31 +494,6 @@ mod tests {
         }
     }
 
-    /// One const-generic component per bit: prod mobs differ in dozens of
-    /// optional components, so a world has thousands of distinct
-    /// archetypes, not the 32 of `scatter`.
-    #[derive(Component)]
-    struct Bit<const N: usize>;
-    #[derive(Component)]
-    struct Pad<const N: usize>;
-
-    macro_rules! insert_all {
-        ($ent:expr, $ty:ident; $($n:literal),*) => {
-            $( $ent.insert($ty::<$n>); )*
-        };
-    }
-
-    fn shape(world: &mut World, e: Entity, h: usize) {
-        let mut ent = world.entity_mut(e);
-        insert_all!(ent, Pad; 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
-            20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39);
-        let h = h.wrapping_mul(2_654_435_761) >> 7;
-        macro_rules! bits {
-            ($($n:literal),*) => { $( if h >> $n & 1 != 0 { ent.insert(Bit::<$n>); } )* };
-        }
-        bits!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11);
-    }
-
     /// Prod stalled 240-310 ms on the first night/morning sweep after each
     /// boot (never again until the next restart): tagging a mob
     /// structurally moves it to a new archetype, and the first move out of
@@ -563,7 +538,7 @@ mod tests {
                     Posture(PostureKind::Standing),
                 ))
                 .id();
-            shape(&mut world, mob, i + 1);
+            crate::archetype_noise::shape(&mut world, mob, i + 1);
         }
         let archetypes = world.archetypes().len();
 
