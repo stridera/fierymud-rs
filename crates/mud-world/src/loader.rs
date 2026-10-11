@@ -120,6 +120,28 @@ fn rows_or_empty_with_fix<T>(
     }
 }
 
+/// `Zones` rows. `Zones.is_god_zone` is created by the muditor schema / the prod
+/// SQL (possibly after the deploy), so when the column is missing this logs an
+/// ERROR naming the fix and loads every zone as a non-god zone instead of
+/// failing the boot. Any other error still fails the load.
+async fn load_zone_rows(pool: &PgPool) -> sqlx::Result<Vec<zones::Zone>> {
+    match zones::list_zones(pool).await {
+        Err(e) if is_missing_schema(&e) => {
+            let e = schema_gap(
+                e,
+                "column \"Zones\".is_god_zone",
+                "deploy the muditor schema (prisma db push, or muditor/deploy/prod/sql/090-zones-is-god-zone.sql)",
+            );
+            error!(
+                "{e}; loading every zone as a non-god zone (staff-only zones are visible to mortals, \
+                 grant exploration credit and can be random teleport destinations)"
+            );
+            zones::list_zones_without_god_flag(pool).await
+        }
+        other => other,
+    }
+}
+
 /// `MobResetEquipmentContents` rows (items inside containers mobs carry or
 /// wear). The table is created by the muditor schema / the prod SQL, possibly
 /// after the deploy, so a missing one boots with no rows and an ERROR naming
@@ -390,7 +412,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     let mut stats = LoadStats::default();
 
     // Pass 1: zones.
-    let zone_rows = zones::list_zones(pool).await?;
+    let zone_rows = load_zone_rows(pool).await?;
     let mut zone_index: HashMap<i32, Entity> = HashMap::with_capacity(zone_rows.len());
     let mut weather = crate::resources::WeatherCatalog::default();
     for z in &zone_rows {
@@ -2713,7 +2735,7 @@ pub async fn reload_zones(
     // Fetch everything first so a DB error leaves the world untouched.
     let fresh_mobs = load_mob_prototypes(pool).await?;
     let fresh_objects = load_object_prototypes(pool).await?;
-    let zone_rows = zones::list_zones(pool).await?;
+    let zone_rows = load_zone_rows(pool).await?;
     let room_rows = rooms::list_rooms(pool).await?;
     let exit_rows = room_exits::list_exits(pool).await?;
     let extra_rows = mud_db::room_extra_descriptions::list_extras(pool).await?;

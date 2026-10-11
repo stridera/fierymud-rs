@@ -10306,9 +10306,12 @@ pub(crate) fn cmd_world(world: &mut World, player: Entity, _args: &str) {
                 || crate::room_access::is_immortal(world, player)
         })
         .count();
+    // God-zone rooms are not on any mortal map, so they are not counted either.
+    let staff = crate::room_access::is_immortal(world, player);
     let rooms = world
         .query_filtered::<Entity, With<mud_world::Room>>()
         .iter(world)
+        .filter(|r| staff || !mud_world::room_in_god_zone(world, *r))
         .count();
     let mobs = world
         .query_filtered::<Entity, With<Mob>>()

@@ -120,7 +120,7 @@ inventory::submit! {
 
 fn cmd_areas(world: &mut World, player: Entity, args: &str) {
     let needle = args.trim().to_ascii_lowercase();
-    let rows = area_rows(world);
+    let rows = area_rows(world, player);
     let total = rows.len();
     let shown: Vec<&(i32, String)> = rows
         .iter()
@@ -155,10 +155,11 @@ fn cmd_areas(world: &mut World, player: Entity, args: &str) {
     send_to(world, player, out);
 }
 
-/// `(zone id, name)` of every zone a mortal may be told about: loaded,
-/// not a god zone, not an internal plumbing zone, and with at least one
-/// room. Sorted by zone id.
-fn area_rows(world: &mut World) -> Vec<(i32, String)> {
+/// `(zone id, name)` of every zone `viewer` may be told about: loaded, not an
+/// internal plumbing zone, with at least one room, and not a god zone unless
+/// the viewer is staff (Immortal+). Sorted by zone id.
+fn area_rows(world: &mut World, viewer: Entity) -> Vec<(i32, String)> {
+    let sees_god_zones = crate::room_access::is_immortal(world, viewer);
     let zones: Vec<(i32, Entity)> = world
         .resource::<WorldKeyIndex>()
         .zones
@@ -173,7 +174,7 @@ fn area_rows(world: &mut World) -> Vec<(i32, String)> {
         .into_iter()
         .filter(|(id, e)| {
             !zone_is_internal(*id)
-                && world.get::<GodZone>(*e).is_none()
+                && (sees_god_zones || world.get::<GodZone>(*e).is_none())
                 && rooms_per_zone.get(e).copied().unwrap_or(0) > 0
         })
         .map(|(id, e)| (id, name_of(world, e)))

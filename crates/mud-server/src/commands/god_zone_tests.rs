@@ -223,6 +223,88 @@ fn visibility_helpers_follow_rank() {
     assert!(room_access::room_visible_to(&fx.world, mortal, square));
 }
 
+#[test]
+fn areas_lists_god_zones_for_staff_only() {
+    let mut fx = Fx::new();
+    let town = fx.zone(30, false);
+    let heavens = fx.zone(12, true);
+    let square = fx.room(town, 30, 1);
+    fx.room(heavens, 12, 4);
+    let (mortal, mut mrx) = fx.person("Mortal", 20, square);
+    let (imm, mut irx) = fx.person("Laoris", 100, square);
+
+    dispatch(&mut fx.world, mortal, "areas");
+    let out = drain(&mut mrx);
+    assert!(out.contains("Zone 30"), "{out}");
+    assert!(!out.contains("Zone 12"), "mortal saw the god zone: {out}");
+
+    dispatch(&mut fx.world, imm, "areas");
+    let out = drain(&mut irx);
+    assert!(out.contains("Zone 30") && out.contains("Zone 12"), "{out}");
+}
+
+/// `s` with ANSI colour escapes removed.
+fn plain(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            for n in chars.by_ref() {
+                if n.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[test]
+fn world_status_counts_god_zones_and_their_rooms_for_staff_only() {
+    let mut fx = Fx::new();
+    fx.world.insert_resource(crate::TickCount(0));
+    fx.world
+        .insert_resource(crate::ServerStart(std::time::Instant::now()));
+    let town = fx.zone(30, false);
+    let heavens = fx.zone(12, true);
+    let square = fx.room(town, 30, 1);
+    fx.room(heavens, 12, 4);
+    fx.room(heavens, 12, 5);
+    let (mortal, mut mrx) = fx.person("Mortal", 20, square);
+    let (imm, mut irx) = fx.person("Laoris", 100, square);
+
+    dispatch(&mut fx.world, mortal, "world");
+    let out = plain(&drain(&mut mrx));
+    assert!(out.contains("Zones loaded:    1"), "{out}");
+    assert!(out.contains("Rooms loaded:    1"), "{out}");
+
+    dispatch(&mut fx.world, imm, "world");
+    let out = plain(&drain(&mut irx));
+    assert!(out.contains("Zones loaded:    2"), "{out}");
+    assert!(out.contains("Rooms loaded:    3"), "{out}");
+}
+
+#[test]
+fn gmcp_room_info_names_a_god_zone_only_to_staff() {
+    let mut fx = Fx::new();
+    let heavens = fx.zone(12, true);
+    let hall = fx.room(heavens, 12, 4);
+    let (mortal, _a) = fx.person("Lost", 20, hall);
+    let (imm, _b) = fx.person("Laoris", 100, hall);
+
+    let info = |fx: &mut Fx, who| -> serde_json::Value {
+        serde_json::from_str(&crate::commands::gmcp::build_room_info(&mut fx.world, who)).unwrap()
+    };
+    let m = info(&mut fx, mortal);
+    assert_eq!(m["zone"], "", "{m}");
+    assert_eq!(m["area"], "", "{m}");
+    let s = info(&mut fx, imm);
+    assert_eq!(s["zone"], "Zone 12", "{s}");
+    assert_eq!(s["area"], "Zone 12", "{s}");
+}
+
 // ---------------------------------------------------------------------------
 // Exploration credit
 // ---------------------------------------------------------------------------

@@ -43,3 +43,31 @@ pub async fn list_zones(pool: &PgPool) -> sqlx::Result<Vec<Zone>> {
     .fetch_all(pool)
     .await
 }
+
+/// [`list_zones`] for a database that predates `Zones.is_god_zone` (the column
+/// is created by the muditor schema / `muditor/deploy/prod/sql/090-zones-is-god-zone.sql`,
+/// which prod can apply after the game deploy): every zone reads as not a god
+/// zone. Only the loader's missing-column fallback should call this.
+pub async fn list_zones_without_god_flag(pool: &PgPool) -> sqlx::Result<Vec<Zone>> {
+    sqlx::query_as!(
+        Zone,
+        r#"
+        SELECT
+            id,
+            name,
+            lifespan,
+            "resetMode" AS "reset_mode: ResetMode",
+            hemisphere AS "hemisphere: Hemisphere",
+            climate AS "climate: Climate",
+            false AS "is_god_zone!",
+            "created_at" AS "created_at: DateTime<Utc>",
+            "updated_at" AS "updated_at: DateTime<Utc>",
+            "deleted_at" AS "deleted_at: DateTime<Utc>"
+        FROM "Zones"
+        WHERE "deleted_at" IS NULL
+        ORDER BY id
+        "#
+    )
+    .fetch_all(pool)
+    .await
+}

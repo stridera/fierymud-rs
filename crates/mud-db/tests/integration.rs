@@ -9,7 +9,7 @@ use mud_db::{
     objects::list_objects,
     room_exits::list_exits,
     rooms::list_rooms,
-    zones::list_zones,
+    zones::{list_zones, list_zones_without_god_flag},
 };
 use sqlx::PgPool;
 
@@ -26,6 +26,17 @@ async fn lists_zones() {
     assert!(!zones.is_empty());
     let void = zones.iter().find(|z| z.id == 0).expect("zone 0 (Void)");
     assert_eq!(void.name, "Void");
+}
+
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn zone_list_without_the_god_flag_matches_the_full_list() {
+    let pool = pool().await;
+    let full = list_zones(&pool).await.expect("list zones");
+    let fallback = list_zones_without_god_flag(&pool).await.expect("fallback");
+    let ids = |zs: &[mud_db::zones::Zone]| zs.iter().map(|z| z.id).collect::<Vec<_>>();
+    assert_eq!(ids(&full), ids(&fallback));
+    assert!(fallback.iter().all(|z| !z.is_god_zone));
 }
 
 #[tokio::test]
