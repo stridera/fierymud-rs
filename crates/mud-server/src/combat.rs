@@ -18,7 +18,7 @@ const PLAYER_CORPSE_DECAY_SECS: i32 = 7 * 24 * 60 * 60;
 /// claim window rather than piling up. 10 minutes.
 const MOB_CORPSE_DECAY_SECS: i32 = 600;
 use crate::commands::{
-    apply_attacker_damage, arrival_from, broadcast_room_except_players_rendered,
+    apply_attacker_damage, arrival_from, attack_ok, broadcast_room_except_players_rendered,
     broadcast_room_except_rendered, damage_color_tag, direction_name, disengage_attackers_of,
     drain_stamina, flee_through_exit, name_of, send_msg, send_to, try_insert, try_remove,
 };
@@ -1481,7 +1481,9 @@ pub(crate) fn engage_swing_now(world: &mut World, attacker: Entity, target: Enti
 /// a victim that is idle and above stunned starts fighting its attacker, so
 /// a player hit by a second mob after killing the first keeps swinging at it.
 /// Players and mobs alike; skipped for ghosts, held / frozen / downed
-/// victims, and attackers that are not in the victim's room.
+/// victims, and attackers that are not in the victim's room. Also skipped
+/// when `attack_ok(victim, attacker)` refuses (peaceful room or mob,
+/// someone else's pet, non-consenting PK).
 pub(crate) fn victim_fights_back(world: &mut World, victim: Entity, attacker: Entity) {
     if victim == attacker
         || world.get::<Fighting>(victim).is_some()
@@ -1499,7 +1501,7 @@ pub(crate) fn victim_fights_back(world: &mut World, victim: Entity, attacker: En
     ) else {
         return;
     };
-    if vr == ar {
+    if vr == ar && attack_ok(world, victim, attacker, false) {
         try_insert(world, victim, Fighting(attacker));
     }
 }
@@ -6006,6 +6008,110 @@ mod tests {
         );
     }
 
+    fn plain_mob(world: &mut World, room: Entity, peaceful: bool) -> Entity {
+        let behaviors = if peaceful {
+            vec![mud_db::enums::MobBehavior::Peaceful]
+        } else {
+            Vec::new()
+        };
+        world
+            .spawn((
+                Mob,
+                Named {
+                    name: "a quest giver".to_string(),
+                },
+                Located(room),
+                Health { hp: 50, max: 50 },
+                CombatStats::default(),
+                Posture(PostureKind::Standing),
+                mud_world::MobBehaviors(behaviors),
+            ))
+            .id()
+    }
+
+    #[test]
+    fn lua_damage_from_a_peaceful_mob_starts_no_fight() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let player = credit_player(&mut world, room, "Hero", 0);
+        let npc = plain_mob(&mut world, room, true);
+        let dealt = crate::commands::lua_damage(&mut world, Some(npc), player, 5);
+        assert_eq!(dealt, 5);
+        assert_eq!(world.get::<Health>(player).map(|h| h.hp), Some(95));
+        assert!(world.get::<Fighting>(player).is_none(), "no fight-back");
+        assert!(world.get::<Fighting>(npc).is_none());
+    }
+
+    #[test]
+    fn lua_damage_from_a_hostile_mob_is_still_narrative() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let player = credit_player(&mut world, room, "Hero", 0);
+        let npc = plain_mob(&mut world, room, false);
+        crate::commands::lua_damage(&mut world, Some(npc), player, 5);
+        assert!(
+            world.get::<Fighting>(player).is_none(),
+            "scripted damage is not an attack"
+        );
+    }
+
+    #[test]
+    fn lua_damage_from_a_player_credits_the_kill_without_a_fight() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let player = credit_player(&mut world, room, "Hero", 0);
+        let npc = plain_mob(&mut world, room, false);
+        crate::commands::lua_damage(&mut world, Some(player), npc, 5);
+        assert_eq!(
+            world.get::<DamagedBy>(npc).map(|d| d.attacker),
+            Some(player),
+            "damager recorded for kill credit"
+        );
+        assert!(world.get::<Fighting>(npc).is_none(), "no fight-back");
+    }
+
+    #[test]
+    fn victim_does_not_fight_back_when_attack_ok_refuses() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let player = credit_player(&mut world, room, "Hero", 0);
+        // Peaceful mob hitting a player (e.g. a spell or skill source).
+        let npc = plain_mob(&mut world, room, true);
+        victim_fights_back(&mut world, player, npc);
+        assert!(world.get::<Fighting>(player).is_none(), "peaceful mob");
+        // Non-consenting PK: neither player flagged.
+        let other = credit_player(&mut world, room, "Other", 0);
+        victim_fights_back(&mut world, other, player);
+        assert!(world.get::<Fighting>(other).is_none(), "non-consenting PK");
+        // Peaceful room refuses everything.
+        let calm = make_room(&mut world);
+        world.entity_mut(calm).insert(mud_world::PeacefulRoom);
+        let in_calm = plain_mob(&mut world, calm, false);
+        let hostile = plain_mob(&mut world, calm, false);
+        victim_fights_back(&mut world, in_calm, hostile);
+        assert!(world.get::<Fighting>(in_calm).is_none(), "peaceful room");
+    }
+
+    #[test]
+    fn mob_melee_still_triggers_fight_back() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let player = credit_player(&mut world, room, "Hero", 0);
+        let mob = plain_mob(&mut world, room, false);
+        victim_fights_back(&mut world, player, mob);
+        assert_eq!(world.get::<Fighting>(player).map(|f| f.0), Some(mob));
+        // Consenting PK still fights back too.
+        let a = credit_player(&mut world, room, "A", 0);
+        let b = credit_player(&mut world, room, "B", 0);
+        for e in [a, b] {
+            world
+                .entity_mut(e)
+                .insert(PlayerFlags(vec![mud_db::enums::PlayerFlag::PkEnabled]));
+        }
+        victim_fights_back(&mut world, b, a);
+        assert_eq!(world.get::<Fighting>(b).map(|f| f.0), Some(a));
+    }
+
     fn assist_fixture() -> (World, Entity, Entity, Entity) {
         let mut world = World::new();
         let room = make_room(&mut world);
@@ -6149,7 +6255,7 @@ mod tests {
     fn spell_damage_makes_an_idle_victim_fight_back() {
         let mut world = World::new();
         let room = make_room(&mut world);
-        let caster = credit_player(&mut world, room, "Caster", 0);
+        let caster = plain_mob(&mut world, room, false);
         let victim = credit_player(&mut world, room, "Victim", 0);
         let (dead, _) = crate::commands::apply_damage_from(&mut world, victim, 7, caster);
         assert!(!dead);

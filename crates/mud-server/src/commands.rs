@@ -15739,8 +15739,9 @@ pub fn lua_engage(world: &mut World, attacker: Entity, target: Entity) {
     engage_combat(world, attacker, target, a_room);
 }
 
-/// `actor:damage`: scripted damage takes the same path as any other hit
-/// (`apply_damage_from`, then `handle_death` on a kill); a negative amount
+/// `actor:damage`: scripted damage records the damager for kill credit, then
+/// `apply_damage` and `handle_death` on a kill; it never starts a fight
+/// (legacy `hurt_char`, not `damage()`). A negative amount
 /// heals, up to max hp. Returns the hit points removed (negative when
 /// healed).
 pub fn lua_damage(world: &mut World, attacker: Option<Entity>, target: Entity, amount: i32) -> i32 {
@@ -15758,9 +15759,17 @@ pub fn lua_damage(world: &mut World, attacker: Option<Entity>, target: Entity, a
         send_char_vitals(world, target);
         return old - new;
     }
+    // Legacy `do_mdamage` / `do_wdamage` / `do_odamage` queue a `hurt_event`
+    // -> `hurt_char` (regen.cpp): raw hp loss plus the dying check, never
+    // `damage()`. Scripted damage is narrative, not an attack, so it records
+    // the damager for kill credit but starts no fight (no victim fight-back,
+    // no autoassist, no wimpy flee) and breaks no invisibility or holds.
     let (dead, threshold_msg) = match attacker {
-        Some(a) => apply_damage_from(world, target, amount, a),
-        None => apply_damage(world, target, amount),
+        Some(a) if a != target => {
+            crate::combat::record_damager(world, target, a);
+            apply_damage(world, target, amount)
+        }
+        _ => apply_damage(world, target, amount),
     };
     let dealt = old - world.get::<Health>(target).map_or(old, |h| h.hp);
     if dead {
