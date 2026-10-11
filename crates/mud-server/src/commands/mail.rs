@@ -293,15 +293,15 @@ pub(crate) async fn cmd_mail(
     );
 }
 
-/// Stub for the help/registry path — mail commands are intercepted by
-/// the async pre-dispatch hook before this ever runs. If somehow it
-/// does (a future refactor moves dispatch order around), bail loudly.
+/// Stub registered as the sync `run` of every async-only command (mail,
+/// `save`, `visit`, ...): the async pre-dispatch hook claims them first. It
+/// only runs when a sync-only path (Lua `command()`, `force`) reaches one.
 pub(crate) fn cmd_mail_stub(world: &mut World, player: Entity, _args: &str) {
     send_to(
         world,
         player,
-        "Mail subsystem error: sync dispatch reached an async-only \
-         command. Please report.\r\n",
+        "That command can't run here (async-only: it needs the database \
+         dispatcher, which this path doesn't have).\r\n",
     );
 }
 

@@ -922,7 +922,7 @@ fn json_err((code, msg): (StatusCode, String)) -> (StatusCode, axum::Json<Value>
 const MAX_PER_TICK: usize = 32;
 
 #[allow(clippy::needless_pass_by_value)]
-pub fn drain_admin_requests(world: &mut World) {
+pub async fn drain_admin_requests(world: &mut World, pool: &PgPool) {
     let mut pending: VecDeque<AdminCommand> = VecDeque::new();
     {
         let inbox = world.resource::<AdminInbox>();
@@ -935,7 +935,14 @@ pub fn drain_admin_requests(world: &mut World) {
         }
     }
     while let Some(cmd) = pending.pop_front() {
-        let resp = service(world, cmd.request);
+        let resp = match cmd.request {
+            // Player commands take the same async path as a telnet line
+            // (aliases, async-only commands, shared pre-gate).
+            AdminRequest::Command { executor, command } => {
+                run_command(world, pool, &executor, &command).await
+            }
+            other => service(world, other),
+        };
         let _ = cmd.reply.send(resp);
     }
 }
@@ -980,7 +987,11 @@ fn service(world: &mut World, req: AdminRequest) -> AdminResponse {
         ),
         AdminRequest::SessionDestroy { player_name } => session_destroy(world, &player_name),
         AdminRequest::MarkPendingSave { player_name } => mark_pending_save(world, &player_name),
-        AdminRequest::Command { executor, command } => run_command(world, &executor, &command),
+        // Handled by `drain_admin_requests` (needs the async dispatcher).
+        AdminRequest::Command { .. } => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "command requests must go through drain_admin_requests".to_string(),
+        )),
         AdminRequest::Teleport {
             player_name,
             zone_id,
@@ -2012,7 +2023,18 @@ fn mark_pending_save(world: &mut World, player_name: &str) -> AdminResponse {
     }))
 }
 
-fn run_command(world: &mut World, executor: &str, command_line: &str) -> AdminResponse {
+/// Longest an admin-issued command may run before the request is answered
+/// with a timeout. Async handlers (DB saves, mail, houses) normally finish
+/// in milliseconds; this only bounds a stuck database call so it can't
+/// hold the tick loop for long.
+const COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+async fn run_command(
+    world: &mut World,
+    pool: &PgPool,
+    executor: &str,
+    command_line: &str,
+) -> AdminResponse {
     let entity = {
         let sessions = world.resource::<VirtualSessions>();
         let by_name = sessions.by_name.lock().expect("sessions poisoned");
@@ -2024,10 +2046,17 @@ fn run_command(world: &mut World, executor: &str, command_line: &str) -> AdminRe
             format!("no virtual session for '{executor}'; create one first"),
         ));
     };
-    // Run the command. Any send_to / send_rendered the dispatch
-    // performs flows through the entity's Connection (which we
-    // replaced on session_create) into our captured rx.
-    commands::dispatch(world, entity, command_line);
+    // Run the command through the telnet input path so async-only
+    // commands work and the gates / room triggers fire exactly once. Any
+    // send_to / send_rendered the dispatch performs flows through the
+    // entity's Connection (which we replaced on session_create) into our
+    // captured rx.
+    let timed_out = tokio::time::timeout(
+        COMMAND_TIMEOUT,
+        commands::dispatch_with_async(world, entity, pool, command_line),
+    )
+    .await
+    .is_err();
     // Drain whatever bytes accumulated. The mpsc is unbounded and
     // sends are sync, so by this point everything the command wrote
     // is sitting in the receiver.
@@ -2041,10 +2070,20 @@ fn run_command(world: &mut World, executor: &str, command_line: &str) -> AdminRe
             }
         }
     }
+    let output = String::from_utf8_lossy(&buf).to_string();
+    if timed_out {
+        return Err((
+            StatusCode::GATEWAY_TIMEOUT,
+            format!(
+                "command '{command_line}' timed out after {}s; partial output: {output}",
+                COMMAND_TIMEOUT.as_secs()
+            ),
+        ));
+    }
     Ok(json!({
         "success": true,
         "command": command_line,
-        "output": String::from_utf8_lossy(&buf).to_string(),
+        "output": output,
     }))
 }
 
@@ -2559,5 +2598,112 @@ mod auth_token_tests {
     #[test]
     fn no_token_configured_passes() {
         assert!(check_bearer(None, &bearer(None)).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod command_dispatch_tests {
+    use super::*;
+    use mud_db::enums::UserRole;
+    use mud_world::{Account, Fighting, Health, Located, Named, Profile, Room};
+
+    fn pool() -> PgPool {
+        mud_db::sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(200))
+            .connect_lazy("postgres://nobody:nopass@127.0.0.1:1/none")
+            .unwrap()
+    }
+
+    /// A world with one virtual session named "Tester" in a quiet room.
+    fn world_with_session() -> (World, Entity) {
+        let mut world = World::new();
+        world.init_resource::<mud_world::SocialRegistry>();
+        world.init_resource::<VirtualSessions>();
+        let room = world
+            .spawn((
+                Room,
+                Named {
+                    name: "A quiet hall".into(),
+                },
+                mud_world::Exits::default(),
+            ))
+            .id();
+        let (tx, rx) = mpsc::channel::<Vec<u8>>(64);
+        let player = world
+            .spawn((
+                Player,
+                Named {
+                    name: "Tester".into(),
+                },
+                Located(room),
+                crate::commands::Connection(tx),
+                Account {
+                    user_id: "u".into(),
+                    character_id: "c".into(),
+                    role: UserRole::Player,
+                    account_role: UserRole::Player,
+                    perms: vec![],
+                },
+                Health { hp: 100, max: 100 },
+                Profile {
+                    level: 10,
+                    class_id: None,
+                    race: "HUMAN".into(),
+                    experience: 0,
+                    gender: "male".into(),
+                },
+            ))
+            .id();
+        world
+            .resource::<VirtualSessions>()
+            .by_name
+            .lock()
+            .unwrap()
+            .insert("Tester".into(), VirtualSession { entity: player, rx });
+        (world, player)
+    }
+
+    fn output(resp: AdminResponse) -> String {
+        resp.expect("command ok")["output"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_only_visit_runs_and_is_refused_while_fighting() {
+        let (mut world, player) = world_with_session();
+        let foe = world.spawn_empty().id();
+        world.entity_mut(player).insert(Fighting(foe));
+        let out = output(run_command(&mut world, &pool(), "Tester", "visit tester").await);
+        assert!(!out.contains("async-only"), "{out}");
+        assert!(!out.contains("DB error"), "reached the database: {out}");
+        assert!(out.contains("can't"), "{out}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_only_save_gives_its_normal_output() {
+        let (mut world, _player) = world_with_session();
+        // The pool is unreachable, so the checkpoint rolls back: the
+        // handler's own failure line, not the async-only stub text.
+        let out = output(run_command(&mut world, &pool(), "Tester", "save").await);
+        assert!(!out.contains("async-only"), "{out}");
+        assert!(out.contains("Save failed"), "{out}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sync_commands_still_work() {
+        let (mut world, _player) = world_with_session();
+        let out = output(run_command(&mut world, &pool(), "Tester", "look").await);
+        assert!(out.contains("A quiet hall"), "{out}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unknown_session_is_not_found() {
+        let (mut world, _player) = world_with_session();
+        let err = run_command(&mut world, &pool(), "Nobody", "look")
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
     }
 }

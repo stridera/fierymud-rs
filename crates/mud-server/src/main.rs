@@ -691,7 +691,7 @@ async fn main() {
                 // tick must flow even while the rest of the world is
                 // frozen. The drain consumes any forced-tick budget
                 // posted by /api/admin/world/tick.
-                admin::drain_admin_requests(&mut world);
+                admin::drain_admin_requests(&mut world, &pool).await;
                 tick_stats::lap(&mut world, "admin_drain");
                 // Tell mud-net which connections have finished login
                 // so they leave the pre-login timeout. Wall-clock
