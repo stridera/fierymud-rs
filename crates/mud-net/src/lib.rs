@@ -810,7 +810,6 @@ pub fn iac_will_mssp() -> Vec<u8> {
 struct CapsLocal {
     gmcp: bool,
     eor: bool,
-    mxp: bool,
     naws: bool,
     ttype: bool,
     charset_utf8: bool,
@@ -846,8 +845,12 @@ struct CapsLocal {
 /// reply in order. Options we send WILL for: GMCP (we'll push
 /// JSON state), MSSP (we'll respond with server metadata),
 /// MCCP2 (the client opts in to compression by replying DO),
-/// EOR (prompt boundary marker), CHARSET (for UTF-8 confirmation),
-/// MXP (clickable links — optional). Options we send DO for:
+/// EOR (prompt boundary marker), CHARSET (for UTF-8 confirmation).
+/// MXP is deliberately NOT offered: player text (say, tells, names,
+/// descriptions) is never escaped for `<`, `>` and `&`, so an MXP client
+/// would render it as live markup (`say <send href="quit">x</send>`). MXP
+/// must escape ALL outbound text before it is ever re-enabled here. Options
+/// we send DO for:
 /// NAWS (window size), TTYPE (terminal type / MTTS), NEW-ENVIRON
 /// (env vars). Suppress-Go-Ahead is deliberately NOT offered: a
 /// plain line-mode telnet client that sees `WILL SGA` switches to
@@ -859,7 +862,6 @@ fn queue_negotiation(out_tx: &Outbound) {
     let _ = out_tx.try_send(will(opt::MCCP2));
     let _ = out_tx.try_send(will(opt::EOR));
     let _ = out_tx.try_send(will(opt::CHARSET));
-    let _ = out_tx.try_send(will(opt::MXP));
     let _ = out_tx.try_send(do_(opt::NAWS));
     let _ = out_tx.try_send(do_(opt::TTYPE));
     let _ = out_tx.try_send(do_(opt::NEW_ENVIRON));
@@ -1716,9 +1718,10 @@ async fn handle_negotiate(
             caps.output.set_eor(false);
             return forward_capability(sink, "eor", false).await;
         }
+        // MXP is never offered (see `queue_negotiation`): refuse a client
+        // that asks for it anyway, so it cannot treat player text as markup.
         (DO, opt::MXP) => {
-            caps.mxp = true;
-            return forward_capability(sink, "mxp", true).await;
+            let _ = out_tx.try_send(wont(opt::MXP));
         }
         (DO, opt::CHARSET) => {
             // Client agreed we may negotiate charset; send the
@@ -2586,7 +2589,6 @@ mod limit_tests {
             (telnet::WILL, opt::MCCP2),
             (telnet::WILL, opt::EOR),
             (telnet::WILL, opt::CHARSET),
-            (telnet::WILL, opt::MXP),
             (telnet::DO, opt::NAWS),
             (telnet::DO, opt::TTYPE),
             (telnet::DO, opt::NEW_ENVIRON),
@@ -2594,6 +2596,25 @@ mod limit_tests {
             assert!(has(&[telnet::IAC, cmd, option]), "missing {cmd} {option}");
         }
         assert!(has(&[telnet::IAC, telnet::SB, opt::MSSP]), "MSSP payload");
+        assert!(!has(&[telnet::IAC, telnet::WILL, opt::MXP]), "MXP offered");
+    }
+
+    #[tokio::test]
+    async fn client_do_mxp_is_refused_with_wont() {
+        let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(8);
+        let (in_tx, mut in_rx) = mpsc::channel::<Inbound>(8);
+        let mut sink = Sink {
+            conn_id: 1,
+            inbound: &in_tx,
+            pending: Vec::new(),
+            pending_bytes: 0,
+            hello: None,
+        };
+        let mut caps = CapsLocal::default();
+        assert!(handle_negotiate(&out_tx, &mut sink, &mut caps, telnet::DO, opt::MXP).await);
+        assert_eq!(out_rx.try_recv().unwrap(), wont(opt::MXP));
+        assert!(out_rx.try_recv().is_err(), "only WONT MXP is sent");
+        assert!(in_rx.try_recv().is_err(), "MXP capability not forwarded");
     }
 
     #[tokio::test]

@@ -3076,15 +3076,14 @@ pub(crate) fn render_color_tags(s: &str, mode: ColorMode) -> String {
     out
 }
 
-/// Render a string for embedding inside a GMCP JSON payload: strip
-/// color tags, then escape `\` and `"`. The combination every named-
-/// entity GMCP emit site needs. Keeps the wire payload plain so the
-/// client can re-style without re-parsing color tags.
+/// Render a string for a GMCP JSON payload: strip color tags. The
+/// result is NOT JSON-escaped; callers build payloads with
+/// `serde_json::json!`, which escapes quotes, backslashes and control
+/// characters. Keeps the wire payload plain so the client can re-style
+/// without re-parsing color tags.
 #[must_use]
 pub(crate) fn plain_for_gmcp(s: &str) -> String {
     render_color_tags(s, ColorMode::Strip)
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
 }
 
 /// True if `<tag>` looks like an XML-Lite color/style tag — i.e. its
@@ -3649,11 +3648,11 @@ mod tests {
             "inn_name missing: {seen:?}"
         );
         assert!(
-            seen.contains(r#""name":"basic","tier":1,"fee_gp":10,"affordable":true"#),
+            seen.contains(r#""affordable":true,"fee_gp":10,"name":"basic","tier":1"#),
             "tier 1 should be affordable: {seen:?}"
         );
         assert!(
-            seen.contains(r#""name":"suite","tier":2,"fee_gp":50,"affordable":false"#),
+            seen.contains(r#""affordable":false,"fee_gp":50,"name":"suite","tier":2"#),
             "tier 2 should be unaffordable: {seen:?}"
         );
         assert!(
@@ -3773,7 +3772,7 @@ mod tests {
             "no Room.Mob.Info frame: {seen:?}"
         );
         assert!(
-            seen.contains(r#""bank":{"on_hand":123,"per_char":456,"account":789}"#),
+            seen.contains(r#""bank":{"account":789,"on_hand":123,"per_char":456}"#),
             "bank block missing or mis-ordered: {seen:?}"
         );
         // Inn block must NOT appear — Banker has no InnRoom.
@@ -8015,17 +8014,12 @@ pub(crate) fn send_comm_channel_list(world: &World, viewer: Entity) {
             min_role: mud_db::enums::UserRole::Immortal,
         },
     ];
-    let entries: Vec<String> = dir
+    let entries: Vec<serde_json::Value> = dir
         .iter()
         .filter(|c| role.at_least(c.min_role))
-        .map(|c| {
-            format!(
-                r#"{{"name":"{}","caption":"{}","command":"{}"}}"#,
-                c.name, c.caption, c.command,
-            )
-        })
+        .map(|c| serde_json::json!({"name": c.name, "caption": c.caption, "command": c.command}))
         .collect();
-    let payload = format!("[{}]", entries.join(","));
+    let payload = serde_json::Value::Array(entries).to_string();
     let _ = conn
         .0
         .try_send(mud_net::gmcp_packet("Comm.Channel.List", &payload));
@@ -8051,16 +8045,14 @@ pub(crate) fn send_char_items_list(
     let Some(conn) = world.get::<Connection>(viewer) else {
         return;
     };
-    let mut entries: Vec<String> = Vec::with_capacity(items.len());
+    let mut entries: Vec<serde_json::Value> = Vec::with_capacity(items.len());
     for &item in items {
         // The panel never names an item the viewer cannot see.
         if !senses::item_visible_to(world, viewer, item) {
             continue;
         }
         let raw_name = world.get::<Named>(item).map_or("", |n| n.name.as_str());
-        let plain = render_color_tags(raw_name, ColorMode::Strip)
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"");
+        let plain = plain_for_gmcp(raw_name);
         let id = item.to_bits();
         // Item type label (Weapon / Armor / Drinkcontainer / etc.)
         // — sourced from the proto. Lets the client pick the right
@@ -8084,23 +8076,20 @@ pub(crate) fn send_char_items_list(
         // bucket. Empty for inventory items / containers. Lets
         // the equipment panel render "head: a golden circlet"
         // without a second lookup.
-        let slot_field = if location == "wear" {
-            world
-                .get::<EquippedSlot>(item)
-                .map(|eq| format!(r#","location":"{}""#, eq.0.label()))
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
-        entries.push(format!(
-            r#"{{"id":"{id}","name":"{plain}","type":"{item_type}","identified":{identified}{slot_field}}}"#
-        ));
+        let mut entry = serde_json::json!({
+            "id": id.to_string(),
+            "name": plain,
+            "type": item_type,
+            "identified": identified,
+        });
+        if location == "wear"
+            && let Some(eq) = world.get::<EquippedSlot>(item)
+        {
+            entry["location"] = serde_json::Value::from(eq.0.label());
+        }
+        entries.push(entry);
     }
-    let payload = format!(
-        r#"{{"location":"{}","items":[{}]}}"#,
-        location.replace('"', "\\\""),
-        entries.join(","),
-    );
+    let payload = serde_json::json!({"location": location, "items": entries}).to_string();
     let _ = conn
         .0
         .try_send(mud_net::gmcp_packet("Char.Items.List", &payload));
@@ -8154,14 +8143,13 @@ pub(crate) fn send_char_items_diff(
         return;
     };
     let raw_name = world.get::<Named>(item).map_or("", |n| n.name.as_str());
-    let plain = render_color_tags(raw_name, ColorMode::Strip)
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"");
+    let plain = plain_for_gmcp(raw_name);
     let id = item.to_bits();
-    let payload = format!(
-        r#"{{"location":"{loc}","item":{{"id":"{id}","name":"{plain}"}}}}"#,
-        loc = location.replace('"', "\\\""),
-    );
+    let payload = serde_json::json!({
+        "location": location,
+        "item": {"id": id.to_string(), "name": plain},
+    })
+    .to_string();
     let package = format!("Char.Items.{verb}");
     let _ = conn.0.try_send(mud_net::gmcp_packet(&package, &payload));
 }
@@ -8232,13 +8220,10 @@ pub(crate) fn send_char_skills_list(world: &World, viewer: Entity) {
             continue;
         }
         if let Some(def) = catalog.by_name.values().find(|d| d.id == ability_id) {
-            let plain = render_color_tags(&def.plain_name, ColorMode::Strip)
-                .replace('\\', "\\\\")
-                .replace('"', "\\\"");
-            names.push(format!("\"{plain}\""));
+            names.push(plain_for_gmcp(&def.plain_name));
         }
     }
-    let payload = format!("[{}]", names.join(","));
+    let payload = serde_json::json!(names).to_string();
     let _ = conn
         .0
         .try_send(mud_net::gmcp_packet("Char.Skills.List", &payload));
@@ -8278,7 +8263,7 @@ fn build_char_skills(world: &World, viewer: Entity) -> String {
     // prompt. Snapshot a by_id view once. Mirrors Char.Effects.
     let by_id: std::collections::HashMap<i32, &mud_world::AbilityDef> =
         catalog.by_name.values().map(|d| (d.id, d)).collect();
-    let mut entries: Vec<String> = Vec::with_capacity(known.entries.len());
+    let mut entries: Vec<serde_json::Value> = Vec::with_capacity(known.entries.len());
     for &(ability_id, _, known_flag) in &known.entries {
         if !known_flag {
             continue;
@@ -8294,11 +8279,14 @@ fn build_char_skills(world: &World, viewer: Entity) -> String {
             .map_or(0, |when| when.saturating_duration_since(now).as_secs());
         let available = cooldown_secs == 0;
         let passive = def.passive;
-        entries.push(format!(
-            r#"{{"name":"{plain}","cooldown":{cooldown_secs},"available":{available},"passive":{passive}}}"#,
-        ));
+        entries.push(serde_json::json!({
+            "name": plain,
+            "cooldown": cooldown_secs,
+            "available": available,
+            "passive": passive,
+        }));
     }
-    format!(r#"{{"skills":[{}]}}"#, entries.join(","))
+    serde_json::json!({"skills": entries}).to_string()
 }
 
 /// Push a `Group` GMCP frame to `viewer`. The frame describes the
@@ -8330,18 +8318,14 @@ pub(crate) fn send_group_state(world: &mut World, viewer: Entity) {
         .get::<Named>(root)
         .map(|n| n.name.clone())
         .unwrap_or_default();
-    let leader_plain = render_color_tags(&leader_name, ColorMode::Strip)
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"");
-    let mut entries: Vec<String> = Vec::with_capacity(members.len());
+    let leader_plain = plain_for_gmcp(&leader_name);
+    let mut entries: Vec<serde_json::Value> = Vec::with_capacity(members.len());
     for &m in &members {
         let raw = world
             .get::<Named>(m)
             .map(|n| n.name.clone())
             .unwrap_or_default();
-        let plain = render_color_tags(&raw, ColorMode::Strip)
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"");
+        let plain = plain_for_gmcp(&raw);
         // Pets are mobs: their level and race live on the prototype.
         let level = mud_world::effective_level(world, m);
         let race = mud_world::effective_race(world, m);
@@ -8363,24 +8347,22 @@ pub(crate) fn send_group_state(world: &mut World, viewer: Entity) {
         let (mv, max_mv) = world
             .get::<Stamina>(m)
             .map_or((0, 0), |s| (s.current, s.max));
-        entries.push(format!(
-            r#"{{"name":"{plain}","with_leader":{with},"level":{level},"race":"{race}","class":"{class}","stats":{{"hp":{hp},"max_hp":{max_hp},"mv":{mv},"max_mv":{max_mv}}}}}"#,
-            plain = plain,
-            with = with_leader,
-            level = level,
-            race = race.replace('"', "\\\""),
-            class = class.replace('"', "\\\""),
-            hp = hp,
-            max_hp = max_hp,
-            mv = mv,
-            max_mv = max_mv,
-        ));
+        entries.push(serde_json::json!({
+            "name": plain,
+            "with_leader": with_leader,
+            "level": level,
+            "race": race,
+            "class": class,
+            "stats": {"hp": hp, "max_hp": max_hp, "mv": mv, "max_mv": max_mv},
+        }));
     }
-    let payload = format!(
-        r#"{{"group_name":"{leader_plain}'s group","leader":"{leader_plain}","count":{count},"members":[{members}]}}"#,
-        count = members.len(),
-        members = entries.join(","),
-    );
+    let payload = serde_json::json!({
+        "group_name": format!("{leader_plain}'s group"),
+        "leader": leader_plain,
+        "count": members.len(),
+        "members": entries,
+    })
+    .to_string();
     gmcp::send_if_changed(world, viewer, "Group", &payload, false);
 }
 
@@ -8452,9 +8434,12 @@ fn build_char_combat(world: &World, viewer: Entity) -> String {
         .unwrap_or_default();
     let (tank_hp, tank_max) = world.get::<Health>(tank).map_or((0, 0), |h| (h.hp, h.max));
 
-    format!(
-        r#"{{"tank":{{"name":"{tank_plain}","hp":{tank_hp},"max_hp":{tank_max}}},"opponent":{{"name":"{mob_plain}","hp_percent":{mob_pct}}},"target":{{"name":"{mob_plain}","hp_percent":{mob_pct}}}}}"#,
-    )
+    serde_json::json!({
+        "tank": {"name": tank_plain, "hp": tank_hp, "max_hp": tank_max},
+        "opponent": {"name": mob_plain, "hp_percent": mob_pct},
+        "target": {"name": mob_plain, "hp_percent": mob_pct},
+    })
+    .to_string()
 }
 
 /// Returns true when `mob` should appear with `hostile: true` in the
@@ -8548,17 +8533,21 @@ pub(crate) fn send_room_mobs(world: &mut World, viewer: Entity, force: bool) {
         .map(|mob| (mob, gmcp::perceives(world, viewer, mob, room_seen)))
         .filter(|(_, how)| *how != gmcp::Perceived::Unseen)
         .collect();
-    let mut entries: Vec<String> = Vec::with_capacity(candidates.len());
+    let mut entries: Vec<serde_json::Value> = Vec::with_capacity(candidates.len());
     let mut services: Vec<&'static str> = Vec::new();
     for (mob, how) in candidates {
         if how == gmcp::Perceived::Shape {
             // Infravision in the dark: a generic shape, no hostility,
             // health, targets or services.
             let label = gmcp::perceived_name(world, mob, how).unwrap_or_default();
-            entries.push(format!(
-                r#"{{"id":"{}","name":"{label}","hostile":false,"hp_percent":0,"targeting":null,"professions":[]}}"#,
-                mob.to_bits(),
-            ));
+            entries.push(serde_json::json!({
+                "id": mob.to_bits().to_string(),
+                "name": label,
+                "hostile": false,
+                "hp_percent": 0,
+                "targeting": null,
+                "professions": [],
+            }));
             continue;
         }
         let mob_plain = world
@@ -8580,18 +8569,14 @@ pub(crate) fn send_room_mobs(world: &mut World, viewer: Entity, force: bool) {
                     .get::<Named>(t)
                     .map(|n| seen_name(world, viewer, t, &n.name))
             })
-            .map_or_else(
-                || "null".to_string(),
-                |n| format!("\"{}\"", plain_for_gmcp(&n)),
-            );
+            .map_or(serde_json::Value::Null, |n| {
+                serde_json::Value::from(plain_for_gmcp(&n))
+            });
         // Posture and hold come from the same rules as the text room line
         // (`room_line`): "sleeping", "flying", ...; a held mob also says
         // whether it is paralyzed, mesmerized or just stunned.
         let posture = room_line::posture_word(world, mob);
-        let status_field = match room_line::hold_of(world, mob) {
-            Some(hold) => format!(r#","status":"stunned","hold":"{}""#, hold.status()),
-            None => String::new(),
-        };
+        let hold = room_line::hold_of(world, mob);
         // Professions come off the proto, not the spawned entity.
         // We emit `professions:[]` (always present, even when empty)
         // so the client doesn't need a presence check.
@@ -8631,29 +8616,24 @@ pub(crate) fn send_room_mobs(world: &mut World, viewer: Entity, force: bool) {
                 services.push(tag);
             }
         }
-        let prof_json = if professions.is_empty() {
-            "[]".to_string()
-        } else {
-            let inner = professions
-                .iter()
-                .map(|s| format!("\"{s}\""))
-                .collect::<Vec<_>>()
-                .join(",");
-            format!("[{inner}]")
-        };
-        let id_bits = mob.to_bits();
-        entries.push(format!(
-            r#"{{"id":"{id_bits}","name":"{mob_plain}","hostile":{hostile},"hp_percent":{hp_pct},"targeting":{targeting_json},"posture":"{posture}"{status_field},"professions":{prof_json}}}"#,
-        ));
+        let mut entry = serde_json::json!({
+            "id": mob.to_bits().to_string(),
+            "name": mob_plain,
+            "hostile": hostile,
+            "hp_percent": hp_pct,
+            "targeting": targeting_json,
+            "posture": posture,
+            "professions": professions,
+        });
+        if let Some(hold) = hold {
+            entry["status"] = serde_json::Value::from("stunned");
+            entry["hold"] = serde_json::Value::from(hold.status());
+        }
+        entries.push(entry);
     }
-    let mobs_payload = format!("[{}]", entries.join(","));
+    let mobs_payload = serde_json::Value::Array(entries).to_string();
     gmcp::send_if_changed(world, viewer, "Room.Mobs", &mobs_payload, force);
-    let services_inner = services
-        .iter()
-        .map(|s| format!("\"{s}\""))
-        .collect::<Vec<_>>()
-        .join(",");
-    let services_payload = format!(r#"{{"services":[{services_inner}]}}"#);
+    let services_payload = serde_json::json!({"services": services}).to_string();
     gmcp::send_if_changed(world, viewer, "Room.Services", &services_payload, force);
 }
 
@@ -8751,31 +8731,24 @@ pub(crate) fn handle_room_mob_get(world: &mut World, viewer: Entity, payload: &s
                 .collect()
         })
         .unwrap_or_default();
-    let prof_json = professions
-        .iter()
-        .map(|s| format!("\"{s}\""))
-        .collect::<Vec<_>>()
-        .join(",");
 
     // Shop block — populated only when the mob is a registered
     // keeper. `ShopCatalog.keeper_index` maps (zone, id) → the
     // shop's (zone, id), then `by_key` carries the offerings + accept
     // rules. Item names come from `ObjectPrototypes`.
-    let shop_json: String = (|| {
+    let shop_json: Option<serde_json::Value> = (|| {
         let key = world.get::<WorldKey>(target)?;
         let catalog = world.get_resource::<mud_world::ShopCatalog>()?;
         let shop_key = catalog.keeper_index.get(&(key.zone, key.id))?;
         let shop = catalog.by_key.get(shop_key)?;
         let obj_protos = world.get_resource::<ObjectPrototypes>();
-        let items_json: Vec<String> = shop
+        let items_json: Vec<serde_json::Value> = shop
             .items
             .iter()
             .map(|o| {
-                let proto = obj_protos
-                    .and_then(|op| op.by_key.get(&(o.object_zone_id, o.object_id)));
-                let name_plain = proto
-                    .map(|p| plain_for_gmcp(&p.name))
-                    .unwrap_or_default();
+                let proto =
+                    obj_protos.and_then(|op| op.by_key.get(&(o.object_zone_id, o.object_id)));
+                let name_plain = proto.map(|p| plain_for_gmcp(&p.name)).unwrap_or_default();
                 // First keyword is the canonical noun for `buy <kw>`.
                 // Empty string when the proto has no keywords (loader
                 // gap) — client falls back to deriving from name.
@@ -8787,28 +8760,22 @@ pub(crate) fn handle_room_mob_get(world: &mut World, viewer: Entity, payload: &s
                 // Stock semantics: -1 = unlimited (per
                 // ShopOffering.amount); surface verbatim so the
                 // client can render "∞".
-                format!(
-                    r#"{{"id":"{item_id}","name":"{name_plain}","keyword":"{keyword}","price":{price},"stock":{stock}}}"#,
-                    price = o.price,
-                    stock = o.amount,
-                )
+                serde_json::json!({
+                    "id": item_id,
+                    "name": name_plain,
+                    "keyword": keyword,
+                    "price": o.price,
+                    "stock": o.amount,
+                })
             })
             .collect();
-        let accepts_json: Vec<String> = shop
+        let accepts_json: Vec<&str> = shop
             .accepts
             .iter()
-            .map(|a| {
-                let safe = a.object_type.replace('\\', "\\\\").replace('"', "\\\"");
-                format!("\"{safe}\"")
-            })
+            .map(|a| a.object_type.as_str())
             .collect();
-        Some(format!(
-            r#","shop":{{"items":[{items}],"accepts":[{accepts}]}}"#,
-            items = items_json.join(","),
-            accepts = accepts_json.join(",")
-        ))
-    })()
-    .unwrap_or_default();
+        Some(serde_json::json!({"items": items_json, "accepts": accepts_json}))
+    })();
 
     // Inn block — populated only when the mob is a Receptionist and
     // its room carries an `InnRoom`. The rental data lives on the
@@ -8817,7 +8784,7 @@ pub(crate) fn handle_room_mob_get(world: &mut World, viewer: Entity, payload: &s
     // viewer's on-hand Wealth so the client doesn't parse coin
     // strings; `current_rest` mirrors the viewer's RestState so the
     // popup can show "already prepaid" instead of re-offering.
-    let inn_json: String = (|| {
+    let inn_json: Option<serde_json::Value> = (|| {
         const COPPER_PER_GOLD: i64 = 100;
         let key = world.get::<WorldKey>(target)?;
         let proto = world
@@ -8833,39 +8800,38 @@ pub(crate) fn handle_room_mob_get(world: &mut World, viewer: Entity, payload: &s
         let room = world.get::<Located>(target).map(|l| l.0)?;
         let inn = world.get::<InnRoom>(room)?;
         let on_hand = world.get::<Wealth>(viewer).map_or(0, |w| w.0);
-        let tiers_json: Vec<String> = inn
+        let tiers_json: Vec<serde_json::Value> = inn
             .tiers
             .iter()
             .map(|t| {
                 let fee_copper = i64::from(t.fee_gp).saturating_mul(COPPER_PER_GOLD);
                 let affordable = on_hand >= fee_copper;
                 let name = plain_for_gmcp(&t.name);
-                format!(
-                    r#"{{"name":"{name}","tier":{tier},"fee_gp":{fee},"affordable":{affordable}}}"#,
-                    tier = t.tier,
-                    fee = t.fee_gp,
-                )
+                serde_json::json!({
+                    "name": name,
+                    "tier": t.tier,
+                    "fee_gp": t.fee_gp,
+                    "affordable": affordable,
+                })
             })
             .collect();
         // current_rest is null unless the viewer holds a RestState.
-        let current_rest = world.get::<RestState>(viewer).map_or_else(
-            || "null".to_string(),
-            |r| {
-                format!(
-                    r#"{{"source":"{src}","tier":{tier},"repose":{repose}}}"#,
-                    src = r.source.as_str(),
-                    tier = r.tier,
-                    repose = r.repose,
-                )
-            },
-        );
+        let current_rest = world
+            .get::<RestState>(viewer)
+            .map_or(serde_json::Value::Null, |r| {
+                serde_json::json!({
+                    "source": r.source.as_str(),
+                    "tier": r.tier,
+                    "repose": r.repose,
+                })
+            });
         let inn_name = plain_for_gmcp(&inn.inn_name);
-        Some(format!(
-            r#","inn":{{"inn_name":"{inn_name}","tiers":[{tiers}],"current_rest":{current_rest}}}"#,
-            tiers = tiers_json.join(","),
-        ))
-    })()
-    .unwrap_or_default();
+        Some(serde_json::json!({
+            "inn_name": inn_name,
+            "tiers": tiers_json,
+            "current_rest": current_rest,
+        }))
+    })();
 
     // Bank block — populated only when the mob carries
     // MobProfession::Banker. All three coin pools are viewer-scoped:
@@ -8875,7 +8841,7 @@ pub(crate) fn handle_room_mob_get(world: &mut World, viewer: Entity, payload: &s
     // `wealth`, `balance`, `account_balance`). "Deposit/withdraw all"
     // affordances on the client compute their amount from these
     // pool values — no server-side "all" keyword needed.
-    let bank_json: String = (|| {
+    let bank_json: Option<serde_json::Value> = (|| {
         let key = world.get::<WorldKey>(target)?;
         let proto = world
             .get_resource::<MobPrototypes>()?
@@ -8890,15 +8856,25 @@ pub(crate) fn handle_room_mob_get(world: &mut World, viewer: Entity, payload: &s
         let on_hand = world.get::<Wealth>(viewer).map_or(0, |w| w.0);
         let per_char = world.get::<BankWealth>(viewer).map_or(0, |b| b.0);
         let account = world.get::<AccountWealth>(viewer).map_or(0, |a| a.0);
-        Some(format!(
-            r#","bank":{{"on_hand":{on_hand},"per_char":{per_char},"account":{account}}}"#,
-        ))
-    })()
-    .unwrap_or_default();
+        Some(serde_json::json!({
+            "on_hand": on_hand,
+            "per_char": per_char,
+            "account": account,
+        }))
+    })();
 
-    let payload = format!(
-        r#"{{"id":"{bits}","name":"{plain_name}","description":"{plain_desc}","professions":[{prof_json}]{shop_json}{inn_json}{bank_json}}}"#,
-    );
+    let mut info = serde_json::json!({
+        "id": bits.to_string(),
+        "name": plain_name,
+        "description": plain_desc,
+        "professions": professions,
+    });
+    for (key, block) in [("shop", shop_json), ("inn", inn_json), ("bank", bank_json)] {
+        if let Some(block) = block {
+            info[key] = block;
+        }
+    }
+    let payload = info.to_string();
     let _ = conn
         .0
         .try_send(mud_net::gmcp_packet("Room.Mob.Info", &payload));
@@ -8946,7 +8922,7 @@ pub(crate) fn handle_room_mob_get(world: &mut World, viewer: Entity, payload: &s
             const MAX_ROWS: usize = 50;
             let unread = rows.iter().filter(|r| r.read_at.is_none()).count();
             let total = rows.len();
-            let entries: Vec<String> = rows
+            let entries: Vec<serde_json::Value> = rows
                 .iter()
                 .take(MAX_ROWS)
                 .enumerate()
@@ -8956,16 +8932,23 @@ pub(crate) fn handle_room_mob_get(world: &mut World, viewer: Entity, payload: &s
                     let subject = plain_for_gmcp(&r.subject);
                     let sent_at = r.sent_at.format("%Y-%m-%d %H:%M");
                     let is_unread = r.read_at.is_none();
-                    format!(
-                        r#"{{"id":{id},"slot":{slot},"sender":"{sender}","subject":"{subject}","sent_at":"{sent_at}","unread":{is_unread}}}"#,
-                        id = r.id,
-                    )
+                    serde_json::json!({
+                        "id": r.id,
+                        "slot": slot,
+                        "sender": sender,
+                        "subject": subject,
+                        "sent_at": sent_at.to_string(),
+                        "unread": is_unread,
+                    })
                 })
                 .collect();
-            let payload = format!(
-                r#"{{"mob_id":"{mob_bits}","unread":{unread},"total":{total},"messages":[{msgs}]}}"#,
-                msgs = entries.join(","),
-            );
+            let payload = serde_json::json!({
+                "mob_id": mob_bits.to_string(),
+                "unread": unread,
+                "total": total,
+                "messages": entries,
+            })
+            .to_string();
             let _ = out.try_send(mud_net::gmcp_packet("Room.Mail.Inbox", &payload));
         });
     }
@@ -8981,8 +8964,7 @@ pub(crate) fn send_core_goodbye(world: &World, viewer: Entity, reason: &str) {
     let Some(conn) = world.get::<Connection>(viewer) else {
         return;
     };
-    let safe = reason.replace('\\', "\\\\").replace('"', "\\\"");
-    let payload = format!("\"{safe}\"");
+    let payload = serde_json::Value::from(reason).to_string();
     let _ = conn
         .0
         .try_send(mud_net::gmcp_packet("Core.Goodbye", &payload));
@@ -23514,14 +23496,15 @@ pub(crate) fn send_char_vitals(world: &mut World, target: Entity) {
         .get::<Profile>(target)
         .and_then(|p| level_progress(world, p))
         .map_or(0, |lp| lp.percent);
-    let payload = format!(
-        "{{\"hp\":{hp},\"max_hp\":{max_hp},\"mv\":{mv},\"max_mv\":{max_mv},\"next_level_pct\":{nlp},\"string\":\"H:{hp}/{max_hp} V:{mv}/{max_mv}\"}}",
-        hp = h.hp,
-        max_hp = h.max,
-        mv = s.current,
-        max_mv = s.max,
-        nlp = next_level_pct,
-    );
+    let payload = serde_json::json!({
+        "hp": h.hp,
+        "max_hp": h.max,
+        "mv": s.current,
+        "max_mv": s.max,
+        "next_level_pct": next_level_pct,
+        "string": format!("H:{}/{} V:{}/{}", h.hp, h.max, s.current, s.max),
+    })
+    .to_string();
     // Change-gated: the mid-tick push from `apply_damage` records its
     // hash, so the end-of-tick prompt does not repeat the same frame.
     gmcp::send_if_changed(world, target, "Char.Vitals", &payload, false);

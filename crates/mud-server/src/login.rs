@@ -1947,11 +1947,7 @@ impl ConnRouter {
         let gui_url = cfg.get_string("gmcp", "client_gui_url", "");
         let gui_version = cfg.get_string("gmcp", "client_gui_version", "");
         if !gui_url.is_empty() {
-            let payload = format!(
-                r#"{{"version":"{}","url":"{}"}}"#,
-                json_escape(gui_version),
-                json_escape(gui_url),
-            );
+            let payload = client_gui_payload(gui_version, gui_url);
             let _ = outbound.try_send(mud_net::gmcp_packet("Client.GUI", &payload));
         }
     }
@@ -1967,7 +1963,7 @@ impl ConnRouter {
         };
         let map_url = cfg.get_string("gmcp", "client_map_url", "");
         if !map_url.is_empty() {
-            let payload = format!(r#"{{"url":"{}"}}"#, json_escape(map_url));
+            let payload = client_map_payload(map_url);
             let _ = outbound.try_send(mud_net::gmcp_packet("Client.Map", &payload));
         }
     }
@@ -1988,11 +1984,7 @@ impl ConnRouter {
         let app_id = cfg.get_string("gmcp", "discord_application_id", "");
         let invite_url = cfg.get_string("gmcp", "discord_invite_url", "");
         if !app_id.is_empty() {
-            let payload = format!(
-                r#"{{"application_id":"{}","invite_url":"{}"}}"#,
-                json_escape(app_id),
-                json_escape(invite_url),
-            );
+            let payload = discord_info_payload(app_id, invite_url);
             let _ = outbound.try_send(mud_net::gmcp_packet("External.Discord.Info", &payload));
         }
     }
@@ -2017,17 +2009,24 @@ impl ConnRouter {
     }
 }
 
-/// Escape a string for safe embedding in a JSON literal — the
-/// shape every GMCP payload builder in this crate needs. Replaces
-/// backslash and double-quote; leaves bytes outside that pair
-/// alone since the rest of our config strings are URL/identifier-
-/// shaped (no control bytes, no Unicode-escape territory).
-fn json_escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
+/// `Client.GUI` payload. Built with `serde_json` so quotes, backslashes and
+/// control characters in operator-configured strings stay valid JSON.
+fn client_gui_payload(version: &str, url: &str) -> String {
+    serde_json::json!({"version": version, "url": url}).to_string()
 }
 
-// Continuation of `impl ConnRouter` — split because `json_escape`
-// is a free function and Rust doesn't allow free fns inside an
+/// `Client.Map` payload (see [`client_gui_payload`]).
+fn client_map_payload(url: &str) -> String {
+    serde_json::json!({"url": url}).to_string()
+}
+
+/// `External.Discord.Info` payload (see [`client_gui_payload`]).
+fn discord_info_payload(application_id: &str, invite_url: &str) -> String {
+    serde_json::json!({"application_id": application_id, "invite_url": invite_url}).to_string()
+}
+
+// Continuation of `impl ConnRouter` — split because the payload helpers
+// above are free functions and Rust doesn't allow free fns inside an
 // impl. The two blocks compose at compile time.
 impl ConnRouter {
     /// GMCP package received from the client. Dispatches based on
@@ -6968,6 +6967,20 @@ fn accrue_repose(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_gmcp_payloads_are_valid_json_for_hostile_strings() {
+        let bad = "u\u{1}\"r\\l";
+        let gui: serde_json::Value = serde_json::from_str(&client_gui_payload(bad, bad)).unwrap();
+        assert_eq!(gui["version"], bad);
+        assert_eq!(gui["url"], bad);
+        let map: serde_json::Value = serde_json::from_str(&client_map_payload(bad)).unwrap();
+        assert_eq!(map, serde_json::json!({"url": bad}));
+        let discord: serde_json::Value =
+            serde_json::from_str(&discord_info_payload("app", bad)).unwrap();
+        assert_eq!(discord["application_id"], "app");
+        assert_eq!(discord["invite_url"], bad);
+    }
 
     fn row(cur: Option<(i32, i32)>, recall: Option<(i32, i32)>) -> CharacterRow {
         CharacterRow {

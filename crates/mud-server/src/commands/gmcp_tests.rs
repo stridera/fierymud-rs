@@ -699,3 +699,135 @@ fn char_effects_pushed_when_the_effect_set_changes_without_a_prompt() {
     let fr = frames(&drain_bytes(&mut rx));
     assert_eq!(of(&fr, "Char.Effects"), vec!["[]".to_string()], "{fr:?}");
 }
+
+/// A name with control characters and a quote, the shape that used to
+/// break the hand-built payloads. Color-tag stripping drops the `\u{1}`
+/// (`CLEAN`); the tab survives and must be escaped by the serializer.
+const HOSTILE: &str = "ev\u{1}il\t\"one\" \\";
+const CLEAN: &str = "evil\t\"one\" \\";
+
+fn parse(json: &str, what: &str) -> Value {
+    serde_json::from_str(json).unwrap_or_else(|e| panic!("{what}: invalid JSON ({e}): {json:?}"))
+}
+
+#[test]
+fn char_items_list_survives_hostile_item_names() {
+    let (mut fx, p, mut rx) = world_with_skills();
+    let item = fx
+        .world
+        .spawn((
+            mud_world::Item,
+            Named {
+                name: HOSTILE.into(),
+            },
+            Located(p),
+        ))
+        .id();
+    drain_bytes(&mut rx);
+    super::send_char_items_list(&fx.world, p, "in\"v", &[item]);
+    super::send_char_items_diff(&fx.world, p, "Add", "in\"v", item);
+    let fr = frames(&drain_bytes(&mut rx));
+    let list = parse(&of(&fr, "Char.Items.List")[0], "Char.Items.List");
+    assert_eq!(list["location"], "in\"v");
+    let entry = &list["items"][0];
+    assert_eq!(entry["name"], CLEAN);
+    assert_eq!(entry["id"], item.to_bits().to_string());
+    assert_eq!(entry["type"], "");
+    assert_eq!(entry["identified"], false);
+    let add = parse(&of(&fr, "Char.Items.Add")[0], "Char.Items.Add");
+    assert_eq!(add["item"]["name"], CLEAN);
+}
+
+#[test]
+fn skills_frames_survive_hostile_ability_names() {
+    let mut fx = fixture();
+    let mut catalog = mud_world::AbilityCatalog::default();
+    catalog.by_name.insert(
+        "evil".to_string(),
+        ability_def(KICK, HOSTILE, AbilityKind::Skill),
+    );
+    fx.world.insert_resource(catalog);
+    let a = fx.a;
+    let (p, mut rx) = player(&mut fx.world, a, "Kicker");
+    fx.world.entity_mut(p).insert(KnownAbilities {
+        entries: vec![(KICK, 500, true)],
+    });
+    super::send_char_skills(&mut fx.world, p);
+    super::send_char_skills_list(&fx.world, p);
+    let fr = frames(&drain_bytes(&mut rx));
+    let skills = parse(&of(&fr, "Char.Skills")[0], "Char.Skills");
+    let name = skills["skills"][0]["name"].as_str().unwrap();
+    assert!(name.contains('\t') && name.contains('"'), "{name:?}");
+    assert_eq!(skills["skills"][0]["available"], true);
+    let list = parse(&of(&fr, "Char.Skills.List")[0], "Char.Skills.List");
+    assert_eq!(list[0].as_str().unwrap(), name);
+}
+
+#[test]
+fn room_mob_and_combat_frames_survive_hostile_mob_names() {
+    let (mut fx, p, mut rx) = world_with_skills();
+    let a = fx.a;
+    let wolf = mob(&mut fx.world, a, HOSTILE);
+    fx.world.entity_mut(wolf).insert((
+        mud_world::Health { hp: 10, max: 10 },
+        mud_world::Description("it \u{2}\t\"stares\"".into()),
+    ));
+    fx.world.entity_mut(p).insert(mud_world::Fighting(wolf));
+    drain_bytes(&mut rx);
+    super::send_prompt(&mut fx.world, p);
+    super::handle_room_mob_get(
+        &mut fx.world,
+        p,
+        &format!(r#"{{"id":"{}"}}"#, wolf.to_bits()),
+    );
+    let fr = frames(&drain_bytes(&mut rx));
+    let mobs = parse(&of(&fr, "Room.Mobs")[0], "Room.Mobs");
+    assert_eq!(mobs[0]["name"], CLEAN);
+    assert_eq!(mobs[0]["hp_percent"], 100);
+    assert_eq!(mobs[0]["professions"], serde_json::json!([]));
+    assert!(mobs[0].get("targeting").is_some());
+    let combat = parse(&of(&fr, "Char.Combat")[0], "Char.Combat");
+    assert_eq!(combat["opponent"]["name"], CLEAN);
+    let info = parse(&of(&fr, "Room.Mob.Info")[0], "Room.Mob.Info");
+    assert_eq!(info["name"], CLEAN);
+    assert_eq!(info["description"], "it \t\"stares\"");
+    parse(&of(&fr, "Room.Services")[0], "Room.Services");
+}
+
+#[test]
+fn vitals_goodbye_and_channel_list_are_valid_json() {
+    let (mut fx, p, mut rx) = world_with_skills();
+    drain_bytes(&mut rx);
+    super::send_char_vitals(&mut fx.world, p);
+    super::send_core_goodbye(&fx.world, p, "bye \u{1} \"now\" \\");
+    super::send_comm_channel_list(&fx.world, p);
+    let fr = frames(&drain_bytes(&mut rx));
+    let vitals = parse(&of(&fr, "Char.Vitals")[0], "Char.Vitals");
+    assert_eq!(vitals["hp"], 50);
+    assert_eq!(vitals["max_mv"], 30);
+    assert_eq!(vitals["string"], "H:50/50 V:30/30");
+    let bye = parse(&of(&fr, "Core.Goodbye")[0], "Core.Goodbye");
+    assert_eq!(bye, "bye \u{1} \"now\" \\");
+    let channels = parse(&of(&fr, "Comm.Channel.List")[0], "Comm.Channel.List");
+    assert!(channels[0]["name"].is_string() && channels[0]["command"].is_string());
+}
+
+#[test]
+fn group_frame_survives_hostile_names() {
+    let mut fx = fixture();
+    let a = fx.a;
+    let (leader, mut rx) = player(&mut fx.world, a, HOSTILE);
+    let (member, _rx2) = player(&mut fx.world, a, "Plain");
+    fx.world
+        .entity_mut(member)
+        .insert(mud_world::GroupMember(leader));
+    super::send_group_state(&mut fx.world, leader);
+    let fr = frames(&drain_bytes(&mut rx));
+    let group = parse(&of(&fr, "Group")[0], "Group");
+    assert_eq!(group["leader"], CLEAN);
+    assert_eq!(group["group_name"], format!("{CLEAN}'s group"));
+    assert_eq!(group["count"], 2);
+    assert_eq!(group["members"][0]["name"], CLEAN);
+    assert_eq!(group["members"][0]["race"], "Human");
+    assert_eq!(group["members"][0]["with_leader"], true);
+}
