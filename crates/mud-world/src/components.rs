@@ -39,6 +39,26 @@ pub fn zone_is_god(world: &World, zone_id: i32) -> bool {
         .is_some_and(|zone| world.get::<GodZone>(zone).is_some())
 }
 
+/// Zones that exist only as plumbing and carry no explorable content: 0 is
+/// the Void (the fallback room), 1 is "Reserved - create food items" and 2
+/// is "non-loading items zone". They are not flagged `is_god_zone`, so the
+/// exploration achievements skip them by id.
+pub const INTERNAL_ZONE_IDS: [i32; 3] = [0, 1, 2];
+
+/// True when the zone with schema id `zone_id` is an internal plumbing zone
+/// ([`INTERNAL_ZONE_IDS`]).
+#[must_use]
+pub fn zone_is_internal(zone_id: i32) -> bool {
+    INTERNAL_ZONE_IDS.contains(&zone_id)
+}
+
+/// True when walking zone `zone_id` earns exploration credit: neither a
+/// god zone nor an internal one.
+#[must_use]
+pub fn zone_grants_exploration(world: &World, zone_id: i32) -> bool {
+    !zone_is_internal(zone_id) && !zone_is_god(world, zone_id)
+}
+
 /// `Room.entry_restriction`: Lua body that must return `true` for a
 /// non-staff actor to enter this room (legacy GODROOM imports as
 /// `return actor:is_god()`). Enforced on every movement path by

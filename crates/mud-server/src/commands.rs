@@ -783,6 +783,9 @@ mod multi_hit_tests;
 #[path = "commands/norepeat_tests.rs"]
 mod norepeat_tests;
 #[cfg(test)]
+#[path = "commands/queued_fixes_tests.rs"]
+mod queued_fixes_tests;
+#[cfg(test)]
 #[path = "commands/skill_target_tests.rs"]
 mod skill_target_tests;
 #[cfg(test)]
@@ -1761,6 +1764,10 @@ fn dispatch_line(world: &mut World, player: Entity, line: &str, run: &mut AliasR
             send_to(world, player, CASTING_BUSY_MSG);
             return;
         }
+        // Legacy socials are `do_action` at STANCE_RESTING, bar `dream`.
+        if social_blocked_asleep(world, player, &social_word) {
+            return;
+        }
         // A social gives a hiding character away, bar the two legacy
         // hide-safe ones.
         if crate::hiding::social_reveals(&social_word)
@@ -1802,6 +1809,12 @@ fn dispatch_line(world: &mut World, player: Entity, line: &str, run: &mut AliasR
 
     // Paralysis / mesmerize gate (legacy `command_interpreter`).
     if hold_gate(world, player, cmd) {
+        return;
+    }
+
+    // Legacy `command_interpreter` stance gate: speech commands need
+    // STANCE_RESTING or better.
+    if speech_blocked_asleep(world, player, cmd.names[0]) {
         return;
     }
 
@@ -1890,6 +1903,49 @@ fn strip_articles(args: &str) -> String {
 /// Refusal for a new cast (spell, chant, song or item) during the wait
 /// state a broken-off cast leaves behind.
 pub(crate) const CAST_LAG_MSG: &str = "You are still recovering your concentration.\r\n";
+
+/// Legacy `command_interpreter` refusal for a sleeping character running a
+/// command that needs `STANCE_RESTING`.
+pub(crate) const ASLEEP_MSG: &str = "In your dreams, or what?\r\n";
+
+/// Canonical names of the speech commands legacy `interpreter.cpp` gates at
+/// `STANCE_RESTING` (a sleeper may not use them). `gossip`, `gsay`, `tell`,
+/// `reply` and `clan` are `STANCE_SLEEPING` in legacy, so they stay usable.
+const SPEECH_NEEDS_WAKING: &[&str] = &[
+    "say", "emote", "emote's", "ask", "whisper", "insult", "shout", "qsay",
+];
+
+/// True (after sending the legacy refusal) when `player` is asleep and
+/// `command` is a speech command that needs `STANCE_RESTING`.
+pub(crate) fn speech_blocked_asleep(world: &mut World, player: Entity, command: &str) -> bool {
+    if !SPEECH_NEEDS_WAKING.contains(&command) {
+        return false;
+    }
+    sleeping_refusal(world, player)
+}
+
+/// Socials are `do_action` at `STANCE_RESTING` in legacy, except `dream`
+/// (`STANCE_SLEEPING`). Sends the refusal when `player` is asleep.
+pub(crate) fn social_blocked_asleep(world: &mut World, player: Entity, social: &str) -> bool {
+    if social.eq_ignore_ascii_case("dream") {
+        return false;
+    }
+    if world
+        .get_resource::<SocialRegistry>()
+        .is_none_or(|r| r.get(social).is_none())
+    {
+        return false;
+    }
+    sleeping_refusal(world, player)
+}
+
+fn sleeping_refusal(world: &mut World, player: Entity) -> bool {
+    if world.get::<Posture>(player).map(|p| p.0) == Some(PostureKind::Sleeping) {
+        send_to(world, player, ASLEEP_MSG);
+        return true;
+    }
+    false
+}
 
 /// Legacy interpreter refusal for a non-`CMD_CAST` command mid-cast.
 const CASTING_BUSY_MSG: &str = "You are busy spellcasting...\r\n";
@@ -9415,9 +9471,9 @@ pub(crate) fn mark_room_visited(world: &mut World, player: Entity, room: Entity)
     if !newly_inserted {
         return;
     }
-    // God zones grant no exploration credit: nothing is persisted and no
-    // `zone_<N>_cleared` can fire.
-    if mud_world::room_in_god_zone(world, room) {
+    // God zones and internal zones (Void, reserved) grant no exploration
+    // credit: nothing is persisted and no `zone_<N>_cleared` can fire.
+    if mud_world::room_in_god_zone(world, room) || mud_world::zone_is_internal(key.zone) {
         return;
     }
     let total_in_zone = world
@@ -13101,6 +13157,27 @@ pub(crate) fn item_weight(world: &World, item: Entity) -> f64 {
 /// corrupted world from recursing without bound.
 const MAX_CONTAINER_DEPTH: u32 = 32;
 
+/// Ceiling for a single prototype weight (lbs). Builders park fixtures at
+/// absurd "immovable" sentinels (e.g. 2147483648, `i32::MAX + 1`); clamping
+/// keeps every sum and the displays bounded and finite.
+pub(crate) const MAX_ITEM_WEIGHT: f64 = 1_000_000.0;
+
+/// A prototype weight forced into `0..=MAX_ITEM_WEIGHT` (NaN counts as 0,
+/// infinity and overflowing sentinels as the ceiling).
+pub(crate) fn clamp_weight(w: f64) -> f64 {
+    if w.is_nan() {
+        0.0
+    } else {
+        w.clamp(0.0, MAX_ITEM_WEIGHT)
+    }
+}
+
+/// True for a weight at the sentinel ceiling: the item is a fixture, so
+/// player-facing text should show no weight for it.
+pub(crate) fn is_immovable_weight(w: f64) -> bool {
+    w >= MAX_ITEM_WEIGHT
+}
+
 /// Prototype weight of `item` alone, ignoring anything inside it.
 fn base_weight(world: &World, item: Entity) -> f64 {
     world
@@ -13111,7 +13188,7 @@ fn base_weight(world: &World, item: Entity) -> f64 {
                 .by_key
                 .get(&(wk.zone, wk.id))
         })
-        .map_or(0.0, |p| p.weight)
+        .map_or(0.0, |p| clamp_weight(p.weight))
 }
 
 /// Weight `item` adds to whoever carries it: its own weight plus the

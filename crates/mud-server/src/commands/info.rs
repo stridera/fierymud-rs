@@ -3861,7 +3861,9 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
         // Fixtures (NO_TAKE) carry a sentinel "immovable" weight, so the
         // line is noise for them.
         let weight = item_weight(world, target);
-        if weight > 0.0 && !has_restriction(world, target, mud_db::enums::ObjectRestriction::NoTake)
+        if weight > 0.0
+            && !crate::commands::is_immovable_weight(weight)
+            && !has_restriction(world, target, mud_db::enums::ObjectRestriction::NoTake)
         {
             out.push_str(&format!("It weighs about <dim>{weight:.1} lbs.</>\r\n"));
         }
@@ -5236,8 +5238,9 @@ pub(crate) fn cmd_value(world: &mut World, player: Entity, args: &str) {
         // is-this-worth-carrying picture without a separate
         // examine. Skip the level line at level 0 (the proto
         // default) since "minimum level: 0" reads as noise.
-        if p.weight > 0.0 {
-            msg.push_str(&format!("  Weight: {:.1} lbs.\r\n", p.weight));
+        let weight = crate::commands::clamp_weight(p.weight);
+        if weight > 0.0 && !crate::commands::is_immovable_weight(weight) {
+            msg.push_str(&format!("  Weight: {weight:.1} lbs.\r\n"));
         }
         if p.level > 0 {
             msg.push_str(&format!("  Minimum level: {}\r\n", p.level));
@@ -7907,21 +7910,9 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
         is_ghost: world.get::<mud_world::Ghost>(player).is_some(),
         is_stunned: world.get::<mud_world::Stunned>(player).is_some(),
         is_frozen: world.get::<mud_world::Frozen>(player).is_some(),
-        rest: world.get::<mud_world::RestState>(player).and_then(|r| {
-            // Suppress entirely when nothing's worth saying — no
-            // pending source AND no banked Repose. Avoids a noisy
-            // "Rest: none / 0 XP" line for players who have neither
-            // rented nor camped nor accumulated any pool.
-            if matches!(r.source, mud_db::enums::RestSource::None) && r.repose == 0 {
-                None
-            } else {
-                Some(crate::commands::RestStateDisplay {
-                    source: r.source,
-                    tier: r.tier,
-                    repose: r.repose,
-                })
-            }
-        }),
+        rest: world
+            .get::<mud_world::RestState>(player)
+            .and_then(|r| score_rest_display(r.source, r.tier, r.repose)),
     };
     let out = match style {
         UiStyle::Standard => render_score_standard(&data),
@@ -7929,6 +7920,25 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
         UiStyle::Minimal => render_score_minimal(&data),
     };
     send_to(world, player, out);
+}
+
+/// The score sheet's `Rest:` row, or `None` when there is nothing worth
+/// saying: no pending source and no banked Repose (a noisy "Rest: none /
+/// 0 XP" otherwise), or a logged-out rest that banked nothing.
+pub(crate) fn score_rest_display(
+    source: mud_db::enums::RestSource,
+    tier: i32,
+    repose: i32,
+) -> Option<crate::commands::RestStateDisplay> {
+    use mud_db::enums::RestSource;
+    if repose == 0 && matches!(source, RestSource::None | RestSource::Quit) {
+        return None;
+    }
+    Some(crate::commands::RestStateDisplay {
+        source,
+        tier,
+        repose,
+    })
 }
 
 pub(crate) fn cmd_style(world: &mut World, player: Entity, args: &str) {
@@ -13921,6 +13931,14 @@ pub(crate) fn page_window(
     Ok((start, total.min(start + per), pages))
 }
 
+/// Zone id out of a `zone_<N>_cleared` achievement code.
+fn zone_cleared_zone_id(code: &str) -> Option<i32> {
+    code.strip_prefix("zone_")?
+        .strip_suffix("_cleared")?
+        .parse()
+        .ok()
+}
+
 pub(crate) fn cmd_achievements(world: &mut World, player: Entity, args: &str) {
     use mud_db::enums::AchievementCategory;
     let (filter, page) = split_page_arg(args);
@@ -13930,7 +13948,14 @@ pub(crate) fn cmd_achievements(world: &mut World, player: Entity, args: &str) {
         .map(|c| c.unlocked.clone())
         .unwrap_or_default();
     let catalog = world.resource::<mud_world::AchievementCatalog>();
-    let mut entries: Vec<&mud_world::AchievementDef> = catalog.by_id.values().collect();
+    // Exploration rows for god zones and internal zones (Void, reserved)
+    // are never earnable, so they stay out of the list and the totals.
+    let listed = |d: &&mud_world::AchievementDef| -> bool {
+        zone_cleared_zone_id(&d.code)
+            .is_none_or(|zone| mud_world::zone_grants_exploration(world, zone))
+    };
+    let mut entries: Vec<&mud_world::AchievementDef> =
+        catalog.by_id.values().filter(listed).collect();
     entries.sort_by_key(|d| (d.category as i32, d.sort_order, d.id));
     let want_cat: Option<AchievementCategory> = match filter.as_str() {
         "" | "all" => None,
@@ -13979,7 +14004,7 @@ pub(crate) fn cmd_achievements(world: &mut World, player: Entity, args: &str) {
         ));
         shown += 1;
     }
-    let total_defs = catalog.by_id.len();
+    let total_defs = catalog.by_id.values().filter(listed).count();
     let mut out = String::from("\r\nAchievements:\r\n");
     if shown == 0 {
         out.push_str("  (none visible)\r\n");
@@ -15296,10 +15321,14 @@ pub(crate) fn render_identify_block(
         "    <cyan>Type:</>     <yellow>{}</>\r\n",
         p.r#type.label()
     ));
-    out.push_str(&format!(
-        "    <cyan>Weight:</>   <dim>{:.1} lbs</>\r\n",
-        p.weight
-    ));
+    let weight = crate::commands::clamp_weight(p.weight);
+    if crate::commands::is_immovable_weight(weight) {
+        out.push_str("    <cyan>Weight:</>   <dim>immovable</>\r\n");
+    } else {
+        out.push_str(&format!(
+            "    <cyan>Weight:</>   <dim>{weight:.1} lbs</>\r\n"
+        ));
+    }
     if p.level > 0 {
         out.push_str(&format!("    <cyan>Min Lvl:</>  {}\r\n", p.level));
     }
