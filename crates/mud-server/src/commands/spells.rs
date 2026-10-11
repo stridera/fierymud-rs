@@ -210,6 +210,14 @@ inventory::submit! {
 pub(crate) fn cmd_pick(world: &mut World, player: Entity, args: &str) {
     const STAMINA_COST: i32 = 5;
     let arg = args.trim();
+    if crate::commands::containers::try_container_verb(
+        world,
+        player,
+        crate::commands::containers::Verb::Pick,
+        arg,
+    ) {
+        return;
+    }
     let Some(dir) = parse_direction(arg) else {
         send_to(world, player, "Pick which way?\r\n");
         return;

@@ -5895,6 +5895,11 @@ fn search_scope(
         .then(|| find_item(world, player, arg, ItemClass::RoomFirst))
         .flatten()
         .filter(|c| crate::commands::is_container_entity(world, *c));
+    if let Some(c) = container
+        && crate::commands::containers::refuse_if_closed(world, player, c)
+    {
+        return (Vec::new(), true);
+    }
     let holder = container.unwrap_or(room);
     let mut items: Vec<Entity> = {
         let mut q = world.query_filtered::<(Entity, &Located), With<Item>>();
@@ -9091,6 +9096,14 @@ pub(crate) fn cmd_exits(world: &mut World, player: Entity, _args: &str) {
 /// needs `open` afterward). Two-sided sync.
 pub(crate) fn cmd_unlock(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
+    if crate::commands::containers::try_container_verb(
+        world,
+        player,
+        crate::commands::containers::Verb::Unlock,
+        arg,
+    ) {
+        return;
+    }
     let Some(dir) = resolve_exit_arg(world, player, arg) else {
         send_to(world, player, "Unlock which way?\r\n");
         return;
@@ -9172,6 +9185,14 @@ pub(crate) fn cmd_unlock(world: &mut World, player: Entity, args: &str) {
 /// locked exits and on exits that don't exist.
 pub(crate) fn cmd_open(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
+    if crate::commands::containers::try_container_verb(
+        world,
+        player,
+        crate::commands::containers::Verb::Open,
+        arg,
+    ) {
+        return;
+    }
     let Some(dir) = resolve_exit_arg(world, player, arg) else {
         send_to(world, player, "Open which way?\r\n");
         return;
@@ -9229,6 +9250,14 @@ pub(crate) fn cmd_open(world: &mut World, player: Entity, args: &str) {
 /// already-closed/locked or non-existent exits.
 pub(crate) fn cmd_close(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
+    if crate::commands::containers::try_container_verb(
+        world,
+        player,
+        crate::commands::containers::Verb::Close,
+        arg,
+    ) {
+        return;
+    }
     let Some(dir) = resolve_exit_arg(world, player, arg) else {
         send_to(world, player, "Close which way?\r\n");
         return;
@@ -9279,6 +9308,14 @@ pub(crate) fn cmd_close(world: &mut World, player: Entity, args: &str) {
 /// Already-locked / open / no-keyhole / no-key cases all refuse.
 pub(crate) fn cmd_lock(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
+    if crate::commands::containers::try_container_verb(
+        world,
+        player,
+        crate::commands::containers::Verb::Lock,
+        arg,
+    ) {
+        return;
+    }
     let Some(dir) = resolve_exit_arg(world, player, arg) else {
         send_to(world, player, "Lock which way?\r\n");
         return;
@@ -10738,6 +10775,11 @@ fn get_from_container_inner(
     let container_name = name_of(world, container);
     let player_name = name_of(world, player);
 
+    // Closed (and locked) containers hold their contents back.
+    if crate::commands::containers::refuse_if_closed(world, player, container) {
+        return;
+    }
+
     // Loot-claim gate: corpses with an active LootClaim refuse
     // anyone other than the owner until the window expires.
     // Past the deadline the component still exists; we just
@@ -10765,11 +10807,21 @@ fn get_from_container_inner(
     // dies; uncollected items still drop to the room on decay.
     let is_pc = world.get::<mud_world::PlayerCorpse>(container).is_some();
     if is_pc && !crate::commands::is_staff(world, player) {
-        let owner_name = container_name
-            .strip_prefix("the corpse of ")
-            .unwrap_or("")
-            .trim();
-        if !owner_name.eq_ignore_ascii_case(player_name.as_str()) {
+        // The corpse records its owner's character id; a name is only a
+        // look-alike (a different character can be called the same after
+        // a rename or deletion), so the id decides. Corpses restored
+        // without an owner id fall back to the name in their title.
+        let is_owner = match world.get::<crate::corpses::PlayerCorpseOwner>(container) {
+            Some(owner) => world
+                .get::<mud_world::Account>(player)
+                .is_some_and(|a| a.character_id == owner.0),
+            None => container_name
+                .strip_prefix("the corpse of ")
+                .unwrap_or("")
+                .trim()
+                .eq_ignore_ascii_case(player_name.as_str()),
+        };
+        if !is_owner {
             send_to(
                 world,
                 player,
@@ -11154,6 +11206,10 @@ fn put_plain(world: &mut World, player: Entity, args: &str) {
             player,
             &format!("{container_name} isn't a container.\r\n"),
         );
+        return;
+    }
+
+    if crate::commands::containers::refuse_if_closed(world, player, container) {
         return;
     }
 

@@ -606,6 +606,11 @@ mod conjuration;
 #[cfg(test)]
 #[path = "commands/conjuration_tests.rs"]
 mod conjuration_tests;
+#[path = "commands/containers.rs"]
+pub(crate) mod containers;
+#[cfg(test)]
+#[path = "commands/containers_tests.rs"]
+mod containers_tests;
 #[cfg(test)]
 #[path = "commands/lua_safety_tests.rs"]
 mod lua_safety_tests;
@@ -12461,6 +12466,9 @@ pub(crate) fn look_in_container(world: &mut World, player: Entity, target_word: 
             player,
             &format!("{container_name} isn't a container.\r\n"),
         );
+        return;
+    }
+    if containers::refuse_if_closed(world, player, container) {
         return;
     }
     let items: Vec<String> = {

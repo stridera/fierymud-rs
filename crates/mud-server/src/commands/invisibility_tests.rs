@@ -808,3 +808,54 @@ fn aggro_mob_that_cannot_act_does_not_engage_at_all() {
     assert!(!out.contains("sees you and attacks!"), "{out}");
     assert!(!out.contains("wolf hits you"), "{out}");
 }
+
+// -- room chat verbs name an unseen speaker "Someone" -----------------------
+
+#[test]
+fn say_and_emote_from_an_invisible_player_read_someone() {
+    let mut fx = Fx::new();
+    dispatch(&mut fx.world, fx.ghost, "say boo");
+    dispatch(&mut fx.world, fx.ghost, "emote waves.");
+    dispatch(&mut fx.world, fx.ghost, "emote's eyes glow.");
+    let out = drain(&mut fx.wrx);
+    assert!(out.contains("Someone"), "{out}");
+    assert!(out.contains("says,"), "{out}");
+    assert!(out.contains("Someone waves."), "{out}");
+    assert!(out.contains("Someone's eyes glow."), "{out}");
+    assert!(!out.contains("Ghost"), "{out}");
+    // The speaker still sees their own line.
+    assert!(drain(&mut fx.grx).contains("You say,"));
+}
+
+#[test]
+fn say_and_emote_name_the_speaker_to_detecting_observers() {
+    let mut fx = Fx::new();
+    fx.world.entity_mut(fx.watcher).insert(DetectInvis);
+    dispatch(&mut fx.world, fx.ghost, "say boo");
+    dispatch(&mut fx.world, fx.ghost, "emote waves.");
+    let out = drain(&mut fx.wrx);
+    assert!(out.contains("Ghost"), "{out}");
+    assert!(out.contains("Ghost waves."), "{out}");
+    assert!(!out.contains("Someone"), "{out}");
+}
+
+#[test]
+fn ask_and_whisper_from_an_invisible_player_read_someone() {
+    let mut fx = Fx::new();
+    let ogre = fx.mob("an ogre", 0);
+    fx.world
+        .entity_mut(ogre)
+        .insert(mud_world::Keywords(vec!["ogre".into()]));
+    dispatch(&mut fx.world, fx.ghost, "ask ogre about gold");
+    dispatch(&mut fx.world, fx.ghost, "whisper ogre secrets");
+    let out = drain(&mut fx.wrx);
+    assert!(
+        out.contains("Someone asks an ogre about something."),
+        "{out}"
+    );
+    assert!(
+        out.contains("Someone whispers something to an ogre."),
+        "{out}"
+    );
+    assert!(!out.contains("Ghost"), "{out}");
+}

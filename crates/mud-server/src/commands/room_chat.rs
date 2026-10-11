@@ -8,9 +8,10 @@ use mud_db::enums::{PlayerFlag, UserRole};
 use mud_world::{Located, Mob, Player, WorldKey};
 
 use crate::commands::{
-    Category, Command, Help, Prevent, broadcast_room_except_players_rendered,
-    bump_talk_quest_progress, effect_prevents, find_actor_in_room, group_members, group_root,
-    has_flag, name_approval_gate, name_of, send_comm_channel_text, send_rendered, send_to,
+    Category, Command, Help, Prevent, anonymise_for, broadcast_room_anonymised,
+    bump_talk_quest_progress, can_see_player, effect_prevents, find_actor_in_room, group_members,
+    group_root, has_flag, name_approval_gate, name_of, send_comm_channel_text, send_rendered,
+    send_to,
 };
 
 inventory::submit! {
@@ -151,6 +152,16 @@ inventory::submit! {
     }
 }
 
+/// How `observer` sees `actor`'s name: the real one, or "Someone" when
+/// `actor` is invisible (or hidden) to them.
+fn shown_name(world: &World, observer: Entity, actor: Entity, name: &str) -> String {
+    if can_see_player(world, observer, actor) {
+        name.to_string()
+    } else {
+        "Someone".to_string()
+    }
+}
+
 fn cmd_say(world: &mut World, player: Entity, message: &str) {
     let message = message.trim();
     if message.is_empty() {
@@ -175,9 +186,11 @@ fn cmd_say(world: &mut World, player: Entity, message: &str) {
             .map(|(e, _)| e)
             .collect()
     };
-    let gmcp_text = format!("{speaker} says, \"{message}\"");
     let norepeat = has_flag(world, player, PlayerFlag::NoRepeat);
     for target in targets {
+        // Listeners who can't see the speaker hear "Someone".
+        let speaker = shown_name(world, target, player, &speaker);
+        let gmcp_text = format!("{speaker} says, \"{message}\"");
         // Say/says verb framed in green (room-local speech reads
         // friendly / open vs the louder yellow/red wide channels).
         // Speaker name emphasized so the eye lands on who's
@@ -216,13 +229,6 @@ fn emote_as(world: &mut World, player: Entity, args: &str, suffix: &str) {
         return;
     };
     let player_name = name_of(world, player);
-    let shown = format!("{player_name}{suffix}");
-    let line = format!("{shown} {action}\r\n");
-    // Emote body is already third-person ("Strider smiles."),
-    // so the GMCP frame is just the line minus its trailing
-    // CRLF — every recipient sees the same thing in the chat
-    // tab regardless of whether they're the speaker.
-    let gmcp_text = format!("{shown} {action}");
     let targets: Vec<Entity> = {
         let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
         q.iter(world)
@@ -231,8 +237,14 @@ fn emote_as(world: &mut World, player: Entity, args: &str, suffix: &str) {
             .collect()
     };
     for t in targets {
-        send_to(world, t, line.clone());
-        send_comm_channel_text(world, t, "emote", &player_name, &gmcp_text);
+        // Emote body is already third-person ("Strider smiles."), so the
+        // GMCP frame is just the line minus its trailing CRLF. Observers
+        // who can't see the actor get "Someone" in both.
+        let shown_actor = shown_name(world, t, player, &player_name);
+        let shown = format!("{shown_actor}{suffix}");
+        let gmcp_text = format!("{shown} {action}");
+        send_to(world, t, format!("{shown} {action}\r\n"));
+        send_comm_channel_text(world, t, "emote", &shown_actor, &gmcp_text);
     }
 }
 
@@ -267,10 +279,14 @@ fn cmd_ask(world: &mut World, player: Entity, args: &str) {
             format!("You ask {target_name} about \"{topic}\".\r\n"),
         );
     }
-    broadcast_room_except_players_rendered(
+    broadcast_room_anonymised(
         world,
         located.0,
         &[player],
+        &[
+            (player, player_name.as_str()),
+            (target, target_name.as_str()),
+        ],
         &format!("{player_name} asks {target_name} about something.\r\n"),
     );
     // GMCP only to participants — the topic stays private to
@@ -336,15 +352,17 @@ fn cmd_whisper(world: &mut World, player: Entity, args: &str) {
             &format!("You whisper to {target_name}, \"{message}\"\r\n"),
         );
     }
+    let heard_from = shown_name(world, target, player, &speaker);
     send_to(
         world,
         target,
-        format!("{speaker} whispers to you, \"{message}\"\r\n"),
+        format!("{heard_from} whispers to you, \"{message}\"\r\n"),
     );
-    broadcast_room_except_players_rendered(
+    broadcast_room_anonymised(
         world,
         located.0,
         &[player, target],
+        &[(player, speaker.as_str()), (target, target_name.as_str())],
         &format!("{speaker} whispers something to {target_name}.\r\n"),
     );
     // GMCP only to the two participants. Bystanders see the
@@ -393,10 +411,11 @@ fn cmd_insult(world: &mut World, player: Entity, args: &str) {
         player,
         format!("You insult {target_name}: {line}\r\n"),
     );
+    let insulter = shown_name(world, target, player, &actor_name);
     send_to(
         world,
         target,
-        crate::commands::cap_sentence_start(&format!("{actor_name} insults you: {line}\r\n")),
+        crate::commands::cap_sentence_start(&format!("{insulter} insults you: {line}\r\n")),
     );
     let bystanders: Vec<Entity> = {
         let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
@@ -407,8 +426,13 @@ fn cmd_insult(world: &mut World, player: Entity, args: &str) {
     };
     let line_room =
         crate::commands::cap_sentence_start(&format!("{actor_name} insults {target_name}.\r\n"));
+    let actors = [
+        (player, actor_name.as_str()),
+        (target, target_name.as_str()),
+    ];
     for e in bystanders {
-        send_to(world, e, line_room.clone());
+        let seen = anonymise_for(world, e, &actors, &line_room);
+        send_to(world, e, seen);
     }
     // GMCP only to the two participants — the full insult line
     // is content; bystanders see the muffled action in the main

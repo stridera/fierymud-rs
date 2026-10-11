@@ -2193,6 +2193,62 @@ pub struct PendingSummon {
     pub at: std::time::Instant,
 }
 
+/// Open/closed/locked state of a `CONTAINER` object (legacy
+/// `VAL_CONTAINER_BITS`). The proto's `values` JSON is the authored
+/// default; `commands::containers::container_state` derives it from there
+/// until `open`/`close`/`lock`/`unlock`/`pick` first change an instance,
+/// which writes this component as that instance's override. A respawned
+/// container is a fresh entity, so it comes back in its authored state.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // the four legacy container bits
+pub struct ContainerState {
+    pub closeable: bool,
+    pub closed: bool,
+    pub locked: bool,
+    pub pickproof: bool,
+    /// `(zone, id)` of the key object, `None` when the container has no
+    /// keyhole (legacy key `< 0`; `0` is treated the same, it is the
+    /// importer's "unset").
+    pub key: Option<(i32, i32)>,
+}
+
+impl ContainerState {
+    /// Parse the CONTAINER `values` JSON:
+    /// `{"Key": 7911, "Flags": ["Closeable", "PickProof", "Closed", "Locked"], ...}`.
+    /// The key is still the legacy vnum (`zone * 100 + id`, zone 0 is zone
+    /// 1000).
+    #[must_use]
+    pub fn from_values(values: &serde_json::Value) -> Self {
+        let flag = |name: &str| {
+            values
+                .get("Flags")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|flags| {
+                    flags
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .any(|f| f.trim().eq_ignore_ascii_case(name))
+                })
+        };
+        let raw_key = values.get("Key").and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+        });
+        let key = raw_key.filter(|k| *k > 0).and_then(|k| {
+            let zone = i32::try_from(k / 100).ok()?;
+            let id = i32::try_from(k % 100).ok()?;
+            Some((if zone == 0 { 1000 } else { zone }, id))
+        });
+        Self {
+            closeable: flag("Closeable"),
+            closed: flag("Closed"),
+            locked: flag("Locked"),
+            pickproof: flag("PickProof"),
+            key,
+        }
+    }
+}
+
 /// Component on spawned DRINKCONTAINER-typed items: per-instance
 /// liquid state mirrored from `Objects.values`. `remaining` mutates
 /// on `drink`/`sip`/`pour`/`fill`; the proto values are the

@@ -2798,7 +2798,11 @@ fn award_kill_coin(
         let members = crate::commands::group_members(world, root);
         members
             .into_iter()
-            .filter(|m| world.get::<mud_world::Located>(*m).map(|l| l.0) == killer_room)
+            .filter(|m| {
+                world.get::<mud_world::Located>(*m).map(|l| l.0) == killer_room
+                    // A ghost groupmate is dead: no share of the coin.
+                    && world.get::<Ghost>(*m).is_none()
+            })
             .collect()
     } else {
         vec![killer]
@@ -6068,6 +6072,30 @@ mod tests {
         // 75 copper between two: the odd copper stays with the killer.
         assert_eq!(wealth_of(&world, killer), 38);
         assert_eq!(wealth_of(&world, leader), 37);
+    }
+
+    #[test]
+    fn autosplit_skips_a_ghost_groupmate() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let goblin = credit_goblin(&mut world, room, 0, None);
+        let leader = credit_player(&mut world, room, "Leader", 0);
+        let killer = credit_player(&mut world, room, "Killer", 0);
+        world.entity_mut(leader).insert(Ghost);
+        world.entity_mut(killer).insert((
+            mud_world::Follower(leader),
+            mud_world::GroupMember(leader),
+            Fighting(goblin),
+            mud_world::PlayerFlags(vec![
+                mud_db::enums::PlayerFlag::AutoLoot,
+                mud_db::enums::PlayerFlag::AutoSplit,
+            ]),
+        ));
+        run_combat_tick(&mut world);
+        assert!(world.get_entity(goblin).is_err());
+        // The dead groupmate takes no share; the killer keeps the whole pile.
+        assert_eq!(wealth_of(&world, killer), 75);
+        assert_eq!(wealth_of(&world, leader), 0);
     }
 
     #[test]
