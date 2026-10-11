@@ -791,6 +791,9 @@ mod room_line_tests;
 #[path = "commands/aggro_pulse_tests.rs"]
 mod aggro_pulse_tests;
 #[cfg(test)]
+#[path = "commands/cast_move_batch_tests.rs"]
+mod cast_move_batch_tests;
+#[cfg(test)]
 #[path = "commands/cmd_parity_tests.rs"]
 mod cmd_parity_tests;
 #[cfg(test)]
@@ -12192,7 +12195,8 @@ pub(crate) fn parse_direction(s: &str) -> Option<Direction> {
 /// canonical direction names that `parse_direction` does, and also
 /// matches the typed word against the keywords on the player's
 /// current-room exits — so `open curtain` finds the curtain
-/// regardless of which direction it's on. Hidden exits the player
+/// regardless of which direction it's on, and `<keyword> <direction>`
+/// (`open door north`) names the exit by both. Hidden exits the player
 /// hasn't discovered are skipped, matching the look / move gates,
 /// so puzzle exits can't be probed by guessing keywords.
 pub(crate) fn resolve_exit_arg(world: &World, player: Entity, arg: &str) -> Option<Direction> {
@@ -12214,7 +12218,25 @@ pub(crate) fn resolve_exit_arg(world: &World, player: Entity, arg: &str) -> Opti
             return Some(*dir);
         }
     }
-    None
+    // `open door north`: the last word is a direction, the rest must name
+    // that exit (legacy `find_door`). An exit with no keywords of its own
+    // still answers to the plain word "door".
+    let (keyword, last) = trimmed.rsplit_once(char::is_whitespace)?;
+    let keyword = keyword.trim();
+    let dir = parse_direction(last.trim())?;
+    let ed = exits.0.get(&dir)?;
+    if keyword.is_empty() || exit_is_hidden_to(world, player, room, dir, ed) {
+        return None;
+    }
+    let names_exit = if ed.keywords.is_empty() {
+        keyword.eq_ignore_ascii_case("door")
+    } else {
+        mud_world::targeting::names_match(
+            &keyword.to_ascii_lowercase(),
+            ed.keywords.iter().map(String::as_str),
+        )
+    };
+    names_exit.then_some(dir)
 }
 
 /// True when the player's room is currently dark enough that
@@ -15230,6 +15252,177 @@ fn aoe_preflight(
     true
 }
 
+/// Wall-making room effect: `(material, traversal)` when the effect's params
+/// describe a wall (stone / ice block, fog slows, illusion passes).
+fn wall_kind(
+    override_params: Option<&serde_json::Value>,
+    default_params: &serde_json::Value,
+) -> Option<(String, mud_world::WallTraversal)> {
+    let pick = |key: &str| -> String {
+        override_params
+            .and_then(|v| v.get(key))
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| default_params.get(key).and_then(serde_json::Value::as_str))
+            .unwrap_or("")
+            .to_ascii_lowercase()
+    };
+    let type_str = pick("type");
+    let traversal = match pick("traversalRules").as_str() {
+        "block" if matches!(type_str.as_str(), "ice" | "stone") => mud_world::WallTraversal::Block,
+        "slow" if type_str == "fog" => mud_world::WallTraversal::Slow,
+        "passable" if type_str == "illusion" => mud_world::WallTraversal::Passable,
+        _ => return None,
+    };
+    Some((type_str, traversal))
+}
+
+/// Everything `install_magical_wall` needs besides the room and direction.
+struct WallSpec<'a> {
+    effect_kind: i32,
+    ability_id: i32,
+    type_str: &'a str,
+    kind_label: &'a str,
+    dur_secs: i32,
+    hp: i32,
+    traversal: mud_world::WallTraversal,
+}
+
+/// Raise one wall in `room` across `dir`: a duration-tracked backing
+/// `EffectInstance` plus the `RoomBlockedExits` entry. A second wall on the
+/// same direction replaces the older one, so teardown never has to guess.
+fn install_magical_wall(world: &mut World, room: Entity, dir: Direction, wall: &WallSpec<'_>) {
+    let eff_entity = world
+        .spawn((
+            EffectInstance {
+                kind: wall.effect_kind,
+                name: format!("wall-{}", wall.type_str),
+                strength: 1,
+                remaining_secs: wall.dur_secs,
+                source: EffectSource::Spell,
+                ability_id: Some(wall.ability_id),
+            },
+            AppliedTo(room),
+        ))
+        .id();
+    let mut blocked = world
+        .get_mut::<mud_world::RoomBlockedExits>(room)
+        .map(|mut b| std::mem::take(&mut *b))
+        .unwrap_or_default();
+    if let Some(prev) = blocked.by_direction.insert(
+        dir,
+        mud_world::RoomBlockedExit {
+            kind_label: wall.kind_label.to_string(),
+            backed_by: eff_entity,
+            hp: wall.hp,
+            traversal: wall.traversal,
+        },
+    ) {
+        // Despawn the previous wall's backing instance so `effects` reads
+        // cleanly and its teardown can't later wipe the new entry.
+        if let Ok(em) = world.get_entity_mut(prev.backed_by) {
+            em.despawn();
+        }
+    }
+    try_insert(world, room, blocked);
+}
+
+/// Refuse a wall spell (`cast 'wall of ice' <direction>`) before the slot or
+/// the wind-up is spent: it needs a direction that names an exit here.
+/// `true` when the cast may go ahead (also for every non-wall ability).
+fn wall_preflight(
+    world: &mut World,
+    player: Entity,
+    def: &mud_world::AbilityDef,
+    target_word: Option<&str>,
+) -> bool {
+    let is_wall = {
+        let mappings = world
+            .resource::<AbilityCatalog>()
+            .effects_for
+            .get(&def.id)
+            .cloned()
+            .unwrap_or_default();
+        let effects = world.resource::<EffectCatalog>();
+        mappings.iter().any(|(id, over)| {
+            effects.by_id.get(id).is_some_and(|e| {
+                e.effect_type == "room" && wall_kind(over.as_ref(), &e.default_params).is_some()
+            })
+        })
+    };
+    if !is_wall {
+        return true;
+    }
+    let Some(dir) = target_word.map(str::trim).and_then(parse_direction) else {
+        send_to(
+            world,
+            player,
+            format!(
+                "{} needs a direction (e.g. cast '{}' north).\r\n",
+                def.name,
+                cast_hint_name(def)
+            ),
+        );
+        return false;
+    };
+    let has_exit = world
+        .get::<Located>(player)
+        .and_then(|l| world.get::<mud_world::Exits>(l.0))
+        .is_some_and(|e| e.0.contains_key(&dir));
+    if !has_exit {
+        send_to(
+            world,
+            player,
+            format!("There's no exit {} here.\r\n", direction_label(dir)),
+        );
+        return false;
+    }
+    true
+}
+
+/// Refuse a keyword-driven `create` spell (Minor Creation) before the slot or
+/// the wind-up is spent: legacy `spell_minor_creation` asks what to create,
+/// and refuses a word that names no recipe. `true` when the cast may go ahead
+/// (also for every ability without keyword recipes).
+fn create_preflight(
+    world: &mut World,
+    player: Entity,
+    def: &mud_world::AbilityDef,
+    target_word: Option<&str>,
+) -> bool {
+    let Some(recipes) = world.get_resource::<mud_world::CreationRecipes>() else {
+        return true;
+    };
+    let keyworded = recipes
+        .by_ability
+        .get(&def.plain_name.to_ascii_uppercase())
+        .is_some_and(|rows| rows.iter().any(|r| r.keyword.is_some()));
+    if !keyworded {
+        return true;
+    }
+    let typed = target_word.map(str::trim).filter(|w| !w.is_empty());
+    let class_id = crate::mob_ai::spell_class_id(world, player);
+    let recipes = world.resource::<mud_world::CreationRecipes>();
+    if typed.is_some()
+        && conjuration::creation_choice(recipes, &def.plain_name, typed, class_id).is_some()
+    {
+        return true;
+    }
+    let msg = if typed.is_none() {
+        "What are you trying to create?\r\n"
+    } else {
+        "You have no idea how to create such an item.\r\n"
+    };
+    send_to(world, player, msg);
+    false
+}
+
+/// The name a cast hint quotes back to the player (`cast 'ray of enfeeblement'
+/// <target>`): the ability's display name, lowercased. `plain_name` is the
+/// truncated schema identifier (`RAY_OF_ENFEEB`) and must not leak.
+fn cast_hint_name(def: &mud_world::AbilityDef) -> String {
+    def.name.to_ascii_lowercase()
+}
+
 /// Where a spell's slot would come from right now: `None` when the spell is
 /// outside the slot model (off-class, classless caster), else
 /// `Ok((native circle, circle that would be used))`, or `Err((native circle,
@@ -15323,7 +15516,10 @@ fn reserve_spell_slot(
         send_to(
             world,
             player,
-            format!("Upcasting a circle {native} spell into circle {circle}.\r\n"),
+            format!(
+                "<b><yellow>Upcasting a circle {native} spell into circle {circle}.</></> \
+                 (type <b>abort</> to cancel)\r\n"
+            ),
         );
     }
     let recover = mud_world::CIRCLE_RECOVER_TIME
@@ -16095,7 +16291,7 @@ fn resolve_and_gate_target(
             {
                 Some(opp)
             } else {
-                let display = def.plain_name.to_ascii_lowercase().replace('_', " ");
+                let display = cast_hint_name(def);
                 send_msg(
                     world,
                     player,
@@ -16113,7 +16309,7 @@ fn resolve_and_gate_target(
         && target_word.is_none()
         && travel_to_target_params(world, def).is_some()
     {
-        let display = def.plain_name.to_ascii_lowercase().replace('_', " ");
+        let display = cast_hint_name(def);
         send_msg(
             world,
             player,
@@ -16749,6 +16945,17 @@ pub(crate) fn invoke_ability_core(
         }
     }
 
+    // Wall spells need a direction naming an exit, and Minor Creation a word
+    // naming a recipe: refuse now, not after the wind-up has eaten the slot.
+    if !skip_queue && !aoe_repeat {
+        if !wall_preflight(world, player, &def, target_word) {
+            return;
+        }
+        if !create_preflight(world, player, &def, target_word) {
+            return;
+        }
+    }
+
     // Slot reservation. Every refusal gate (anti-magic / dead-magic /
     // known / combat / posture / cooldown / summon / room-wide target
     // preflight) has passed, so only now does the cast take a slot --
@@ -16794,7 +17001,7 @@ pub(crate) fn invoke_ability_core(
     // AOE-sub casts always skip too.
     if queue_wind_up {
         let roll = rand::random_range(1..=110);
-        let (total_ticks, quick) = crate::casting::wind_up_ticks(world, player, &def, roll);
+        let (total_ticks, _quick) = crate::casting::wind_up_ticks(world, player, &def, roll);
         let recognized_by =
             crate::casting::announce_cast_start(world, player, &def, verb, cast_target);
         world.entity_mut(player).insert(mud_world::Casting {
@@ -16814,18 +17021,10 @@ pub(crate) fn invoke_ability_core(
         // `abort_casting` settle it.
         slot_guard.armed = false;
         let secs = (total_ticks / 10).max(1);
-        let quick_note = if quick {
-            " Your quick chant hastens the spell."
-        } else {
-            ""
-        };
         send_to(
             world,
             player,
-            format!(
-                "You begin {verb}ing {}...  (about {secs}s){quick_note}\r\n",
-                def.name,
-            ),
+            format!("You begin {verb}ing {}...  (about {secs}s)\r\n", def.name,),
         );
         return;
     }
@@ -17146,6 +17345,28 @@ pub(crate) fn invoke_ability_core(
     // Captured up front: the target can despawn mid-cast.
     let actor_p_pre = Pronouns::of(world, player);
     let target_p_pre = Pronouns::of(world, target_entity);
+    // Legacy `mag_affect`: a spell that does not refresh (`refresh = false`:
+    // Stone Skin, Fireshield, Sleep, ...) fails on a victim who already
+    // has it, "Nothing seems to happen.", and the cast is still charged.
+    // Data-driven through `"refresh": false` in the ability's effect params.
+    if !effect_specs.is_empty()
+        && effect_specs.iter().any(|s| {
+            s.override_params
+                .as_ref()
+                .and_then(|p| p.get("refresh"))
+                .and_then(serde_json::Value::as_bool)
+                == Some(false)
+        })
+        && {
+            let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+            q.iter(world)
+                .any(|(e, at)| at.0 == target_entity && e.ability_id == Some(def.id))
+        }
+    {
+        send_to(world, player, "Nothing seems to happen.\r\n");
+        settle_slot(world, player, slot_hold, true);
+        return;
+    }
     // Saving-throw resolution. If the ability has a row in
     // AbilitySavingThrow, evaluate the DC against caster's
     // FormulaCtx, roll d20 + target's level (proxy for save bonus
@@ -17315,7 +17536,7 @@ pub(crate) fn invoke_ability_core(
     // For non-damage spells (and absorbed-damage casts) the header
     // is queued into `pending_header` and conditionally emitted
     // after the loop.
-    let pending_header: Option<String> = if emit_header_now {
+    let mut pending_header: Option<String> = if emit_header_now {
         None
     } else {
         Some(render_header())
@@ -18375,6 +18596,11 @@ pub(crate) fn invoke_ability_core(
                 // carried item, not a room fixture (portals use the
                 // room-spawn path below).
                 let created = crate::item_spawn::spawn_item_from_proto(world, &proto, player);
+                // Conjuring reads before wielding: the cast line is held for the
+                // end of the loop, so send it ahead of wear_item's own message.
+                if wield && let Some(header) = pending_header.take() {
+                    send_to(world, player, header);
+                }
                 if wield && wear_item(world, player, created, WearWhere::Hands(Slot::Wield), false)
                 {
                     applied_msgs.push(format!(
@@ -19322,28 +19548,8 @@ pub(crate) fn invoke_ability_core(
                 // and WALL_OF_FOG ("slow") still fall through to the
                 // decorative path — pass/slow semantics are a later
                 // pass once movement-cost machinery lands.
-                let traversal_str = spec
-                    .override_params
-                    .as_ref()
-                    .and_then(|v| v.get("traversalRules"))
-                    .and_then(serde_json::Value::as_str)
-                    .or_else(|| {
-                        spec.default_params
-                            .get("traversalRules")
-                            .and_then(serde_json::Value::as_str)
-                    })
-                    .unwrap_or("")
-                    .to_ascii_lowercase();
-                let wall_traversal = match traversal_str.as_str() {
-                    "block" if matches!(type_str.as_str(), "ice" | "stone") => {
-                        Some(mud_world::WallTraversal::Block)
-                    }
-                    "slow" if type_str == "fog" => Some(mud_world::WallTraversal::Slow),
-                    "passable" if type_str == "illusion" => {
-                        Some(mud_world::WallTraversal::Passable)
-                    }
-                    _ => None,
-                };
+                let wall_traversal = wall_kind(spec.override_params.as_ref(), &spec.default_params)
+                    .map(|(_, traversal)| traversal);
                 if let Some(traversal) = wall_traversal {
                     let arg = target_word.map_or("", str::trim);
                     let Some(dir) = parse_direction(arg) else {
@@ -19353,7 +19559,7 @@ pub(crate) fn invoke_ability_core(
                             format!(
                                 "{} needs a direction (e.g. 'cast '{}' north').\r\n",
                                 def.name,
-                                def.plain_name.to_ascii_lowercase().replace('_', " ")
+                                cast_hint_name(&def)
                             ),
                         );
                         applied_msgs.push(format!("{pretty} (no direction)"));
@@ -19398,48 +19604,53 @@ pub(crate) fn invoke_ability_core(
                         // is never consulted in practice.
                         _ => 0,
                     };
-                    let eff_entity = world
-                        .spawn((
-                            EffectInstance {
-                                kind: spec.id,
-                                name: format!("wall-{type_str}"),
-                                strength: 1,
-                                remaining_secs: dur_secs,
-                                source: EffectSource::Spell,
-                                ability_id: Some(def.id),
-                            },
-                            AppliedTo(caster_room),
-                        ))
-                        .id();
-                    spawn_count += 1;
-                    // Install / overwrite the per-direction entry on
-                    // the room. Overwrite (not stack) so a second
-                    // wall cast on the same direction extends the
-                    // wall by despawning the older instance — keeps
-                    // the model "one wall per direction" and avoids
-                    // teardown ambiguity.
-                    let mut blocked = world
-                        .get_mut::<mud_world::RoomBlockedExits>(caster_room)
-                        .map(|mut b| std::mem::take(&mut *b))
-                        .unwrap_or_default();
-                    if let Some(prev) = blocked.by_direction.insert(
+                    // Legacy `spell_magical_wall` raises the wall in this
+                    // room and again in the room beyond when that room has
+                    // an exit back, so the barrier holds from both sides.
+                    install_magical_wall(
+                        world,
+                        caster_room,
                         dir,
-                        mud_world::RoomBlockedExit {
-                            kind_label: kind_label.clone(),
-                            backed_by: eff_entity,
+                        &WallSpec {
+                            effect_kind: spec.id,
+                            ability_id: def.id,
+                            type_str: &type_str,
+                            kind_label: &kind_label,
+                            dur_secs,
                             hp: wall_hp,
                             traversal,
                         },
-                    ) {
-                        // Despawn the previous wall's backing
-                        // EffectInstance so `effects` reads cleanly
-                        // and a teardown for the old entity doesn't
-                        // later wipe our new entry.
-                        if let Ok(em) = world.get_entity_mut(prev.backed_by) {
-                            em.despawn();
-                        }
+                    );
+                    let far_side = world
+                        .get::<mud_world::Exits>(caster_room)
+                        .and_then(|e| e.0.get(&dir))
+                        .and_then(|x| x.to)
+                        .and_then(|next| {
+                            let back = world
+                                .get::<mud_world::Exits>(next)?
+                                .0
+                                .iter()
+                                .find(|(_, x)| x.to == Some(caster_room))
+                                .map(|(d, _)| *d)?;
+                            Some((next, back))
+                        });
+                    if let Some((next_room, back_dir)) = far_side {
+                        install_magical_wall(
+                            world,
+                            next_room,
+                            back_dir,
+                            &WallSpec {
+                                effect_kind: spec.id,
+                                ability_id: def.id,
+                                type_str: &type_str,
+                                kind_label: &kind_label,
+                                dur_secs,
+                                hp: wall_hp,
+                                traversal,
+                            },
+                        );
                     }
-                    try_insert(world, caster_room, blocked);
+                    spawn_count += 1;
                     // Broadcast the wall's formation to everyone in
                     // the room (except the caster, who already gets
                     // the spell's own success_to_caster). Without
@@ -25580,7 +25791,19 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
             stamina_cost = stamina_cost.saturating_add(1);
         }
     }
-    if let Some(s) = world.get::<Stamina>(player).copied()
+    // A mounted rider is carried: the mount does the walking, so the mount's
+    // movement points pay for the step and its exhaustion stops it (legacy
+    // `do_simple_move`: the motivator, not the actor, pays).
+    let player_mount = steed_in_room(world, player, from_room);
+    if let Some(mount) = player_mount {
+        if world
+            .get::<mud_world::MovementPoints>(mount)
+            .is_some_and(|mp| mp.current < stamina_cost)
+        {
+            send_to(world, player, "Your mount is too exhausted.\r\n");
+            return;
+        }
+    } else if let Some(s) = world.get::<Stamina>(player).copied()
         && s.current < stamina_cost
     {
         send_to(world, player, "You're too exhausted to move.\r\n");
@@ -25694,6 +25917,30 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         }
     }
 
+    // Riders and the mounts that carry them (legacy `do_simple_move`'s actor /
+    // mount split): observers see one rider on the move, not a rider and a
+    // separate mount, and the mount itself hears nothing.
+    let steeds: Vec<(Entity, Entity)> = movers
+        .iter()
+        .filter_map(|&r| steed_in_room(world, r, from_room).map(|m| (r, m)))
+        .collect();
+    let steed_of = |rider: Entity| {
+        steeds
+            .iter()
+            .find(|(r, _)| *r == rider)
+            .map(|&(_, mount)| mount)
+    };
+    let mut hush: Vec<Entity> = movers.clone();
+    hush.extend(steeds.iter().map(|&(_, m)| m));
+    for &(rider, mount) in &steeds {
+        let mount_name = name_of(world, mount);
+        send_to(
+            world,
+            rider,
+            format!("You ride {dir_name} on {mount_name}.\r\n"),
+        );
+    }
+
     // LEAVE triggers in the source room (legacy `leave_mtrigger`,
     // `leave_wtrigger`, `leave_otrigger`), one pass per mover.
     for &mover in &movers {
@@ -25708,13 +25955,15 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
     for &mover in &movers {
         let mover_name = name_of(world, mover);
         let verb = race_movement_verb(world, mover, false);
-        broadcast_room_visual(
-            world,
-            from_room,
-            mover,
-            &movers,
-            &format!("{} {verb} {dir_name}.\r\n", cap_sentence_start(&mover_name),),
-        );
+        let line = match steed_of(mover) {
+            Some(mount) => format!(
+                "{} rides {dir_name} on {}.\r\n",
+                cap_sentence_start(&mover_name),
+                name_of(world, mount)
+            ),
+            None => format!("{} {verb} {dir_name}.\r\n", cap_sentence_start(&mover_name)),
+        };
+        broadcast_room_visual(world, from_room, mover, &hush, &line);
         // Observers who missed it but sense life feel it go.
         senses::sense_departure(world, from_room, mover, &movers);
     }
@@ -25772,8 +26021,12 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
     }
 
     // Drain the leader's stamina by the target sector's cost. Followers
-    // don't pay the cost — they're being led.
-    if let Some(mut s) = world.get_mut::<Stamina>(player) {
+    // don't pay the cost — they're being led. A mounted leader's mount pays.
+    if let Some(mount) = player_mount {
+        if let Some(mut mp) = world.get_mut::<mud_world::MovementPoints>(mount) {
+            mp.current = (mp.current - stamina_cost).max(0);
+        }
+    } else if let Some(mut s) = world.get_mut::<Stamina>(player) {
         s.current = (s.current - stamina_cost).max(0);
     }
 
@@ -25782,17 +26035,19 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
     // arrival also stays hidden.
     for &mover in &movers {
         let mover_name = name_of(world, mover);
-        broadcast_room_visual(
-            world,
-            target,
-            mover,
-            &movers,
-            &format!(
+        let line = match steed_of(mover) {
+            Some(mount) => format!(
+                "{} arrives from {arrival_dir}, riding {}.\r\n",
+                cap_sentence_start(&mover_name),
+                name_of(world, mount)
+            ),
+            None => format!(
                 "{} {} {arrival_dir}.\r\n",
                 cap_sentence_start(&mover_name),
                 race_arrival_phrase(world, mover),
             ),
-        );
+        };
+        broadcast_room_visual(world, target, mover, &hush, &line);
     }
 
     // DeathTrap gate — `Room.is_death_trap = true` kills every
@@ -26276,6 +26531,16 @@ pub(crate) fn direction_name(d: Direction) -> &'static str {
         Portal => "portal",
         Direction::None => "(none)",
     }
+}
+
+/// The mount `rider` is sitting on, when it stands in `room` with them
+/// (legacy `do_simple_move` ignores a mount that has been left elsewhere).
+fn steed_in_room(world: &World, rider: Entity, room: Entity) -> Option<Entity> {
+    let mount = world.get::<mud_world::Mounted>(rider)?.0;
+    world
+        .get::<Located>(mount)
+        .is_some_and(|l| l.0 == room)
+        .then_some(mount)
 }
 
 /// Origin phrase for an arrival broadcast after moving `dir`, as legacy

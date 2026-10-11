@@ -111,6 +111,19 @@ pub fn regen_tick(world: &mut World) {
             h.hp = new_hp;
         }
     }
+
+    // Mobs with a movement pool (mounts pay their rider's steps from it)
+    // recover it at the player rate for their posture.
+    let mut mobs = world.query_filtered::<
+        (&mut mud_world::MovementPoints, Option<&Posture>),
+        (With<Mob>, Without<Fighting>),
+    >();
+    for (mut mp, posture) in mobs.iter_mut(world) {
+        if mp.current < mp.max {
+            let gain = stamina_per_tick(posture.map_or(PostureKind::Standing, |p| p.0));
+            mp.current = (mp.current + gain).min(mp.max);
+        }
+    }
 }
 
 /// One game-hour at 10Hz × 75s/hour. Hunger / Thirst tick at this

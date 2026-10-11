@@ -576,3 +576,94 @@ fn a_conjured_item_has_the_prototypes_flags_restrictions_triggers_but_no_conceal
         .collect();
     assert_eq!(rows, vec![(true, true, Some(vec![(10, 5)]), None)]);
 }
+
+// -- up-front validation (#14) and message order (#35) ------------------------
+
+impl Fx {
+    /// A cast typed by the player: every gate runs, nothing is skipped.
+    fn cast_typed(&mut self, args: &str) -> String {
+        crate::commands::invoke_ability_with(
+            &mut self.world,
+            self.caster,
+            args,
+            AbilityKind::Spell,
+            "cast",
+            false,
+            false,
+            false,
+            None,
+        );
+        drain(&mut self.rx)
+    }
+}
+
+/// Class 7 owns the spell at circle 1 with a single slot at the caster's level.
+fn with_one_slot(f: &mut Fx) {
+    let mut slots = mud_world::SpellSlotData::default();
+    slots.ability_circle.insert((7, ABILITY), 1);
+    slots.progression.insert((50, 1), 1);
+    f.world.insert_resource(slots);
+    f.set_class(Some(7));
+}
+
+fn slots_in_use(f: &Fx) -> i32 {
+    f.world
+        .get::<mud_world::SpellSlots>(f.caster)
+        .map_or(0, |s| s.used_in_circle(1))
+}
+
+#[test]
+fn minor_creation_without_a_word_asks_before_spending_the_slot() {
+    let mut f = minor_creation_fx();
+    with_one_slot(&mut f);
+    let out = f.cast_typed("'minor creation'");
+    assert!(out.contains("What are you trying to create?"), "{out}");
+    assert_eq!(slots_in_use(&f), 0);
+    assert!(f.carried().is_empty());
+}
+
+#[test]
+fn minor_creation_of_an_unknown_word_is_refused_before_the_slot_is_spent() {
+    let mut f = minor_creation_fx();
+    with_one_slot(&mut f);
+    let out = f.cast_typed("'minor creation' xyzzy");
+    assert!(
+        out.contains("You have no idea how to create such an item."),
+        "{out}"
+    );
+    assert_eq!(slots_in_use(&f), 0, "slot untouched");
+    assert!(f.carried().is_empty());
+}
+
+#[test]
+fn minor_creation_of_a_known_word_still_casts_and_charges() {
+    let mut f = minor_creation_fx();
+    with_one_slot(&mut f);
+    let out = f.cast_typed("'minor creation' dagger");
+    assert_eq!(f.carried(), vec![(10, 12)], "{out}");
+    assert!(
+        f.world
+            .get::<mud_world::SpellSlots>(f.caster)
+            .is_some_and(|s| !s.in_flight.is_empty()),
+        "slot committed to recovery"
+    );
+}
+
+#[test]
+fn ice_dagger_announces_the_conjuring_before_the_wielding() {
+    let mut f = ice_dagger_fx();
+    f.world
+        .resource_mut::<mud_world::AbilityCatalog>()
+        .messages
+        .insert(
+            ABILITY,
+            mud_world::AbilityMessageSet {
+                success_to_caster: Some("You conjure a dagger of ice.".into()),
+                ..Default::default()
+            },
+        );
+    let out = f.cast("'ice dagger'");
+    let conjured = out.find("You conjure a dagger of ice.").expect(&out);
+    let wielded = out.find("wield").expect(&out);
+    assert!(conjured < wielded, "{out}");
+}

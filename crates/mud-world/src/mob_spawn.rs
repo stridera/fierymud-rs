@@ -21,6 +21,24 @@ use crate::components::{
 use crate::mob_ai_rules::{MobAi, MobAiData};
 use crate::resources::{MobProto, RuntimeConfig, ShopCatalog, SpellSlotData, TriggerCatalog};
 
+/// Movement points of a mountable mob by level, legacy `natural_move`:
+/// 20 at level 1 rising on a 0.8-power curve to 250 at level 27, then two per
+/// level beyond. (Legacy adds a random 0-9; the mean, 4, is used here.)
+#[must_use]
+pub fn mount_move_points(level: i32) -> i32 {
+    const MIN_MOVE: f64 = 20.0;
+    const MAX_MOVE: f64 = 250.0;
+    const MAX_MOUNT_LEVEL: i32 = 27;
+    const JITTER: i32 = 4;
+    if level > MAX_MOUNT_LEVEL {
+        return 250 + 2 * (level - MAX_MOUNT_LEVEL) + JITTER;
+    }
+    let frac = f64::from((level - 1).max(0)) / f64::from(MAX_MOUNT_LEVEL - 1);
+    #[allow(clippy::cast_possible_truncation)]
+    let base = (MIN_MOVE + (MAX_MOVE - MIN_MOVE) * frac.powf(0.8)) as i32;
+    base + JITTER
+}
+
 /// Spawn a fresh mob from `proto` into `room` and apply its
 /// `MobDefaultEffects`. `reset_id` tags the instance with the
 /// `MobResets` row that owns it (boot / respawn paths); `None` for
@@ -82,11 +100,20 @@ pub fn spawn_mob_from_proto(
         Some(reset_id) => world.spawn((base, FromMobReset(reset_id))),
         None => world.spawn(base),
     };
-    // Zero movement points = "unconstrained" per legacy.
-    if proto.move_points > 0 {
+    // Zero movement points = "unconstrained" per legacy, except mounts: a
+    // mountable mob's pool follows its level (legacy `natural_move`), since
+    // it pays the rider's steps.
+    let move_points = if proto.move_points > 0 {
+        proto.move_points
+    } else if proto.is_mountable() {
+        mount_move_points(proto.level)
+    } else {
+        0
+    };
+    if move_points > 0 {
         em.insert(MovementPoints {
-            current: proto.move_points,
-            max: proto.move_points,
+            current: move_points,
+            max: move_points,
         });
     }
     if let Some((shop_zone_id, shop_id)) = shop_key {
@@ -169,5 +196,23 @@ fn attach_mob_ai(world: &mut World, mob: Entity, proto: &MobProto) {
     }
     if caster {
         em.insert(SpellSlots::default());
+    }
+}
+
+#[cfg(test)]
+mod mount_move_tests {
+    use super::mount_move_points;
+
+    #[test]
+    fn mount_movement_pool_follows_the_legacy_level_curve() {
+        assert_eq!(mount_move_points(1), 24, "20 base + 4 jitter");
+        assert_eq!(mount_move_points(27), 254, "250 cap + 4 jitter");
+        assert_eq!(mount_move_points(30), 260, "two per level past 27");
+        let mid = mount_move_points(14);
+        assert!(mid > 24 && mid < 254, "{mid}");
+        assert!(
+            mount_move_points(0) >= 24,
+            "level 0 is clamped, not negative"
+        );
     }
 }

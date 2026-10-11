@@ -17,8 +17,8 @@ use crate::commands::{
     cmd_look, consider_verdict_color, direction_name, drain_stamina, engage_skill_shim,
     find_actor_in_room, flip_door_both_sides, hit_chance_color, invoke_ability, invoke_ability_aoe,
     invoke_ability_targeting, mob_helpers_engage, name_of, name_or, opposite, parse_direction,
-    refuse_hidden_exit, remove_effect_named, require_alert_posture, send_msg, send_rendered,
-    send_to, skill_stamina_cost, try_insert, try_remove,
+    refuse_hidden_exit, remove_effect_named, require_alert_posture, resolve_exit_arg, send_msg,
+    send_rendered, send_to, skill_stamina_cost, try_insert, try_remove,
 };
 
 inventory::submit! {
@@ -793,7 +793,7 @@ pub(crate) fn cmd_doorbash(world: &mut World, player: Entity, args: &str) {
         return;
     }
     let arg = args.trim();
-    let Some(dir) = parse_direction(arg) else {
+    let Some(dir) = resolve_exit_arg(world, player, arg) else {
         send_to(world, player, "Doorbash which way?\r\n");
         return;
     };

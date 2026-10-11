@@ -13,7 +13,7 @@ use mud_world::{
 use crate::commands::info::{door_phrase, door_sentence};
 use crate::commands::{
     Category, Command, Help, broadcast_room_except_players_rendered, direction_name,
-    flip_door_both_sides, invoke_ability, name_of, parse_direction, refuse_hidden_exit, send_msg,
+    flip_door_both_sides, invoke_ability, name_of, refuse_hidden_exit, resolve_exit_arg, send_msg,
     send_to,
 };
 
@@ -220,7 +220,7 @@ pub(crate) fn cmd_pick(world: &mut World, player: Entity, args: &str) {
     ) {
         return;
     }
-    let Some(dir) = parse_direction(arg) else {
+    let Some(dir) = resolve_exit_arg(world, player, arg) else {
         send_to(world, player, "Pick which way?\r\n");
         return;
     };
