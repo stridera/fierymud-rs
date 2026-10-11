@@ -467,13 +467,14 @@ fn find_in_room(
     id: i32,
     items: bool,
 ) -> Option<Entity> {
-    let mut q = world.query::<(Entity, &Located, &WorldKey, Has<Item>)>();
-    let mut hits: Vec<Entity> = q
-        .iter(world)
-        .filter(|(_, l, wk, is_item)| {
-            l.0 == room && wk.zone == zone && wk.id == id && *is_item == items
+    let mut hits: Vec<Entity> = super::contents_of(world, room)
+        .into_iter()
+        .filter(|&e| {
+            world.get::<Item>(e).is_some() == items
+                && world
+                    .get::<WorldKey>(e)
+                    .is_some_and(|wk| wk.zone == zone && wk.id == id)
         })
-        .map(|(e, ..)| e)
         .collect();
     hits.sort_unstable();
     hits.first().copied()
@@ -658,12 +659,7 @@ pub(crate) fn resolve_destroy_name(world: &mut World, from: Entity, name: &str) 
 /// Characters (anything that is not an item) standing in `room`, in entity
 /// order so every caller sees the same sequence.
 fn people_in(world: &mut World, room: Entity) -> Vec<Entity> {
-    let mut q = world.query_filtered::<(Entity, &Located), Without<Item>>();
-    let mut out: Vec<Entity> = q
-        .iter(world)
-        .filter(|(_, l)| l.0 == room)
-        .map(|(e, _)| e)
-        .collect();
+    let mut out = super::characters_in(world, room);
     out.sort_unstable();
     out
 }

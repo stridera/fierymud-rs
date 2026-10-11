@@ -2202,19 +2202,50 @@ fn combat_pair(lua: &Lua, args: MultiValue) -> mlua::Result<Option<(Entity, Enti
     Ok(other.map(|o| (actor, o)))
 }
 
+/// Everything directly inside `container` (a room, bag or inventory), read
+/// off the `Located` -> `Contents` relationship index: O(contents), not a
+/// scan of every located entity in the world.
+pub(crate) fn contents_of(world: &World, container: Entity) -> Vec<Entity> {
+    world
+        .get::<mud_world::Contents>(container)
+        .map(|c| c.iter().collect())
+        .unwrap_or_default()
+}
+
+/// Characters (anything that is not an item) in `room`, in `Contents` order.
+pub(crate) fn characters_in(world: &World, room: Entity) -> Vec<Entity> {
+    let mut v = contents_of(world, room);
+    v.retain(|&e| world.get::<Item>(e).is_none());
+    v
+}
+
+/// Items lying directly in `room`, in `Contents` order.
+pub(crate) fn items_in(world: &World, room: Entity) -> Vec<Entity> {
+    let mut v = contents_of(world, room);
+    v.retain(|&e| world.get::<Item>(e).is_some());
+    v
+}
+
+/// First entity of `candidates` whose name or keywords match `needle`.
+fn first_matching(world: &World, candidates: &[Entity], needle: &str) -> Option<Entity> {
+    candidates.iter().copied().find(|&e| {
+        world.get::<Named>(e).is_some_and(|n| {
+            mud_world::targeting::entity_matches(
+                needle,
+                &n.name,
+                world.get::<Keywords>(e).map(|k| k.0.as_slice()),
+            )
+        })
+    })
+}
+
 /// First actor (not item) in `actor`'s room, other than `actor`, whose
 /// name or keywords match `needle`.
 fn find_in_room(world: &mut World, actor: Entity, needle: &str) -> Option<Entity> {
     let room = world.get::<Located>(actor)?.0;
-    let mut q =
-        world.query_filtered::<(Entity, &Located, &Named, Option<&Keywords>), Without<Item>>();
-    q.iter(world)
-        .find(|(e, l, n, kw)| {
-            *e != actor
-                && l.0 == room
-                && mud_world::targeting::entity_matches(needle, &n.name, kw.map(|k| k.0.as_slice()))
-        })
-        .map(|(e, _, _, _)| e)
+    let mut others = characters_in(world, room);
+    others.retain(|&e| e != actor);
+    first_matching(world, &others, needle)
 }
 
 /// `combat.engage` body: through the server's `engage_combat` when one is
@@ -2699,21 +2730,10 @@ impl UserData for LuaActor {
                         .get::<Named>(this.entity)
                         .map_or_else(|| "Someone".to_string(), |n| n.name.clone());
                     let target = {
-                        let mut q = world.query_filtered::<
-                            (Entity, &Located, &Named, Option<&Keywords>),
-                            Without<Item>,
-                        >();
-                        q.iter(world)
-                            .find(|(e, l, n, kw)| {
-                                *e != this.entity
-                                    && l.0 == located.0
-                                    && (mud_world::targeting::entity_matches(
-                                        &needle,
-                                        &n.name,
-                                        kw.map(|k| k.0.as_slice()),
-                                    ))
-                            })
-                            .map(|(e, _, n, _)| (e, n.name.clone()))
+                        let mut others = characters_in(world, located.0);
+                        others.retain(|&e| e != this.entity);
+                        first_matching(world, &others, &needle)
+                            .and_then(|e| world.get::<Named>(e).map(|n| (e, n.name.clone())))
                     };
                     let Some((target_entity, resolved_name)) = target else {
                         return;
@@ -2722,15 +2742,14 @@ impl UserData for LuaActor {
                     // (skip speaker + target). Snapshot before we
                     // borrow LuaOutbox mut so the query doesn't
                     // deadlock with the resource borrow.
-                    let bystanders: Vec<Entity> = {
-                        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-                        q.iter(world)
-                            .filter(|(e, l)| {
-                                *e != this.entity && *e != target_entity && l.0 == located.0
-                            })
-                            .map(|(e, _)| e)
-                            .collect()
-                    };
+                    let bystanders: Vec<Entity> = contents_of(world, located.0)
+                        .into_iter()
+                        .filter(|&e| {
+                            e != this.entity
+                                && e != target_entity
+                                && world.get::<Player>(e).is_some()
+                        })
+                        .collect();
                     if !world.contains_resource::<LuaOutbox>() {
                         world.insert_resource(LuaOutbox::default());
                     }
@@ -4384,20 +4403,8 @@ impl UserData for LuaRoom {
                     return Ok(Value::Nil);
                 }
                 let entity = world_mut_from_lua(lua, |world| -> Option<Entity> {
-                    let mut q = world.query_filtered::<
-                        (Entity, &Located, &Named, Option<&Keywords>),
-                        Without<Item>,
-                    >();
-                    q.iter(world)
-                        .find(|(_, l, n, kw)| {
-                            l.0 == this.entity
-                                && (mud_world::targeting::entity_matches(
-                                    &needle,
-                                    &n.name,
-                                    kw.map(|k| k.0.as_slice()),
-                                ))
-                        })
-                        .map(|(e, _, _, _)| e)
+                    let here = characters_in(world, this.entity);
+                    first_matching(world, &here, &needle)
                 })?;
                 match entity {
                     Some(e) => Ok(Value::UserData(
@@ -4462,13 +4469,8 @@ impl UserData for LuaRoom {
         // intent is "cleanup minions", not "wipe the room".
         methods.add_method("purge", |lua, this, ()| -> mlua::Result<()> {
             world_mut_from_lua(lua, |world| {
-                let mobs: Vec<Entity> = {
-                    let mut q = world.query_filtered::<(Entity, &Located), With<Mob>>();
-                    q.iter(world)
-                        .filter(|(_, l)| l.0 == this.entity)
-                        .map(|(e, _)| e)
-                        .collect()
-                };
+                let mut mobs = contents_of(world, this.entity);
+                mobs.retain(|&e| world.get::<Mob>(e).is_some());
                 for e in mobs {
                     script_extract_mob(world, e);
                 }
@@ -4490,13 +4492,7 @@ impl UserData for LuaRoom {
                     return Ok(());
                 }
                 world_mut_from_lua(lua, |world| {
-                    let occupants: Vec<Entity> = {
-                        let mut q = world.query_filtered::<(Entity, &Located), Without<Item>>();
-                        q.iter(world)
-                            .filter(|(_, l)| l.0 == this.entity)
-                            .map(|(e, _)| e)
-                            .collect()
-                    };
+                    let occupants = characters_in(world, this.entity);
                     for e in occupants {
                         mud_world::movement::move_to_room(world, e, target_entity);
                     }
@@ -4517,17 +4513,13 @@ impl UserData for LuaRoom {
                     return Ok(Value::Nil);
                 }
                 let entity = world_mut_from_lua(lua, |world| -> Option<Entity> {
-                    let mut q = world
-                        .query_filtered::<(Entity, &Located, &Named, Option<&Keywords>), With<Item>>();
-                    q.iter(world)
-                        .find(|(_, l, n, kw)| {
-                            l.0 == this.entity
-                                && (mud_world::targeting::entity_matches(&needle, &n.name, kw.map(|k| k.0.as_slice())))
-                        })
-                        .map(|(e, _, _, _)| e)
+                    let here = items_in(world, this.entity);
+                    first_matching(world, &here, &needle)
                 })?;
                 match entity {
-                    Some(e) => Ok(Value::UserData(lua.create_userdata(LuaActor { entity: e })?)),
+                    Some(e) => Ok(Value::UserData(
+                        lua.create_userdata(LuaActor { entity: e })?,
+                    )),
                     None => Ok(Value::Nil),
                 }
             },
@@ -4651,13 +4643,8 @@ impl UserData for LuaRoom {
                     // randomized "pick a random target here"
                     // patterns: `room.actors[random(1, #room.actors)]`.
                     "actors" | "people" => {
-                        let occupants: Vec<Entity> = world_mut_from_lua(lua, |w| {
-                            let mut q = w.query_filtered::<(Entity, &Located), Without<Item>>();
-                            q.iter(w)
-                                .filter(|(_, l)| l.0 == this.entity)
-                                .map(|(e, _)| e)
-                                .collect()
-                        })?;
+                        let occupants: Vec<Entity> =
+                            world_from_lua(lua, |w| characters_in(w, this.entity))?;
                         let tbl = lua.create_table()?;
                         for (i, e) in occupants.iter().enumerate() {
                             let actor = LuaActor { entity: *e };
@@ -4673,10 +4660,8 @@ impl UserData for LuaRoom {
                     // Cheaper than building the actors table just for
                     // its length when callers only need the count.
                     "actor_count" => {
-                        let count = world_mut_from_lua(lua, |w| {
-                            let mut q = w.query_filtered::<(Entity, &Located), Without<Item>>();
-                            i64::try_from(q.iter(w).filter(|(_, l)| l.0 == this.entity).count())
-                                .unwrap_or(i64::MAX)
+                        let count = world_from_lua(lua, |w| {
+                            i64::try_from(characters_in(w, this.entity).len()).unwrap_or(i64::MAX)
                         })?;
                         Ok(Value::Integer(count))
                     }
@@ -6480,3 +6465,6 @@ mod despawn_tests;
 
 #[cfg(test)]
 mod script_hooks_tests;
+
+#[cfg(test)]
+mod room_scan_tests;

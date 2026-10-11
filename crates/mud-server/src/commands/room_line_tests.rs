@@ -345,6 +345,35 @@ fn a_rider_is_listed_as_mounted_and_the_mount_is_not_listed_apart() {
 }
 
 #[test]
+fn gmcp_room_mobs_omits_a_mount_with_a_visible_rider() {
+    let (mut world, room, p, mut rx) = setup();
+    let wolf = wolf(&mut world, room);
+    let mobs_of = |world: &mut World, rx: &mut _| {
+        dispatch(world, p, "look");
+        let fr = frames(&drain_bytes(rx));
+        serde_json::from_str::<serde_json::Value>(&of(&fr, "Room.Mobs")[0]).unwrap()
+    };
+    assert_eq!(mobs_of(&mut world, &mut rx).as_array().unwrap().len(), 1);
+    let bob = other_player(&mut world, room, "Bob");
+    world.entity_mut(bob).insert(mud_world::Mounted(wolf));
+    world.entity_mut(wolf).insert(mud_world::RiddenBy(bob));
+    let mobs = mobs_of(&mut world, &mut rx);
+    assert!(mobs.as_array().unwrap().is_empty(), "{mobs}");
+    // Rider gone from the room: the mount is listed again.
+    let away = world
+        .spawn((
+            Room,
+            Named {
+                name: "Away".into(),
+            },
+        ))
+        .id();
+    world.entity_mut(bob).insert(Located(away));
+    let mobs = mobs_of(&mut world, &mut rx);
+    assert_eq!(mobs.as_array().unwrap().len(), 1, "{mobs}");
+}
+
+#[test]
 fn your_own_mount_is_not_listed_and_riders_name_you_as_the_mount() {
     let (mut world, room, p, mut rx) = setup();
     let wolf = wolf(&mut world, room);

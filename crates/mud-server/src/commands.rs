@@ -8618,6 +8618,9 @@ pub(crate) fn send_room_mobs(world: &mut World, viewer: Entity, force: bool) {
         .into_iter()
         .map(|mob| (mob, gmcp::perceives(world, viewer, mob, room_seen)))
         .filter(|(_, how)| *how != gmcp::Perceived::Unseen)
+        // A mount carrying a rider the viewer sees is named by the rider's
+        // "mounted upon Y" line; like the room text, it gets no entry.
+        .filter(|(mob, _)| !room_line::is_carrying_visible_rider(world, viewer, *mob))
         .collect();
     let mut entries: Vec<serde_json::Value> = Vec::with_capacity(candidates.len());
     let mut services: Vec<&'static str> = Vec::new();
