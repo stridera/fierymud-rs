@@ -1989,6 +1989,7 @@ mod tests {
             "zap",
             crate::commands::AoeScope::RoomEnemies,
             "Nothing here.\r\n",
+            false,
         );
         assert!(cast);
         assert!(world.get_entity(g1).is_err() && world.get_entity(g2).is_err());
@@ -2040,6 +2041,7 @@ mod tests {
             "zap",
             crate::commands::AoeScope::RoomEnemies,
             "Nothing here.\r\n",
+            false,
         )
     }
 

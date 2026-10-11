@@ -380,6 +380,7 @@ mod tests {
             "fireball",
             crate::commands::AoeScope::RoomEnemies,
             "Nothing here.\r\n",
+            false,
         );
         assert!(!cast);
         let text = drain(&mut rx);

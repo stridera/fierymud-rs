@@ -16,8 +16,9 @@ use crate::commands::{
     broadcast_room_except_players_rendered, broadcast_room_except_rendered, check_stamina,
     cmd_look, consider_verdict_color, direction_name, drain_stamina, engage_skill_shim,
     find_actor_in_room, flip_door_both_sides, hit_chance_color, invoke_ability, invoke_ability_aoe,
-    mob_helpers_engage, name_of, name_or, opposite, parse_direction, remove_effect_named,
-    require_alert_posture, send_rendered, send_to, skill_stamina_cost, try_insert, try_remove,
+    invoke_ability_targeting, mob_helpers_engage, name_of, name_or, opposite, parse_direction,
+    remove_effect_named, require_alert_posture, send_rendered, send_to, skill_stamina_cost,
+    try_insert, try_remove,
 };
 
 inventory::submit! {
@@ -2042,13 +2043,13 @@ pub(crate) fn cmd_kick(world: &mut World, player: Entity, _args: &str) {
         return;
     }
     drain_stamina(world, player, cost);
-    let target_name = name_of(world, target);
-    invoke_ability(
+    invoke_ability_targeting(
         world,
         player,
-        &format!("kick {target_name}"),
+        "kick",
         mud_db::abilities::AbilityKind::Skill,
         "use",
+        Some(target),
     );
 }
 pub(crate) fn cmd_berserk(world: &mut World, player: Entity, _args: &str) {
@@ -2165,26 +2166,27 @@ pub(crate) fn cmd_tripup(world: &mut World, player: Entity, args: &str) {
         return;
     }
     let arg = args.trim();
-    // Empty-arg shortcut: current Fighting target. The data path
-    // doesn't synthesize this; we resolve it here and pass the name
-    // through.
-    let dispatched = if arg.is_empty() {
+    // Empty-arg shortcut: current Fighting target, locked in by entity so the
+    // dispatcher doesn't re-resolve its display name.
+    let (dispatched, forced) = if arg.is_empty() {
         let Some(Fighting(t)) = world.get::<Fighting>(player).copied() else {
             send_to(world, player, "Trip up whom? You aren't fighting.\r\n");
             return;
         };
-        let target_name = name_of(world, t);
-        format!("trip_up {target_name}")
+        (String::from("trip_up"), Some(t))
     } else if arg.eq_ignore_ascii_case("me") || arg.eq_ignore_ascii_case("self") {
         // Targeting gate would also catch this, but refusing here
         // skips wasted stamina.
         send_to(world, player, "You can't trip yourself.\r\n");
         return;
     } else {
-        format!("trip_up {arg}")
+        (format!("trip_up {arg}"), None)
     };
-    let victim_word = dispatched.trim_start_matches("trip_up ");
-    if !offensive_word_allowed(world, player, victim_word) {
+    let allowed = match forced {
+        Some(t) => super::attack_ok::offensive_target_allowed(world, player, t),
+        None => offensive_word_allowed(world, player, arg),
+    };
+    if !allowed {
         return;
     }
     let cost = skill_stamina_cost(world, "tripup", TRIPUP_COST);
@@ -2192,12 +2194,13 @@ pub(crate) fn cmd_tripup(world: &mut World, player: Entity, args: &str) {
         return;
     }
     drain_stamina(world, player, cost);
-    invoke_ability(
+    invoke_ability_targeting(
         world,
         player,
         &dispatched,
         mud_db::abilities::AbilityKind::Skill,
         "use",
+        forced,
     );
 }
 /// Resolve `victim_word` among the actors in the attacker's room and run it through
@@ -2339,13 +2342,13 @@ pub(crate) fn cmd_roundhouse(world: &mut World, player: Entity, _args: &str) {
         return;
     }
     drain_stamina(world, player, cost);
-    let target_name = name_of(world, target);
-    invoke_ability(
+    invoke_ability_targeting(
         world,
         player,
-        &format!("roundhouse {target_name}"),
+        "roundhouse",
         mud_db::abilities::AbilityKind::Skill,
         "use",
+        Some(target),
     );
 }
 pub(crate) fn cmd_roar(world: &mut World, player: Entity, _args: &str) {
@@ -2369,6 +2372,7 @@ pub(crate) fn cmd_roar(world: &mut World, player: Entity, _args: &str) {
         "roar",
         AoeScope::RoomEnemies,
         "There's nothing here to roar at.\r\n",
+        false,
     );
     if !landed {
         return;
@@ -2393,16 +2397,20 @@ pub(crate) fn cmd_rend(world: &mut World, player: Entity, args: &str) {
         return;
     }
     let arg = args.trim();
-    let target_word = if arg.is_empty() {
+    let (dispatched, forced) = if arg.is_empty() {
         let Some(Fighting(t)) = world.get::<Fighting>(player).copied() else {
             send_to(world, player, "Rend whom? You aren't fighting.\r\n");
             return;
         };
-        name_of(world, t)
+        (String::from("rend"), Some(t))
     } else {
-        arg.to_string()
+        (format!("rend {arg}"), None)
     };
-    if !offensive_word_allowed(world, player, &target_word) {
+    let allowed = match forced {
+        Some(t) => super::attack_ok::offensive_target_allowed(world, player, t),
+        None => offensive_word_allowed(world, player, arg),
+    };
+    if !allowed {
         return;
     }
     let cost = skill_stamina_cost(world, "rend", REND_COST);
@@ -2410,12 +2418,13 @@ pub(crate) fn cmd_rend(world: &mut World, player: Entity, args: &str) {
         return;
     }
     drain_stamina(world, player, cost);
-    invoke_ability(
+    invoke_ability_targeting(
         world,
         player,
-        &format!("rend {target_word}"),
+        &dispatched,
         mud_db::abilities::AbilityKind::Skill,
         "use",
+        forced,
     );
 }
 pub(crate) fn cmd_gouge(world: &mut World, player: Entity, args: &str) {
@@ -2423,16 +2432,20 @@ pub(crate) fn cmd_gouge(world: &mut World, player: Entity, args: &str) {
         return;
     }
     let arg = args.trim();
-    let target_word = if arg.is_empty() {
+    let (dispatched, forced) = if arg.is_empty() {
         let Some(Fighting(t)) = world.get::<Fighting>(player).copied() else {
             send_to(world, player, "Gouge whom? You aren't fighting.\r\n");
             return;
         };
-        name_of(world, t)
+        (String::from("eye_gouge"), Some(t))
     } else {
-        arg.to_string()
+        (format!("eye_gouge {arg}"), None)
     };
-    if !offensive_word_allowed(world, player, &target_word) {
+    let allowed = match forced {
+        Some(t) => super::attack_ok::offensive_target_allowed(world, player, t),
+        None => offensive_word_allowed(world, player, arg),
+    };
+    if !allowed {
         return;
     }
     let cost = skill_stamina_cost(world, "gouge", GOUGE_COST);
@@ -2440,12 +2453,13 @@ pub(crate) fn cmd_gouge(world: &mut World, player: Entity, args: &str) {
         return;
     }
     drain_stamina(world, player, cost);
-    invoke_ability(
+    invoke_ability_targeting(
         world,
         player,
-        &format!("eye_gouge {target_word}"),
+        &dispatched,
         mud_db::abilities::AbilityKind::Skill,
         "use",
+        forced,
     );
 }
 pub(crate) fn cmd_springleap(world: &mut World, player: Entity, args: &str) {
@@ -2494,13 +2508,13 @@ pub(crate) fn cmd_springleap(world: &mut World, player: Entity, args: &str) {
         return;
     }
     drain_stamina(world, player, cost);
-    let target_name = name_of(world, target);
-    invoke_ability(
+    invoke_ability_targeting(
         world,
         player,
-        &format!("springleap {target_name}"),
+        "springleap",
         mud_db::abilities::AbilityKind::Skill,
         "use",
+        Some(target),
     );
     // Auto-engage if the target survived. The data path doesn't model
     // engagement; springleap's gameplay contract is "open combat with
@@ -2556,13 +2570,13 @@ pub(crate) fn cmd_throatcut(world: &mut World, player: Entity, args: &str) {
         return;
     }
     drain_stamina(world, player, cost);
-    let target_name = name_of(world, target);
-    invoke_ability(
+    invoke_ability_targeting(
         world,
         player,
-        &format!("throatcut {target_name}"),
+        "throatcut",
         mud_db::abilities::AbilityKind::Skill,
         "use",
+        Some(target),
     );
     if world.get_entity(target).is_ok() {
         try_insert(world, player, Fighting(target));
@@ -2616,13 +2630,13 @@ pub(crate) fn cmd_backstab(world: &mut World, player: Entity, args: &str) {
         return;
     }
     drain_stamina(world, player, cost);
-    let target_name = name_of(world, target);
-    invoke_ability(
+    invoke_ability_targeting(
         world,
         player,
-        &format!("backstab {target_name}"),
+        "backstab",
         mud_db::abilities::AbilityKind::Skill,
         "use",
+        Some(target),
     );
     if world.get_entity(target).is_ok() {
         try_insert(world, player, Fighting(target));
@@ -3069,13 +3083,13 @@ pub(crate) fn cmd_tame(world: &mut World, player: Entity, args: &str) {
         return;
     }
     drain_stamina(world, player, cost);
-    let target_name = name_of(world, target);
-    invoke_ability(
+    invoke_ability_targeting(
         world,
         player,
-        &format!("tame {target_name}"),
+        "tame",
         mud_db::abilities::AbilityKind::Skill,
         "use",
+        Some(target),
     );
 }
 pub(crate) fn cmd_buck(world: &mut World, player: Entity, args: &str) {

@@ -156,6 +156,7 @@ fn cmd_enter(world: &mut World, player: Entity, args: &str) {
         &format!("{mover_capped} steps into {portal_name} and vanishes.\r\n"),
     );
     crate::combat::relocate(world, player, dest);
+    crate::combat::carry_mount(world, player, dest);
     crate::commands::broadcast_room_visible(
         world,
         dest,

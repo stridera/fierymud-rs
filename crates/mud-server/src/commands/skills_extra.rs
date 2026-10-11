@@ -17,8 +17,8 @@ use mud_world::{EquippedSlot, Fighting, Item, Located, Slot};
 
 use crate::commands::{
     Category, Command, Help, ItemClass, broadcast_room_except_players_rendered, check_stamina,
-    drain_stamina, find_item, invoke_ability, name_of, refresh_player_items_gmcp,
-    require_alert_posture, send_to, skill_stamina_cost, try_remove,
+    drain_stamina, find_item, invoke_ability, invoke_ability_targeting, name_of,
+    refresh_player_items_gmcp, require_alert_posture, send_to, skill_stamina_cost, try_remove,
 };
 
 const PALM_COST: i32 = 4;
@@ -119,13 +119,13 @@ fn cmd_cartwheel(world: &mut World, player: Entity, _args: &str) {
         return;
     }
     drain_stamina(world, player, cost);
-    let target_name = name_of(world, fighting.0);
-    invoke_ability(
+    invoke_ability_targeting(
         world,
         player,
-        &format!("cartwheel {target_name}"),
+        "cartwheel",
         AbilityKind::Skill,
         "use",
+        Some(fighting.0),
     );
 }
 

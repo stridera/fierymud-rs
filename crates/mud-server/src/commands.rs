@@ -774,6 +774,9 @@ mod multi_hit_tests;
 #[path = "commands/norepeat_tests.rs"]
 mod norepeat_tests;
 #[cfg(test)]
+#[path = "commands/skill_target_tests.rs"]
+mod skill_target_tests;
+#[cfg(test)]
 #[path = "commands/wand_charge_tests.rs"]
 mod wand_charge_tests;
 
@@ -5157,6 +5160,7 @@ mod tests {
             "fireball",
             super::AoeScope::RoomEnemies,
             "Nothing here.\r\n",
+            false,
         );
         assert!(!cast, "nobody attackable: the cast does not land");
         let text = drain(&mut rx);
@@ -14586,6 +14590,22 @@ pub(crate) fn invoke_ability(
     invoke_ability_with(world, player, args, kind, verb, false, false, false, None);
 }
 
+/// [`invoke_ability`] against a target the caller already resolved. The
+/// entity is locked in, so the dispatcher never re-looks it up by display
+/// name (which fails for names like "a rat" and can hit the wrong one of two
+/// mobs sharing a name). `args` carries only the ability name. `None` falls
+/// back to the dispatcher's own resolution of whatever `args` names.
+pub(crate) fn invoke_ability_targeting(
+    world: &mut World,
+    player: Entity,
+    args: &str,
+    kind: mud_db::abilities::AbilityKind,
+    verb: &str,
+    target: Option<Entity>,
+) {
+    invoke_ability_with(world, player, args, kind, verb, false, false, false, target);
+}
+
 /// `innate <name>`: [`invoke_ability`] with the racial cooldown applied.
 pub(crate) fn invoke_ability_innate(
     world: &mut World,
@@ -14682,6 +14702,7 @@ pub(crate) enum AoeScope {
 /// lands the call site collapses further: `invoke_ability_with`
 /// itself will read the column and pick the scope, dropping the
 /// per-ability shim entirely.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn invoke_ability_aoe(
     world: &mut World,
     caster: Entity,
@@ -14690,6 +14711,7 @@ pub(crate) fn invoke_ability_aoe(
     ability_name: &str,
     scope: AoeScope,
     refusal_when_empty: &str,
+    from_item: bool,
 ) -> bool {
     let Some(located) = world.get::<Located>(caster).copied() else {
         send_to(world, caster, "You are nowhere.\r\n");
@@ -14738,7 +14760,7 @@ pub(crate) fn invoke_ability_aoe(
             kind,
             verb,
             true,
-            false,
+            from_item,
             true,
             Some(*target),
         );
@@ -16407,9 +16429,20 @@ pub(crate) fn invoke_ability_core(
     }
     if !aoe_repeat && let Some(scope) = inferred_scope {
         let refusal = aoe_refusal(scope, verb, &def);
-        let dispatched =
-            invoke_ability_aoe(world, player, kind, verb, &def.plain_name, scope, &refusal);
-        settle_slot(world, player, slot_hold, dispatched);
+        let dispatched = invoke_ability_aoe(
+            world,
+            player,
+            kind,
+            verb,
+            &def.plain_name,
+            scope,
+            &refusal,
+            from_item,
+        );
+        // An item has no slot to commit, and its charge is spent only if a
+        // per-target cast landed (each one sets the latch itself), not merely
+        // because targets were present.
+        settle_slot(world, player, slot_hold, dispatched && !from_item);
         return;
     }
 
