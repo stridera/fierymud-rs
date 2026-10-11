@@ -46,20 +46,65 @@ pub(crate) fn is_reserved_name(name: &str) -> bool {
     is_target_word(name) || STAFF_NAMES.iter().any(|w| w.eq_ignore_ascii_case(name))
 }
 
-/// True when `name` (any case) equals a mob prototype's name or one of its
-/// keywords, so a player can never be confused with, or target-collide
-/// with, a mob.
+/// Single words that read as a generic mob and so are refused as player
+/// names, whether or not a prototype of that exact name exists.
+pub(crate) const GENERIC_MOB_WORDS: &[&str] = &[
+    "beggar",
+    "citizen",
+    "cityguard",
+    "corpse",
+    "guard",
+    "guardian",
+    "guardsman",
+    "merchant",
+    "mob",
+    "npc",
+    "shopkeeper",
+];
+
+/// A mob's short name reduced for comparison: lowercase, a leading
+/// article (`a` / `an` / `the` / `some`) removed. "an ebony raven" becomes
+/// "ebony raven"; only a one-word result can equal a character name.
+fn mob_short_name(name: &str) -> String {
+    // Drop XML-Lite colour tags ("<red>wolf</>") before comparing.
+    let mut plain = String::with_capacity(name.len());
+    let mut in_tag = false;
+    for c in name.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if !in_tag => plain.push(c),
+            _ => {}
+        }
+    }
+    let lower = plain.trim().to_ascii_lowercase();
+    for article in ["a ", "an ", "the ", "some "] {
+        if let Some(rest) = lower.strip_prefix(article) {
+            return rest.trim_start().to_string();
+        }
+    }
+    lower
+}
+
+/// True when `name` (any case) is a generic mob word or equals a mob
+/// prototype's short name with its article stripped. Keywords are
+/// deliberately not matched: they include common handles ("bob", "raven",
+/// "shadow") that players are entitled to.
 pub(crate) fn matches_mob_proto(world: &World, name: &str) -> bool {
+    if GENERIC_MOB_WORDS
+        .iter()
+        .any(|w| w.eq_ignore_ascii_case(name))
+    {
+        return true;
+    }
     let Some(protos) = world.get_resource::<mud_world::MobPrototypes>() else {
         return false;
     };
-    protos.by_key.values().any(|p| {
-        p.name.eq_ignore_ascii_case(name)
-            || p.keywords
-                .iter()
-                .flat_map(|k| k.split_whitespace())
-                .any(|k| k.eq_ignore_ascii_case(name))
-    })
+    let wanted = name.trim().to_ascii_lowercase();
+    protos
+        .by_key
+        .values()
+        .any(|p| mob_short_name(&p.name) == wanted)
 }
 
 /// Why `name` cannot be used for a new character, as a message ready for
@@ -96,21 +141,35 @@ mod tests {
     }
 
     #[test]
-    fn mob_names_and_keywords_are_reserved() {
+    fn mob_short_names_and_generic_words_are_reserved_but_keywords_are_not() {
         let mut world = World::new();
         assert!(
-            check_character_name(&world, "Guard").is_ok(),
+            check_character_name(&world, "Guard").is_err(),
+            "curated word"
+        );
+        assert!(
+            check_character_name(&world, "Strider").is_ok(),
             "no catalog yet"
         );
         let mut protos = MobPrototypes::default();
-        let mut p = mob_proto(1, 1, MobProfession::Trainer);
-        p.name = "Bartholomew".into();
-        p.keywords = vec!["goblin".into(), "big guard".into()];
-        protos.by_key.insert((1, 1), p);
+        let mut add = |id: i32, name: &str, keywords: &[&str]| {
+            let mut p = mob_proto(1, id, MobProfession::Trainer);
+            p.name = name.into();
+            p.keywords = keywords.iter().map(|k| (*k).to_string()).collect();
+            protos.by_key.insert((1, id), p);
+        };
+        add(1, "Bartholomew", &["bartholomew"]);
+        add(2, "a wolf", &["wolf"]);
+        add(3, "an ebony raven", &["ebony", "raven", "bob"]);
+        add(4, "The Hermit", &["hermit"]);
+        add(5, "<red>a</> <b>Cinder</>", &[]);
         world.insert_resource(protos);
-        assert!(check_character_name(&world, "bartholomew").is_err());
-        assert!(check_character_name(&world, "GOBLIN").is_err());
-        assert!(check_character_name(&world, "Guard").is_err());
-        assert!(check_character_name(&world, "Strider").is_ok());
+        for n in ["bartholomew", "WOLF", "hermit", "cinder"] {
+            assert!(check_character_name(&world, n).is_err(), "{n}");
+        }
+        // Keywords alone ("raven", "bob", "ebony") do not block a handle.
+        for n in ["Raven", "Bob", "Ebony", "Shadow"] {
+            assert!(check_character_name(&world, n).is_ok(), "{n}");
+        }
     }
 }

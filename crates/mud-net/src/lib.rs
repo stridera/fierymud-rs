@@ -832,6 +832,10 @@ struct CapsLocal {
     /// Previous TTYPE reply; a repeat means the client has run out
     /// of distinct answers (the MTTS end-of-list convention).
     last_ttype: Option<String>,
+    /// Latest NAWS size refused by the control-frame limiter, applied on
+    /// the next accepted control frame or at `naws_flush_at`.
+    pending_naws: Option<(u16, u16)>,
+    naws_flush_at: Option<Instant>,
     /// Colour depth / charset shared with the writer and the server.
     output: OutputHandle,
 }
@@ -1160,8 +1164,75 @@ const CTL_FRAMES_PER_SEC: u32 = 20;
 /// Burst allowance for control frames; covers a client's connect-time
 /// `Core.Hello` / `Core.Supports.Set` / TTYPE cycle with plenty to spare.
 const CTL_FRAME_BURST: u32 = 40;
-/// Consecutive refused control frames at which the connection is dropped.
-const CTL_ABUSE_STREAK: u32 = 500;
+/// Control frames refused within one wall-clock second above which that
+/// second counts as abusive. The bucket refills continuously, so a flood
+/// never produces a long unbroken run of refusals; the rate of refusals is
+/// the signal.
+const CTL_ABUSE_REFUSALS_PER_SEC: u32 = 200;
+/// Consecutive abusive seconds after which the connection is dropped.
+const CTL_ABUSE_SECONDS: u32 = 3;
+/// How long after the last refused NAWS frame its size is applied if no
+/// other control frame is accepted first.
+const NAWS_FLUSH_DELAY: Duration = Duration::from_millis(250);
+
+/// What to do with one control frame.
+#[derive(Debug, PartialEq, Eq)]
+enum CtlVerdict {
+    Pass,
+    Shed,
+    /// Sustained flood: drop the connection.
+    Abusive,
+}
+
+/// Token bucket plus a per-second refusal counter for control frames.
+struct CtlLimiter {
+    bucket: LineBucket,
+    /// Start of the one-second window refusals are being counted in.
+    window_start: Instant,
+    refused_in_window: u32,
+    /// Completed windows in a row that were abusive.
+    abusive_seconds: u32,
+}
+
+impl CtlLimiter {
+    fn new(now: Instant) -> Self {
+        Self {
+            bucket: LineBucket::new(now, CTL_FRAME_BURST),
+            window_start: now,
+            refused_in_window: 0,
+            abusive_seconds: 0,
+        }
+    }
+
+    /// Charge one frame arriving at `now`.
+    fn admit(&mut self, now: Instant) -> CtlVerdict {
+        if self.bucket.take(now, CTL_FRAMES_PER_SEC, CTL_FRAME_BURST) {
+            return CtlVerdict::Pass;
+        }
+        let elapsed = now.saturating_duration_since(self.window_start);
+        if elapsed >= Duration::from_secs(1) {
+            // Close the window that was open. A refusal-free second or more
+            // in between breaks the run.
+            if elapsed < Duration::from_secs(2)
+                && self.refused_in_window > CTL_ABUSE_REFUSALS_PER_SEC
+            {
+                self.abusive_seconds += 1;
+            } else {
+                self.abusive_seconds = 0;
+            }
+            self.window_start = now;
+            self.refused_in_window = 0;
+        }
+        self.refused_in_window = self.refused_in_window.saturating_add(1);
+        if self.abusive_seconds + 1 >= CTL_ABUSE_SECONDS
+            && self.refused_in_window > CTL_ABUSE_REFUSALS_PER_SEC
+        {
+            CtlVerdict::Abusive
+        } else {
+            CtlVerdict::Shed
+        }
+    }
+}
 
 /// Token bucket for input lines. `per_sec == 0` disables the limit.
 /// The rate and burst are passed per call so the same bucket follows a
@@ -1336,7 +1407,7 @@ async fn handle_connection<S>(
     let started = Instant::now();
     let mut last_line = started;
     let mut line_bucket = LineBucket::new(started, limits.pre_login_line_burst);
-    let mut ctl_bucket = LineBucket::new(started, CTL_FRAME_BURST);
+    let mut ctl_bucket = CtlLimiter::new(started);
     let mut was_authed = false;
     // The greeting waits for the client's capabilities, but not forever
     // (raw TCP clients never answer).
@@ -1347,8 +1418,10 @@ async fn handle_connection<S>(
     let mut drain = false;
 
     'conn: loop {
-        let outcome = if sink.connected() {
-            read_chunk(
+        let connected = sink.connected();
+        let flush_at = caps.naws_flush_at;
+        let outcome = tokio::select! {
+            o = read_chunk(
                 &mut read_half,
                 &mut chunk,
                 &guard,
@@ -1356,25 +1429,34 @@ async fn handle_connection<S>(
                 started,
                 last_line,
                 &mut close_rx,
-            )
-            .await
-        } else {
-            tokio::select! {
-                o = read_chunk(
-                    &mut read_half,
-                    &mut chunk,
-                    &guard,
-                    &limits,
-                    started,
-                    last_line,
-                    &mut close_rx,
-                ) => o,
-                () = tokio::time::sleep_until(connect_deadline) => {
-                    if !sink.connect().await {
-                        break 'conn;
-                    }
-                    continue 'conn;
+            ) => o,
+            // Release the connect greeting once negotiation has had its
+            // window (raw TCP clients never answer).
+            () = async {
+                if connected {
+                    std::future::pending::<()>().await;
+                } else {
+                    tokio::time::sleep_until(connect_deadline).await;
                 }
+            } => {
+                if !sink.connect().await {
+                    break 'conn;
+                }
+                continue 'conn;
+            }
+            // A window size the control-frame limiter held back: apply it
+            // once the client has gone quiet, so the final size of a drag
+            // resize is never lost.
+            () = async {
+                match flush_at {
+                    Some(t) => tokio::time::sleep_until(t).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                if !flush_pending_naws(&mut sink, &mut caps).await {
+                    break 'conn;
+                }
+                continue 'conn;
             }
         };
         let n = match outcome {
@@ -1585,7 +1667,7 @@ async fn handle_telnet_event(
     out_tx: &Outbound,
     sink: &mut Sink<'_>,
     caps: &mut CapsLocal,
-    ctl_bucket: &mut LineBucket,
+    ctl_bucket: &mut CtlLimiter,
     event: TelnetEvent,
 ) -> bool {
     match event {
@@ -1732,29 +1814,82 @@ fn answer_charset_request(out_tx: &Outbound, caps: &mut CapsLocal, list: &[u8]) 
     }
 }
 
+/// Outcome of charging a control frame to the limiter.
+enum FrameGate {
+    Process,
+    /// Over budget: ignore the frame, keep the connection.
+    Shed,
+    Close,
+}
+
+/// GMCP / NAWS / TTYPE frames are not input lines, so the line bucket never
+/// sees them. Charge them to their own limiter: shed the excess, and drop
+/// the connection on a sustained flood.
+async fn charge_control_frame(
+    conn_id: ConnId,
+    sink: &mut Sink<'_>,
+    caps: &mut CapsLocal,
+    limiter: &mut CtlLimiter,
+    option: u8,
+    payload: &[u8],
+) -> FrameGate {
+    match limiter.admit(Instant::now()) {
+        CtlVerdict::Pass => {
+            // A resize shed earlier must not be lost: this frame's own size
+            // supersedes it (NAWS), otherwise deliver it first.
+            if option == opt::NAWS {
+                caps.pending_naws = None;
+            } else if !flush_pending_naws(sink, caps).await {
+                return FrameGate::Close;
+            }
+            FrameGate::Process
+        }
+        CtlVerdict::Shed => {
+            // Keep the latest window size so the final one of a drag resize
+            // still arrives (see `flush_pending_naws`).
+            if option == opt::NAWS
+                && let Some(size) = parse_naws(payload)
+            {
+                caps.pending_naws = Some(size);
+                caps.naws_flush_at = Some(Instant::now() + NAWS_FLUSH_DELAY);
+            }
+            FrameGate::Shed
+        }
+        CtlVerdict::Abusive => {
+            warn!(
+                conn_id,
+                option, "telnet control-frame flood; dropping connection"
+            );
+            FrameGate::Close
+        }
+    }
+}
+
+/// Deliver the window size held back by the control-frame limiter, if any.
+/// False when the server is gone.
+async fn flush_pending_naws(sink: &mut Sink<'_>, caps: &mut CapsLocal) -> bool {
+    caps.naws_flush_at = None;
+    match caps.pending_naws.take() {
+        Some((cols, rows)) => sink.send(InboundKind::WindowSize { cols, rows }).await,
+        None => true,
+    }
+}
+
 async fn handle_subneg(
     conn_id: ConnId,
     out_tx: &Outbound,
     sink: &mut Sink<'_>,
     caps: &mut CapsLocal,
-    ctl_bucket: &mut LineBucket,
+    ctl_bucket: &mut CtlLimiter,
     option: u8,
     payload: &[u8],
 ) -> bool {
-    // GMCP / NAWS / TTYPE frames are not input lines, so the line bucket
-    // never sees them. Charge them to their own bucket: shed the excess,
-    // and drop the connection on a sustained flood.
-    if matches!(option, opt::NAWS | opt::TTYPE | opt::GMCP)
-        && !ctl_bucket.take(Instant::now(), CTL_FRAMES_PER_SEC, CTL_FRAME_BURST)
-    {
-        if ctl_bucket.dropped_streak >= CTL_ABUSE_STREAK {
-            warn!(
-                conn_id,
-                option, "telnet control-frame flood; dropping connection"
-            );
-            return false;
+    if matches!(option, opt::NAWS | opt::TTYPE | opt::GMCP) {
+        match charge_control_frame(conn_id, sink, caps, ctl_bucket, option, payload).await {
+            FrameGate::Process => {}
+            FrameGate::Shed => return true,
+            FrameGate::Close => return false,
         }
-        return true;
     }
     match option {
         opt::NAWS => {
@@ -2496,37 +2631,51 @@ mod limit_tests {
         ));
     }
 
-    #[tokio::test]
-    async fn control_frame_flood_is_shed_then_dropped() {
-        let (out_tx, _out_rx) = mpsc::channel::<Vec<u8>>(8);
-        let (in_tx, mut in_rx) = mpsc::channel::<Inbound>(4096);
-        let mut sink = Sink {
+    fn ctl_sink(
+        in_tx: &InboundTx,
+    ) -> (
+        Sink<'_>,
+        CapsLocal,
+        CtlLimiter,
+        Outbound,
+        mpsc::Receiver<Vec<u8>>,
+    ) {
+        let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(8);
+        let sink = Sink {
             conn_id: 1,
-            inbound: &in_tx,
+            inbound: in_tx,
             pending: Vec::new(),
             pending_bytes: 0,
             hello: None,
         };
-        let mut caps = CapsLocal::default();
-        let mut bucket = LineBucket::new(Instant::now(), CTL_FRAME_BURST);
+        (
+            sink,
+            CapsLocal::default(),
+            CtlLimiter::new(Instant::now()),
+            out_tx,
+            out_rx,
+        )
+    }
 
-        // A burst of GMCP frames passes; the rest are shed, not forwarded.
-        let mut dropped_at = None;
-        for i in 0..(CTL_FRAME_BURST + CTL_ABUSE_STREAK + 50) {
-            let keep = handle_subneg(
-                1,
-                &out_tx,
-                &mut sink,
-                &mut caps,
-                &mut bucket,
-                opt::GMCP,
-                b"Core.Hello {}",
-            )
-            .await;
-            if !keep {
-                dropped_at = Some(i);
-                break;
-            }
+    #[tokio::test]
+    async fn control_frame_burst_is_shed_but_not_dropped() {
+        let (in_tx, mut in_rx) = mpsc::channel::<Inbound>(4096);
+        let (mut sink, mut caps, mut lim, out_tx, _out_rx) = ctl_sink(&in_tx);
+        // A fast burst of GMCP frames: the allowance passes, the rest is shed
+        // and the connection survives (a second is not yet sustained abuse).
+        for _ in 0..(CTL_FRAME_BURST * 4) {
+            assert!(
+                handle_subneg(
+                    1,
+                    &out_tx,
+                    &mut sink,
+                    &mut caps,
+                    &mut lim,
+                    opt::GMCP,
+                    b"Core.Hello {}"
+                )
+                .await
+            );
         }
         let mut forwarded = 0;
         while in_rx.try_recv().is_ok() {
@@ -2536,48 +2685,131 @@ mod limit_tests {
             (CTL_FRAME_BURST..=CTL_FRAME_BURST + 1).contains(&forwarded),
             "forwarded {forwarded}"
         );
-        // Sustained abuse ends the connection (handler returns false).
-        let at = dropped_at.expect("flood must drop the connection");
-        assert!(
-            at >= CTL_FRAME_BURST + CTL_ABUSE_STREAK - 1,
-            "dropped at {at}"
-        );
+    }
 
-        // NAWS / TTYPE / GMCP draw from one budget: spend it on NAWS and
-        // the next GMCP frame is shed (handler still true, nothing sent).
-        let mut bucket = LineBucket::new(Instant::now(), CTL_FRAME_BURST);
-        let naws = [0, 80, 0, 24];
-        for _ in 0..CTL_FRAME_BURST {
+    #[test]
+    fn sustained_refusals_per_second_drop_the_connection() {
+        let t0 = Instant::now();
+        let mut lim = CtlLimiter::new(t0);
+        // 400 frames a second, every second: ~20/s refilled, the rest
+        // refused (well over the per-second threshold).
+        let mut dropped_at = None;
+        'run: for sec in 0..6u64 {
+            for k in 0..400u64 {
+                let now = t0 + Duration::from_millis(sec * 1000 + k * 2);
+                if lim.admit(now) == CtlVerdict::Abusive {
+                    dropped_at = Some((sec, k));
+                    break 'run;
+                }
+            }
+        }
+        let (sec, _) = dropped_at.expect("sustained flood must drop the connection");
+        // Never in the first two seconds; during the third consecutive one.
+        assert_eq!(sec, 2, "dropped during second {sec}");
+    }
+
+    #[test]
+    fn a_quiet_second_resets_the_flood_count_and_light_traffic_never_trips() {
+        let t0 = Instant::now();
+        let mut lim = CtlLimiter::new(t0);
+        let flood_second = |lim: &mut CtlLimiter, start: Duration| {
+            (0..400u64).all(|k| {
+                let now = t0 + start + Duration::from_millis(k * 2);
+                lim.admit(now) != CtlVerdict::Abusive
+            })
+        };
+        assert!(flood_second(&mut lim, Duration::from_secs(0)));
+        assert!(flood_second(&mut lim, Duration::from_secs(1)));
+        // Two idle seconds, then abuse resumes: the run starts over.
+        assert!(flood_second(&mut lim, Duration::from_secs(4)));
+        assert!(flood_second(&mut lim, Duration::from_secs(5)));
+        // A client at the allowed rate is never refused at all.
+        let mut calm = CtlLimiter::new(t0);
+        for k in 0..600u64 {
+            let now = t0 + Duration::from_millis(k * 60);
+            assert_eq!(calm.admit(now), CtlVerdict::Pass);
+        }
+    }
+
+    #[tokio::test]
+    async fn the_final_window_size_of_a_drag_resize_is_never_lost() {
+        let (in_tx, mut in_rx) = mpsc::channel::<Inbound>(4096);
+        let (mut sink, mut caps, mut lim, out_tx, _out_rx) = ctl_sink(&in_tx);
+        // 100 resize frames in a burst; most are shed. The last one is 199x50.
+        for i in 0..100u16 {
+            let cols = 100 + i;
+            let naws = [(cols >> 8) as u8, (cols & 0xFF) as u8, 0, 50];
             assert!(
-                handle_subneg(
-                    1,
-                    &out_tx,
-                    &mut sink,
-                    &mut caps,
-                    &mut bucket,
-                    opt::NAWS,
-                    &naws
-                )
-                .await
+                handle_subneg(1, &out_tx, &mut sink, &mut caps, &mut lim, opt::NAWS, &naws).await
             );
         }
-        while in_rx.try_recv().is_ok() {}
+        let last = |rx: &mut mpsc::Receiver<Inbound>| {
+            let mut sizes = Vec::new();
+            while let Ok(m) = rx.try_recv() {
+                if let InboundKind::WindowSize { cols, rows } = m.kind {
+                    sizes.push((cols, rows));
+                }
+            }
+            sizes
+        };
+        let delivered = last(&mut in_rx);
+        assert!(delivered.len() <= usize::try_from(CTL_FRAME_BURST).unwrap() + 1);
+        assert_ne!(
+            delivered.last(),
+            Some(&(199, 50)),
+            "the last frame was shed"
+        );
+        assert_eq!(caps.pending_naws, Some((199, 50)), "held back, not dropped");
+        assert!(caps.naws_flush_at.is_some(), "a flush is scheduled");
+
+        // The timer path applies it.
+        assert!(flush_pending_naws(&mut sink, &mut caps).await);
+        assert_eq!(last(&mut in_rx), vec![(199, 50)]);
+        assert!(caps.pending_naws.is_none() && caps.naws_flush_at.is_none());
+
+        // Or the next accepted control frame carries it ahead of itself.
+        caps.pending_naws = Some((120, 40));
+        lim.bucket.refill(CTL_FRAME_BURST);
         assert!(
             handle_subneg(
                 1,
                 &out_tx,
                 &mut sink,
                 &mut caps,
-                &mut bucket,
+                &mut lim,
                 opt::GMCP,
                 b"Core.Ping"
             )
             .await
         );
+        assert!(matches!(
+            in_rx.try_recv().unwrap().kind,
+            InboundKind::WindowSize {
+                cols: 120,
+                rows: 40
+            }
+        ));
+        assert!(matches!(
+            in_rx.try_recv().unwrap().kind,
+            InboundKind::Gmcp { .. }
+        ));
+
+        // A fresh accepted NAWS supersedes a pending one.
+        caps.pending_naws = Some((90, 30));
         assert!(
-            in_rx.try_recv().is_err(),
-            "GMCP shed after NAWS used the budget"
+            handle_subneg(
+                1,
+                &out_tx,
+                &mut sink,
+                &mut caps,
+                &mut lim,
+                opt::NAWS,
+                &[0, 80, 0, 24]
+            )
+            .await
         );
+        assert_eq!(last(&mut in_rx), vec![(80, 24)]);
+        assert!(caps.pending_naws.is_none());
     }
 
     #[tokio::test]
@@ -2592,7 +2824,7 @@ mod limit_tests {
             hello: None,
         };
         let mut caps = CapsLocal::default();
-        let mut bucket = LineBucket::new(Instant::now(), CTL_FRAME_BURST);
+        let mut bucket = CtlLimiter::new(Instant::now());
         let naws = [0, 80, 0, 24];
         for _ in 0..3 {
             assert!(

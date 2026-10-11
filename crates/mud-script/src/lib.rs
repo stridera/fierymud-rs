@@ -2043,6 +2043,9 @@ fn spells_cast_dispatch(lua: &Lua, args: MultiValue) -> mlua::Result<()> {
     })
 }
 
+/// Top of the `KnownAbilities` proficiency scale (1000 = 100%).
+const MAX_PROFICIENCY: i32 = 1000;
+
 /// Upsert a `KnownAbilities` row on `entity`. If the entity has no
 /// `KnownAbilities` component yet (mobs typically don't), insert one.
 /// Names are matched case-insensitively against `AbilityCatalog.by_name`
@@ -2051,11 +2054,12 @@ fn spells_cast_dispatch(lua: &Lua, args: MultiValue) -> mlua::Result<()> {
 ///
 /// Only creatures (Mob / Player) can be taught: any other entity is a script
 /// error, so a stray reference can't grow a `KnownAbilities` on a room or an
-/// item. `level` is clamped to the skill range `0..=100`. Players are
+/// item. `level` is clamped to the proficiency range `0..=1000`
+/// ([`MAX_PROFICIENCY`]; 100 is 10%, the `proficiency / 10` percent scale). Players are
 /// deliberately allowed (quest rewards and trainers grant them abilities,
 /// including ones outside their class's own list).
 fn skills_set_level(lua: &Lua, entity: Entity, name: &str, level: i32) -> mlua::Result<()> {
-    let level = level.clamp(0, 100);
+    let level = level.clamp(0, MAX_PROFICIENCY);
     world_mut_from_lua(lua, |world| {
         if world.get_entity(entity).is_ok()
             && world.get::<Mob>(entity).is_none()
@@ -5639,7 +5643,15 @@ mod tests {
             .expect("ok");
         assert_eq!(
             world.get::<KnownAbilities>(actor).unwrap().entries[0].1,
-            100
+            1000
+        );
+        // In-range values on the 0..=1000 scale pass through (a trainer's
+        // `level * 10 + 50`).
+        host.exec_for_actor(&mut world, actor, "skills.set_level(self, 'bash', 550)")
+            .expect("ok");
+        assert_eq!(
+            world.get::<KnownAbilities>(actor).unwrap().entries[0].1,
+            550
         );
         host.exec_for_actor(&mut world, actor, "skills.set_level(self, 'bash', -5)")
             .expect("ok");
