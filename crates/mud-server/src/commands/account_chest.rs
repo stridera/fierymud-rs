@@ -496,9 +496,8 @@ pub(crate) fn spawn_withdrawn_item(
     {
         f.remaining = r;
     }
-    // The stored count when the chest kept one, else a fresh pool from the
-    // prototype (no `Charges` would read as an endless wand).
-    mud_world::attach_proto_charges(world, item_entity, proto.zone_id, proto.id);
+    // The stored count when the chest kept one; the spawn helper already
+    // gave a fresh pool from the prototype otherwise.
     if let Some(c) = state.charges
         && let Ok(mut em) = world.get_entity_mut(item_entity)
     {

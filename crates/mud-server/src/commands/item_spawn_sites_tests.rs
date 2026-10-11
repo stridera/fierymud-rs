@@ -189,7 +189,18 @@ fn a_house_item_has_the_full_set_and_a_stored_charge_count_wins() {
     super::spawn_house_item(&mut world, 5, KEY.0, KEY.1, room, &custom);
     let items = items_of(&mut world, room);
     assert_eq!(items.len(), 1);
-    assert_full_component_set(&world, items[0]);
+    assert!(world.get::<ObjectFlags>(items[0]).is_some(), "flags");
+    assert!(
+        world.get::<ObjectRestrictions>(items[0]).is_some(),
+        "restrictions"
+    );
+    assert!(
+        world.get::<AttachedTriggers>(items[0]).is_some(),
+        "triggers"
+    );
+    // Legacy house storage never decays, and a decayed entity would leave
+    // its `player_house_items` row to reappear every boot.
+    assert!(world.get::<ItemTimer>(items[0]).is_none(), "no decay timer");
     assert!(world.get::<mud_world::HouseItem>(items[0]).is_some());
     assert_eq!(world.get::<Charges>(items[0]).map(|c| c.0), Some(1));
 }
@@ -205,4 +216,49 @@ fn a_lua_spawned_object_has_the_full_component_set() {
     assert_eq!(items.len(), 1);
     assert_full_component_set(&world, items[0]);
     assert_eq!(world.get::<Charges>(items[0]).map(|c| c.0), Some(3));
+}
+
+/// A concealed-proto world: the wand prototype with concealment 300.
+fn world_with_concealed_wand() -> (World, Entity) {
+    let (mut world, room) = world_with_wand();
+    world
+        .resource_mut::<ObjectPrototypes>()
+        .by_key
+        .get_mut(&KEY)
+        .unwrap()
+        .concealment = 300;
+    (world, room)
+}
+
+#[test]
+fn a_concealed_item_restored_at_login_is_visible_once_dropped() {
+    let (mut world, room) = world_with_concealed_wand();
+    let (player, _rx) = player_in(&mut world, room);
+    assert_eq!(
+        crate::login::spawn_inventory(&mut world, player, &[row(1, 1)]),
+        1
+    );
+    let item = items_of(&mut world, player)[0];
+    assert!(
+        world.get::<mud_world::Hiddenness>(item).is_none(),
+        "carried at spawn: no concealment"
+    );
+    world.entity_mut(item).insert(Located(room));
+    assert!(super::senses::item_visible_to(&world, player, item));
+}
+
+#[test]
+fn a_spawn_into_a_carried_bag_has_no_concealment_but_a_floor_spawn_does() {
+    let (mut world, room) = world_with_concealed_wand();
+    let (player, _rx) = player_in(&mut world, room);
+    let proto = world.resource::<ObjectPrototypes>().by_key[&KEY].clone();
+    let bag = world.spawn((Item, Located(player))).id();
+    let in_bag = mud_world::spawn_item_from_proto(&mut world, &proto, bag);
+    assert!(world.get::<mud_world::Hiddenness>(in_bag).is_none());
+    let on_floor = mud_world::spawn_item_from_proto(&mut world, &proto, room);
+    assert_eq!(
+        world.get::<mud_world::Hiddenness>(on_floor).map(|h| h.0),
+        Some(300)
+    );
+    assert!(!super::senses::item_visible_to(&world, player, on_floor));
 }

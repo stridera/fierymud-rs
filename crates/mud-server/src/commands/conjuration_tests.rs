@@ -539,7 +539,7 @@ fn a_created_object_with_a_lifetime_gets_a_decay_timer() {
 }
 
 #[test]
-fn a_conjured_item_has_the_prototypes_flags_restrictions_triggers_and_hiddenness() {
+fn a_conjured_item_has_the_prototypes_flags_restrictions_triggers_but_no_concealment_in_hand() {
     use mud_db::enums::{ObjectFlag, ObjectRestriction};
     let mut f = ice_dagger_fx();
     {
@@ -574,5 +574,5 @@ fn a_conjured_item_has_the_prototypes_flags_restrictions_triggers_and_hiddenness
             )
         })
         .collect();
-    assert_eq!(rows, vec![(true, true, Some(vec![(10, 5)]), Some(30))]);
+    assert_eq!(rows, vec![(true, true, Some(vec![(10, 5)]), None)]);
 }

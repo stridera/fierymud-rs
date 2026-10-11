@@ -11762,6 +11762,7 @@ fn give_plain(world: &mut World, player: Entity, args: &str) {
     }
     if world.get::<Located>(item).is_some() {
         world.entity_mut(item).insert(Located(target));
+        crate::hiding::set_hiddenness(world, item, 0);
     }
 
     send_to(
@@ -15429,6 +15430,9 @@ pub(crate) fn cmd_house_place(
     world
         .entity_mut(item)
         .remove::<mud_world::PersistedItemId>()
+        // Legacy house storage never decays; a decay that deleted the entity
+        // would leave its `player_house_items` row to reappear every boot.
+        .remove::<mud_world::ItemTimer>()
         .insert(placement.clone());
     send_rendered(
         world,
@@ -16325,6 +16329,15 @@ mod tests {
         world.entity_mut(sword).insert(Located(player));
         cmd_give(&mut world, player, "sword bob");
         assert_eq!(world.get::<Located>(sword).unwrap().0, bob);
+    }
+
+    #[test]
+    fn give_clears_leftover_concealment() {
+        let (mut world, _room, player, sword, bob) = make_give_world();
+        world.entity_mut(sword).insert(mud_world::Hiddenness(300));
+        cmd_give(&mut world, player, "sword to bob");
+        assert_eq!(world.get::<Located>(sword).unwrap().0, bob);
+        assert!(world.get::<mud_world::Hiddenness>(sword).is_none());
     }
 
     #[test]

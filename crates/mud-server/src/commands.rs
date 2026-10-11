@@ -14521,6 +14521,12 @@ pub(crate) fn spawn_house_item(
     // same base a carried item has.
     let item = crate::item_spawn::spawn_item_from_proto(world, &proto, parent);
     try_insert(world, item, mud_world::HouseItem(house_item_id));
+    // Legacy house storage never decays. A decayed entity would leave its
+    // `player_house_items` row behind to reappear on every boot, so placed
+    // items carry no decay timer at all.
+    if let Ok(mut em) = world.get_entity_mut(item) {
+        em.remove::<mud_world::ItemTimer>();
+    }
     // What is left in the wand, not what a fresh one holds: the stored count
     // wins over the prototype's.
     if let Some(charges) = custom.charges {

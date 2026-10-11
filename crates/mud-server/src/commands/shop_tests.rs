@@ -611,7 +611,7 @@ fn bought_sword(world: &mut World, player: Entity) -> Entity {
 }
 
 #[test]
-fn bought_item_keeps_flags_restrictions_hidden_state_and_timer() {
+fn bought_item_keeps_flags_restrictions_and_timer_but_carries_no_concealment() {
     let (mut world, player, mut rx) = world_with_shop(shop_def(sword_offer(0), Vec::new()), 1_000);
     edit_sword(&mut world, |p| {
         p.flags = vec![mud_db::enums::ObjectFlag::Soulbound];
@@ -624,10 +624,8 @@ fn bought_item_keeps_flags_restrictions_hidden_state_and_timer() {
     let sword = bought_sword(&mut world, player);
     assert!(world.get::<mud_world::ObjectFlags>(sword).is_some());
     assert!(world.get::<mud_world::ObjectRestrictions>(sword).is_some());
-    assert_eq!(
-        world.get::<mud_world::Hiddenness>(sword).map(|h| h.0),
-        Some(40)
-    );
+    // Minted into the buyer's pack: carried, so no concealment to carry over.
+    assert!(world.get::<mud_world::Hiddenness>(sword).is_none());
     assert!(world.get::<mud_world::ItemTimer>(sword).is_some());
 }
 

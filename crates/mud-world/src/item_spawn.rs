@@ -17,7 +17,7 @@ use mud_db::enums::ObjectFlag;
 
 use crate::components::{
     AttachedTriggers, BoardLink, Description, Item, ItemTimer, Keywords, LiquidContainer, Located,
-    Named, ObjectFlags, ObjectRestrictions, WorldKey,
+    Mob, Named, ObjectFlags, ObjectRestrictions, Player, WorldKey,
 };
 use crate::resources::{ObjectProto, TriggerCatalog};
 
@@ -48,6 +48,22 @@ pub fn attach_timer_if_decaying(world: &mut World, entity: Entity, proto: &Objec
         remaining_secs: remaining,
         decompose_window_secs: decompose,
     });
+}
+
+/// True when `holder` is a player or mob, or sits (through any depth of
+/// nested containers) inside one.
+fn held_by_creature_chain(world: &World, holder: Entity) -> bool {
+    let mut at = holder;
+    for _ in 0..64 {
+        if world.get::<Player>(at).is_some() || world.get::<Mob>(at).is_some() {
+            return true;
+        }
+        let Some(next) = world.get::<Located>(at).map(|l| l.0) else {
+            return false;
+        };
+        at = next;
+    }
+    false
 }
 
 /// Spawn one instance of `proto` located in `location` (a room, a
@@ -103,7 +119,13 @@ pub fn spawn_item_from_proto(world: &mut World, proto: &ObjectProto, location: E
     if !proto.restrictions.is_empty() {
         bundle.insert(ObjectRestrictions(proto.restrictions.clone()));
     }
-    if let Some(h) = proto.initial_hiddenness() {
+    // Concealment only means something for an item lying in a room or in a
+    // container there. One minted straight into a creature's hands, pack or
+    // worn slot (login restore, chest withdraw, buy, conjure) is carried, and
+    // legacy `unhide_object` clears hiddenness on pickup, so it would only
+    // leave the item hidden even from its owner once dropped.
+    let carried = held_by_creature_chain(bundle.world(), location);
+    if !carried && let Some(h) = proto.initial_hiddenness() {
         bundle.insert(h);
     }
     let spawned = bundle.id();
