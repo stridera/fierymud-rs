@@ -3134,59 +3134,6 @@ inventory::submit! {
     }
 }
 
-inventory::submit! {
-    Command {
-        names: &["osearch"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "osearch <substring>",
-            summary: "Find object prototypes by name or keyword substring.",
-            long: "Builder+. Case-insensitive substring match against \
-                   each ObjectProto's name and keyword list. Prints \
-                   '(zone, id) name' per match, capped at 50 results. \
-                   Pair with 'ostat <zone> <id>' for full proto detail.",
-        },
-        run: cmd_osearch,
-    }
-}
-
-inventory::submit! {
-    Command {
-        names: &["msearch"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "msearch <substring>",
-            summary: "Find mob prototypes by name or keyword substring.",
-            long: "Builder+. Case-insensitive substring match against \
-                   each MobProto's name and keywords. Same shape as \
-                   'osearch'. Pair with 'mstat <zone> <id>' for full \
-                   proto detail.",
-        },
-        run: cmd_msearch,
-    }
-}
-
-inventory::submit! {
-    Command {
-        names: &["rsearch"],
-        min_role: UserRole::Builder,
-        required_perm: None,
-        category: Category::Admin,
-        help: Help {
-            usage: "rsearch <substring>",
-            summary: "Find rooms by name substring.",
-            long: "Builder+. Case-insensitive substring match against \
-                   the room's 'Named' value. Prints '(zone, id) name' \
-                   per match, capped at 50.",
-        },
-        run: cmd_rsearch,
-    }
-}
-
 fn parse_ability_kind(s: &str) -> Option<mud_db::abilities::AbilityKind> {
     use mud_db::abilities::AbilityKind as K;
     match s.to_ascii_lowercase().as_str() {
@@ -3602,72 +3549,6 @@ pub(crate) fn cmd_csearch(world: &mut World, player: Entity, args: &str) {
         out.push_str(&format!("  <dim>[{id:>2}]</> {name}{suffix}\r\n"));
     }
     crate::commands::send_rendered(world, player, &out);
-}
-
-pub(crate) fn cmd_osearch(world: &mut World, player: Entity, args: &str) {
-    let needle = args.trim();
-    if needle.is_empty() {
-        send_to(world, player, "Usage: osearch <substring>\r\n");
-        return;
-    }
-    let needle_lc = needle.to_ascii_lowercase();
-    let mut hits: Vec<((i32, i32), String)> = world
-        .resource::<ObjectPrototypes>()
-        .by_key
-        .iter()
-        .filter(|(_, p)| {
-            p.name.to_ascii_lowercase().contains(&needle_lc)
-                || p.keywords
-                    .iter()
-                    .any(|k| k.to_ascii_lowercase().contains(&needle_lc))
-        })
-        .map(|((z, id), p)| ((*z, *id), p.name.clone()))
-        .collect();
-    // Stable order by (zone, id) so consecutive runs read the
-    // same; HashMap iteration order is unstable otherwise.
-    hits.sort_by_key(|((z, id), _)| (*z, *id));
-    render_search_results(world, player, "object", needle, &hits);
-}
-
-pub(crate) fn cmd_msearch(world: &mut World, player: Entity, args: &str) {
-    let needle = args.trim();
-    if needle.is_empty() {
-        send_to(world, player, "Usage: msearch <substring>\r\n");
-        return;
-    }
-    let needle_lc = needle.to_ascii_lowercase();
-    let mut hits: Vec<((i32, i32), String)> = world
-        .resource::<MobPrototypes>()
-        .by_key
-        .iter()
-        .filter(|(_, p)| {
-            p.name.to_ascii_lowercase().contains(&needle_lc)
-                || p.keywords
-                    .iter()
-                    .any(|k| k.to_ascii_lowercase().contains(&needle_lc))
-        })
-        .map(|((z, id), p)| ((*z, *id), p.name.clone()))
-        .collect();
-    hits.sort_by_key(|((z, id), _)| (*z, *id));
-    render_search_results(world, player, "mob", needle, &hits);
-}
-
-pub(crate) fn cmd_rsearch(world: &mut World, player: Entity, args: &str) {
-    let needle = args.trim();
-    if needle.is_empty() {
-        send_to(world, player, "Usage: rsearch <substring>\r\n");
-        return;
-    }
-    let needle_lc = needle.to_ascii_lowercase();
-    let mut hits: Vec<((i32, i32), String)> = {
-        let mut q = world.query_filtered::<(&WorldKey, &Named), With<mud_world::Room>>();
-        q.iter(world)
-            .filter(|(_, n)| n.name.to_ascii_lowercase().contains(&needle_lc))
-            .map(|(k, n)| ((k.zone, k.id), n.name.clone()))
-            .collect()
-    };
-    hits.sort_by_key(|((z, id), _)| (*z, *id));
-    render_search_results(world, player, "room", needle, &hits);
 }
 
 fn render_search_results(

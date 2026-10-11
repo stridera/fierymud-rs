@@ -1,14 +1,19 @@
-//! `at`, `vnum` family, `vstat`, `vsearch` / `esearch` / `tsearch`.
+//! `at`, `vnum` family, `vstat`, `vsearch` / `esearch` / `tsearch`,
+//! `osearch` / `msearch` / `rsearch`.
 //! Test-only.
 
 use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
-use mud_db::enums::{Direction, ExitState, MobProfession, ObjectType, UserRole, effective_rank};
+use mud_db::enums::{
+    Direction, ExitState, MobBehavior, MobProfession, ObjectFlag, ObjectType, Sector, UserRole,
+    WearFlag, effective_rank,
+};
 use mud_world::{
-    Account, Description, ExitData, Exits, Ghost, Located, Mob, MobPrototypes, Named,
-    ObjectPrototypes, Online, Player, Profile, Room, TriggerAttach, TriggerCatalog, TriggerDef,
-    WorldKey, WorldKeyIndex,
+    Account, Description, EffectCatalog, EffectDef, ExitData, Exits, Ghost, Located, Mob,
+    MobPrototypes, Named, NoMagicRoom, ObjectGrantedEffect, ObjectPrototypes, Online, PeacefulRoom,
+    Player, Profile, Room, RoomSector, TriggerAttach, TriggerCatalog, TriggerDef, WorldKey,
+    WorldKeyIndex,
 };
 
 use super::super::dispatch;
@@ -226,6 +231,9 @@ fn mortals_are_refused() {
         "vsearch mob level 5",
         "esearch keyword door",
         "tsearch name greet",
+        "osearch level 1",
+        "msearch level 1",
+        "rsearch name hall",
     ] {
         dispatch(&mut w, p, cmd);
         let out = drain(&mut rx);
@@ -399,4 +407,247 @@ fn vstat_shows_a_mob_without_spawning_it() {
     assert!(drain(&mut rx).contains("either 'obj' or 'mob'"));
     dispatch(&mut w, p, "vstat");
     assert!(drain(&mut rx).contains("Usage: vstat"));
+}
+
+fn add_object(
+    w: &mut World,
+    key: (i32, i32),
+    name: &str,
+    kind: ObjectType,
+    wear: &[WearFlag],
+    level: i32,
+) {
+    let mut o = object_proto(key.0, key.1, kind);
+    o.name = name.into();
+    o.keywords = name.split_whitespace().map(str::to_string).collect();
+    o.wear_flags = wear.to_vec();
+    o.level = level;
+    w.resource_mut::<ObjectPrototypes>().by_key.insert(key, o);
+}
+
+fn effect(id: i32, name: &str) -> EffectDef {
+    EffectDef {
+        id,
+        name: name.into(),
+        description: None,
+        effect_type: "status".into(),
+        tags: vec![],
+        presence_override: None,
+        default_params: serde_json::json!({}),
+        prevents_speaking: false,
+        prevents_casting: false,
+        prevents_movement: false,
+        on_apply: None,
+        on_tick: None,
+        on_remove: None,
+    }
+}
+
+fn osearch_fx() -> (World, Entity, Rx) {
+    let (mut w, p, _a, _b, rx) = two_rooms();
+    add_object(
+        &mut w,
+        (30, 1),
+        "a bronze helm",
+        ObjectType::Armor,
+        &[WearFlag::Head],
+        10,
+    );
+    add_object(
+        &mut w,
+        (30, 2),
+        "a gem collar",
+        ObjectType::Armor,
+        &[WearFlag::Neck, WearFlag::Head],
+        25,
+    );
+    add_object(
+        &mut w,
+        (31, 3),
+        "a rusty sword",
+        ObjectType::Weapon,
+        &[WearFlag::Mainhand],
+        12,
+    );
+    add_object(
+        &mut w,
+        (31, 4),
+        "a fire staff",
+        ObjectType::Fireweapon,
+        &[],
+        40,
+    );
+    {
+        let mut objs = w.resource_mut::<ObjectPrototypes>();
+        let collar = objs.by_key.get_mut(&(30, 2)).unwrap();
+        collar.flags = vec![ObjectFlag::Glow];
+        collar.timer_hours = 6;
+        collar.granted_effects = vec![ObjectGrantedEffect {
+            effect_id: 9,
+            strength: 1,
+            modifier_data: serde_json::json!({}),
+            wear_location: None,
+        }];
+    }
+    let mut effects = EffectCatalog::default();
+    effects.by_id.insert(9, effect(9, "Sanctuary"));
+    w.insert_resource(effects);
+    (w, p, rx)
+}
+
+#[test]
+fn osearch_filters_by_type_wear_flags_and_effects() {
+    let (mut w, p, mut rx) = osearch_fx();
+    // Type: whole-word prefix, so "weapon" is not Fireweapon.
+    dispatch(&mut w, p, "osearch type weapon");
+    let out = drain(&mut rx);
+    assert!(out.contains("31:3") && !out.contains("31:4"), "{out}");
+    dispatch(&mut w, p, "osearch type fire");
+    assert!(drain(&mut rx).contains("31:4"));
+    // Several wear flags must all be present; abbreviations work.
+    dispatch(&mut w, p, "osearch wear head neck");
+    let out = drain(&mut rx);
+    assert!(out.contains("30:2") && !out.contains("30:1"), "{out}");
+    dispatch(&mut w, p, "osearch wear hea");
+    let out = drain(&mut rx);
+    assert!(out.contains("30:1") && out.contains("30:2"), "{out}");
+    // Item flags, granted effects, timer.
+    dispatch(&mut w, p, "osearch extraflags glow");
+    let out = drain(&mut rx);
+    assert!(out.contains("30:2") && !out.contains("30:1"), "{out}");
+    dispatch(&mut w, p, "osearch effflags sanctuary");
+    let out = drain(&mut rx);
+    assert!(out.contains("30:2") && !out.contains("30:1"), "{out}");
+    dispatch(&mut w, p, "osearch timer >0");
+    assert!(drain(&mut rx).contains("30:2"));
+}
+
+#[test]
+fn osearch_filters_by_level_zone_and_name() {
+    let (mut w, p, mut rx) = osearch_fx();
+    // Level range, both grammars; zone scope.
+    dispatch(&mut w, p, "osearch level 11..30");
+    let out = drain(&mut rx);
+    assert!(
+        out.contains("30:2") && out.contains("31:3") && !out.contains("30:1"),
+        "{out}"
+    );
+    dispatch(&mut w, p, "osearch level bt 11 and 30");
+    let out = drain(&mut rx);
+    assert!(
+        out.contains("30:2") && out.contains("31:3") && !out.contains("30:1"),
+        "{out}"
+    );
+    dispatch(&mut w, p, "osearch level gt 30");
+    let out = drain(&mut rx);
+    assert!(out.contains("31:4") && !out.contains("31:3"), "{out}");
+    dispatch(&mut w, p, "osearch level 1..99 in 31");
+    let out = drain(&mut rx);
+    assert!(out.contains("31:3") && !out.contains("30:"), "{out}");
+    // Name search, no matches, bad field, no field.
+    dispatch(&mut w, p, "osearch name helm");
+    assert!(drain(&mut rx).contains("30:1"));
+    dispatch(&mut w, p, "osearch wear tail");
+    assert!(drain(&mut rx).contains("No object prototypes match"));
+    // Text that starts with no field is a name search, with the fields
+    // listed when it finds nothing; `vsearch` still rejects it.
+    dispatch(&mut w, p, "osearch rust");
+    assert!(drain(&mut rx).contains("31:3"));
+    dispatch(&mut w, p, "osearch bogus 1");
+    let out = drain(&mut rx);
+    assert!(
+        out.contains("No object prototypes match") && out.contains("search fields"),
+        "{out}"
+    );
+    dispatch(&mut w, p, "vsearch objects bogus 1");
+    assert!(drain(&mut rx).contains("Unrecognized search field"));
+    dispatch(&mut w, p, "osearch");
+    assert!(drain(&mut rx).contains("search fields"));
+}
+
+#[test]
+fn msearch_filters_by_flags_level_and_race() {
+    let (mut w, p, _a, _b, mut rx) = two_rooms();
+    add_mob(&mut w, (30, 5), "a sleepy guard", &["guard"]);
+    add_mob(&mut w, (30, 6), "a twitchy scout", &["scout"]);
+    add_mob(&mut w, (31, 7), "a plain clerk", &["clerk"]);
+    {
+        let mut mobs = w.resource_mut::<MobPrototypes>();
+        let g = mobs.by_key.get_mut(&(30, 5)).unwrap();
+        g.behaviors = vec![MobBehavior::Sentinel, MobBehavior::Wimpy];
+        g.level = 30;
+        g.race = "dwarf".into();
+        let s = mobs.by_key.get_mut(&(30, 6)).unwrap();
+        s.behaviors = vec![MobBehavior::Wimpy];
+        s.level = 8;
+    }
+    dispatch(&mut w, p, "msearch flags sentinel");
+    let out = drain(&mut rx);
+    assert!(out.contains("30:5") && !out.contains("30:6"), "{out}");
+    dispatch(&mut w, p, "msearch flags wimpy");
+    let out = drain(&mut rx);
+    assert!(out.contains("30:5") && out.contains("30:6"), "{out}");
+    dispatch(&mut w, p, "msearch flags sentinel wimpy");
+    let out = drain(&mut rx);
+    assert!(out.contains("30:5") && !out.contains("30:6"), "{out}");
+    // Profession is a mob flag too (the test proto is a banker).
+    dispatch(&mut w, p, "msearch flags banker");
+    let out = drain(&mut rx);
+    assert!(out.contains("30:6") && out.contains("31:7"), "{out}");
+    dispatch(&mut w, p, "msearch level 20..40");
+    let out = drain(&mut rx);
+    assert!(out.contains("30:5") && !out.contains("30:6"), "{out}");
+    dispatch(&mut w, p, "msearch race dwarf");
+    assert!(drain(&mut rx).contains("30:5"));
+    dispatch(&mut w, p, "msearch name scout in 31");
+    assert!(drain(&mut rx).contains("No mob prototypes match"));
+    dispatch(&mut w, p, "msearch flags");
+    assert!(drain(&mut rx).contains("Search flags for what"));
+}
+
+#[test]
+fn rsearch_filters_by_sector_and_room_flags() {
+    let (mut w, p, a, b, mut rx) = two_rooms();
+    w.entity_mut(a).insert(RoomSector(Sector::City));
+    w.entity_mut(b)
+        .insert((RoomSector(Sector::Underwater), NoMagicRoom, PeacefulRoom));
+    dispatch(&mut w, p, "rsearch sector city");
+    let out = drain(&mut rx);
+    assert!(out.contains("30:1") && !out.contains("30:2"), "{out}");
+    dispatch(&mut w, p, "rsearch sector water");
+    assert!(
+        drain(&mut rx).contains("No rooms match"),
+        "prefix, not substring"
+    );
+    dispatch(&mut w, p, "rsearch flags nomagic");
+    let out = drain(&mut rx);
+    assert!(out.contains("30:2") && !out.contains("30:1"), "{out}");
+    dispatch(&mut w, p, "rsearch flags nomagic peaceful");
+    assert!(drain(&mut rx).contains("30:2"));
+    dispatch(&mut w, p, "rsearch flags nomagic deathtrap");
+    assert!(drain(&mut rx).contains("No rooms match"));
+    dispatch(&mut w, p, "rsearch name cellar");
+    assert!(drain(&mut rx).contains("30:2"));
+    dispatch(&mut w, p, "vsearch rooms flags peaceful");
+    assert!(drain(&mut rx).contains("30:2"));
+}
+
+#[test]
+fn searches_cap_at_100_rows_and_say_how_many_more() {
+    let (mut w, p, _a, _b, mut rx) = two_rooms();
+    for id in 1..=130 {
+        add_object(
+            &mut w,
+            (40, id),
+            "a copper coin",
+            ObjectType::Treasure,
+            &[],
+            1,
+        );
+    }
+    dispatch(&mut w, p, "osearch type treasure");
+    let out = drain(&mut rx);
+    assert!(out.contains("100 of 130"), "{out}");
+    assert!(out.contains("30 more"), "{out}");
+    assert!(out.contains("40:100") && !out.contains("40:101"), "{out}");
 }

@@ -7,21 +7,28 @@
 //! | `vnum` `mnum` `onum` `rnum` `tnum` | `LVL_ATTENDANT` | Builder   |
 //! | `vstat`                         | `LVL_ATTENDANT`   | Builder   |
 //! | `vsearch` `esearch` `tsearch`   | `LVL_ATTENDANT`   | Builder   |
+//! | `osearch` `msearch` `rsearch`   | `LVL_ATTENDANT`   | Builder   |
 //!
 //! Legacy levels 101 and 102 both map to the `Builder` role
 //! (`UserRole::from_level`). Every id printed here is the composite
 //! `zone:id`; the same form is accepted back by `goto`, `at` and `vstat`.
 //!
+//! `osearch` / `msearch` / `rsearch` are `vsearch objects|mobiles|rooms`
+//! under the legacy per-type names (`do_osearch` and friends): the same
+//! `<field> <query>` grammar, with the flag-set fields (`wear`,
+//! `extraflags`, `effflags`, mob `flags`, room `flags`) taking several
+//! flag words that must all be present.
+//!
 //! Skipped from legacy `vsearch`: shop / zone / reset-command / skill
-//! searches and the long tail of mob and object value fields (flag sets,
-//! per-type values, applies). The commands that remain cover the
+//! searches and the long tail of per-type value fields (weapon dice,
+//! liquids, portal targets, applies). The commands that remain cover the
 //! prototype, trigger and exit tables a builder reaches for most.
 
 use bevy_ecs::prelude::*;
 use mud_db::enums::UserRole;
 use mud_world::{
-    Description, Exits, Ghost, Located, MobPrototypes, Named, ObjectPrototypes, Room, RoomSector,
-    TriggerAttach, TriggerCatalog, WorldKey,
+    Description, EffectCatalog, Exits, Ghost, Located, MobDefaultEffectCatalog, MobPrototypes,
+    Named, ObjectPrototypes, Room, RoomSector, TriggerAttach, TriggerCatalog, WorldKey,
 };
 
 use crate::commands::admin_inspect::{cmd_mstat, cmd_ostat};
@@ -29,7 +36,7 @@ use crate::commands::admin_world::resolve_staff_destination;
 use crate::commands::{Category, Command, Help, send_rendered, send_to, skip_n_tokens};
 
 /// Most rows one search prints.
-const RESULT_LIMIT: usize = 50;
+const RESULT_LIMIT: usize = 100;
 
 inventory::submit! {
     Command {
@@ -165,6 +172,51 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
+        names: &["osearch"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "osearch <field> <query> [in <zone>]",
+            summary: "Search object prototypes by name, type, wear or effect flags, level, ...",
+            long: OSEARCH_HELP,
+        },
+        run: cmd_osearch,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["msearch"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "msearch <field> <query> [in <zone>]",
+            summary: "Search mob prototypes by name, flags, level, race, size, ...",
+            long: MSEARCH_HELP,
+        },
+        run: cmd_msearch,
+    }
+}
+
+inventory::submit! {
+    Command {
+        names: &["rsearch"],
+        min_role: UserRole::Builder,
+        required_perm: None,
+        category: Category::Admin,
+        help: Help {
+            usage: "rsearch <field> <query> [in <zone>]",
+            summary: "Search rooms by name, description, sector or room flags.",
+            long: RSEARCH_HELP,
+        },
+        run: cmd_rsearch,
+    }
+}
+
+inventory::submit! {
+    Command {
         names: &["esearch"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -195,7 +247,7 @@ inventory::submit! {
 
 const VNUM_HELP: &str = "Builder+. Lists prototypes whose name or keywords \
     start with every word you give, as 'zone:id name', sorted by id and \
-    capped at 50 rows. 'vnum' takes a type first (mobiles, objects, rooms, \
+    capped at 100 rows. 'vnum' takes a type first (mobiles, objects, rooms, \
     triggers, exits), 'mnum' / 'onum' / 'rnum' / 'tnum' are the same \
     search for one type. Add 'in <zone>' to stay in one zone. Pair with \
     'vstat', 'rstat' or 'tstat', or jump with 'goto <zone>:<id>'.";
@@ -205,8 +257,40 @@ const VSEARCH_HELP: &str = "Builder+. Search one table by a field. Run it \
     fields. Text fields match a substring; 'name' fields match whole-word \
     prefixes of the name and keywords. Number fields take 5, >5, <5, >=5, \
     <=5, !5 or 5..9 (an inclusive range). Add 'in <zone>' at the end to \
-    stay in one zone. Shops, zones, reset commands and skills are not \
-    searchable here.";
+    stay in one zone. Flag fields (wear, extraflags, effflags, flags, \
+    type, size, sector, ...) take one or more flag names, abbreviations \
+    allowed, and match when every one is present. Output is capped at \
+    100 rows. Shops, zones, reset commands and skills are not searchable \
+    here.";
+
+const OSEARCH_HELP: &str = "Builder+. 'osearch <field> <query> [in <zone>]' \
+    searches object prototypes (legacy 'osearch'; same as 'vsearch \
+    objects'). Fields: name, short, long, desc, type, wear, extraflags \
+    (glow, magic, nodrop, ...), effflags (effects the item grants, e.g. \
+    sanctuary), level, weight, cost, timer. Examples: 'osearch type \
+    weapon', 'osearch wear head neck', 'osearch effflags sanctuary in \
+    30', 'osearch level 20..30', 'osearch cost gt 5000'. Numbers take 5, \
+    >5, <5, >=5, <=5, !5, 5..9 or the legacy 'gt 5' / 'bt 5 9'. Add 'in \
+    <zone>' to stay in one zone; at most 100 rows print.";
+
+const MSEARCH_HELP: &str = "Builder+. 'msearch <field> <query> [in <zone>]' \
+    searches mob prototypes (legacy 'msearch'; same as 'vsearch \
+    mobiles'). Fields: name, short, long, desc, race, gender, role, \
+    level, alignment, flags (sentinel, wimpy, shopkeeper, aquatic, ...), \
+    effflags (permanent effects), size, lifeforce. Examples: 'msearch \
+    flags sentinel wimpy', 'msearch level 30..40 in 12', 'msearch race \
+    dragon', 'msearch lifeforce undead'. Numbers take 5, >5, <5, >=5, \
+    <=5, !5, 5..9 or the legacy 'gt 5' / 'bt 5 9'. Add 'in <zone>' to \
+    stay in one zone; at most 100 rows print.";
+
+const RSEARCH_HELP: &str = "Builder+. 'rsearch <field> <query> [in <zone>]' \
+    searches rooms (legacy 'rsearch'; same as 'vsearch rooms'). Fields: \
+    name, desc, sector (city, forest, water, ...), flags (peaceful, \
+    nomagic, norecall, nosummon, noteleport, deathtrap, indoors, \
+    soundproof, arena, guildhall, nomobs, notracking, noportals, \
+    noscanning, inn). Examples: 'rsearch flags deathtrap', 'rsearch \
+    sector forest in 30', 'rsearch flags nomagic peaceful'. Add 'in \
+    <zone>' to stay in one zone; at most 100 rows print.";
 
 // ---------------------------------------------------------------------------
 // at
@@ -319,22 +403,33 @@ impl Kind {
                 (&["role"], Class::Text),
                 (&["level"], Class::Num),
                 (&["alignment"], Class::Num),
+                (
+                    &["flags", "actflags", "mobflags", "behaviors"],
+                    Class::Flags,
+                ),
+                (&["effflags", "spellflags"], Class::Flags),
+                (&["size"], Class::Flags),
+                (&["lifeforce"], Class::Flags),
             ],
             Self::Object => &[
                 (&["name", "alias", "keywords"], Class::Words),
                 (&["short", "shortdesc"], Class::Text),
                 (&["long", "longdesc"], Class::Text),
                 (&["desc", "description"], Class::Text),
-                (&["type"], Class::Text),
-                (&["wear", "worn"], Class::Text),
+                (&["type"], Class::Flags),
+                (&["wear", "worn"], Class::Flags),
+                (&["extraflags", "bits"], Class::Flags),
+                (&["effflags", "spellflags"], Class::Flags),
                 (&["level"], Class::Num),
                 (&["weight"], Class::Num),
                 (&["cost"], Class::Num),
+                (&["timer"], Class::Num),
             ],
             Self::Room => &[
                 (&["name", "title"], Class::Words),
                 (&["desc", "description"], Class::Text),
-                (&["sector"], Class::Text),
+                (&["sector"], Class::Flags),
+                (&["flags", "roomflags"], Class::Flags),
             ],
             Self::Trigger => &[
                 (&["name"], Class::Words),
@@ -362,6 +457,8 @@ enum Class {
     Text,
     /// Number with a comparison.
     Num,
+    /// One or more flag names, abbreviations allowed; all must be present.
+    Flags,
 }
 
 /// Prototype kinds by typed word, abbreviations allowed, in legacy
@@ -450,6 +547,8 @@ enum Query {
     Words(String),
     Text(String),
     Num(NumQuery),
+    /// Normalized flag words (see [`norm`]).
+    Flags(Vec<String>),
 }
 
 /// A field's value on one candidate.
@@ -458,6 +557,8 @@ enum Val {
     Words(String, Vec<String>),
     Text(String),
     Num(i64),
+    /// Normalized flag names the candidate carries.
+    Flags(Vec<String>),
     /// The field does not apply (an exit with no key).
     Absent,
 }
@@ -471,9 +572,93 @@ impl Query {
             }
             (Self::Text(q), Val::Text(t)) => t.to_ascii_lowercase().contains(q),
             (Self::Num(q), Val::Num(n)) => q.test(*n),
+            (Self::Flags(want), Val::Flags(have)) => want
+                .iter()
+                .all(|w| have.iter().any(|h| h.starts_with(w.as_str()))),
             _ => false,
         }
     }
+}
+
+/// Lowercase letters and digits only, so `NoSummon`, `no-summon` and
+/// `NO_SUMMON` all compare equal.
+fn norm(s: &str) -> String {
+    s.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// Normalized `Debug` names of a flag list.
+fn debug_flags<T: std::fmt::Debug>(items: &[T]) -> Vec<String> {
+    items.iter().map(|i| norm(&format!("{i:?}"))).collect()
+}
+
+/// Effect names and status flags of one effect row (an object's granted
+/// effect or a mob's default effect), as `effflags` searches them.
+fn effect_flag_names(world: &World, effect_id: i32, modifier: &serde_json::Value) -> Vec<String> {
+    let Some(def) = world
+        .get_resource::<EffectCatalog>()
+        .and_then(|c| c.by_id.get(&effect_id))
+    else {
+        return Vec::new();
+    };
+    let mut names = vec![norm(&def.name)];
+    names.extend(
+        mud_world::mob_effects::row_flags(modifier, &def.default_params)
+            .iter()
+            .map(|f| norm(f)),
+    );
+    names
+}
+
+/// The room-boolean marker components a room carries, by flag name.
+fn room_flag_names(world: &World, room: Entity) -> Vec<String> {
+    use mud_world::{
+        ArenaRoom, DeathTrap, GuildhallRoom, IndoorRoom, InnRoom, NoMagicRoom, NoMobsRoom,
+        NoPortalsRoom, NoRecallRoom, NoScanningRoom, NoSummonRoom, NoTeleportRoom, NoTrackingRoom,
+        PeacefulRoom, SoundproofRoom,
+    };
+    let e = world.entity(room);
+    let mut names = Vec::new();
+    macro_rules! flag {
+        ($($ty:ty => $name:literal),* $(,)?) => {
+            $(if e.contains::<$ty>() { names.push($name.to_string()); })*
+        };
+    }
+    flag! {
+        PeacefulRoom => "peaceful", NoMagicRoom => "nomagic", NoRecallRoom => "norecall",
+        NoSummonRoom => "nosummon", NoTeleportRoom => "noteleport", DeathTrap => "deathtrap",
+        IndoorRoom => "indoors", SoundproofRoom => "soundproof", ArenaRoom => "arena",
+        GuildhallRoom => "guildhall", NoMobsRoom => "nomobs", NoTrackingRoom => "notracking",
+        NoPortalsRoom => "noportals", NoScanningRoom => "noscanning", InnRoom => "inn",
+    }
+    names
+}
+
+/// Legacy comparison words (`gt 5`, `le 3`, `bt 5 and 9`) rewritten to the
+/// symbol forms [`NumQuery::parse`] reads. Anything else passes through.
+fn legacy_num_text(words: &[String]) -> String {
+    let lower: Vec<String> = words.iter().map(|w| w.to_ascii_lowercase()).collect();
+    let sym = match lower.first().map(String::as_str) {
+        Some("gt") => Some(">"),
+        Some("lt") => Some("<"),
+        Some("ge") => Some(">="),
+        Some("le") => Some("<="),
+        Some("ne" | "not") => Some("!"),
+        Some("eq" | "is" | "equals") => Some(""),
+        _ => None,
+    };
+    if let (Some(sym), [_, n]) = (sym, lower.as_slice()) {
+        return format!("{sym}{n}");
+    }
+    if matches!(lower.first().map(String::as_str), Some("bt" | "between")) {
+        let nums: Vec<&String> = lower[1..].iter().filter(|w| *w != "and").collect();
+        if let [a, b] = nums.as_slice() {
+            return format!("{a}..{b}");
+        }
+    }
+    words.join(" ")
 }
 
 /// One search result: `((zone, id), row text)`.
@@ -537,6 +722,23 @@ fn collect_hits(
                     "role" => Val::Text(p.role.label().to_string()),
                     "level" => Val::Num(i64::from(p.level)),
                     "alignment" => Val::Num(i64::from(p.alignment)),
+                    "flags" => {
+                        let mut f = debug_flags(&p.behaviors);
+                        f.extend(debug_flags(&p.traits));
+                        f.extend(debug_flags(&p.professions));
+                        Val::Flags(f)
+                    }
+                    "effflags" => Val::Flags(
+                        world
+                            .get_resource::<MobDefaultEffectCatalog>()
+                            .and_then(|c| c.by_key.get(&(*z, *id)))
+                            .into_iter()
+                            .flatten()
+                            .flat_map(|e| effect_flag_names(world, e.effect_id, &e.modifier_data))
+                            .collect(),
+                    ),
+                    "size" => Val::Flags(debug_flags(&[p.size])),
+                    "lifeforce" => Val::Flags(debug_flags(&[p.life_force])),
                     _ => Val::Absent,
                 };
                 if query.matches(&val) {
@@ -554,14 +756,20 @@ fn collect_hits(
                     "short" => Val::Text(p.name.clone()),
                     "long" => Val::Text(p.room_description.clone()),
                     "desc" => Val::Text(p.examine_description.clone().unwrap_or_default()),
-                    "type" => Val::Text(p.r#type.label().to_string()),
-                    "wear" => Val::Text(
-                        p.wear_flags
+                    "type" => Val::Flags(debug_flags(&[p.r#type])),
+                    "wear" => Val::Flags(debug_flags(&p.wear_flags)),
+                    "extraflags" => {
+                        let mut f = debug_flags(&p.flags);
+                        f.extend(debug_flags(&p.restrictions));
+                        Val::Flags(f)
+                    }
+                    "effflags" => Val::Flags(
+                        p.granted_effects
                             .iter()
-                            .map(|w| format!("{w:?}"))
-                            .collect::<Vec<_>>()
-                            .join(" "),
+                            .flat_map(|e| effect_flag_names(world, e.effect_id, &e.modifier_data))
+                            .collect(),
                     ),
+                    "timer" => Val::Num(i64::from(p.timer_hours)),
                     "level" => Val::Num(i64::from(p.level)),
                     // Whole weight units, like the stat output.
                     #[allow(clippy::cast_possible_truncation)]
@@ -579,30 +787,33 @@ fn collect_hits(
         }
         Kind::Room => {
             let mut q = world.query_filtered::<(
+                Entity,
                 &WorldKey,
                 &Named,
                 Option<&Description>,
                 Option<&RoomSector>,
             ), With<Room>>();
-            let rows: Vec<(WorldKey, String, String, String)> = q
+            let rows: Vec<(Entity, WorldKey, String, String, String)> = q
                 .iter(world)
-                .map(|(k, n, d, s)| {
+                .map(|(e, k, n, d, s)| {
                     (
+                        e,
                         *k,
                         n.name.clone(),
                         d.map(|d| d.0.clone()).unwrap_or_default(),
-                        s.map(|s| format!("{:?}", s.0)).unwrap_or_default(),
+                        s.map(|s| norm(&format!("{:?}", s.0))).unwrap_or_default(),
                     )
                 })
                 .collect();
-            for (k, name, desc, sector) in rows {
+            for (entity, k, name, desc, sector) in rows {
                 if !visible(world, viewer, k.zone, zone_filter) {
                     continue;
                 }
                 let val = match field {
                     "name" => Val::Words(name.clone(), Vec::new()),
                     "desc" => Val::Text(desc),
-                    "sector" => Val::Text(sector),
+                    "sector" => Val::Flags(vec![sector]),
+                    "flags" => Val::Flags(room_flag_names(world, entity)),
                     _ => Val::Absent,
                 };
                 if query.matches(&val) {
@@ -806,7 +1017,10 @@ pub(crate) fn cmd_tnum(world: &mut World, player: Entity, args: &str) {
 // ---------------------------------------------------------------------------
 
 /// Parse `<field> <query...> [in <zone>]` for `kind` and print the hits.
-fn run_search(world: &mut World, player: Entity, kind: Kind, args: &str) {
+/// With `bare_name` (`osearch` / `msearch` / `rsearch`), text whose first
+/// word is not a search field is read as a name search, so
+/// `osearch dagger` keeps working.
+fn run_search(world: &mut World, player: Entity, kind: Kind, args: &str, bare_name: bool) {
     let tokens: Vec<&str> = args.split_whitespace().collect();
     let Some(field_word) = tokens.first() else {
         send_to(world, player, field_list(kind));
@@ -824,6 +1038,29 @@ fn run_search(world: &mut World, player: Entity, kind: Kind, args: &str) {
                 .find(|(names, _)| names.iter().any(|n| n.starts_with(&fw)))
         })
     else {
+        if bare_name {
+            let (words, zone) = match split_zone_filter(&tokens) {
+                Ok(p) => p,
+                Err(msg) => {
+                    send_to(world, player, msg);
+                    return;
+                }
+            };
+            let needle = words.join(" ").to_ascii_lowercase();
+            let hits = collect_hits(
+                world,
+                player,
+                kind,
+                "name",
+                &Query::Words(needle.clone()),
+                zone,
+            );
+            send_hits(world, player, kind, &format!("'{needle}'"), &hits);
+            if hits.is_empty() {
+                send_to(world, player, field_list(kind));
+            }
+            return;
+        }
         send_to(
             world,
             player,
@@ -850,8 +1087,20 @@ fn run_search(world: &mut World, player: Entity, kind: Kind, args: &str) {
     let query = match class {
         Class::Words => Query::Words(text.to_ascii_lowercase()),
         Class::Text => Query::Text(text.to_ascii_lowercase()),
+        Class::Flags => {
+            let wanted: Vec<String> = words
+                .iter()
+                .map(|w| norm(w))
+                .filter(|w| !w.is_empty())
+                .collect();
+            if wanted.is_empty() {
+                send_to(world, player, format!("Search {canonical} for what?\r\n"));
+                return;
+            }
+            Query::Flags(wanted)
+        }
         Class::Num => {
-            let Some(n) = NumQuery::parse(&text) else {
+            let Some(n) = NumQuery::parse(&legacy_num_text(&words)) else {
                 send_to(
                     world,
                     player,
@@ -883,15 +1132,27 @@ pub(crate) fn cmd_vsearch(world: &mut World, player: Entity, args: &str) {
         );
         return;
     };
-    run_search(world, player, kind, skip_n_tokens(args, 1));
+    run_search(world, player, kind, skip_n_tokens(args, 1), false);
+}
+
+pub(crate) fn cmd_osearch(world: &mut World, player: Entity, args: &str) {
+    run_search(world, player, Kind::Object, args, true);
+}
+
+pub(crate) fn cmd_msearch(world: &mut World, player: Entity, args: &str) {
+    run_search(world, player, Kind::Mob, args, true);
+}
+
+pub(crate) fn cmd_rsearch(world: &mut World, player: Entity, args: &str) {
+    run_search(world, player, Kind::Room, args, true);
 }
 
 pub(crate) fn cmd_esearch(world: &mut World, player: Entity, args: &str) {
-    run_search(world, player, Kind::Exit, args);
+    run_search(world, player, Kind::Exit, args, false);
 }
 
 pub(crate) fn cmd_tsearch(world: &mut World, player: Entity, args: &str) {
-    run_search(world, player, Kind::Trigger, args);
+    run_search(world, player, Kind::Trigger, args, false);
 }
 
 // ---------------------------------------------------------------------------

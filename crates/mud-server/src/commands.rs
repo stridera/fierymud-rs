@@ -17639,6 +17639,32 @@ pub(crate) fn invoke_ability_core(
                     ));
                     continue;
                 };
+                // `wield: true` (Ice Dagger): the conjured item goes
+                // straight into the wield slot, and the cast makes
+                // nothing when that hand is already full (legacy
+                // `spell_ice_dagger`: "Your hands are not free").
+                let wield = spec
+                    .override_params
+                    .as_ref()
+                    .and_then(|p| p.get("wield"))
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                if wield {
+                    let hand_full = {
+                        let mut q = world.query_filtered::<(&Located, &EquippedSlot), With<Item>>();
+                        q.iter(world)
+                            .any(|(l, eq)| l.0 == player && eq.0 == Slot::Wield)
+                    };
+                    if hand_full {
+                        send_to(
+                            world,
+                            player,
+                            format!("Your hands are not free to wield {}.\r\n", proto.name),
+                        );
+                        applied_msgs.push(format!("{pretty} (hands not free)"));
+                        continue;
+                    }
+                }
                 // Spawn into the caster's inventory rather than the
                 // room — Create Food / Minor Creation produce a
                 // carried item, not a room fixture (portals use the
@@ -17660,7 +17686,18 @@ pub(crate) fn invoke_ability_core(
                 }
                 let created = bundle.id();
                 mud_world::attach_proto_charges(world, created, proto.zone_id, proto.id);
-                applied_msgs.push(format!("{} ({} appears in your hands)", pretty, proto.name));
+                // A proto with a lifetime (`timer_hours`) rots like any
+                // other spawned copy of it.
+                crate::item_decay::attach_timer_if_decaying(world, created, &proto);
+                if wield && wear_item(world, player, created, WearWhere::Hands(Slot::Wield), false)
+                {
+                    applied_msgs.push(format!(
+                        "{} ({} is conjured and wielded)",
+                        pretty, proto.name
+                    ));
+                } else {
+                    applied_msgs.push(format!("{} ({} appears in your hands)", pretty, proto.name));
+                }
             }
             "portal" => {
                 // Spawn a specific Object proto in the caster's room

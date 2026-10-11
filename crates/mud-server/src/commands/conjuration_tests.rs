@@ -456,3 +456,84 @@ fn pick_food_scales_with_skill_and_never_overruns() {
     assert_eq!(conjuration::pick_food(&foods, -5, 0), Some((1, 0)));
     assert_eq!(conjuration::pick_food(&[], 50, 1), None);
 }
+
+// -- wielded conjuration (ice dagger) ---------------------------------------
+
+fn ice_dagger_fx() -> Fx {
+    let mut f = fx();
+    f.world
+        .insert_resource(mud_world::ObjectAbilityCatalog::default());
+    f.object((10, 47), ObjectType::Weapon);
+    {
+        let mut protos = f.world.resource_mut::<ObjectPrototypes>();
+        let dagger = protos.by_key.get_mut(&(10, 47)).unwrap();
+        dagger.name = "a dagger of ice".into();
+        dagger.wear_flags = vec![mud_db::enums::WearFlag::Mainhand];
+    }
+    f.spell(
+        "ICE_DAGGER",
+        "create",
+        serde_json::json!({"objectZoneId": 10, "objectId": 47, "wield": true}),
+    );
+    f
+}
+
+/// What the caster has in the wield slot.
+fn wielded(f: &mut Fx) -> Vec<(i32, i32)> {
+    let caster = f.caster;
+    let mut q = f
+        .world
+        .query_filtered::<(&Located, &WorldKey, &mud_world::EquippedSlot), With<Item>>();
+    q.iter(&f.world)
+        .filter(|(l, _, eq)| l.0 == caster && eq.0 == mud_world::Slot::Wield)
+        .map(|(_, k, _)| (k.zone, k.id))
+        .collect()
+}
+
+#[test]
+fn a_create_effect_with_wield_puts_the_object_in_the_wield_slot() {
+    let mut f = ice_dagger_fx();
+    let out = f.cast("'ice dagger'");
+    assert_eq!(f.carried(), vec![(10, 47)], "{out}");
+    assert_eq!(wielded(&mut f), vec![(10, 47)], "{out}");
+}
+
+#[test]
+fn a_create_effect_with_wield_makes_nothing_when_the_hand_is_full() {
+    let mut f = ice_dagger_fx();
+    f.cast("'ice dagger'");
+    let out = f.cast("'ice dagger'");
+    assert!(
+        out.contains("Your hands are not free to wield a dagger of ice"),
+        "{out}"
+    );
+    assert_eq!(f.carried(), vec![(10, 47)], "still just the first one");
+}
+
+#[test]
+fn a_create_effect_without_wield_only_carries() {
+    let mut f = ice_dagger_fx();
+    f.spell(
+        "ICE_DAGGER",
+        "create",
+        serde_json::json!({"objectZoneId": 10, "objectId": 47}),
+    );
+    f.cast("'ice dagger'");
+    assert_eq!(f.carried(), vec![(10, 47)]);
+    assert!(wielded(&mut f).is_empty());
+}
+
+#[test]
+fn a_created_object_with_a_lifetime_gets_a_decay_timer() {
+    let mut f = ice_dagger_fx();
+    f.world
+        .resource_mut::<ObjectPrototypes>()
+        .by_key
+        .get_mut(&(10, 47))
+        .unwrap()
+        .timer_hours = 2;
+    f.cast("'ice dagger'");
+    let mut q = f.world.query::<&mud_world::ItemTimer>();
+    let secs: Vec<i32> = q.iter(&f.world).map(|t| t.remaining_secs).collect();
+    assert_eq!(secs, vec![2 * crate::item_decay::SECS_PER_MUD_HOUR]);
+}
