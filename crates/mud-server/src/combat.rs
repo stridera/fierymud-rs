@@ -75,6 +75,44 @@ pub fn roll_dice(num: i32, sides: i32, bonus: i32) -> i32 {
     total
 }
 
+/// Inclusive `(min, max)` of [`roll_dice`] for the same arguments.
+#[must_use]
+pub fn dice_range(num: i32, sides: i32, bonus: i32) -> (i32, i32) {
+    if num <= 0 || sides <= 0 {
+        return (bonus, bonus);
+    }
+    (
+        bonus.saturating_add(num),
+        bonus.saturating_add(num.saturating_mul(sides)),
+    )
+}
+
+/// `LevelDefinition.hp_gain` scaled by the race `hp_factor` (percent),
+/// floored at 1. Shared by the real level-up and the score preview.
+#[must_use]
+pub fn race_scaled_hp_gain(table_hp_gain: i32, hp_factor: i32) -> i32 {
+    table_hp_gain
+        .saturating_mul(hp_factor)
+        .saturating_div(100)
+        .max(1)
+}
+
+/// Inclusive `(min, max)` HP a character can gain on a level-up:
+/// race-scaled table gain + class `hp_per_level` + the class hit-dice
+/// roll (`hit_dice` as parsed by [`parse_hit_dice`]).
+#[must_use]
+pub fn level_hp_gain_range(
+    table_hp_gain: i32,
+    hp_factor: i32,
+    class_hp_per_level: i32,
+    hit_dice: &str,
+) -> (i32, i32) {
+    let base = race_scaled_hp_gain(table_hp_gain, hp_factor).saturating_add(class_hp_per_level);
+    let (n, m, b) = parse_hit_dice(hit_dice);
+    let (lo, hi) = dice_range(n, m, b);
+    (base.saturating_add(lo), base.saturating_add(hi))
+}
+
 /// Spawn a single hardcoded test mob in The Void so combat tests have a
 /// stable target without depending on reset content. The Void has no
 /// MobResets/ObjectResets in the imported world, so this dummy is the
@@ -3345,11 +3383,7 @@ pub(crate) fn level_up_to(world: &mut World, entity: Entity, max_level: i32) {
                     });
                 (race_factor, class_hp, hit_dice_roll)
             });
-        let race_scaled = next_row
-            .hp_gain
-            .saturating_mul(hp_factor)
-            .saturating_div(100)
-            .max(1);
+        let race_scaled = race_scaled_hp_gain(next_row.hp_gain, hp_factor);
         let total_hp_gain = race_scaled
             .saturating_add(class_hp_per_level)
             .saturating_add(class_hit_dice_roll);
@@ -3456,6 +3490,25 @@ pub(crate) fn level_up_to(world: &mut World, entity: Entity, max_level: i32) {
 mod tests {
     use super::*;
     use mud_world::KnownAbilities;
+
+    #[test]
+    fn level_hp_gain_range_covers_race_class_and_dice() {
+        // Table gain 8 at a 100% race, class +6, 1d8: 8 + 6 + (1..=8).
+        assert_eq!(level_hp_gain_range(8, 100, 6, "1d8"), (15, 22));
+        // Race factor scales only the table part (floored at 1).
+        assert_eq!(level_hp_gain_range(8, 150, 6, "1d8"), (19, 26));
+        assert_eq!(race_scaled_hp_gain(1, 10), 1);
+        // No dice: a fixed gain.
+        assert_eq!(level_hp_gain_range(8, 100, 6, ""), (14, 14));
+        assert_eq!(dice_range(2, 6, 1), (3, 13));
+        // Every real roll falls inside the advertised range.
+        let (lo, hi) = level_hp_gain_range(8, 100, 6, "2d4+1");
+        for _ in 0..200 {
+            let (n, m, b) = parse_hit_dice("2d4+1");
+            let g = race_scaled_hp_gain(8, 100) + 6 + roll_dice(n, m, b);
+            assert!((lo..=hi).contains(&g), "{g} outside {lo}..={hi}");
+        }
+    }
 
     #[test]
     fn parse_hit_dice_handles_common_shapes() {

@@ -206,9 +206,11 @@ inventory::submit! {
         required_perm: None,
         category: Category::Banking,
         help: Help {
-            usage: "deposit <amount>",
-            summary: "Move copper into the bank.",
-            long: "Refuses if you don't have that much on hand. v1 \
+            usage: "deposit <amount> [copper|silver|gold|platinum] | deposit all",
+            summary: "Move coin into the bank.",
+            long: "A bare number is copper ('deposit 100' is 100 copper); \
+                   add a unit for more ('deposit 5 gold'), or say 'all'. \
+                   Refuses if you don't have that much on hand. v1 \
                    is location-agnostic; banker-mob gating arrives \
                    once 'MobProfession::Banker' is hydrated.",
         },
@@ -223,10 +225,12 @@ inventory::submit! {
         required_perm: None,
         category: Category::Banking,
         help: Help {
-            usage: "withdraw <amount>",
-            summary: "Move copper from the bank to on-hand wealth.",
-            long: "Refuses if your bank balance can't cover the \
-                   amount. Inverse of 'deposit'.",
+            usage: "withdraw <amount> [copper|silver|gold|platinum] | withdraw all",
+            summary: "Move coin from the bank to on-hand wealth.",
+            long: "A bare number is copper ('withdraw 50' is 50 copper); \
+                   add a unit for more ('withdraw 2 silver'). Refuses if \
+                   your bank balance can't cover the amount. Inverse of \
+                   'deposit'.",
         },
         run: cmd_withdraw,
     }
@@ -1301,10 +1305,11 @@ inventory::submit! {
             summary: "Live entity counts: zones, rooms, mobs, items, players.",
             long: "Snapshot of the world state right now: how many zones \
                    and rooms loaded, how many live mobs and items \
-                   spawned, how many players online, server tick + \
-                   uptime, and active effect-instance count. Aliases \
-                   'users' and 'stats' mirror 'world' since the player \
-                   count and per-system load are the most-asked pieces.",
+                   spawned, how many players online, uptime \
+                   (plus the server tick for staff), and active \
+                   effect-instance count. Aliases 'users' and 'stats' \
+                   mirror 'world' since the player count and per-system \
+                   load are the most-asked pieces.",
         },
         run: cmd_world,
     }
@@ -1318,9 +1323,10 @@ inventory::submit! {
         category: Category::Info,
         help: Help {
             usage: "time",
-            summary: "Show server uptime and tick count.",
+            summary: "Show server uptime and the game clock.",
             long: "Real-world time, how long the server has been running, \
-                   and the current world tick.",
+                   and the in-game date and hour. Staff also see the \
+                   current world tick.",
         },
         run: cmd_time,
     }
@@ -1882,10 +1888,13 @@ inventory::submit! {
         category: Category::Settings,
         help: Help {
             usage: "autoassist",
-            summary: "Toggle the auto-assist flag (no behavior wired yet).",
-            long: "Sets AUTO_ASSIST. Once group combat lands, this \
-                   controls whether you automatically engage anyone \
-                   attacking your group leader.",
+            summary: "Toggle automatically joining fights against the one you follow.",
+            long: "Sets AUTO_ASSIST. While you follow someone and stand in \
+                   the same room, you automatically engage anyone who \
+                   attacks them. Today this fires when the attack is \
+                   started by a player's attack command; a monster that \
+                   starts the fight against your leader does not trigger \
+                   it yet, so 'assist' by hand in that case.",
         },
         run: cmd_autoassist,
     }
@@ -1899,10 +1908,11 @@ inventory::submit! {
         category: Category::Settings,
         help: Help {
             usage: "autosplit",
-            summary: "Toggle the auto-split flag (no behavior wired yet).",
-            long: "Sets AUTO_SPLIT. Once the group system lands, this \
-                   controls whether kill rewards split automatically \
-                   between group members.",
+            summary: "Toggle automatic splitting of coins you pick up.",
+            long: "Sets AUTO_SPLIT. Coins you take from a corpse, the \
+                   floor or an autolooted kill are split evenly with the \
+                   groupmates standing in the room; you keep the \
+                   remainder. Use 'split <amount>' to divide coins by hand.",
         },
         run: cmd_autosplit,
     }
@@ -2551,16 +2561,16 @@ pub(crate) fn cmd_newbie(world: &mut World, player: Entity, _args: &str) {
     let body = "\r\n\
         <b:cyan>Newbie starter pack:</>\r\n\
         \r\n\
-        <yellow>1.</> <b:cyan>Get oriented.</> <dim>Try</> <cyan>look</> <dim>and</> <cyan>exits</> <dim>to see your room and where you can go.</>\r\n\
-        <yellow>2.</> <b:cyan>Check yourself.</> <dim>Try</> <cyan>score</> <dim>(stats),</> <cyan>inventory</> <dim>(carried items), and</> <cyan>equipment</> <dim>(worn).</>\r\n\
-        <yellow>3.</> <b:cyan>Equip what you have.</> <dim>Try</> <cyan>wear &lt;item&gt;</> <dim>or</> <cyan>wield &lt;weapon&gt;</> <dim>— a half-dressed character takes far more damage.</>\r\n\
-        <yellow>4.</> <b:cyan>Find a trainer.</> <dim>Trainers teach skills and spells. Ask local NPCs or use</> <cyan>where &lt;name&gt;</> <dim>to track one down. Spend points with</> <cyan>practice</>.\r\n\
-        <yellow>5.</> <b:cyan>Fight something safe.</> <dim>Use</> <cyan>consider [target]</> <dim>to gauge danger before</> <cyan>kill [target]</>. <dim>If a fight goes poorly,</> <cyan>flee</> <dim>or set</> <cyan>wimpy 30</> <dim>to auto-flee at low HP.</>\r\n\
-        <yellow>6.</> <b:cyan>Stay alive.</> <dim>Watch hunger / thirst on</> <cyan>score</>. <dim>Eat / drink and</> <cyan>rest</> <dim>or</> <cyan>sleep</> <dim>to regen.</>\r\n\
-        <yellow>7.</> <b:cyan>Set a recall.</> <dim>Touch a touchstone in a safe spot, then</> <cyan>recall</> <dim>warps you back from anywhere — invaluable when a fight goes wrong.</>\r\n\
+\x20\x20\x20<yellow>1.</> <b:cyan>Get oriented.</> <dim>Try</> <cyan>look</> <dim>and</> <cyan>exits</> <dim>to see your room and where you can go.</>\r\n\
+\x20\x20\x20<yellow>2.</> <b:cyan>Check yourself.</> <dim>Try</> <cyan>score</> <dim>(stats),</> <cyan>inventory</> <dim>(carried items), and</> <cyan>equipment</> <dim>(worn).</>\r\n\
+\x20\x20\x20<yellow>3.</> <b:cyan>Equip what you have.</> <dim>Try</> <cyan>wear <item></> <dim>or</> <cyan>wield <weapon></> <dim>— a half-dressed character takes far more damage.</>\r\n\
+\x20\x20\x20<yellow>4.</> <b:cyan>Find a trainer.</> <dim>Trainers teach skills and spells. Ask local NPCs or use</> <cyan>where <name></> <dim>to track one down. Spend points with</> <cyan>practice</>.\r\n\
+\x20\x20\x20<yellow>5.</> <b:cyan>Fight something safe.</> <dim>Use</> <cyan>consider [target]</> <dim>to gauge danger before</> <cyan>kill [target]</>. <dim>If a fight goes poorly,</> <cyan>flee</> <dim>or set</> <cyan>wimpy 30</> <dim>to auto-flee at low HP.</>\r\n\
+\x20\x20\x20<yellow>6.</> <b:cyan>Stay alive.</> <dim>Watch hunger / thirst on</> <cyan>score</>. <dim>Eat / drink and</> <cyan>rest</> <dim>or</> <cyan>sleep</> <dim>to regen.</>\r\n\
+\x20\x20\x20<yellow>7.</> <b:cyan>Set a recall.</> <dim>Touch a touchstone in a safe spot, then</> <cyan>recall</> <dim>warps you back from anywhere — invaluable when a fight goes wrong.</>\r\n\
         \r\n\
-        <dim>Type</> <cyan>help &lt;command&gt;</> <dim>for any of the verbs above.</>\r\n";
-    send_to(world, player, body);
+        <dim>Type</> <cyan>help <command></> <dim>for any of the verbs above.</>\r\n";
+    send_prose(world, player, body);
 }
 
 /// Render `help <social>` as a sample of every message variant the
@@ -4367,7 +4377,7 @@ pub(crate) fn cmd_list(world: &mut World, player: Entity, args: &str) {
         }
     }
     if !pet_rows.is_empty() {
-        out.push_str(&format!("\r\n{keeper_name} also has pets for hire:\r\n"));
+        out.push_str(&format!("\r\n{keeper_name} has pets for hire:\r\n"));
         out.push_str(&format!(
             "  {:<3} {} {} {}\r\n",
             "#",
@@ -7520,6 +7530,28 @@ pub(crate) fn cmd_aggr(world: &mut World, player: Entity, _args: &str) {
     crate::commands::send_rendered(world, player, &out);
 }
 
+/// Expected HP range for the player's next level-up: the table gain
+/// scaled by the race `hp_factor`, plus the class `hp_per_level` and the
+/// class hit-dice roll, via the same helper the real level-up uses.
+fn next_level_hp_range(world: &World, player: Entity, table_hp_gain: i32) -> (i32, i32) {
+    let Some(profile) = world.get::<Profile>(player) else {
+        return (table_hp_gain, table_hp_gain);
+    };
+    let hp_factor = world
+        .get_resource::<mud_world::RaceCatalog>()
+        .and_then(|c| c.get(&profile.race))
+        .map_or(100, |def| def.hp_factor);
+    let (class_hp, dice) = profile
+        .class_id
+        .and_then(|id| {
+            world
+                .get_resource::<mud_world::ClassCatalog>()
+                .and_then(|cat| cat.by_id.get(&id))
+        })
+        .map_or((0, ""), |c| (c.hp_per_level, c.hit_dice.as_str()));
+    crate::combat::level_hp_gain_range(table_hp_gain, hp_factor, class_hp, dice)
+}
+
 pub(crate) fn cmd_idle(world: &mut World, player: Entity, args: &str) {
     // Optional minimum-idle filter in minutes. Lenient parser:
     // non-numeric args fall back to "no filter" — matches `who`'s
@@ -7800,17 +7832,17 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
     // upcoming level-up. None at the cap (no row above max) or
     // when the table hasn't loaded yet.
     let is_god = mud_world::bypasses_restrictions(world, player);
-    let next_level_gains: Option<(i32, i32, i32)> = profile_owned.as_ref().and_then(|(lvl, ..)| {
-        // Gods have no next level to preview.
-        if is_god {
-            return None;
-        }
-        let next = lvl + 1;
-        world
-            .resource::<mud_world::LevelTable>()
-            .gains_for(next)
-            .map(|(hp, st)| (next, hp, st))
-    });
+    let next_level_gains: Option<(i32, i32, i32, i32)> =
+        profile_owned.as_ref().and_then(|(lvl, ..)| {
+            // Gods have no next level to preview.
+            if is_god {
+                return None;
+            }
+            let next = lvl + 1;
+            let (hp, st) = world.resource::<mud_world::LevelTable>().gains_for(next)?;
+            let (hp_min, hp_max) = next_level_hp_range(world, player, hp);
+            Some((next, hp_min, hp_max, st))
+        });
     let stars_owned: Option<String> = world.get::<Profile>(player).and_then(|p| {
         mud_world::is_starstar(world, p).then(|| {
             p.class_id
@@ -9283,6 +9315,10 @@ pub(crate) fn exit_state_sentence(ed: &mud_world::ExitData, state_word: &str) ->
     let noun = exit_noun_phrase(ed);
     let last = noun.rsplit(' ').next().unwrap_or("").to_ascii_lowercase();
     let plural = last.ends_with('s') && !last.ends_with("ss") && !last.ends_with("us");
+    // "not locked" reads "isn't locked" / "aren't locked".
+    if let Some(rest) = state_word.strip_prefix("not ") {
+        return format!("{noun} {} {rest}", if plural { "aren't" } else { "isn't" });
+    }
     format!("{noun} {} {state_word}", if plural { "are" } else { "is" })
 }
 
@@ -9322,22 +9358,16 @@ pub(crate) fn cmd_unlock(world: &mut World, player: Entity, args: &str) {
         return;
     };
     if state != ExitState::Locked {
-        send_to(
-            world,
-            player,
-            format!("It's not locked {}.\r\n", direction_name(dir)),
-        );
+        let line = door_sentence(world, room, dir, "not locked");
+        send_to(world, player, format!("{line}.\r\n"));
         return;
     }
     // Legacy rooms.cpp unlock_door: only characters below LVL_IMMORT need
     // the key (or even a keyhole); staff unlock anything by hand.
     if !crate::room_access::can_unlock_without_key(world, player) {
         let Some(key_req) = key_req else {
-            send_to(
-                world,
-                player,
-                format!("There's no keyhole {}.\r\n", direction_name(dir)),
-            );
+            let door = door_phrase(world, room, dir);
+            send_to(world, player, format!("There's no keyhole on {door}.\r\n"));
             return;
         };
         // Match a carried item by exact `WorldKey` against the exit's
@@ -9520,29 +9550,24 @@ pub(crate) fn cmd_lock(world: &mut World, player: Entity, args: &str) {
     };
     match state {
         ExitState::Open => {
+            let door = door_phrase(world, room, dir);
             send_to(
                 world,
                 player,
-                format!("You'll need to close it first {}.\r\n", direction_name(dir)),
+                format!("You'll need to close {door} first.\r\n"),
             );
             return;
         }
         ExitState::Locked => {
-            send_to(
-                world,
-                player,
-                format!("It's already locked {}.\r\n", direction_name(dir)),
-            );
+            let line = door_sentence(world, room, dir, "already locked");
+            send_to(world, player, format!("{line}.\r\n"));
             return;
         }
         ExitState::Closed => {}
     }
     let Some(key_req) = key_req else {
-        send_to(
-            world,
-            player,
-            format!("There's no keyhole {}.\r\n", direction_name(dir)),
-        );
+        let door = door_phrase(world, room, dir);
+        send_to(world, player, format!("There's no keyhole on {door}.\r\n"));
         return;
     };
     let has_key = {
@@ -10111,7 +10136,7 @@ pub(crate) async fn cmd_account(world: &mut World, player: Entity, pool: &mud_db
         match &google {
             Some(g) => {
                 let label = g.google_name.as_deref().unwrap_or(g.google_email.as_str());
-                format!("<dim>signed in as {} &lt;{}&gt;</>", label, g.google_email)
+                format!("<dim>signed in as {} <{}></>", label, g.google_email)
             }
             None => "<dim>not linked</>".to_string(),
         }
@@ -10215,7 +10240,9 @@ pub(crate) fn cmd_world(world: &mut World, player: Entity, _args: &str) {
     out.push_str(&format!("  <cyan>Items spawned:</>   {items}\r\n"));
     out.push_str(&format!("  <cyan>Players online:</>  {players_online}\r\n"));
     out.push_str(&format!("  <cyan>Active effects:</>  {effects}\r\n"));
-    out.push_str(&format!("  <cyan>Server tick:</>     <dim>{tick}</>\r\n"));
+    if crate::commands::is_staff(world, player) {
+        out.push_str(&format!("  <cyan>Server tick:</>     <dim>{tick}</>\r\n"));
+    }
     out.push_str(&format!(
         "  <cyan>Uptime:</>          <b:cyan>{h}h {m}m {s}s</>\r\n"
     ));
@@ -10270,7 +10297,10 @@ pub(crate) fn cmd_time(world: &mut World, player: Entity, _args: &str) {
     out.push_str(&format!(
         "  <cyan>Uptime:</>      <b:cyan>{h}h {m}m {s}s</>\r\n"
     ));
-    out.push_str(&format!("  <cyan>World tick:</>  <dim>{tick}</>\r\n"));
+    // The raw tick counter is debug data: staff only.
+    if crate::commands::is_staff(world, player) {
+        out.push_str(&format!("  <cyan>World tick:</>  <dim>{tick}</>\r\n"));
+    }
     out.push_str(&format!(
         "  <cyan>Game time:</>   <b:yellow>The {mud_day}{day_suffix} day of {month_name}, Year {mud_year}.</>\r\n",
     ));
@@ -10581,6 +10611,34 @@ pub(crate) fn take_loose_coins(world: &mut World, player: Entity, item: Entity) 
     (amount > 0).then_some(amount)
 }
 
+/// Legacy `act.get.cpp` splits every money pickup when the picker has
+/// AUTOSPLIT on and shares a group with someone in the room. Silent
+/// when there is nobody to split with.
+pub(crate) fn autosplit_pickup(world: &mut World, player: Entity, amount: i64) {
+    if amount <= 0
+        || !world
+            .get::<PlayerFlags>(player)
+            .is_some_and(|pf| pf.has(PlayerFlag::AutoSplit))
+    {
+        return;
+    }
+    let Some(here) = world.get::<Located>(player).map(|l| l.0) else {
+        return;
+    };
+    let root = group_root(world, player);
+    let others = group_members(world, root)
+        .into_iter()
+        .filter(|m| {
+            *m != player
+                && world.get::<Located>(*m).is_some_and(|l| l.0 == here)
+                && world.get::<Ghost>(*m).is_none()
+        })
+        .count();
+    if others > 0 {
+        cmd_split(world, player, &amount.to_string());
+    }
+}
+
 /// True for the words that name a container's coin pile.
 fn is_coin_word(word: &str) -> bool {
     ["coin", "coins", "gold", "money"]
@@ -10603,6 +10661,7 @@ fn collect_coin_pile(
         player,
         &format!("You collect {msg} from {container_name}.\r\n"),
     );
+    autosplit_pickup(world, player, amount);
     Some(amount)
 }
 
@@ -10988,6 +11047,7 @@ fn get_plain(world: &mut World, player: Entity, args: &str) {
     if let Some(amount) = take_loose_coins(world, player, item) {
         let coin = crate::commands::format_wealth(amount).unwrap_or_else(|| "no coin".to_string());
         send_rendered(world, player, &format!("You pick up {coin}.\r\n"));
+        autosplit_pickup(world, player, amount);
         broadcast_room_except_rendered(
             world,
             room,
@@ -11389,6 +11449,7 @@ fn get_all_from_floor(world: &mut World, player: Entity, room: Entity, filter: &
             let coin =
                 crate::commands::format_wealth(amount).unwrap_or_else(|| "no coin".to_string());
             send_rendered(world, player, &format!("You pick up {coin}.\r\n"));
+            autosplit_pickup(world, player, amount);
             moved += 1;
             continue;
         }
@@ -13943,6 +14004,7 @@ pub(crate) fn cmd_achievements(world: &mut World, player: Entity, args: &str) {
     use mud_db::enums::AchievementCategory;
     let (filter, page) = split_page_arg(args);
     let filter = filter.to_ascii_lowercase();
+    let wrap_cols = crate::layout::wrap_width(world, player);
     let unlocked: std::collections::HashMap<i32, chrono::DateTime<chrono::Utc>> = world
         .get::<mud_world::CharacterAchievements>(player)
         .map(|c| c.unlocked.clone())
@@ -13998,10 +14060,9 @@ pub(crate) fn cmd_achievements(world: &mut World, player: Entity, args: &str) {
         let when = unlocked_at
             .map(|t| format!("  <dim>(unlocked {})</>", t.format("%Y-%m-%d")))
             .unwrap_or_default();
-        rows.push(format!(
-            "  {mark} {} — {}{when}\r\n",
-            def.title, def.description,
-        ));
+        let line = format!("{mark} {} — {}{when}", def.title, def.description);
+        let wrapped = crate::layout::wrap_paragraph(&line, wrap_cols, 2, 6);
+        rows.push(format!("{}\r\n", wrapped.join("\r\n")));
         shown += 1;
     }
     let total_defs = catalog.by_id.values().filter(listed).count();
@@ -14982,7 +15043,7 @@ pub(crate) fn cmd_dismiss(world: &mut World, player: Entity, args: &str) {
 pub(crate) fn cmd_split(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
     let Ok(amount) = arg.parse::<i64>() else {
-        send_to(world, player, "Usage: split <amount>\r\n");
+        send_to(world, player, "Usage: split <amount in copper>\r\n");
         return;
     };
     if amount <= 0 {
@@ -15006,7 +15067,10 @@ pub(crate) fn cmd_split(world: &mut World, player: Entity, args: &str) {
     let members = group_members(world, root);
     let here: Vec<Entity> = members
         .into_iter()
-        .filter(|m| world.get::<Located>(*m).is_some_and(|l| l.0 == located.0))
+        .filter(|m| {
+            world.get::<Located>(*m).is_some_and(|l| l.0 == located.0)
+                && (*m == player || world.get::<Ghost>(*m).is_none())
+        })
         .collect();
     if here.len() <= 1 {
         send_to(
@@ -17577,6 +17641,40 @@ mod playtest_2026_10_11_tests {
         assert!(drain(&mut rx).contains("only 3 page(s)"));
     }
 
+    // #75: achievements wrap at 80 columns.
+    #[test]
+    fn long_achievement_rows_wrap_at_80_columns() {
+        let mut world = World::new();
+        let mut catalog = mud_world::AchievementCatalog::default();
+        let def = mud_world::AchievementDef {
+            id: 1,
+            code: "walk_1".into(),
+            title: "Walked: Reserved - create food items".into(),
+            description: "Visit every room in Reserved - create food items, \
+                          including the ones nobody ever goes into."
+                .into(),
+            category: mud_db::enums::AchievementCategory::Exploration,
+            hidden: false,
+            sort_order: 1,
+        };
+        catalog.by_id.insert(1, def.clone());
+        catalog.by_code.insert(def.code.clone(), def);
+        world.insert_resource(catalog);
+        let room = world.spawn((Room, RoomSector(Sector::Field))).id();
+        let (p, mut rx) = player_in(&mut world, room);
+        cmd_achievements(&mut world, p, "");
+        let out = drain(&mut rx);
+        assert!(out.contains("Reserved - create food items"), "{out}");
+        for line in out.lines() {
+            let w = crate::layout::text_width(line);
+            assert!(w <= 80, "{w} cols: {line:?}");
+        }
+        assert!(
+            out.lines().filter(|l| l.contains("[ ]")).count() == 1,
+            "{out}"
+        );
+    }
+
     #[test]
     fn board_listing_shows_one_page_with_a_footer() {
         use crate::commands::boards::render_board_listing;
@@ -17655,5 +17753,224 @@ mod playtest_2026_10_11_tests {
             out.contains("a felt hat") && out.contains("(0.0 lbs)"),
             "{out}"
         );
+    }
+}
+
+#[cfg(test)]
+mod r2_playtest_tests {
+    use std::collections::HashMap;
+
+    use bevy_ecs::prelude::*;
+    use mud_db::enums::{Direction, ExitState, PlayerFlag};
+    use mud_world::{
+        CoinPile, Exits, Follower, GroupMember, Item, Keywords, Located, Named, PlayerFlags, Room,
+        Wealth,
+    };
+
+    use super::{autosplit_pickup, cmd_get, cmd_newbie, collect_coin_pile};
+    use crate::commands::dispatch;
+    use crate::commands::test_support::{Rx, drain, player_in};
+
+    /// Leader and member standing together in one room; the member has
+    /// the given flags.
+    fn group_pair(flags: Vec<PlayerFlag>) -> (World, Entity, Entity, Rx, Rx) {
+        let mut world = World::new();
+        world.insert_resource(mud_world::ObjectPrototypes::default());
+        let room = world.spawn(Room).id();
+        let (leader, lrx) = player_in(&mut world, room);
+        let (member, mrx) = player_in(&mut world, room);
+        world.entity_mut(leader).insert((
+            Named {
+                name: "Leader".into(),
+            },
+            PlayerFlags(Vec::new()),
+        ));
+        world.entity_mut(member).insert((
+            Named {
+                name: "Member".into(),
+            },
+            Follower(leader),
+            GroupMember(leader),
+            PlayerFlags(flags),
+        ));
+        (world, leader, member, lrx, mrx)
+    }
+
+    fn wealth(world: &World, e: Entity) -> i64 {
+        world.get::<Wealth>(e).map_or(0, |w| w.0)
+    }
+
+    // #42: autosplit applies to coin pickups.
+
+    #[test]
+    fn autosplit_divides_coins_taken_from_a_corpse() {
+        let (mut world, leader, member, _lrx, mut mrx) = group_pair(vec![PlayerFlag::AutoSplit]);
+        let corpse = world.spawn(CoinPile(300)).id();
+        world.entity_mut(member).insert(Wealth(0));
+        collect_coin_pile(&mut world, corpse, member, "the corpse");
+        let out = drain(&mut mrx);
+        assert!(out.contains("You collect"), "{out}");
+        assert!(out.contains("You split"), "{out}");
+        assert_eq!(wealth(&world, member), 150);
+        assert_eq!(wealth(&world, leader), 150);
+    }
+
+    #[test]
+    fn autosplit_divides_a_loose_coin_pile_picked_up_from_the_floor() {
+        let (mut world, leader, member, _lrx, _mrx) = group_pair(vec![PlayerFlag::AutoSplit]);
+        let room = world.get::<Located>(member).unwrap().0;
+        world.spawn((
+            Item,
+            CoinPile(100),
+            Named {
+                name: "a pile of coins".into(),
+            },
+            Keywords(vec!["coins".into(), "pile".into()]),
+            Located(room),
+        ));
+        cmd_get(&mut world, member, "pile");
+        assert_eq!(wealth(&world, member), 50);
+        assert_eq!(wealth(&world, leader), 50);
+    }
+
+    #[test]
+    fn without_autosplit_the_picker_keeps_everything() {
+        let (mut world, leader, member, _lrx, _mrx) = group_pair(Vec::new());
+        let corpse = world.spawn(CoinPile(300)).id();
+        collect_coin_pile(&mut world, corpse, member, "the corpse");
+        assert_eq!(wealth(&world, member), 300);
+        assert_eq!(wealth(&world, leader), 0);
+    }
+
+    #[test]
+    fn autosplit_alone_is_silent_and_keeps_the_coin() {
+        let mut world = World::new();
+        let room = world.spawn(Room).id();
+        let (p, mut rx) = player_in(&mut world, room);
+        world
+            .entity_mut(p)
+            .insert((PlayerFlags(vec![PlayerFlag::AutoSplit]), Wealth(300)));
+        autosplit_pickup(&mut world, p, 300);
+        assert_eq!(wealth(&world, p), 300);
+        assert!(!drain(&mut rx).contains("split"));
+    }
+
+    // #43: help text no longer claims the toggles do nothing.
+
+    #[test]
+    fn autoassist_and_autosplit_help_does_not_say_unwired() {
+        for name in ["autoassist", "autosplit"] {
+            let cmd = inventory::iter::<crate::commands::Command>()
+                .find(|c| c.names.contains(&name))
+                .expect(name);
+            let text = format!("{} {}", cmd.help.summary, cmd.help.long);
+            assert!(!text.contains("no behavior wired"), "{name}: {text}");
+            assert!(!text.contains("Once "), "{name}: {text}");
+        }
+    }
+
+    // #74: newbie prints real angle brackets and fits 80 columns.
+
+    #[test]
+    fn newbie_has_real_angle_brackets_and_wraps_at_80() {
+        let mut world = World::new();
+        let room = world.spawn(Room).id();
+        let (p, mut rx) = player_in(&mut world, room);
+        cmd_newbie(&mut world, p, "");
+        let out = drain(&mut rx);
+        assert!(!out.contains("&lt;") && !out.contains("&gt;"), "{out}");
+        assert!(out.contains("wear <item>"), "{out}");
+        assert!(out.contains("help <command>"), "{out}");
+        for line in out.lines() {
+            let w = crate::layout::text_width(line);
+            assert!(w <= 80, "{w} cols: {line:?}");
+        }
+    }
+
+    // #68: door messages name the door, direction never last.
+
+    fn door_world(state: ExitState, keyword: &str, key: Option<(i32, i32)>) -> (World, Entity, Rx) {
+        let mut world = World::new();
+        world.insert_resource(mud_world::ObjectPrototypes::default());
+        let a = world.spawn((Room, Exits::default())).id();
+        let b = world.spawn((Room, Exits::default())).id();
+        let ed = |to| mud_world::ExitData {
+            to: Some(to),
+            state,
+            key,
+            description: None,
+            keywords: vec![keyword.to_string()],
+            is_hidden: false,
+            is_pickproof: false,
+            is_bashable: false,
+            hit_points: None,
+        };
+        world
+            .entity_mut(a)
+            .insert(Exits(HashMap::from([(Direction::North, ed(b))])));
+        world
+            .entity_mut(b)
+            .insert(Exits(HashMap::from([(Direction::South, ed(a))])));
+        let (p, rx) = player_in(&mut world, a);
+        world.entity_mut(p).insert(mud_world::Account {
+            user_id: String::new(),
+            character_id: String::new(),
+            role: mud_db::enums::UserRole::Player,
+            account_role: mud_db::enums::UserRole::Player,
+            perms: vec![],
+        });
+        (world, p, rx)
+    }
+
+    #[test]
+    fn lock_on_an_open_door_says_close_it_first_with_the_noun() {
+        let (mut world, p, mut rx) = door_world(ExitState::Open, "slab", Some((1, 1)));
+        dispatch(&mut world, p, "lock north");
+        let out = drain(&mut rx);
+        assert!(
+            out.contains("You'll need to close the slab first."),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn unlock_an_unlocked_door_and_lock_a_locked_one_read_naturally() {
+        let (mut world, p, mut rx) = door_world(ExitState::Closed, "slab", Some((1, 1)));
+        dispatch(&mut world, p, "unlock north");
+        assert!(drain(&mut rx).contains("The slab isn't locked."));
+        let (mut world, p, mut rx) = door_world(ExitState::Locked, "slab", Some((1, 1)));
+        dispatch(&mut world, p, "lock north");
+        assert!(drain(&mut rx).contains("The slab is already locked."));
+    }
+
+    #[test]
+    fn plural_door_uses_arent_locked() {
+        let (mut world, p, mut rx) = door_world(ExitState::Closed, "doors", Some((1, 1)));
+        dispatch(&mut world, p, "unlock north");
+        assert!(drain(&mut rx).contains("The doors aren't locked."));
+    }
+
+    #[test]
+    fn no_keyhole_names_the_door() {
+        let (mut world, p, mut rx) = door_world(ExitState::Closed, "grate", None);
+        dispatch(&mut world, p, "lock north");
+        assert!(drain(&mut rx).contains("There's no keyhole on the grate."));
+    }
+
+    // #78: the world tick is staff-only.
+
+    #[test]
+    fn time_hides_the_world_tick_from_players() {
+        let mut world = World::new();
+        world.insert_resource(crate::TickCount(1234));
+        world.insert_resource(crate::ServerStart(std::time::Instant::now()));
+        world.insert_resource(mud_world::MudClock::default());
+        let room = world.spawn(Room).id();
+        let (p, mut rx) = player_in(&mut world, room);
+        super::cmd_time(&mut world, p, "");
+        let out = drain(&mut rx);
+        assert!(out.contains("Uptime"), "{out}");
+        assert!(!out.contains("World tick"), "{out}");
+        assert!(!out.contains("1234"), "{out}");
     }
 }

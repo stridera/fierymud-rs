@@ -10,6 +10,7 @@ use mud_world::{
     AbilityCatalog, AppliedTo, EffectInstance, Exits, KnownAbilities, Located, Profile, Stamina,
 };
 
+use crate::commands::info::{door_phrase, door_sentence};
 use crate::commands::{
     Category, Command, Help, broadcast_room_except_players_rendered, direction_name,
     flip_door_both_sides, invoke_ability, name_of, parse_direction, refuse_hidden_exit, send_msg,
@@ -242,11 +243,8 @@ pub(crate) fn cmd_pick(world: &mut World, player: Entity, args: &str) {
         return;
     };
     if state != ExitState::Locked {
-        send_to(
-            world,
-            player,
-            format!("It's not locked {}.\r\n", direction_name(dir)),
-        );
+        let line = door_sentence(world, room, dir, "not locked");
+        send_to(world, player, format!("{line}.\r\n"));
         return;
     }
     // Pickproof doors refuse regardless of proficiency — keyed-only
@@ -260,11 +258,8 @@ pub(crate) fn cmd_pick(world: &mut World, player: Entity, args: &str) {
         return;
     }
     if key_req.is_none() {
-        send_to(
-            world,
-            player,
-            format!("There's no keyhole {}.\r\n", direction_name(dir)),
-        );
+        let door = door_phrase(world, room, dir);
+        send_to(world, player, format!("There's no keyhole on {door}.\r\n"));
         return;
     }
 
@@ -299,39 +294,31 @@ pub(crate) fn cmd_pick(world: &mut World, player: Entity, args: &str) {
     let roll = rand::random_range(1..=100);
     let chance = (proficiency / 10).clamp(0, 100);
     let player_name = name_of(world, player);
+    let door = door_phrase(world, room, dir);
     if roll <= chance {
         flip_door_both_sides(world, room, dir, ExitState::Closed);
         send_to(
             world,
             player,
-            format!(
-                "*click* The lock {} yields to your tools.\r\n",
-                direction_name(dir)
-            ),
+            format!("*click* You pick the lock on {door}.\r\n"),
         );
         broadcast_room_except_players_rendered(
             world,
             room,
             &[player],
-            &format!("{player_name} picks the lock {}.\r\n", direction_name(dir)),
+            &format!("{player_name} picks the lock on {door}.\r\n"),
         );
     } else {
         send_to(
             world,
             player,
-            format!(
-                "Your tools slip — the lock {} stays shut.\r\n",
-                direction_name(dir)
-            ),
+            format!("Your tools slip -- the lock on {door} stays shut.\r\n"),
         );
         broadcast_room_except_players_rendered(
             world,
             room,
             &[player],
-            &format!(
-                "{player_name} fumbles with the lock {}.\r\n",
-                direction_name(dir)
-            ),
+            &format!("{player_name} fumbles with the lock on {door}.\r\n"),
         );
     }
 }
@@ -586,13 +573,25 @@ pub(crate) fn cmd_study(world: &mut World, player: Entity, args: &str) {
         format!("You commit {} to memory. (proficiency 1)\r\n", def.name),
     );
 }
-pub(crate) fn cmd_memorize(world: &mut World, player: Entity, _args: &str) {
-    // Pooled slots recover on their own, so there is nothing to prepare:
-    // `memorize` is the legacy name for looking at the slot pool.
-    crate::commands::info::cmd_slots(world, player, "");
+/// Pooled slots recover on their own, so there is nothing to prepare:
+/// `memorize` / `forget` with no argument show the slot pool, and with
+/// an argument explain why nothing happened.
+fn slots_recover_notice(world: &mut World, player: Entity, args: &str) {
+    if args.trim().is_empty() {
+        crate::commands::info::cmd_slots(world, player, "");
+    } else {
+        send_to(
+            world,
+            player,
+            "Spell slots recover on their own; there's nothing to memorize.\r\n",
+        );
+    }
 }
-pub(crate) fn cmd_forget(world: &mut World, player: Entity, _args: &str) {
-    crate::commands::info::cmd_slots(world, player, "");
+pub(crate) fn cmd_memorize(world: &mut World, player: Entity, args: &str) {
+    slots_recover_notice(world, player, args);
+}
+pub(crate) fn cmd_forget(world: &mut World, player: Entity, args: &str) {
+    slots_recover_notice(world, player, args);
 }
 pub(crate) fn cmd_cast(world: &mut World, player: Entity, args: &str) {
     invoke_ability(
@@ -674,6 +673,64 @@ mod pick_tests {
         assert_eq!(state, ExitState::Closed, "{out}");
     }
 
+    fn name_the_door(world: &mut World, room: Entity, keyword: &str) {
+        world
+            .get_mut::<Exits>(room)
+            .unwrap()
+            .0
+            .get_mut(&Direction::North)
+            .unwrap()
+            .keywords = vec![keyword.to_string()];
+    }
+
+    #[test]
+    fn pick_messages_name_the_door_and_put_no_direction_last() {
+        let mut world = World::new();
+        let core = install_core_abilities(&mut world);
+        let (room, _far) = locked_north_door(&mut world);
+        name_the_door(&mut world, room, "grate");
+        let (p, mut rx) = player_in(&mut world, room);
+        world.entity_mut(p).insert((
+            KnownAbilities {
+                entries: vec![(core.pick_lock.unwrap(), 1000, true)],
+            },
+            Stamina {
+                current: 50,
+                max: 50,
+            },
+        ));
+        cmd_pick(&mut world, p, "north");
+        let out = drain(&mut rx);
+        assert!(
+            out.contains("*click* You pick the lock on the grate."),
+            "{out}"
+        );
+        // Now closed, not locked.
+        cmd_pick(&mut world, p, "north");
+        let out = drain(&mut rx);
+        assert!(out.contains("The grate isn't locked."), "{out}");
+        assert!(!out.contains("north"), "{out}");
+    }
+
+    #[test]
+    fn pick_without_a_keyhole_names_the_door() {
+        let mut world = World::new();
+        install_core_abilities(&mut world);
+        let (room, _far) = locked_north_door(&mut world);
+        name_the_door(&mut world, room, "slab");
+        world
+            .get_mut::<Exits>(room)
+            .unwrap()
+            .0
+            .get_mut(&Direction::North)
+            .unwrap()
+            .key = None;
+        let (p, mut rx) = player_in(&mut world, room);
+        cmd_pick(&mut world, p, "north");
+        let out = drain(&mut rx);
+        assert!(out.contains("There's no keyhole on the slab."), "{out}");
+    }
+
     #[test]
     fn the_retired_pick_lock_id_does_not_count() {
         let mut world = World::new();
@@ -745,5 +802,26 @@ mod study_resolver_tests {
         assert_eq!(id_of(""), None);
         assert_eq!(id_of("   "), None);
         assert_eq!(id_of("nonsense"), None);
+    }
+}
+
+#[cfg(test)]
+mod memorize_tests {
+    use super::*;
+    use crate::commands::test_support::{drain, player_in};
+
+    #[test]
+    fn memorize_and_forget_with_args_explain_instead_of_listing_slots() {
+        let mut world = World::new();
+        let room = world.spawn_empty().id();
+        let (p, mut rx) = player_in(&mut world, room);
+        for cmd in [cmd_memorize, cmd_forget] {
+            cmd(&mut world, p, "magic missile");
+            let out = drain(&mut rx);
+            assert!(
+                out.contains("Spell slots recover on their own; there's nothing to memorize."),
+                "{out}"
+            );
+        }
     }
 }

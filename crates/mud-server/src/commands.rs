@@ -7312,7 +7312,7 @@ mod tests {
             // Mortal-level fixture has no rank title — assertions
             // for the staff path are local to specific tests.
             level_title: None,
-            next_level_gains: Some((26, 18, 9)),
+            next_level_gains: Some((26, 18, 18, 9)),
             recall: Some(("The Inn", 30, 1)),
             stealth: false,
             flying: false,
@@ -7386,6 +7386,20 @@ mod tests {
             repose: 87,
         };
         assert_eq!(format_rest_line(rest), "87 XP banked");
+    }
+
+    #[test]
+    fn score_next_level_preview_shows_the_hp_range() {
+        let effects: Vec<String> = Vec::new();
+        let mut data = build_smoke_score_data("Strider", &effects);
+        data.next_level_gains = Some((26, 15, 22, 9));
+        let out = super::render_score_standard(&data);
+        assert!(
+            out.contains("Next level (#26): +15-22 HP, +9 Stamina"),
+            "{out}"
+        );
+        let boxed = super::render_score_fancy(&data);
+        assert!(boxed.contains("+15-22 HP, +9 Stamina"), "{boxed}");
     }
 
     #[test]
@@ -11041,13 +11055,13 @@ pub(crate) struct ScoreData<'a> {
     /// "Level 105 Implementer Male Human (Wizard)" reads as a
     /// proper character-sheet header. Mortals see no change.
     level_title: Option<&'a str>,
-    /// `(next_level_number, hp_gain, stamina_gain)` for the row
+    /// `(next_level_number, hp_min, hp_max, stamina_gain)` for the row
     /// at `level + 1`. None for max-level characters and for
     /// brand-new boots before `LevelTable` is populated. Score
     /// uses this for a "Next level: +N HP, +M Stamina" preview so
     /// the planning info lives next to the experience progress
     /// rather than only on the dedicated `level` command.
-    next_level_gains: Option<(i32, i32, i32)>,
+    next_level_gains: Option<(i32, i32, i32, i32)>,
     /// Bound recall destination as `(display_name, zone, id)`.
     /// `None` when the player hasn't touched a touchstone yet —
     /// the score sheet then quietly omits the line rather than
@@ -11157,6 +11171,15 @@ pub(crate) struct LevelProgress {
 pub(crate) struct GroupStatus<'a> {
     pub leader: Option<&'a str>,
     pub member_count: usize,
+}
+
+/// `18` for a fixed gain, `15-24` for a rolled one.
+fn format_gain_range(min: i32, max: i32) -> String {
+    if min == max {
+        min.to_string()
+    } else {
+        format!("{min}-{max}")
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -11364,7 +11387,8 @@ pub(crate) fn render_score_standard(d: &ScoreData) -> String {
             p.current_xp,
         ));
     }
-    if let Some((next, hp_gain, st_gain)) = d.next_level_gains {
+    if let Some((next, hp_min, hp_max, st_gain)) = d.next_level_gains {
+        let hp_gain = format_gain_range(hp_min, hp_max);
         out.push_str(&format!(
             "  Next level (#{next}): +{hp_gain} HP, +{st_gain} Stamina\r\n",
         ));
@@ -11887,7 +11911,8 @@ pub(crate) fn render_score_fancy(d: &ScoreData) -> String {
             p.current_xp,
         ));
     }
-    if let Some((next, hp_gain, st_gain)) = d.next_level_gains {
+    if let Some((next, hp_min, hp_max, st_gain)) = d.next_level_gains {
+        let hp_gain = format_gain_range(hp_min, hp_max);
         row(format!("Next #{next}:  +{hp_gain} HP, +{st_gain} Stamina",));
     }
     if let Some((name, zone, id)) = d.location {

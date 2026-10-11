@@ -50,11 +50,12 @@ inventory::submit! {
         required_perm: None,
         category: Category::Banking,
         help: Help {
-            usage: "chest",
+            usage: "chest [deposit <item> | withdraw <number>]",
             summary: "List items in your account-shared chest.",
             long: "Shows every item any character on this account has \
-                   deposited via 'chest_deposit'. Use the slot number \
-                   shown to withdraw via 'chest_withdraw <slot>'.",
+                   stored. 'chest deposit <item>' stores an item (same as \
+                   'chest_deposit'); 'chest withdraw <number>' takes the \
+                   numbered item back (same as 'chest_withdraw').",
         },
         run: cmd_mail_stub,
     }
@@ -67,7 +68,7 @@ inventory::submit! {
         required_perm: None,
         category: Category::Banking,
         help: Help {
-            usage: "chest_deposit <item>",
+            usage: "chest_deposit <item>   (or: chest deposit <item>)",
             summary: "Store an inventory item in the account chest.",
             long: "Moves the named item from your inventory into the \
                    account-shared chest, where any character on this \
@@ -85,10 +86,10 @@ inventory::submit! {
         required_perm: None,
         category: Category::Banking,
         help: Help {
-            usage: "chest_withdraw <slot>",
+            usage: "chest_withdraw <number>   (or: chest withdraw <number>)",
             summary: "Take an item back from the account chest.",
-            long: "Withdraws the item at the given slot (see 'chest' \
-                   for the listing). The item is spawned back into your \
+            long: "Withdraws the item with the given number (see 'chest' \
+                   for the listing; numbering starts at 1). The item is spawned back into your \
                    inventory with its per-instance state (charges, \
                    liquid level) restored.",
         },
@@ -100,7 +101,7 @@ inventory::submit! {
     AsyncCommand {
         dispatch: |world, player, pool, head, args| match head {
             "chest" | "accountchest" | "achest" | "storage" | "vault" => {
-                Some(Box::pin(cmd_account_chest(world, player, pool)))
+                Some(Box::pin(cmd_chest_dispatch(world, player, pool, args)))
             }
             "chest_deposit" | "chestdeposit" => {
                 Some(Box::pin(cmd_chest_deposit(world, player, pool, args)))
@@ -165,6 +166,77 @@ pub(crate) fn chest_state_of(world: &World, item: Entity) -> ChestItemState {
     }
 }
 
+/// First word of `chest <word> ...`: which action the verb asks for.
+#[derive(Debug, PartialEq, Eq)]
+enum ChestAction<'a> {
+    List,
+    Deposit(&'a str),
+    Withdraw(&'a str),
+}
+
+/// Split `chest deposit <item>` / `chest withdraw <n>` into an action;
+/// anything else (including nothing) lists the chest.
+fn parse_chest_action(args: &str) -> ChestAction<'_> {
+    let args = args.trim();
+    let (word, rest) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
+    match word.to_ascii_lowercase().as_str() {
+        "deposit" | "put" | "stash" | "store" => ChestAction::Deposit(rest.trim()),
+        "withdraw" | "take" | "get" | "retrieve" => ChestAction::Withdraw(rest.trim()),
+        _ => ChestAction::List,
+    }
+}
+
+/// `chest` with its `deposit` / `withdraw` subcommands, aliases of the
+/// `chest_deposit` / `chest_withdraw` verbs.
+async fn cmd_chest_dispatch(
+    world: &mut World,
+    player: Entity,
+    pool: &mud_db::sqlx::PgPool,
+    args: &str,
+) {
+    match parse_chest_action(args) {
+        ChestAction::List => cmd_account_chest(world, player, pool).await,
+        ChestAction::Deposit(rest) => cmd_chest_deposit(world, player, pool, rest).await,
+        ChestAction::Withdraw(rest) => cmd_chest_withdraw(world, player, pool, rest).await,
+    }
+}
+
+/// Render the chest listing. Numbers are 1-based list positions (what
+/// `chest withdraw <number>` takes); `names` maps a character id to its
+/// name so the "by" column shows who stored the item.
+fn format_chest_listing(
+    rows: &[mud_db::account_items::AccountItemRow],
+    names: &std::collections::HashMap<String, String>,
+    protos: &ObjectPrototypes,
+) -> String {
+    let mut out = String::from("\r\n<b:cyan>Account chest:</>\r\n");
+    for (i, row) in rows.iter().enumerate() {
+        let proto_name = protos
+            .by_key
+            .get(&(row.object_zone_id, row.object_id))
+            .map_or_else(
+                || format!("[{}:{}]", row.object_zone_id, row.object_id),
+                |p| p.name.clone(),
+            );
+        let qty = if row.quantity > 1 {
+            format!(" x{}", row.quantity)
+        } else {
+            String::new()
+        };
+        let stored_by = row
+            .stored_by_character_id
+            .as_deref()
+            .and_then(|id| names.get(id))
+            .map_or("someone", String::as_str);
+        let stamp = row.stored_at.format("%Y-%m-%d %H:%M");
+        out.push_str(&format!(
+            "  [{n}] {proto_name}{qty}  <dim>(by {stored_by}, {stamp})</>\r\n",
+            n = i + 1,
+        ));
+    }
+    out
+}
+
 async fn cmd_account_chest(world: &mut World, player: Entity, pool: &mud_db::sqlx::PgPool) {
     let Some(account) = crate::commands::require_linked_account(world, player, "the account chest")
     else {
@@ -182,29 +254,21 @@ async fn cmd_account_chest(world: &mut World, player: Entity, pool: &mud_db::sql
         send_to(world, player, "\r\nYour account chest is empty.\r\n");
         return;
     }
-    let protos = world.resource::<ObjectPrototypes>();
-    let mut out = String::from("\r\n<b:cyan>Account chest:</>\r\n");
-    for row in &rows {
-        let proto_name = protos
-            .by_key
-            .get(&(row.object_zone_id, row.object_id))
-            .map_or_else(
-                || format!("[{}:{}]", row.object_zone_id, row.object_id),
-                |p| p.name.clone(),
-            );
-        let qty = if row.quantity > 1 {
-            format!(" x{}", row.quantity)
-        } else {
-            String::new()
-        };
-        let stored_by = row.stored_by_character_id.as_deref().unwrap_or("unknown");
-        let stamp = row.stored_at.format("%Y-%m-%d %H:%M");
-        out.push_str(&format!(
-            "  [{slot}] {name}{qty}  <dim>(by {stored_by}, {stamp})</>\r\n",
-            slot = row.slot,
-            name = proto_name,
-        ));
-    }
+    let ids: Vec<String> = rows
+        .iter()
+        .filter_map(|r| r.stored_by_character_id.clone())
+        .collect();
+    let names: std::collections::HashMap<String, String> =
+        mud_db::sqlx::query_as::<_, (String, String)>(
+            "SELECT id, name FROM \"Characters\" WHERE id = ANY($1)",
+        )
+        .bind(&ids)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    let out = format_chest_listing(&rows, &names, world.resource::<ObjectPrototypes>());
     send_to(world, player, out);
 }
 
@@ -325,17 +389,21 @@ async fn cmd_chest_withdraw(
 ) {
     let target = args.trim();
     if target.is_empty() {
-        send_to(world, player, "Withdraw which slot?\r\n");
+        send_to(
+            world,
+            player,
+            "Withdraw which item? Give its number from 'chest'.\r\n",
+        );
         return;
     }
     let Some(account) = crate::commands::require_linked_account(world, player, "the account chest")
     else {
         return;
     };
-    // Resolve the target — first try numeric slot, then proto-name
-    // substring match against the listing. The substring path lets
-    // players write `chest_withdraw sword` instead of looking up the
-    // slot number first.
+    // Resolve the target — first try the 1-based list number, then
+    // proto-name substring match against the listing. The substring path
+    // lets players write `chest_withdraw sword` instead of looking up the
+    // number first.
     let rows = match mud_db::account_items::list_for_user(pool, &account.user_id).await {
         Ok(rows) => rows,
         Err(e) => {
@@ -348,8 +416,8 @@ async fn cmd_chest_withdraw(
         send_to(world, player, "Your account chest is empty.\r\n");
         return;
     }
-    let chosen = if let Ok(slot) = target.parse::<i32>() {
-        rows.iter().find(|r| r.slot == slot).cloned()
+    let chosen = if let Ok(n) = target.parse::<usize>() {
+        n.checked_sub(1).and_then(|i| rows.get(i)).cloned()
     } else {
         let needle = target.to_ascii_lowercase();
         let protos = world.resource::<ObjectPrototypes>();
@@ -845,7 +913,7 @@ mod tests {
         let (mut world, player, mut rx) = fx.world();
         fx.stock_chest(Some(serde_json::json!({"charges": 4})))
             .await;
-        cmd_chest_withdraw(&mut world, player, &fx.pool, "0").await;
+        cmd_chest_withdraw(&mut world, player, &fx.pool, "1").await;
         let text = out(&mut rx);
         assert!(text.contains("You retrieve"), "{text}");
         assert_eq!(fx.chest_count().await, 0);
@@ -879,7 +947,7 @@ mod tests {
         let (mut world, player, mut rx) = fx.world();
         world.insert_resource(ObjectPrototypes::default());
         fx.stock_chest(None).await;
-        cmd_chest_withdraw(&mut world, player, &fx.pool, "0").await;
+        cmd_chest_withdraw(&mut world, player, &fx.pool, "1").await;
         let text = out(&mut rx);
         let (chest, inv) = (fx.chest_count().await, fx.inventory_ids().await);
         fx.end().await;
@@ -920,7 +988,7 @@ mod tests {
         assert!(crate::login::spawn_background_save(
             &mut world, player, &fx.pool
         ));
-        cmd_chest_withdraw(&mut world, player, &fx.pool, "0").await;
+        cmd_chest_withdraw(&mut world, player, &fx.pool, "1").await;
         assert!(
             coordinator
                 .flush(&mut world, std::time::Duration::from_secs(10))
@@ -982,7 +1050,7 @@ mod tests {
         let custom = serde_json::to_value(chest_state_of(&world, blade)).unwrap();
         world.despawn(blade);
         fx.stock_chest(Some(custom)).await;
-        cmd_chest_withdraw(&mut world, player, &fx.pool, "0").await;
+        cmd_chest_withdraw(&mut world, player, &fx.pool, "1").await;
         let back = world
             .query_filtered::<Entity, With<Item>>()
             .single(&world)
@@ -1001,6 +1069,55 @@ mod tests {
         let stored = stored.expect("curse written with the withdrawn row");
         assert_eq!(stored["restrictions_added"], serde_json::json!(["NO_DROP"]));
         assert_eq!(stored["weapon_dice_size"], -2);
+    }
+
+    #[test]
+    fn chest_subcommands_alias_deposit_and_withdraw() {
+        assert_eq!(parse_chest_action(""), ChestAction::List);
+        assert_eq!(parse_chest_action("list"), ChestAction::List);
+        assert_eq!(
+            parse_chest_action("deposit claymore"),
+            ChestAction::Deposit("claymore")
+        );
+        assert_eq!(
+            parse_chest_action("DEPOSIT  a long sword "),
+            ChestAction::Deposit("a long sword")
+        );
+        assert_eq!(parse_chest_action("withdraw 1"), ChestAction::Withdraw("1"));
+        assert_eq!(parse_chest_action("withdraw"), ChestAction::Withdraw(""));
+    }
+
+    #[test]
+    fn chest_listing_is_one_based_and_names_the_depositor() {
+        use std::collections::HashMap;
+        let row = |slot: i32, by: Option<&str>| mud_db::account_items::AccountItemRow {
+            id: slot,
+            user_id: "u".into(),
+            slot,
+            object_zone_id: 1,
+            object_id: 1,
+            quantity: 1,
+            custom_data: None,
+            stored_by_character_id: by.map(str::to_string),
+            stored_at: chrono::NaiveDate::from_ymd_opt(2026, 10, 11)
+                .unwrap()
+                .and_hms_opt(12, 0, 0)
+                .unwrap(),
+        };
+        let mut protos = ObjectPrototypes::default();
+        protos.by_key.insert(
+            (1, 1),
+            crate::commands::test_support::object_proto(1, 1, mud_db::enums::ObjectType::Other),
+        );
+        let names = HashMap::from([("c-uuid-1".to_string(), "Strider".to_string())]);
+        // DB slots start at 0 and can have gaps; the listing does not.
+        let out = format_chest_listing(&[row(0, Some("c-uuid-1")), row(5, None)], &names, &protos);
+        assert!(out.contains("[1]"), "{out}");
+        assert!(out.contains("[2]"), "{out}");
+        assert!(!out.contains("[0]") && !out.contains("[5]"), "{out}");
+        assert!(out.contains("by Strider,"), "{out}");
+        assert!(!out.contains("c-uuid-1"), "{out}");
+        assert!(out.contains("by someone,"), "{out}");
     }
 
     #[test]

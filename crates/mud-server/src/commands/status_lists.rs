@@ -91,7 +91,7 @@ fn cmd_socials(world: &mut World, player: Entity, _args: &str) {
         .collect();
     names.sort_unstable();
     let mut out = format!("\r\n{} socials available:\r\n", names.len());
-    let cols = 6usize;
+    let cols = 5usize; // 2 + 5 * 14 = 72 columns, inside 80
     let col_width = 14usize;
     for (i, name) in names.iter().enumerate() {
         if i % cols == 0 {
@@ -106,4 +106,43 @@ fn cmd_socials(world: &mut World, player: Entity, _args: &str) {
         out.push_str("\r\n");
     }
     send_to(world, player, out);
+}
+
+#[cfg(test)]
+mod socials_width_tests {
+    use super::*;
+    use crate::commands::test_support::{drain, player_in};
+
+    #[test]
+    fn socials_grid_fits_80_columns() {
+        let mut world = World::new();
+        let mut registry = SocialRegistry::default();
+        for i in 0..40 {
+            let name = format!("social{i:02}x");
+            registry.by_name.insert(
+                name.clone(),
+                mud_world::SocialDef {
+                    name,
+                    hide: false,
+                    char_no_arg: None,
+                    others_no_arg: None,
+                    char_found: None,
+                    others_found: None,
+                    vict_found: None,
+                    not_found: None,
+                    char_auto: None,
+                    others_auto: None,
+                },
+            );
+        }
+        world.insert_resource(registry);
+        let room = world.spawn_empty().id();
+        let (p, mut rx) = player_in(&mut world, room);
+        cmd_socials(&mut world, p, "");
+        let out = drain(&mut rx);
+        assert!(out.contains("40 socials available"), "{out}");
+        for line in out.lines() {
+            assert!(line.trim_end().chars().count() <= 80, "{line:?}");
+        }
+    }
 }

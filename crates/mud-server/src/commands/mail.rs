@@ -184,6 +184,7 @@ pub(crate) async fn compose_mail_step(
                     player,
                     format!("Mail sent to {}.\r\n", draft.recipient_label),
                 );
+                notify_new_mail(world, &draft.recipient_user_id);
             }
             Err(e) => {
                 send_to(world, player, format!("Send failed: {e}\r\n"));
@@ -226,6 +227,24 @@ pub(crate) async fn compose_mail_step(
         // Body lines: silent acceptance — the player sees their own typing
         // already; an echo on every line would feel chatty.
         ComposeStep::BodyAdded => {}
+    }
+}
+
+/// Tell every online character on `recipient_user_id`'s account that new
+/// mail arrived.
+pub(crate) fn notify_new_mail(world: &mut World, recipient_user_id: &str) {
+    let recipients: Vec<Entity> = world
+        .query_filtered::<(Entity, &Account), bevy_ecs::prelude::With<mud_world::Online>>()
+        .iter(world)
+        .filter(|(_, a)| a.user_id == recipient_user_id)
+        .map(|(e, _)| e)
+        .collect();
+    for r in recipients {
+        send_to(
+            world,
+            r,
+            "\r\nYou have new mail waiting at the post office.\r\n",
+        );
     }
 }
 
@@ -441,4 +460,45 @@ pub(crate) async fn cmd_delmail(
         player,
         format!("Deleted mail #{slot}: \"{}\".\r\n", row.subject),
     );
+}
+
+#[cfg(test)]
+mod notify_tests {
+    use super::*;
+    use crate::commands::test_support::{drain, player_in};
+
+    #[test]
+    fn online_recipient_account_is_told_about_new_mail() {
+        let mut world = World::new();
+        let room = world.spawn_empty().id();
+        let account = |user: &str| Account {
+            user_id: user.into(),
+            character_id: "c".into(),
+            role: UserRole::Player,
+            account_role: UserRole::Player,
+            perms: vec![],
+        };
+        let (target, mut trx) = player_in(&mut world, room);
+        world
+            .entity_mut(target)
+            .insert((account("u-target"), mud_world::Online));
+        let (other, mut orx) = player_in(&mut world, room);
+        world
+            .entity_mut(other)
+            .insert((account("u-other"), mud_world::Online));
+        let (offline, mut frx) = player_in(&mut world, room);
+        world.entity_mut(offline).insert(account("u-target"));
+
+        notify_new_mail(&mut world, "u-target");
+
+        assert!(
+            drain(&mut trx).contains("You have new mail waiting at the post office."),
+            "recipient told"
+        );
+        assert!(drain(&mut orx).is_empty(), "other accounts are not told");
+        assert!(
+            drain(&mut frx).is_empty(),
+            "offline characters are not told"
+        );
+    }
 }

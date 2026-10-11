@@ -28,7 +28,10 @@ inventory::submit! {
             long: "Visible to every online player who hasn't toggled \
                    their 'deaf' flag and isn't ignoring you. The \
                    dot alias ('.') lets seasoned players stack \
-                   gossips without arrowing back to type the verb.",
+                   gossips without arrowing back to type the verb. \
+                   A lone '.send', '.abort', '.preview' or '.clear' is a \
+                   mail-editor word, not a gossip; use 'gossip <word>' \
+                   to say one of them on the channel.",
         },
         run: cmd_gossip,
     }
@@ -279,7 +282,22 @@ fn broadcast_global(
         });
 }
 
+/// Editor control words (`.send`, `.abort`, `.preview`, `.clear`). The
+/// `.` gossip shortcut shares their prefix, so one typed outside a mail
+/// or note draft lands here as a one-word "gossip".
+fn is_editor_control_word(args: &str) -> bool {
+    ["send", "abort", "preview", "clear"]
+        .iter()
+        .any(|w| args.trim().eq_ignore_ascii_case(w))
+}
+
 fn cmd_gossip(world: &mut World, player: Entity, args: &str) {
+    // An open draft consumes these lines before dispatch, so reaching here
+    // means nothing is being written: answer instead of broadcasting.
+    if is_editor_control_word(args) {
+        send_to(world, player, "You're not writing anything.\r\n");
+        return;
+    }
     broadcast_global(
         world,
         player,
@@ -497,5 +515,48 @@ mod history_label_tests {
     fn several_gossips_are_plural() {
         let out = history_of(3);
         assert!(out.contains("Last 3 gossips:"), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod editor_word_tests {
+    use super::*;
+    use crate::commands::dispatch;
+    use crate::commands::test_support::{drain, player_in};
+
+    #[test]
+    fn dot_editor_words_outside_a_draft_are_not_gossiped() {
+        let mut world = World::new();
+        world.insert_resource(mud_world::ObjectPrototypes::default());
+        let room = world.spawn(mud_world::Room).id();
+        let (speaker, mut srx) = player_in(&mut world, room);
+        let (listener, mut lrx) = player_in(&mut world, room);
+        for e in [speaker, listener] {
+            world.entity_mut(e).insert((
+                Account {
+                    user_id: "u".into(),
+                    character_id: "c".into(),
+                    role: UserRole::Player,
+                    account_role: UserRole::Player,
+                    perms: vec![],
+                },
+                mud_world::Online,
+                mud_world::PlayerFlags(Vec::new()),
+            ));
+        }
+        for line in [".send", ".abort", ".preview", ".clear", ". SEND"] {
+            dispatch(&mut world, speaker, line);
+            let out = drain(&mut srx);
+            assert!(
+                out.contains("You're not writing anything."),
+                "{line}: {out}"
+            );
+            assert!(!out.contains("gossip"), "{line}: {out}");
+            assert!(drain(&mut lrx).is_empty(), "{line} leaked to the channel");
+        }
+        // Real gossip still goes out.
+        dispatch(&mut world, speaker, ".hello world");
+        assert!(drain(&mut srx).contains("You gossip"));
+        assert!(drain(&mut lrx).contains("hello world"));
     }
 }
