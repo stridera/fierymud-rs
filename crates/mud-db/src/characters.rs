@@ -57,9 +57,11 @@ pub struct CharacterRow {
     /// character. None when unset; rendered with XML-Lite color tags
     /// like room descriptions.
     pub description: Option<String>,
-    /// Core attribute scores. Schema default is 13 so freshly-rolled
-    /// characters always have something. Bonuses derive `(stat - 10) / 2`
-    /// at use sites; the runtime stores the raw scores.
+    /// Core attribute scores on the game's 0..100 scale (legacy
+    /// natural scores; 50 is average). Bonuses derive
+    /// `(stat - 50) / 5` via `CoreStats::bonus`; the runtime stores
+    /// the raw scores. The schema default of 13 is a placeholder only:
+    /// creation always rolls via `mud_world::roll_starting_stats`.
     pub strength: i32,
     pub dexterity: i32,
     pub constitution: i32,

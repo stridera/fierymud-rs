@@ -2175,8 +2175,8 @@ pub(crate) fn cmd_reroll(world: &mut World, player: Entity, args: &str) {
     if !target_is_below_caller(world, player, target, "reroll_denied", args) {
         return;
     }
-    // Same roller as character creation (3d6 per stat, clamped to the
-    // race's per-stat caps).
+    // Same roller as character creation (legacy 0..100 natural-stat roll,
+    // clamped to the race's per-stat caps).
     let race = world
         .get::<Profile>(target)
         .map(|p| p.race.clone())
@@ -2186,7 +2186,7 @@ pub(crate) fn cmd_reroll(world: &mut World, player: Entity, args: &str) {
         let catalog = world
             .get_resource::<mud_world::RaceCatalog>()
             .unwrap_or(&empty);
-        crate::login::roll_starting_stats(catalog, &race)
+        mud_world::roll_starting_stats(catalog, &race)
     };
     if let Some(mut cs) = world.get_mut::<mud_world::CoreStats>(target) {
         *cs = new_stats;

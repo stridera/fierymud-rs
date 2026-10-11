@@ -2638,7 +2638,10 @@ impl ConnRouter {
                     send_gender_prompt(&ctx.outbound);
                     return;
                 };
-                let stats = roll_starting_stats(world.resource::<mud_world::RaceCatalog>(), &race);
+                let stats = mud_world::roll_starting_stats(
+                    world.resource::<mud_world::RaceCatalog>(),
+                    &race,
+                );
                 send_stat_review(&ctx.outbound, &stats);
                 ctx.stage = Stage::ReviewStatRoll {
                     email,
@@ -2666,8 +2669,10 @@ impl ConnRouter {
                 let accepted = matches!(answer.as_str(), "a" | "accept" | "y" | "yes" | "");
                 let rerolled = matches!(answer.as_str(), "r" | "reroll" | "n" | "no");
                 if rerolled {
-                    let new_stats =
-                        roll_starting_stats(world.resource::<mud_world::RaceCatalog>(), &race);
+                    let new_stats = mud_world::roll_starting_stats(
+                        world.resource::<mud_world::RaceCatalog>(),
+                        &race,
+                    );
                     send_stat_review(&ctx.outbound, &new_stats);
                     ctx.stage = Stage::ReviewStatRoll {
                         email,
@@ -6884,38 +6889,14 @@ fn match_playable_gender(input: &str) -> Option<&'static str> {
     PLAYABLE_GENDERS.iter().copied().find(|g| *g == needle)
 }
 
-/// Classic 3d6-per-stat roll for a brand-new character, clamped
-/// at the race's per-attribute max from `Races.max_*` columns.
-/// 3d6 tops out at 18 and the schema default cap is 76, so the
-/// clamp is normally a no-op — but a race that lowers a specific
-/// cap (e.g. low-INT brutes capped at 12) will see freshly-rolled
-/// stats respect the schema authoring. Returns six stats in the
-/// canonical order STR / INT / WIS / DEX / CON / CHA.
-pub(crate) fn roll_starting_stats(race_catalog: &mud_world::RaceCatalog, race: &str) -> CoreStats {
-    let roll = || -> i32 {
-        (0..3)
-            .map(|_| i32::try_from(rand::random_range(1u32..=6)).unwrap_or(1))
-            .sum()
-    };
-    let cap = |stat: &str, val: i32| val.min(race_catalog.stat_cap(race, stat, i32::MAX));
-    CoreStats {
-        strength: cap("strength", roll()),
-        intelligence: cap("intelligence", roll()),
-        wisdom: cap("wisdom", roll()),
-        dexterity: cap("dexterity", roll()),
-        constitution: cap("constitution", roll()),
-        charisma: cap("charisma", roll()),
-    }
-}
-
 /// Render the freshly-rolled stat block + accept/reroll prompt.
 /// Bonuses come from the same `CoreStats::bonus` helper used by
 /// score so the player sees what their numbers will mean before
 /// committing.
 fn send_stat_review(outbound: &Outbound, stats: &CoreStats) {
     let line = format!(
-        "Rolled stats:\r\n  STR {:>2} ({:+})  INT {:>2} ({:+})  WIS {:>2} ({:+})\r\n  \
-         DEX {:>2} ({:+})  CON {:>2} ({:+})  CHA {:>2} ({:+})\r\nAccept or reroll? \
+        "Rolled stats:\r\n  STR {:>3} ({:+})  INT {:>3} ({:+})  WIS {:>3} ({:+})\r\n  \
+         DEX {:>3} ({:+})  CON {:>3} ({:+})  CHA {:>3} ({:+})\r\nAccept or reroll? \
          (accept/reroll): ",
         stats.strength,
         CoreStats::bonus(stats.strength),

@@ -8,10 +8,12 @@ pub mod mob_spawn;
 pub mod movement;
 pub mod reset_gear;
 pub mod resources;
+pub mod stat_roll;
 pub mod targeting;
 pub mod wake_effects;
 
 pub use god::{GOD_PROFICIENCY, bypasses_restrictions, known_abilities_of, proficiency_of};
+pub use stat_roll::{STAT_SCALE_MAX, roll_starting_stats};
 pub use wake_effects::{RoomWakeRow, WakeEffectCatalog, WakeRow, load_wake_effect_catalog};
 
 pub use components::{

@@ -537,8 +537,8 @@ fn reroll_respects_level_and_uses_the_creation_roller() {
             cs.charisma
         ]
         .iter()
-        .all(|v| (3..=18).contains(v)),
-        "creation roller is 3d6 per stat: {cs:?}"
+        .all(|v| (30..=100).contains(v)),
+        "creation roller is the legacy 0..100 natural roll: {cs:?}"
     );
 }
 
