@@ -77,7 +77,43 @@ pub async fn list_all(pool: &PgPool) -> sqlx::Result<Vec<ClassRow>> {
             exp_gain_factor,
             alignment_bias,
             campcraft_bonus,
-            tags AS "tags!: Vec<String>",
+            COALESCE(tags, ARRAY[]::text[]) AS "tags!: Vec<String>",
+            accuracy_per_level,
+            evasion_per_level,
+            dex_evasion_mult,
+            attack_power_per_level,
+            base_crit_chance,
+            COALESCE(resistances, '{}'::jsonb) AS "resistances!: serde_json::Value"
+        FROM "Class"
+        ORDER BY id
+        "#
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// [`list_all`] for a database that predates the `"Class".tags` column
+/// (`fierylib/data/sql/2026-10-12-core-class-tags.sql`): every class gets empty
+/// tags, so the `core:<role>` lookups fall back to class names. Only the
+/// loader's missing-column fallback should call this.
+pub async fn list_all_without_tags(pool: &PgPool) -> sqlx::Result<Vec<ClassRow>> {
+    sqlx::query_as!(
+        ClassRow,
+        r#"
+        SELECT
+            id,
+            name,
+            plain_name,
+            is_subclass,
+            parent_class_id,
+            description,
+            hit_dice,
+            primary_stat,
+            hp_per_level,
+            exp_gain_factor,
+            alignment_bias,
+            campcraft_bonus,
+            ARRAY[]::text[] AS "tags!: Vec<String>",
             accuracy_per_level,
             evasion_per_level,
             dex_evasion_mult,

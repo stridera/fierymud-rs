@@ -138,6 +138,42 @@ async fn load_status_flag_rows(
     )
 }
 
+/// `Class` rows. `Class.tags` comes from the muditor schema plus
+/// `2026-10-12-core-class-tags.sql`; when it is missing (42703) retry without it
+/// (empty tags; `CoreClasses` then falls back to class names) and log an ERROR,
+/// rather than aborting the whole world load. Any other missing column / table
+/// (e.g. `campcraft_bonus`) still fails with a pointed [`schema_gap`] message.
+async fn load_class_rows(pool: &PgPool) -> sqlx::Result<Vec<classes::ClassRow>> {
+    let res = classes::list_all(pool).await;
+    if res.as_ref().err().is_some_and(is_missing_column) {
+        match classes::list_all_without_tags(pool).await {
+            Ok(rows) => {
+                error!(
+                    "column \"Class\".\"tags\" is missing; core class tags (core:monk, core:thief) \
+                     are unavailable and the Monk/Thief engine features fall back to class names \
+                     until the muditor schema is pushed (prisma db push) and \
+                     fierylib/data/sql/2026-10-12-core-class-tags.sql is applied"
+                );
+                return Ok(rows);
+            }
+            Err(e) => {
+                return Err(schema_gap(
+                    e,
+                    "column \"Class\".\"campcraft_bonus\" (read by the class catalog)",
+                    "apply fierylib/data/sql/2026-10-09-campcraft.sql (and deploy the muditor schema)",
+                ));
+            }
+        }
+    }
+    res.map_err(|e| {
+        schema_gap(
+            e,
+            "table \"Class\" or column \"Class\".\"campcraft_bonus\" (read by the class catalog)",
+            "apply fierylib/data/sql/2026-10-09-campcraft.sql (and deploy the muditor schema)",
+        )
+    })
+}
+
 /// Build the `StatusFlagValues` resource. Returns `(kept, dropped)` flag-name
 /// pairs for rows that collide in the lowercased `prevents` map (they differ
 /// only by case; the later row wins there).
@@ -691,13 +727,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     // Resistance JSON is distilled into a typed `ElementType` map
     // via the shared `parse_resistance_json` helper so unknown
     // schema labels are dropped consistently with the race catalog.
-    let class_rows = classes::list_all(pool).await.map_err(|e| {
-        schema_gap(
-            e,
-            "columns \"Class\".\"campcraft_bonus\" and \"Class\".\"tags\" (read by the class catalog)",
-            "apply fierylib/data/sql/2026-10-09-campcraft.sql and 2026-10-12-core-class-tags.sql (and deploy the muditor schema)",
-        )
-    })?;
+    let class_rows = load_class_rows(pool).await?;
     let mut class_catalog = ClassCatalog::default();
     for row in class_rows {
         let resistances = crate::resources::parse_resistance_json(&row.resistances);
@@ -3414,6 +3444,51 @@ mod schema_gap_tests {
         assert_eq!(collisions, vec![("HELD".to_string(), "Held".to_string())]);
         assert_eq!(v.by_flag.len(), 2);
         assert!(v.prevents("held").movement);
+    }
+
+    #[derive(Debug)]
+    struct FakeDbError(&'static str);
+
+    impl std::fmt::Display for FakeDbError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "fake db error {}", self.0)
+        }
+    }
+
+    impl std::error::Error for FakeDbError {}
+
+    impl sqlx::error::DatabaseError for FakeDbError {
+        fn message(&self) -> &'static str {
+            "fake"
+        }
+        fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
+            Some(std::borrow::Cow::Borrowed(self.0))
+        }
+        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+            self
+        }
+        fn kind(&self) -> sqlx::error::ErrorKind {
+            sqlx::error::ErrorKind::Other
+        }
+    }
+
+    /// The `Class.tags` fallback fires only for `undefined_column` (42703), not for
+    /// a missing table (42P01) or an unrelated database error.
+    #[test]
+    fn class_tags_fallback_triggers_only_on_missing_column() {
+        let col = sqlx::Error::Database(Box::new(FakeDbError("42703")));
+        let table = sqlx::Error::Database(Box::new(FakeDbError("42P01")));
+        let other = sqlx::Error::Database(Box::new(FakeDbError("23505")));
+        assert!(is_missing_column(&col));
+        assert!(!is_missing_column(&table));
+        assert!(!is_missing_column(&other));
+        assert!(is_missing_schema(&table));
     }
 
     #[test]

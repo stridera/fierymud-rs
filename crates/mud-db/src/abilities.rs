@@ -135,7 +135,7 @@ pub async fn list_all(pool: &PgPool) -> sqlx::Result<Vec<AbilityRow>> {
             LOWER(sphere::text) AS "sphere?: String",
             LOWER(damage_type::text) AS "damage_type?: String",
             memorization_time,
-            tags AS "tags!: Vec<String>",
+            COALESCE(tags, ARRAY[]::text[]) AS "tags!: Vec<String>",
             quest_only
         FROM "Ability"
         ORDER BY id
