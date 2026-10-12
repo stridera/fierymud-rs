@@ -16,7 +16,9 @@ use crate::commands::*;
 inventory::submit! {
     AsyncCommand {
         dispatch: |world, player, pool, head, args| match head {
-            "quests" | "qstat" | "qlist" | "questlog" => Some(Box::pin(cmd_quests(world, player, pool))),
+            "quests" | "qstat" | "qlist" | "questlog" => {
+                Some(Box::pin(cmd_quests(world, player, pool, args)))
+            }
             "abandon" => Some(Box::pin(cmd_abandon(world, player, pool, args))),
             "questinfo" => Some(Box::pin(cmd_questinfo(world, player, pool, args))),
             "innate" => Some(Box::pin(cmd_innate(world, player, pool, args))),
@@ -57,13 +59,17 @@ inventory::submit! {
         required_perm: None,
         category: Category::Quest,
         help: Help {
-            usage: "quests",
-            summary: "List your accepted quests.",
+            usage: "quests [<player>]",
+            summary: "List your accepted quests (staff: or a player's).",
             long: "In-progress quests appear first with their short \
                    description; completed/abandoned quests follow with \
                    their final status. Each in-progress quest also \
                    shows its phases + objective progress (▶ for \
-                   current, ✓ for done, [N/M] for showProgress).",
+                   current, ✓ for done, [N/M] for showProgress). \
+                   Immortal+ may add a player's name (online or \
+                   offline) to see that player's quests, including \
+                   each quest's stored quest variables. A player \
+                   hidden from you by wizinvis cannot be looked up.",
         },
         run: cmd_mail_stub,
     }
@@ -229,25 +235,124 @@ inventory::submit! {
 /// accepted, in-progress first then recently completed. Active rows
 /// show the quest name + short description; completed rows show
 /// completion count. Empty inbox = "no quests accepted."
-pub(crate) async fn cmd_quests(world: &mut World, player: Entity, pool: &mud_db::sqlx::PgPool) {
+///
+/// Immortal+ may pass a player's name: the same listing for that
+/// character (online or offline), headed with their name and followed by
+/// each quest's stored variables. Mortals' argument is ignored.
+pub(crate) async fn cmd_quests(
+    world: &mut World,
+    player: Entity,
+    pool: &mud_db::sqlx::PgPool,
+    args: &str,
+) {
+    let viewer_role = world
+        .get::<Account>(player)
+        .map_or(UserRole::Player, |a| a.role);
+    let target_name = args.trim();
+    if !target_name.is_empty() && viewer_role.at_least(UserRole::Immortal) {
+        qstat_other(world, player, pool, target_name).await;
+        return;
+    }
     let character_id = world.get::<Account>(player).map(|a| a.character_id.clone());
     let Some(character_id) = character_id else {
         send_to(world, player, "No account info; can't fetch quests.\r\n");
         return;
     };
-    let viewer_role = world
-        .get::<Account>(player)
-        .map_or(UserRole::Player, |a| a.role);
     let pool = pool.clone();
     // Off the tick, and ordered: whatever the player types next waits for
     // the listing instead of overtaking it.
     off_tick::run(
         world,
         player,
-        async move { quests_text(&pool, &character_id, viewer_role).await },
+        async move { quests_text(&pool, &character_id, viewer_role, false).await },
         |world, player, text| send_to(world, player, text),
     )
     .await;
+}
+
+/// Staff `qstat <player>`. An online target is found world-wide with the
+/// same visibility rules as `stat player` (so a wizinvis higher-rank
+/// target is "no such player"); otherwise the name is looked up among
+/// saved characters, honouring the stored invis level.
+async fn qstat_other(
+    world: &mut World,
+    player: Entity,
+    pool: &mud_db::sqlx::PgPool,
+    target_name: &str,
+) {
+    record_admin_action(world, player, "qstat", target_name);
+    let viewer_role = world
+        .get::<Account>(player)
+        .map_or(UserRole::Player, |a| a.role);
+    let viewer_level = world.get::<Profile>(player).map_or(0, |p| p.level);
+    let pool = pool.clone();
+    if let Some(online) = super::admin_inspect::stat_player(world, player, target_name) {
+        let Some(character_id) = world.get::<Account>(online).map(|a| a.character_id.clone())
+        else {
+            send_to(world, player, "No such player around.\r\n");
+            return;
+        };
+        let name = name_of(world, online);
+        off_tick::run(
+            world,
+            player,
+            async move { qstat_listing(&pool, &name, &character_id, viewer_role).await },
+            |world, player, text| send_to(world, player, text),
+        )
+        .await;
+        return;
+    }
+    // Online but hidden from the viewer: indistinguishable from absent.
+    let hidden_online = {
+        let mut q = world.query_filtered::<(&Named, Has<Online>), With<Player>>();
+        q.iter(world)
+            .any(|(n, online)| online && n.name.eq_ignore_ascii_case(target_name))
+    };
+    if hidden_online {
+        send_to(world, player, "No such player around.\r\n");
+        return;
+    }
+    let target_name = target_name.to_string();
+    off_tick::run(
+        world,
+        player,
+        async move {
+            match mud_db::characters::find_by_name(&pool, &target_name).await {
+                Ok(Some(row)) if row.invis_level <= viewer_level => {
+                    qstat_listing(&pool, &row.name, &row.id, viewer_role).await
+                }
+                Ok(_) => "No such player around.\r\n".to_string(),
+                Err(e) => format!("DB error: {e}\r\n"),
+            }
+        },
+        |world, player, text| send_to(world, player, text),
+    )
+    .await;
+}
+
+/// The staff view of one character's quests: a header naming them, then
+/// the usual listing plus each quest's variables.
+async fn qstat_listing(
+    pool: &mud_db::sqlx::PgPool,
+    name: &str,
+    character_id: &str,
+    viewer_role: UserRole,
+) -> String {
+    let body = quests_text(pool, character_id, viewer_role, true).await;
+    format!("\r\nQuests of {name}:{body}")
+}
+
+/// Indented `key = value` lines for a quest's stored variables; empty
+/// when the bag is empty.
+fn variable_lines(vars: &serde_json::Value, indent: &str) -> String {
+    let Some(map) = vars.as_object().filter(|m| !m.is_empty()) else {
+        return String::new();
+    };
+    let mut out = format!("{indent}Variables:\r\n");
+    for (k, v) in map {
+        out.push_str(&format!("{indent}  {k} = {v}\r\n"));
+    }
+    out
 }
 
 /// The `quests` listing: one query for the quests plus one per active
@@ -256,13 +361,18 @@ async fn quests_text(
     pool: &mud_db::sqlx::PgPool,
     character_id: &str,
     viewer_role: UserRole,
+    show_variables: bool,
 ) -> String {
     let rows = match mud_db::quests::list_for_character(pool, character_id).await {
         Ok(r) => r,
         Err(e) => return format!("Quest fetch failed: {e}\r\n"),
     };
     if rows.is_empty() {
-        return "\r\nYou have no active or completed quests.\r\n".to_string();
+        return if show_variables {
+            "\r\nNo active or completed quests.\r\n".to_string()
+        } else {
+            "\r\nYou have no active or completed quests.\r\n".to_string()
+        };
     }
     let active: Vec<&mud_db::quests::CharacterQuestRow> =
         rows.iter().filter(|r| r.status == "IN_PROGRESS").collect();
@@ -280,6 +390,9 @@ async fn quests_text(
                 && !desc.trim().is_empty()
             {
                 out.push_str(&format!("        {}\r\n", desc.trim()));
+            }
+            if show_variables {
+                out.push_str(&variable_lines(&q.variables, "        "));
             }
             // Per-quest objective listing. Group by phase; mark
             // the current phase with a "▶" so the player sees
@@ -355,6 +468,9 @@ async fn quests_text(
                 out.push_str(&format!(" ×{}", q.completion_count));
             }
             out.push_str("\r\n");
+            if show_variables {
+                out.push_str(&variable_lines(&q.variables, "        "));
+            }
         }
     }
     out
@@ -2202,5 +2318,132 @@ mod off_tick_tests {
             assert!(crate::commands::run_queued_input(&mut world, player, &pool).await);
             assert!(drain(&mut rx).contains("A quiet hall"), "{cmd}");
         }
+    }
+}
+
+#[cfg(test)]
+mod qstat_other_tests {
+    use super::*;
+    use crate::commands::off_tick::{CommandJobs, drain_command_jobs};
+    use crate::commands::test_support::{drain, player_in};
+    use mud_world::{Online, Profile, WizInvis};
+
+    fn unreachable_pool() -> mud_db::sqlx::PgPool {
+        mud_db::sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(100))
+            .connect_lazy("postgres://nobody:nopass@127.0.0.1:1/none")
+            .unwrap()
+    }
+
+    fn person(
+        world: &mut World,
+        room: Entity,
+        name: &str,
+        role: UserRole,
+        level: i32,
+    ) -> (Entity, crate::commands::test_support::Rx) {
+        let (e, rx) = player_in(world, room);
+        world.entity_mut(e).insert((
+            Named { name: name.into() },
+            Online,
+            Account {
+                user_id: format!("u-{name}"),
+                character_id: format!("c-{name}"),
+                role,
+                account_role: role,
+                perms: vec![],
+            },
+        ));
+        world.entity_mut(e).insert(Profile {
+            level,
+            class_id: None,
+            race: "Human".into(),
+            experience: 0,
+            gender: "neutral".into(),
+        });
+        (e, rx)
+    }
+
+    fn setup() -> (World, Entity) {
+        let mut world = World::new();
+        world.init_resource::<CommandJobs>();
+        let room = world
+            .spawn((
+                Room,
+                Named {
+                    name: "A quiet hall".into(),
+                },
+            ))
+            .id();
+        (world, room)
+    }
+
+    async fn run(world: &mut World, who: Entity, line: &str) {
+        let pool = unreachable_pool();
+        crate::commands::dispatch_with_async(world, who, &pool, line).await;
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        drain_command_jobs(world);
+    }
+
+    #[test]
+    fn variable_lines_lists_keys_and_skips_empty_bags() {
+        let vars = serde_json::json!({"stage": 2, "met_king": true, "who": "Bob"});
+        let out = variable_lines(&vars, "    ");
+        assert!(out.contains("    Variables:\r\n"), "{out}");
+        assert!(out.contains("      stage = 2\r\n"), "{out}");
+        assert!(out.contains("      met_king = true\r\n"), "{out}");
+        assert!(out.contains("      who = \"Bob\"\r\n"), "{out}");
+        assert_eq!(variable_lines(&serde_json::json!({}), "    "), "");
+    }
+
+    /// An immortal naming an online player gets the listing under a header
+    /// naming that player (the unreachable database fails the fetch).
+    #[tokio::test(flavor = "current_thread")]
+    async fn immortal_qstat_names_the_online_target() {
+        let (mut world, room) = setup();
+        let (imm, mut rx) = person(&mut world, room, "Daedela", UserRole::Immortal, 100);
+        person(&mut world, room, "Bob", UserRole::Player, 20);
+        run(&mut world, imm, "qstat bob").await;
+        let out = drain(&mut rx);
+        assert!(out.contains("Quests of Bob:"), "{out}");
+        assert!(out.contains("Quest fetch failed"), "{out}");
+    }
+
+    /// A mortal's argument is ignored: the listing is their own, with no
+    /// target header.
+    #[tokio::test(flavor = "current_thread")]
+    async fn mortal_qstat_ignores_the_argument() {
+        let (mut world, room) = setup();
+        let (mortal, mut rx) = person(&mut world, room, "Newbie", UserRole::Player, 10);
+        person(&mut world, room, "Bob", UserRole::Player, 20);
+        run(&mut world, mortal, "qstat bob").await;
+        let out = drain(&mut rx);
+        assert!(!out.contains("Quests of"), "{out}");
+        assert!(out.contains("Quest fetch failed"), "{out}");
+    }
+
+    /// A higher-rank target behind wizinvis looks absent, the same as for
+    /// `stat player`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn wizinvis_higher_rank_target_is_hidden() {
+        let (mut world, room) = setup();
+        let (imm, mut rx) = person(&mut world, room, "Daedela", UserRole::Immortal, 100);
+        let (zeus, _z) = person(&mut world, room, "Zeus", UserRole::Implementor, 105);
+        world.entity_mut(zeus).insert(WizInvis(105));
+        run(&mut world, imm, "qstat zeus").await;
+        let out = drain(&mut rx);
+        assert!(out.contains("No such player around."), "{out}");
+        assert!(!out.contains("Quests of"), "{out}");
+    }
+
+    /// An offline name goes to the database; with it unreachable that
+    /// surfaces as a DB error rather than "no such player".
+    #[tokio::test(flavor = "current_thread")]
+    async fn immortal_qstat_offline_name_is_looked_up_in_the_database() {
+        let (mut world, room) = setup();
+        let (imm, mut rx) = person(&mut world, room, "Daedela", UserRole::Immortal, 100);
+        run(&mut world, imm, "qstat Nobody").await;
+        let out = drain(&mut rx);
+        assert!(out.contains("DB error"), "{out}");
     }
 }

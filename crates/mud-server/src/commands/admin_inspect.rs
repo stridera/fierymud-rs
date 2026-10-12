@@ -2835,7 +2835,7 @@ fn stat_type_word(word: &str, has_name: bool) -> Option<StatKind> {
 }
 
 /// An online player by name for `stat player` (yourself included).
-fn stat_player(world: &mut World, player: Entity, name: &str) -> Option<Entity> {
+pub(crate) fn stat_player(world: &mut World, player: Entity, name: &str) -> Option<Entity> {
     if name.eq_ignore_ascii_case("me")
         || name.eq_ignore_ascii_case("self")
         || name.eq_ignore_ascii_case(&name_of(world, player))
