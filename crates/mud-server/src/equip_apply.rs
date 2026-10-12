@@ -1365,6 +1365,26 @@ mod tests {
         assert!(!crate::commands::room_has_light(&world, room));
     }
 
+    /// Legacy `do_light`: `light` on a lit light puts it out (`help light`
+    /// and the Academy lesson both say so).
+    #[test]
+    fn light_command_on_a_lit_torch_puts_it_out() {
+        let (mut world, room, wearer, item) = light_world(Some(torch_fuel(150)), Some(Slot::Hold));
+        world
+            .entity_mut(item)
+            .insert(mud_world::Keywords(vec!["torch".into()]));
+        apply_object_to_wearer(&mut world, item, wearer);
+        crate::commands::info::cmd_light(&mut world, wearer, "torch");
+        assert!(world.get::<mud_world::Lit>(item).is_some());
+        assert!(crate::commands::room_has_light(&world, room));
+        crate::commands::info::cmd_light(&mut world, wearer, "torch");
+        assert!(world.get::<mud_world::Lit>(item).is_none());
+        assert!(!crate::commands::room_has_light(&world, room));
+        // And once more lights it again.
+        crate::commands::info::cmd_light(&mut world, wearer, "torch");
+        assert!(world.get::<mud_world::Lit>(item).is_some());
+    }
+
     #[test]
     fn light_command_refuses_a_spent_torch() {
         let (mut world, room, wearer, item) = light_world(Some(torch_fuel(0)), Some(Slot::Hold));

@@ -6598,6 +6598,10 @@ mod tests {
     /// A DEATH script receives the killer as `actor` (legacy
     /// `death_mtrigger(ch, killer)`), not the dying mob.
     fn goblin_with_death_script(world: &mut World, goblin: Entity) {
+        goblin_with_death_body(world, goblin, "self:setvar('killer', actor.name)");
+    }
+
+    fn goblin_with_death_body(world: &mut World, goblin: Entity, body: &str) {
         use mud_world::{
             AttachedTriggers, TriggerAttach, TriggerCatalog, TriggerDef, TriggerEvent,
         };
@@ -6609,7 +6613,7 @@ mod tests {
                 id: 1,
                 name: "death".to_string(),
                 attach_type: TriggerAttach::Mob,
-                commands: "self:setvar('killer', actor.name)".to_string(),
+                commands: body.to_string(),
                 flags: vec![TriggerEvent::Death],
                 arg_list: vec![],
                 num_args: 0,
@@ -6637,6 +6641,66 @@ mod tests {
             .get(mud_db::enums::EntityType::Mob, 1, 1, "killer")
             .cloned();
         assert_eq!(seen, Some("Killer".into()));
+    }
+
+    /// `self.room` in a DEATH script is the room the mob died in (the 175
+    /// DEATH scripts that broadcast or spawn through it depend on that).
+    #[test]
+    fn death_trigger_self_room_is_the_death_room() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let goblin = credit_goblin(&mut world, room, 0, None);
+        let killer = credit_player(&mut world, room, "Killer", 0);
+        world.entity_mut(killer).insert(Fighting(goblin));
+        goblin_with_death_body(
+            &mut world,
+            goblin,
+            "self:setvar('room_seen', tostring(self.room ~= nil))",
+        );
+        run_combat_tick(&mut world);
+        assert!(world.get_entity(goblin).is_err(), "goblin died");
+        let seen = world
+            .resource::<mud_world::EntityVariableCache>()
+            .get(mud_db::enums::EntityType::Mob, 1, 1, "room_seen")
+            .cloned();
+        assert_eq!(seen, Some("true".into()));
+    }
+
+    /// A DEATH script that hops to a staging room with `room:at(...)` sees
+    /// the staging room as `self.room` inside the callback (DG `at` moves the
+    /// script's owner there), and its own room again afterwards. Without
+    /// this the drake chain's `self.room:purge()` purged the death room.
+    #[test]
+    fn death_trigger_at_callback_switches_self_room() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let stage = make_room(&mut world);
+        world.entity_mut(room).insert(WorldKey { zone: 80, id: 40 });
+        world
+            .entity_mut(stage)
+            .insert(WorldKey { zone: 160, id: 95 });
+        let mut index = WorldKeyIndex::default();
+        index.rooms.insert((80, 40), room);
+        index.rooms.insert((160, 95), stage);
+        world.insert_resource(index);
+        let goblin = credit_goblin(&mut world, room, 0, None);
+        let killer = credit_player(&mut world, room, "Killer", 0);
+        world.entity_mut(killer).insert(Fighting(goblin));
+        goblin_with_death_body(
+            &mut world,
+            goblin,
+            "get_room(160, 95):at(function() self:setvar('inside', tostring(self.room.id)) end)\n\
+             self:setvar('after', tostring(self.room.id))",
+        );
+        run_combat_tick(&mut world);
+        let cache = world.resource::<mud_world::EntityVariableCache>();
+        let var = |name: &str| {
+            cache
+                .get(mud_db::enums::EntityType::Mob, 1, 1, name)
+                .cloned()
+        };
+        assert_eq!(var("inside"), Some("95".into()));
+        assert_eq!(var("after"), Some("40".into()));
     }
 
     #[test]

@@ -192,8 +192,10 @@ inventory::submit! {
             long: "Decrements your on-hand coin by 'amount' (copper \
                    units) and pads the target mob's coin by the same. \
                    Fires the target's BRIBE-flagged Lua triggers with \
-                   'actor' = you and 'amount' as a Lua global so \
-                   bodies can react proportionally.",
+                   'actor' = you, 'value' (the total in copper, like \
+                   DG's %value%) and the 'platinum' / 'gold' / 'silver' / \
+                   'copper' breakdown as Lua globals so bodies can react \
+                   proportionally.",
         },
         run: cmd_bribe,
     }
@@ -639,9 +641,9 @@ inventory::submit! {
             summary: "Light a torch or lantern.",
             long: "Lights a Light-type item you are carrying, holding \
                    or wearing. Wearing or holding a light does not \
-                   light it. Refused on non-light items, items that \
-                   are already lit, and burnt-out lights. Permanent \
-                   lights are always lit.",
+                   light it. Lighting a light that is already lit puts \
+                   it out again. Refused on non-light items and \
+                   burnt-out lights. Permanent lights are always lit.",
         },
         run: cmd_light,
     }
@@ -4275,8 +4277,8 @@ pub(crate) fn cmd_bribe(world: &mut World, player: Entity, args: &str) {
             format_amount(amount)
         ),
     );
-    // Fire BRIBE on target with the amount as a Lua extras global.
-    let amount_str = amount.to_string();
+    // Fire BRIBE on target. Bodies get DG's `value` (total copper) and the
+    // `platinum` / `gold` / `silver` / `copper` breakdown as numbers.
     let to_fire: Vec<(i32, i32, String, String)> = {
         if let Some(at) = world.get::<AttachedTriggers>(target) {
             let keys = at.0.clone();
@@ -4297,17 +4299,26 @@ pub(crate) fn cmd_bribe(world: &mut World, player: Entity, args: &str) {
     };
     for (zone, id, _name, body) in to_fire {
         let _ = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
-            host.exec_for_listener_with_extras(
-                world,
-                target,
-                player,
-                &body,
-                &[("amount", &amount_str)],
-            )
+            host.set_bindings(bribe_bindings(amount));
+            host.exec_for_listener_with_extras(world, target, player, &body, &[])
         });
         crate::commands::drain_lua_outbox(world);
         let _ = (zone, id); // referenced for the closure capture only
     }
+}
+
+/// The numeric globals a BRIBE body reads, from a total in copper: DG's
+/// `value`, plus the `platinum` / `gold` / `silver` / `copper` split
+/// (1 platinum = 10 gold = 100 silver = 1000 copper).
+fn bribe_bindings(copper: i64) -> Vec<(&'static str, mud_script::Binding)> {
+    use mud_script::Binding::Int;
+    vec![
+        ("value", Int(copper)),
+        ("platinum", Int(copper / 1000)),
+        ("gold", Int(copper % 1000 / 100)),
+        ("silver", Int(copper % 100 / 10)),
+        ("copper", Int(copper % 10)),
+    ]
 }
 
 /// Legacy shop `is_ok_char`: a keeper refuses a customer it cannot see
@@ -12717,8 +12728,9 @@ pub(crate) fn cmd_hold(world: &mut World, player: Entity, args: &str) {
     refresh_player_items_gmcp(world, player);
 }
 
-/// `light <item>`: mark a Light-type carried item as lit. Refused
-/// on non-Light items or already-lit ones.
+/// `light <item>`: mark a Light-type carried item as lit; on one that is
+/// already lit it toggles it off (legacy `do_light`). Refused on non-Light
+/// items.
 pub(crate) fn cmd_light(world: &mut World, player: Entity, args: &str) {
     let target_word = args.trim();
     if target_word.is_empty() {
@@ -12750,7 +12762,16 @@ pub(crate) fn cmd_light(world: &mut World, player: Entity, args: &str) {
         return;
     }
     if mud_world::is_lit(world, item) {
-        send_msg(world, player, format!("{item_name} is already lit.\r\n"));
+        // Legacy `do_light`: lighting a lit light puts it out. A permanent
+        // light cannot be put out (see `cmd_extinguish`), so it stays lit.
+        if world
+            .get::<mud_world::LightFuel>(item)
+            .is_some_and(mud_world::LightFuel::is_permanent)
+        {
+            send_msg(world, player, format!("{item_name} is already lit.\r\n"));
+        } else {
+            cmd_extinguish(world, player, target_word);
+        }
         return;
     }
     // Burnt out (or no fuel data at all, which is never assumed infinite).

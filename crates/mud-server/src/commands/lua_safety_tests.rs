@@ -588,3 +588,42 @@ fn newbie_guard_blocks_an_abbreviated_direction() {
     super::dispatch(&mut fx.world, bob, "n");
     assert_eq!(fx.world.get::<Located>(bob).map(|l| l.0), Some(a));
 }
+
+/// A BRIBE body reads DG's `value` (total copper) and the coin split as
+/// numbers, so `value >= price` comparisons work (string globals made them
+/// error, and the converter's `percent_chance` gate hid that).
+#[test]
+fn bribe_trigger_reads_value_and_the_coin_split_as_numbers() {
+    let mut fx: Fx = fixture();
+    let a = fx.a;
+    let (payer, _rx) = player(&mut fx.world, a, "Payer");
+    fx.world
+        .entity_mut(payer)
+        .insert(mud_world::Wealth(100_000));
+    let cleric = mob(&mut fx.world, a, "cleric", (900, 6), 5);
+    fx.world
+        .entity_mut(cleric)
+        .insert(AttachedTriggers(vec![(900, 3)]));
+    let mut catalog = TriggerCatalog::default();
+    catalog.by_key.insert(
+        (900, 3),
+        trigger(
+            900,
+            3,
+            TriggerEvent::Bribe,
+            "if value >= 12000 then\n\
+             self:setvar('paid', value .. ':' .. platinum .. ':' .. gold .. ':' .. silver .. ':' .. copper)\n\
+             end",
+        ),
+    );
+    fx.world.insert_resource(catalog);
+
+    super::info::cmd_bribe(&mut fx.world, payer, "12345 cleric");
+
+    let paid = fx
+        .world
+        .resource::<EntityVariableCache>()
+        .get(EntityType::Mob, 900, 6, "paid")
+        .and_then(|v| v.as_str().map(str::to_string));
+    assert_eq!(paid.as_deref(), Some("12345:12:3:4:5"));
+}

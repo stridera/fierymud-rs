@@ -1733,12 +1733,54 @@ const SET_FIELDS: &[(&str, &[&str], &str)] = &[
         "Stamina.max (current stamina pinned)",
     ),
     (
-        "gold",
-        &["copper", "wealth"],
-        "Wealth in copper (clamped >= 0)",
+        "platinum",
+        &["plat"],
+        "platinum coins on hand (other coins kept; clamped >= 0)",
     ),
+    (
+        "gold",
+        &[],
+        "gold coins on hand (other coins kept; clamped >= 0)",
+    ),
+    (
+        "silver",
+        &[],
+        "silver coins on hand (other coins kept; clamped >= 0)",
+    ),
+    (
+        "copper",
+        &[],
+        "copper coins on hand (other coins kept; clamped >= 0)",
+    ),
+    ("wealth", &[], "total coin on hand in copper (clamped >= 0)"),
     ("alignment", &["align"], "CombatStats.alignment (signed)"),
 ];
+
+/// A coin denomination for `set <target> platinum|gold|silver|copper <n>`.
+#[derive(Clone, Copy)]
+enum Coin {
+    Platinum,
+    Gold,
+    Silver,
+    Copper,
+}
+
+/// New copper total after setting how many coins of one denomination are
+/// on hand (legacy `do_set`'s `platinum` / `gold` / `silver` / `copper`):
+/// the other denominations keep their count. The purse is a single copper
+/// total (1 platinum = 10 gold = 100 silver = 1000 copper), so a
+/// denomination's current count is its place in the canonical split:
+/// platinum is everything from 1000 up, gold the hundreds digit, silver
+/// the tens, copper the units.
+fn with_coin_count(total: i64, coin: Coin, count: i64) -> i64 {
+    let (unit, current) = match coin {
+        Coin::Platinum => (1000, total / 1000),
+        Coin::Gold => (100, total % 1000 / 100),
+        Coin::Silver => (10, total % 100 / 10),
+        Coin::Copper => (1, total % 10),
+    };
+    (total + (count.max(0) - current) * unit).max(0)
+}
 
 /// Level at which the legacy-ADMIN `set` fields open up (Coder, 104).
 const SET_CODER_LEVEL: i32 = 104;
@@ -1894,14 +1936,21 @@ pub(crate) fn cmd_set(world: &mut World, player: Entity, args: &str) {
                 crate::commands::clear_stat_overflow(world, target, "max_stamina");
                 true
             }),
-        "gold" | "copper" | "wealth" => {
+        "platinum" | "plat" | "gold" | "silver" | "copper" | "wealth" => {
+            let on_hand = world.get::<Wealth>(target).map_or(0, |w| w.0);
+            let new_total = match field.as_str() {
+                "wealth" => value_i64.max(0),
+                "platinum" | "plat" => with_coin_count(on_hand, Coin::Platinum, value_i64),
+                "gold" => with_coin_count(on_hand, Coin::Gold, value_i64),
+                "silver" => with_coin_count(on_hand, Coin::Silver, value_i64),
+                _ => with_coin_count(on_hand, Coin::Copper, value_i64),
+            };
             if let Some(mut w) = world.get_mut::<Wealth>(target) {
-                w.0 = value_i64.max(0);
-                true
+                w.0 = new_total;
             } else {
-                world.entity_mut(target).insert(Wealth(value_i64.max(0)));
-                true
+                world.entity_mut(target).insert(Wealth(new_total));
             }
+            true
         }
         "alignment" | "align" => world
             .get_mut::<CombatStats>(target)

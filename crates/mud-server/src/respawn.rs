@@ -52,6 +52,14 @@ pub struct MobRespawnTimers {
 /// player stood beside it (5 minutes of 10 Hz ticks).
 const DOOR_RESET_RETRY_TICKS: u64 = 3000;
 
+/// Most zones the door pass resets per respawn tick (one tick per 6 s).
+/// Zones start with the same `last_reset`, so with equal lifespans nearly
+/// all of them fall due on the same tick; resetting them all at once was a
+/// 100-150 ms spike (debug) every 10 minutes. The rest stay due and are
+/// picked up on the next ticks, so every door still resets, a few seconds
+/// late at most.
+const DOOR_RESET_ZONES_PER_PASS: usize = 6;
+
 /// Restore every door in each zone whose `lifespan` has elapsed to its
 /// as-authored state (`RoomExits.default_state`), like legacy `reset_zone`'s
 /// `D` commands. Only due zones are touched; the per-pass cost for idle
@@ -62,24 +70,40 @@ const DOOR_RESET_RETRY_TICKS: u64 = 3000;
 /// `ResetMode::Empty` zones wait until no player is inside; `Never` zones
 /// (clan halls, quest zones) keep their doors as players left them.
 pub(crate) fn door_reset_pass(world: &mut World, tick: u64) {
-    let mut due: Vec<(Entity, ResetMode, u64)> = Vec::new();
+    // (zone, mode, period, how far past due)
+    let mut due: Vec<(Entity, ResetMode, u64, u64)> = Vec::new();
     {
         let mut q = world.query::<(Entity, &ZoneDoorReset)>();
         for (zone, r) in q.iter(world) {
-            if r.mode != ResetMode::Never && tick.saturating_sub(r.last_reset) >= r.period_ticks {
-                due.push((zone, r.mode, r.period_ticks));
+            let age = tick.saturating_sub(r.last_reset);
+            if r.mode != ResetMode::Never && age >= r.period_ticks {
+                due.push((zone, r.mode, r.period_ticks, age - r.period_ticks));
             }
         }
     }
     if due.is_empty() {
         return;
     }
+    // Most overdue first, a bounded slice per pass (see the constant).
+    due.sort_by(|a, b| b.3.cmp(&a.3).then(a.0.cmp(&b.0)));
+    due.truncate(DOOR_RESET_ZONES_PER_PASS);
+    // One scan of the rooms for the whole slice, not one per zone.
+    let batch: HashSet<Entity> = due.iter().map(|d| d.0).collect();
+    let mut rooms_by_zone: HashMap<Entity, Vec<Entity>> = HashMap::new();
+    for (room, located) in world
+        .query_filtered::<(Entity, &Located), (With<Room>, With<ExitDefaults>)>()
+        .iter(world)
+    {
+        if batch.contains(&located.0) {
+            rooms_by_zone.entry(located.0).or_default().push(room);
+        }
+    }
     let occupied: HashSet<Entity> = world
         .query_filtered::<&Located, With<Player>>()
         .iter(world)
         .map(|l| l.0)
         .collect();
-    for (zone, mode, period) in due {
+    for (zone, mode, period, _) in due {
         if mode == ResetMode::Empty
             && occupied
                 .iter()
@@ -87,7 +111,8 @@ pub(crate) fn door_reset_pass(world: &mut World, tick: u64) {
         {
             continue;
         }
-        let skipped = reset_zone_doors(world, zone, &occupied);
+        let rooms = rooms_by_zone.remove(&zone).unwrap_or_default();
+        let skipped = reset_zone_doors(world, &rooms, &occupied);
         let next = if skipped {
             tick.saturating_sub(period)
                 .saturating_add(DOOR_RESET_RETRY_TICKS.min(period))
@@ -100,23 +125,17 @@ pub(crate) fn door_reset_pass(world: &mut World, tick: u64) {
     }
 }
 
-/// Reset the doors of the rooms in `zone`. Each room restores only its
-/// OWN sides from its own `ExitDefaults` entry (state and hp): the two
+/// Reset the doors of `rooms` (a zone's rooms with authored exit defaults).
+/// Each room restores only its OWN sides from its own `ExitDefaults` entry (state and hp): the two
 /// sides of a door may have different defaults (a locked side with a key
 /// facing an open, keyless side), so one side must never be copied onto the
 /// other. The far side is restored by the pass of its own room's zone;
 /// restoring a side from its own defaults is idempotent, so order does not
 /// matter. A side is left alone while a player is in, or next to, its room.
 /// Returns true when a door was skipped because of a player.
-fn reset_zone_doors(world: &mut World, zone: Entity, occupied: &HashSet<Entity>) -> bool {
-    let rooms: Vec<Entity> = world
-        .query_filtered::<(Entity, &Located), (With<Room>, With<ExitDefaults>)>()
-        .iter(world)
-        .filter(|(_, l)| l.0 == zone)
-        .map(|(e, _)| e)
-        .collect();
+fn reset_zone_doors(world: &mut World, rooms: &[Entity], occupied: &HashSet<Entity>) -> bool {
     let mut skipped = false;
-    for room in rooms {
+    for &room in rooms {
         let Some(defaults) = world.get::<ExitDefaults>(room).map(|d| d.0.clone()) else {
             continue;
         };
@@ -1560,6 +1579,83 @@ mod door_reset_tests {
         open_both(&mut world, a, b);
         door_reset_pass(&mut world, PERIOD * 100);
         assert_eq!(state(&world, a, Direction::East), ExitState::Open);
+    }
+
+    /// Prod scale (190 zones, 13k rooms, all on the same lifespan so they all
+    /// fall due on one tick): a pass resets a bounded slice of zones, the
+    /// rest follow on later passes, and every door ends up reset. Round 8
+    /// saw 104-157 ms slow ticks every 10 minutes (debug) when every due
+    /// zone was reset, with a full room scan each, in one tick.
+    #[test]
+    fn many_zones_falling_due_together_are_reset_in_slices() {
+        const ZONES: usize = 190;
+        const ROOMS_PER_ZONE: usize = 70;
+        let mut world = World::new();
+        let target = world.spawn_empty().id();
+        let mut doors: Vec<(Entity, Entity)> = Vec::new();
+        for z in 0..ZONES {
+            let zone = world
+                .spawn((
+                    Named {
+                        name: format!("z{z}"),
+                    },
+                    ZoneDoorReset::new(ResetMode::Normal, 10, 0),
+                ))
+                .id();
+            for _ in 0..ROOMS_PER_ZONE {
+                let mut exits = Exits::default();
+                exits
+                    .0
+                    .insert(Direction::East, door(target, ExitState::Open));
+                let mut defaults = ExitDefaults::default();
+                defaults
+                    .0
+                    .insert(Direction::East, (ExitState::Locked, Some(50)));
+                let room = world.spawn((Room, Located(zone), exits, defaults)).id();
+                doors.push((zone, room));
+            }
+        }
+        let due_tick = 10 * 600;
+        let locked = |world: &World| {
+            doors
+                .iter()
+                .filter(|(_, r)| state(world, *r, Direction::East) == ExitState::Locked)
+                .count()
+        };
+        assert_eq!(locked(&world), 0);
+
+        let start = std::time::Instant::now();
+        door_reset_pass(&mut world, due_tick);
+        let first = start.elapsed();
+        assert_eq!(
+            locked(&world),
+            DOOR_RESET_ZONES_PER_PASS * ROOMS_PER_ZONE,
+            "one pass resets only its slice of zones"
+        );
+
+        let mut passes = 1;
+        let mut worst = first;
+        while locked(&world) < doors.len() {
+            let start = std::time::Instant::now();
+            door_reset_pass(&mut world, due_tick + passes * 60);
+            worst = worst.max(start.elapsed());
+            passes += 1;
+            assert!(passes < 200, "zones must all be reset eventually");
+        }
+        eprintln!("door_reset_pass {ZONES} zones: first={first:?} worst={worst:?} passes={passes}");
+        assert_eq!(
+            usize::try_from(passes).unwrap(),
+            ZONES.div_ceil(DOOR_RESET_ZONES_PER_PASS)
+        );
+        // Once everyone has been reset nothing is due again until the next lifespan.
+        door_reset_pass(&mut world, due_tick + passes * 60 + 60);
+        assert!(
+            doors
+                .iter()
+                .all(|(z, _)| { world.get::<ZoneDoorReset>(*z).unwrap().last_reset >= due_tick })
+        );
+        // Loose bound (debug build, shared CI box): a slice is a few ms, not 100+.
+        assert!(worst.as_millis() < 60, "slowest pass took {worst:?}");
     }
 
     #[test]

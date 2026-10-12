@@ -1679,6 +1679,14 @@ struct LuaCapture {
 #[derive(Clone, Copy)]
 struct SelfEntity(Entity);
 
+/// The room a `room:at(function() ... end)` callback is running "in". DG's
+/// `at <room> <command>` moves the script's owner to that room for the one
+/// command, so inside the callback `self.room` is that room, not the room
+/// the owner really stands in (a dying mob's `self.room:purge()` inside an
+/// `at` of the staging room must not purge the death room).
+#[derive(Clone, Copy)]
+struct AtRoom(Entity);
+
 /// Raw pointer wrapper so Lua callbacks can reach the world.
 #[derive(Clone, Copy)]
 struct WorldPtr(NonNull<World>);
@@ -3645,6 +3653,16 @@ impl UserData for LuaActor {
             |lua, this, key: String| -> mlua::Result<Value> {
                 match key.as_str() {
                     "room" => {
+                        // Inside `room:at(fn)` the trigger's owner is "in" that room.
+                        let at_room = lua.app_data_ref::<AtRoom>().map(|a| a.0);
+                        let is_owner = lua
+                            .app_data_ref::<SelfEntity>()
+                            .is_some_and(|s| s.0 == this.entity);
+                        if let (Some(room), true) = (at_room, is_owner) {
+                            return Ok(Value::UserData(
+                                lua.create_userdata(LuaRoom { entity: room })?,
+                            ));
+                        }
                         // For room-attached triggers (PREENTRY /
                         // POSTENTRY / RESET), `self` IS the room and
                         // the body uses `self.room:send(...)` to emit.
@@ -4681,18 +4699,31 @@ impl UserData for LuaRoom {
             },
         );
 
-        // `room:at(func)` — run `func()` once, immediately. The
-        // legacy DG-style chain `get_room(z, l):at(function() ...
-        // end)` was a "do this thing in the context of room (z, l)"
-        // wrapper; in practice the function bodies almost always
-        // reference `self`/`actor` via closure upvalues from the
-        // enclosing trigger, so we just call the function. ~470
-        // corpus refs across zones 030 / 117 / 160 / 510 — every
-        // staging-room spawn / cross-room broadcast pattern.
-        // Returns whatever the inner function returns.
+        // `room:at(func)` — run `func()` once, immediately, "in" this
+        // room. The legacy DG-style chain `get_room(z, l):at(function()
+        // ... end)` is DG's `at <room> <command>`, which moves the
+        // script's owner to that room for the command: while `func`
+        // runs, `self.room` is this room (see [`AtRoom`]), and the
+        // staging-room `self.room:spawn_mobile(..)` / `:purge()` /
+        // `:send(..)` bodies act there. Other upvalues (`actor`, ..)
+        // are the enclosing trigger's as before. ~470 corpus refs
+        // across zones 030 / 117 / 160 / 510. Returns whatever the
+        // inner function returns; nested calls restore the outer room.
         methods.add_method(
             "at",
-            |_, _this, func: Function| -> mlua::Result<Variadic<Value>> { func.call(()) },
+            |lua, this, func: Function| -> mlua::Result<Variadic<Value>> {
+                let outer = lua.set_app_data(AtRoom(this.entity));
+                let out = func.call(());
+                match outer {
+                    Some(prev) => {
+                        lua.set_app_data(prev);
+                    }
+                    None => {
+                        lua.remove_app_data::<AtRoom>();
+                    }
+                }
+                out
+            },
         );
 
         // `room:exit(direction)` — return a LuaExit userdata bound

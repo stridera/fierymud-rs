@@ -644,3 +644,36 @@ fn forced_and_scripted_quit_are_refused() {
     dispatch(&mut world, bob, "quit");
     assert!(world.get::<crate::commands::Quitting>(bob).is_some());
 }
+
+/// `set <player> gold N` sets N gold coins (not N copper), as `help set`
+/// says; the other denominations keep their count, `wealth` is the raw
+/// copper total.
+#[test]
+fn set_coin_fields_use_coin_units() {
+    let mut world = World::new();
+    let god = spawn(&mut world, "Chinok", 105, UserRole::Player);
+    let coins = |world: &World| world.get::<mud_world::Wealth>(god).map_or(0, |w| w.0);
+
+    dispatch(&mut world, god, "set me gold 20");
+    assert_eq!(coins(&world), 2_000, "20 gold = 2 platinum, not 20 copper");
+    dispatch(&mut world, god, "set me silver 5");
+    assert_eq!(coins(&world), 2_050, "gold untouched");
+    dispatch(&mut world, god, "set me platinum 3");
+    assert_eq!(coins(&world), 3_050, "silver untouched");
+    dispatch(&mut world, god, "set me copper 7");
+    assert_eq!(coins(&world), 3_057);
+    dispatch(&mut world, god, "set me gold 1000");
+    assert_eq!(
+        coins(&world),
+        103_057,
+        "1000 gold plus the 3 platinum and 57 copper"
+    );
+    dispatch(&mut world, god, "set me wealth 1234");
+    assert_eq!(coins(&world), 1_234, "wealth is raw copper");
+    dispatch(&mut world, god, "set me gold -5");
+    assert_eq!(
+        coins(&world),
+        1_034,
+        "a negative count clamps at zero coins of that kind"
+    );
+}
