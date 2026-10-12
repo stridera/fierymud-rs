@@ -1818,7 +1818,9 @@ pub fn is_starstar(world: &World, profile: &crate::Profile) -> bool {
         .is_some_and(|star| profile.experience >= star)
 }
 
-/// Per-circle base recover time in seconds. Index = circle number
+/// Built-in per-circle base recover time in seconds, the fallback for
+/// circles `"SpellCircle"` has no time for (read through
+/// [`SpellSlotData::circle_recover_secs`]). Index = circle number
 /// (1..=14), index 0 is unused / "no circle". Ported verbatim from
 /// legacy `spell_mem.cpp:195` (`circle_recover_time[]`). Multiplied
 /// by class-and-stat focus rate at cast time to set how long a spent
@@ -1855,6 +1857,9 @@ pub struct SpellSlotData {
     pub class_circles: HashMap<i32, Vec<(i32, i32)>>,
     pub ability_circle: HashMap<(i32, i32), i32>,
     pub ability_cap: HashMap<(i32, i32), i32>,
+    /// `"SpellCircle".recover_secs` by circle. Empty (or a missing circle) means
+    /// [`CIRCLE_RECOVER_TIME`]; read through [`SpellSlotData::circle_recover_secs`].
+    pub recover_secs: HashMap<i32, i32>,
 }
 
 /// `ClassSkills` table flattened for runtime lookup. Keyed by
@@ -1948,6 +1953,30 @@ impl RaceAbilitiesData {
 }
 
 impl SpellSlotData {
+    /// Base seconds a spent slot of `circle` takes to recover: the
+    /// `"SpellCircle"` value, else the built-in [`CIRCLE_RECOVER_TIME`]
+    /// entry, else 0 (circle 0 / out of range).
+    #[must_use]
+    pub fn circle_recover_secs(&self, circle: i32) -> i32 {
+        self.recover_secs
+            .get(&circle)
+            .copied()
+            .or_else(|| {
+                usize::try_from(circle)
+                    .ok()
+                    .and_then(|i| CIRCLE_RECOVER_TIME.get(i).copied())
+            })
+            .unwrap_or(0)
+    }
+
+    /// Highest spell circle: the built-in table's last entry, or a higher
+    /// circle given a time in `"SpellCircle"`.
+    #[must_use]
+    pub fn max_circle(&self) -> i32 {
+        let builtin = i32::try_from(CIRCLE_RECOVER_TIME.len()).unwrap_or(1) - 1;
+        self.recover_secs.keys().copied().fold(builtin, i32::max)
+    }
+
     /// Highest circle a character of `level` has slots for — legacy
     /// `level_to_circle`, read off the slot progression table.
     #[must_use]
@@ -3938,6 +3967,42 @@ mod tests {
         data.progression.insert((5, 1), 2);
         data.progression.insert((5, 2), 1);
         data
+    }
+
+    #[test]
+    fn circle_recover_secs_defaults_to_the_builtin_table() {
+        let data = SpellSlotData::default();
+        for (circle, secs) in CIRCLE_RECOVER_TIME.iter().enumerate() {
+            let circle = i32::try_from(circle).unwrap();
+            assert_eq!(data.circle_recover_secs(circle), *secs, "circle {circle}");
+        }
+        // Circle 0, negative and past-the-table circles have no time.
+        for circle in [-3, -1, 15, 99] {
+            assert_eq!(data.circle_recover_secs(circle), 0, "circle {circle}");
+        }
+        assert_eq!(data.max_circle(), 14);
+    }
+
+    #[test]
+    fn circle_recover_secs_prefers_the_database_value_per_circle() {
+        let mut data = SpellSlotData::default();
+        data.recover_secs.insert(3, 7);
+        data.recover_secs.insert(15, 400);
+        assert_eq!(data.circle_recover_secs(3), 7);
+        assert_eq!(data.circle_recover_secs(15), 400);
+        // Circles without a database value keep the built-in time.
+        assert_eq!(data.circle_recover_secs(4), CIRCLE_RECOVER_TIME[4]);
+        assert_eq!(data.max_circle(), 15);
+    }
+
+    #[test]
+    fn circle_recover_time_table_is_the_legacy_one() {
+        assert_eq!(
+            CIRCLE_RECOVER_TIME,
+            [
+                0, 30, 35, 50, 65, 80, 95, 130, 145, 165, 210, 250, 290, 310, 330
+            ]
+        );
     }
 
     #[test]

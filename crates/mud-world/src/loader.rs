@@ -6,8 +6,8 @@ use mud_db::{
     ability_restrictions, ability_saving_throw, ability_targeting, achievements, boards, classes,
     content_tables, discord_config, effects, game_config, help, levels, liquids, login_message,
     mob_ai, mob_reset_equipment, mob_resets, mobs, object_abilities, object_reset_contents,
-    object_resets, objects, races, room_exits, rooms, shops, socials, spell_slots, sphere_styles,
-    sqlx::PgPool, system_text, triggers, zones,
+    object_resets, objects, races, room_exits, rooms, shops, socials, spell_circles, spell_slots,
+    sphere_styles, sqlx::PgPool, system_text, triggers, weather_text, zones,
 };
 use tracing::{error, info, warn};
 
@@ -208,6 +208,57 @@ async fn load_sphere_styles(pool: &PgPool) -> sqlx::Result<crate::sphere_style::
                  fierylib/data/sql/2026-10-12-sphere-colors.sql is applied"
             );
             Ok(crate::sphere_style::SphereStyles::default())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Usable `SpellCircle` rows as `circle -> seconds`: NULL times, negative times and circles
+/// below 1 are skipped, so those circles keep the built-in time.
+fn spell_circle_times<I>(rows: I) -> std::collections::HashMap<i32, i32>
+where
+    I: IntoIterator<Item = spell_circles::SpellCircleRow>,
+{
+    rows.into_iter()
+        .filter(|r| r.circle >= 1)
+        .filter_map(|r| r.recover_secs.filter(|s| *s >= 0).map(|s| (r.circle, s)))
+        .collect()
+}
+
+/// `SpellCircle` recovery times by circle, for [`crate::resources::SpellSlotData`]. A database
+/// without the table (42P01) yields no overrides (the built-in times apply) and an ERROR log.
+async fn load_spell_circle_times(
+    pool: &PgPool,
+) -> sqlx::Result<std::collections::HashMap<i32, i32>> {
+    match spell_circles::list_all(pool).await {
+        Ok(rows) => Ok(spell_circle_times(rows)),
+        Err(e) if is_missing_schema(&e) => {
+            error!(
+                "table \"SpellCircle\" is missing; spell slots recover on the built-in per-circle \
+                 times until the muditor schema is pushed (prisma db push) and \
+                 fierylib/data/sql/2026-10-12-spell-circle-recover.sql is applied"
+            );
+            Ok(std::collections::HashMap::new())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// `WeatherText` flavour lines for the `weather` command. A database without the table
+/// (42P01) yields the built-in lines and an ERROR log; keys with no row or a NULL text keep
+/// the built-in line.
+async fn load_weather_text(pool: &PgPool) -> sqlx::Result<crate::weather_text::WeatherText> {
+    match weather_text::list_all(pool).await {
+        Ok(rows) => Ok(crate::weather_text::WeatherText::from_rows(
+            rows.into_iter().map(|r| (r.climate, r.daypart, r.text)),
+        )),
+        Err(e) if is_missing_schema(&e) => {
+            error!(
+                "table \"WeatherText\" is missing; the weather command uses the built-in lines \
+                 until the muditor schema is pushed (prisma db push) and \
+                 fierylib/data/sql/2026-10-12-weather-text.sql is applied"
+            );
+            Ok(crate::weather_text::WeatherText::default())
         }
         Err(e) => Err(e),
     }
@@ -846,7 +897,19 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             .ability_cap
             .insert((r.class_id, r.ability_id), r.proficiency_cap);
     }
+    spell_slot_data.recover_secs = load_spell_circle_times(pool).await?;
+    info!(
+        circles = spell_slot_data.recover_secs.len(),
+        "spell circle recovery times loaded (built-in table fills the rest)"
+    );
     world.insert_resource(spell_slot_data);
+
+    let weather_text = load_weather_text(pool).await?;
+    info!(
+        lines = weather_text.len(),
+        "weather lines loaded (built-in lines fill the rest)"
+    );
+    world.insert_resource(weather_text);
 
     // ClassSkills: per-class, per-skill (class_id, ability_id) →
     // (min_level, proficiency_cap). Drives the SKILL invoke gate
@@ -3585,5 +3648,38 @@ mod recall_rooms_tests {
     fn absent_or_empty_is_none() {
         assert!(parse_recall_rooms(&json!({"Spells": ["RECALL"]})).is_none());
         assert!(parse_recall_rooms(&json!({"Recall Rooms": {}})).is_none());
+    }
+}
+
+#[cfg(test)]
+mod spell_circle_time_tests {
+    use super::spell_circle_times;
+    use mud_db::spell_circles::SpellCircleRow;
+
+    fn row(circle: i32, recover_secs: Option<i32>) -> SpellCircleRow {
+        SpellCircleRow {
+            circle,
+            recover_secs,
+        }
+    }
+
+    #[test]
+    fn keeps_usable_rows_and_skips_the_rest() {
+        let times = spell_circle_times([
+            row(1, Some(12)),
+            row(2, None),
+            row(3, Some(-5)),
+            row(0, Some(99)),
+            row(-1, Some(99)),
+            row(14, Some(0)),
+        ]);
+        assert_eq!(times.len(), 2);
+        assert_eq!(times.get(&1), Some(&12));
+        assert_eq!(times.get(&14), Some(&0));
+    }
+
+    #[test]
+    fn no_rows_means_no_overrides() {
+        assert!(spell_circle_times([]).is_empty());
     }
 }

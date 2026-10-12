@@ -810,6 +810,9 @@ mod cast_move_batch_tests;
 #[path = "commands/cmd_parity_tests.rs"]
 mod cmd_parity_tests;
 #[cfg(test)]
+#[path = "commands/data_tables_tests.rs"]
+mod data_tables_tests;
+#[cfg(test)]
 #[path = "commands/mob_ai_spawn_tests.rs"]
 mod mob_ai_spawn_tests;
 #[cfg(test)]
@@ -15822,7 +15825,7 @@ fn pick_spell_slot(
         .get(&(class_id, ability_id))
         .copied()?;
     let level = mud_world::effective_level(world, caster);
-    let max_circle = i32::try_from(mud_world::CIRCLE_RECOVER_TIME.len()).unwrap_or(1) - 1;
+    let max_circle = world.resource::<mud_world::SpellSlotData>().max_circle();
     let slot_state = |circle: i32| {
         let max = world
             .resource::<mud_world::SpellSlotData>()
@@ -15898,10 +15901,9 @@ fn reserve_spell_slot(
             ),
         );
     }
-    let recover = mud_world::CIRCLE_RECOVER_TIME
-        .get(usize::try_from(circle).unwrap_or(0))
-        .copied()
-        .unwrap_or(0)
+    let recover = world
+        .resource::<mud_world::SpellSlotData>()
+        .circle_recover_secs(circle)
         .saturating_add(def.memorization_time);
     if world.get::<mud_world::SpellSlots>(player).is_none() {
         world

@@ -14,6 +14,7 @@ pub mod sphere_style;
 pub mod stat_roll;
 pub mod targeting;
 pub mod wake_effects;
+pub mod weather_text;
 
 pub use class_skills::{STARTING_SKILL_PROFICIENCY, grant_class_skills};
 pub use god::{GOD_PROFICIENCY, bypasses_restrictions, known_abilities_of, proficiency_of};
@@ -21,6 +22,7 @@ pub use liquid_legacy::{BUILTIN_CODES as LEGACY_LIQUID_CODES, LegacyLiquidRow, L
 pub use sphere_style::SphereStyles;
 pub use stat_roll::{STAT_SCALE_MAX, roll_starting_stats};
 pub use wake_effects::{RoomWakeRow, WakeEffectCatalog, WakeRow, load_wake_effect_catalog};
+pub use weather_text::{Daypart, WeatherText};
 
 pub use components::{
     Account, AccountSummary, AccountWealth, Aliases, AlignmentProtectionTag, AppliedTo, ArenaRoom,

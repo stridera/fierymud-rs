@@ -1576,3 +1576,94 @@ async fn sphere_styles_hold_the_default_palette() {
             .any(|r| r.sphere == "generic" && r.color.is_none())
     );
 }
+
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn weather_text_and_spell_circle_tables_are_seeded() {
+    let pool = pool().await;
+    let weather = mud_db::weather_text::list_all(&pool)
+        .await
+        .expect("weather text");
+    let line = |c: &str, d: &str| {
+        weather
+            .iter()
+            .find(|r| r.climate == c && r.daypart == d)
+            .and_then(|r| r.text.clone())
+    };
+    assert_eq!(
+        line("temperate", "dawn").as_deref(),
+        Some("A cool breeze rustles the leaves; dew glistens on every blade.")
+    );
+    assert_eq!(
+        line("none", "any").as_deref(),
+        Some("The air is still and unremarkable.")
+    );
+    assert!(weather.len() >= 20);
+
+    let circles = mud_db::spell_circles::list_all(&pool)
+        .await
+        .expect("spell circles");
+    let secs = |c: i32| {
+        circles
+            .iter()
+            .find(|r| r.circle == c)
+            .and_then(|r| r.recover_secs)
+    };
+    assert_eq!(secs(1), Some(30));
+    assert_eq!(secs(7), Some(130));
+    assert_eq!(secs(14), Some(330));
+}
+
+/// A database that predates the tables fails with Postgres 42P01 (`undefined_table`),
+/// the code the loader keys on to fall back to the built-in lines and times; NULL columns
+/// come back as `None` so they are coalesced to the built-ins.
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn weather_and_circle_queries_degrade_when_the_tables_are_missing() {
+    let _ = dotenvy::from_path("../../.env");
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    // One connection so the scratch `search_path` sticks to every query.
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .expect("connect");
+    let schema = format!("scratch_weather_{}", std::process::id());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&pool)
+        .await
+        .expect("create schema");
+    // "Climate" must resolve inside the scratch schema; keep `public` on the path for the
+    // enum type, but the tables themselves are absent, so the queries must hit 42P01.
+    let result: sqlx::Result<_> = async {
+        sqlx::query(&format!("SET search_path = {schema}"))
+            .execute(&pool)
+            .await?;
+        let missing_weather = mud_db::weather_text::list_all(&pool).await;
+        let missing_circles = mud_db::spell_circles::list_all(&pool).await;
+        Ok((missing_weather, missing_circles))
+    }
+    .await;
+    sqlx::query("SET search_path = public")
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&pool)
+        .await
+        .ok();
+    let (weather, circles) = result.expect("scratch setup");
+    let code = |e: sqlx::Error| {
+        e.as_database_error()
+            .and_then(sqlx::error::DatabaseError::code)
+            .map(std::borrow::Cow::into_owned)
+    };
+    assert_eq!(
+        code(weather.expect_err("no table")).as_deref(),
+        Some("42P01")
+    );
+    assert_eq!(
+        code(circles.expect_err("no table")).as_deref(),
+        Some("42P01")
+    );
+}

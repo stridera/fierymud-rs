@@ -65,6 +65,7 @@ pub mod rooms;
 pub mod script_errors;
 pub mod shops;
 pub mod socials;
+pub mod spell_circles;
 pub mod spell_slots;
 pub mod sphere_styles;
 pub mod starting_kit;
@@ -72,6 +73,7 @@ pub mod system_text;
 pub mod tell_messages;
 pub mod triggers;
 pub mod users;
+pub mod weather_text;
 pub mod zones;
 
 pub use sqlx;
