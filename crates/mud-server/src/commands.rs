@@ -27,9 +27,9 @@ use mud_world::{
     CombatStats, Cooldowns, CoreStats, Description, EffectCatalog, EffectInstance, EffectSource,
     EquippedSlot, Exits, Fighting, Follower, Frozen, Ghost, Health, InnRoom, Item, Keywords,
     KnownAbilities, LastInputAt, Located, MailDraft, Mob, MobPrototypes, Named, ObjectPrototypes,
-    Player, PlayerFlags, Posture, PostureKind, Profile, Prompt, RecallPoint, RestState, RoomSector,
-    Slot, SocialDef, SocialRegistry, Stamina, Stealth, Stunned, Wealth, WearableIn, WorldKey,
-    WorldKeyIndex,
+    Player, PlayerFlags, PolicyFlag, Posture, PostureKind, Profile, Prompt, RecallPoint, RestState,
+    RoomSector, Slot, SocialDef, SocialRegistry, Stamina, Stealth, Stunned, Wealth, WearableIn,
+    WorldKey, WorldKeyIndex,
 };
 use tracing::{info_span, warn};
 
@@ -819,6 +819,9 @@ mod cmd_parity_tests;
 #[path = "commands/command_help_tests.rs"]
 mod command_help_tests;
 #[cfg(test)]
+#[path = "commands/command_policy_tests.rs"]
+mod command_policy_tests;
+#[cfg(test)]
 #[path = "commands/data_tables_tests.rs"]
 mod data_tables_tests;
 #[cfg(test)]
@@ -1408,6 +1411,8 @@ fn pre_gate(
 /// a mortal level. Rust has a single `paralyzed` effect, so it takes the
 /// minor list. Names with no Rust command yet (`info`, `wizlist`) are
 /// harmless entries kept for fidelity to the table.
+///
+/// Fallback for a command with no `"Command"` row (or a database without the policy columns); the flag column is the source of truth.
 const PARALYSIS_ALLOWED: &[&str] = &[
     "abort",
     "bug",
@@ -1466,6 +1471,19 @@ const PARALYSIS_ALLOWED: &[&str] = &[
     "wizlist",
     "world",
 ];
+
+/// Whether a paralysed character may run `cmd`: the
+/// `"Command".allowed_while_paralyzed` flag of its row, else any of its names
+/// on the built-in [`PARALYSIS_ALLOWED`] list (an alias such as `'` counts).
+fn paralysis_allows(world: &World, cmd: &Command) -> bool {
+    crate::command_policy::flag(world, cmd.names[0], PolicyFlag::AllowedWhileParalyzed)
+        .unwrap_or_else(|| builtin_paralysis_allows(cmd))
+}
+
+/// The built-in list's answer (the fallback, and what the seed encodes).
+fn builtin_paralysis_allows(cmd: &Command) -> bool {
+    cmd.names.iter().any(|n| PARALYSIS_ALLOWED.contains(n))
+}
 
 /// Commands a stunned character may still run. Legacy knocks a stunned
 /// character down to `STANCE_STUNNED`, and `command_interpreter` refuses
@@ -1551,10 +1569,7 @@ fn hold_gate(world: &mut World, player: Entity, cmd: &Command) -> bool {
             }
         }
     }
-    if paralyzed
-        && cmd.min_role == UserRole::Player
-        && !cmd.names.iter().any(|n| PARALYSIS_ALLOWED.contains(n))
-    {
+    if paralyzed && cmd.min_role == UserRole::Player && !paralysis_allows(world, cmd) {
         send_to(world, player, "You're paralyzed to the bone!\r\n");
         return true;
     }
@@ -1936,6 +1951,7 @@ fn dispatch_line(world: &mut World, player: Entity, line: &str, run: &mut AliasR
     // Legacy `command_interpreter`: anything not flagged `CMD_HIDE` gives
     // a hiding character away before it runs.
     if !crate::hiding::is_hide_safe(
+        world,
         cmd.names[0],
         tokens[0],
         cmd.min_role.rank() > UserRole::Player.rank(),
@@ -2057,7 +2073,7 @@ const CASTING_BUSY_MSG: &str = "You are busy spellcasting...\r\n";
 fn casting_blocks(world: &World, player: Entity, cmd: &Command) -> bool {
     world.get::<mud_world::Casting>(player).is_some()
         && cmd.min_role == UserRole::Player
-        && !crate::casting::allowed_while_casting(cmd.names[0])
+        && !crate::casting::allowed_while_casting(world, cmd.names[0])
 }
 
 /// Where the line currently being dispatched came from. Anything other

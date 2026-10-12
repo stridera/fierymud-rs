@@ -15,7 +15,7 @@
 use bevy_ecs::prelude::*;
 use mud_world::{
     AbilityCatalog, CoreStats, Hiddenness, Located, MAX_HIDDENNESS, Mob, Perception, Player,
-    Profile,
+    PolicyFlag, Profile,
 };
 
 /// Current hiddenness, 0 when not hidden.
@@ -368,6 +368,8 @@ pub(crate) fn is_thief(world: &World, e: Entity) -> bool {
 /// staff commands), under their Rust names. `sneak` and `conceal`
 /// belong with `hide`. Everything else reveals the caller before it
 /// runs ([`reveals_on_command`]).
+///
+/// Fallback for a command with no `"Command"` row (or a database without the policy columns); the flag column is the source of truth.
 const HIDE_SAFE: &[&str] = &[
     // movement
     "north",
@@ -488,8 +490,17 @@ const HIDE_SAFE: &[&str] = &[
 /// hiding god stays hidden while working. `shadow` is the legacy
 /// hide-safe spelling of `follow`.
 #[must_use]
-pub(crate) fn is_hide_safe(command: &str, typed: &str, staff_only: bool) -> bool {
-    staff_only || HIDE_SAFE.contains(&command) || typed == "shadow"
+pub(crate) fn is_hide_safe(world: &World, command: &str, typed: &str, staff_only: bool) -> bool {
+    staff_only
+        || crate::command_policy::flag(world, command, PolicyFlag::KeepsHidden)
+            .unwrap_or_else(|| builtin_hide_safe(command))
+        || typed == "shadow"
+}
+
+/// The built-in list's answer (the fallback, and what the seed encodes).
+#[must_use]
+pub(crate) fn builtin_hide_safe(command: &str) -> bool {
+    HIDE_SAFE.contains(&command)
 }
 
 /// Socials that keep a hiding character hidden (legacy `eyebrow`,
@@ -531,17 +542,17 @@ mod tests {
 
     #[test]
     fn hide_safe_list_is_the_legacy_cmd_hide_set() {
-        assert!(is_hide_safe("look", "l", false));
-        assert!(is_hide_safe("score", "sc", false));
-        assert!(is_hide_safe("hide", "hide", false));
-        assert!(is_hide_safe("sneak", "sneak", false));
-        assert!(is_hide_safe("backstab", "bs", false));
-        assert!(is_hide_safe("follow", "shadow", false));
-        assert!(!is_hide_safe("follow", "follow", false));
-        assert!(!is_hide_safe("say", "say", false));
-        assert!(!is_hide_safe("get", "get", false));
-        assert!(!is_hide_safe("search", "search", false));
-        assert!(is_hide_safe("restore", "restore", true));
+        assert!(is_hide_safe(&World::new(), "look", "l", false));
+        assert!(is_hide_safe(&World::new(), "score", "sc", false));
+        assert!(is_hide_safe(&World::new(), "hide", "hide", false));
+        assert!(is_hide_safe(&World::new(), "sneak", "sneak", false));
+        assert!(is_hide_safe(&World::new(), "backstab", "bs", false));
+        assert!(is_hide_safe(&World::new(), "follow", "shadow", false));
+        assert!(!is_hide_safe(&World::new(), "follow", "follow", false));
+        assert!(!is_hide_safe(&World::new(), "say", "say", false));
+        assert!(!is_hide_safe(&World::new(), "get", "get", false));
+        assert!(!is_hide_safe(&World::new(), "search", "search", false));
+        assert!(is_hide_safe(&World::new(), "restore", "restore", true));
         assert!(!social_reveals("eyebrow") && social_reveals("smile"));
     }
 }

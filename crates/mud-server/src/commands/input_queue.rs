@@ -32,7 +32,7 @@ use std::collections::VecDeque;
 
 use bevy_ecs::prelude::*;
 use mud_db::enums::UserRole;
-use mud_world::{Account, BoardDraft, Casting, MailDraft, SocialRegistry};
+use mud_world::{Account, BoardDraft, Casting, MailDraft, PolicyFlag, SocialRegistry};
 
 use super::{
     AliasRun, Command, abbrev_allowed, casting_blocks, dispatch_async_line, grants,
@@ -49,9 +49,24 @@ const FLUSH_VERBS: &[&str] = &["abort", "flee", "disengage"];
 /// Commands a broken-off cast's lag holds back (see
 /// `casting::cast_lag_active`): the casts themselves and the item verbs
 /// that cast.
+///
+/// Fallback for a command with no `"Command"` row (or a database without the policy columns); the flag column is the source of truth.
 const LAG_HELD_VERBS: &[&str] = &[
     "cast", "chant", "perform", "recite", "quaff", "use", "zap", "tap", "play",
 ];
+
+/// Whether a broken-off cast's lag holds `command` back: the
+/// `"Command".held_by_cast_lag` flag of its row, else the built-in
+/// [`LAG_HELD_VERBS`] list.
+pub(crate) fn held_by_cast_lag(world: &World, command: &str) -> bool {
+    crate::command_policy::flag(world, command, PolicyFlag::HeldByCastLag)
+        .unwrap_or_else(|| builtin_held_by_cast_lag(command))
+}
+
+/// The built-in list's answer (the fallback, and what the seed encodes).
+pub(crate) fn builtin_held_by_cast_lag(command: &str) -> bool {
+    LAG_HELD_VERBS.contains(&command)
+}
 
 /// Lines waiting for the player's cast lock to lift, oldest first.
 #[derive(Component, Debug, Default)]
@@ -148,7 +163,7 @@ pub(crate) fn must_wait(world: &World, player: Entity, line: &str) -> bool {
     match resolve(world, player, line) {
         Resolved::Command(cmd) => {
             (casting && casting_blocks(world, player, cmd))
-                || (lagging && LAG_HELD_VERBS.contains(&cmd.names[0]))
+                || (lagging && held_by_cast_lag(world, cmd.names[0]))
         }
         Resolved::Social => casting,
         Resolved::Unknown => false,

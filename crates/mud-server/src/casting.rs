@@ -54,7 +54,7 @@
 use bevy_ecs::prelude::*;
 use mud_world::{
     AbilityCatalog, AbilityDef, Account, CastTarget, Casting, CoreStats, Fighting, Health, Located,
-    Posture, PostureKind, Profile, SlotHold, SpellSlotData,
+    PolicyFlag, Posture, PostureKind, Profile, SlotHold, SpellSlotData,
 };
 
 use crate::commands::{
@@ -162,6 +162,8 @@ const KNOW_SPELL_KEY: &str = "know_spell";
 /// `CMD_ANY`; `interpreter.cpp`). `quit`, `save` and `toggle` are
 /// `CMD_ANY ^ CMD_CAST` there, i.e. explicitly refused mid-cast.
 /// Staff commands are always allowed (legacy `CMD_ANY`).
+///
+/// Fallback for a command with no `"Command"` row (or a database without the policy columns); the flag column is the source of truth.
 const CASTING_ALLOWED: &[&str] = &[
     "abort",
     "cancel",
@@ -221,9 +223,18 @@ const CASTING_ALLOWED: &[&str] = &[
 ];
 
 /// Whether `command` (canonical name) may run while the caster winds
-/// up a spell. Staff checks happen at the call site.
+/// up a spell. Staff checks happen at the call site. The
+/// `"Command".allowed_while_casting` flag decides when the command has a
+/// row; otherwise the built-in [`CASTING_ALLOWED`] list does.
 #[must_use]
-pub(crate) fn allowed_while_casting(command: &str) -> bool {
+pub(crate) fn allowed_while_casting(world: &World, command: &str) -> bool {
+    crate::command_policy::flag(world, command, PolicyFlag::AllowedWhileCasting)
+        .unwrap_or_else(|| builtin_allowed_while_casting(command))
+}
+
+/// The built-in list's answer (the fallback, and what the seed encodes).
+#[must_use]
+pub(crate) fn builtin_allowed_while_casting(command: &str) -> bool {
     CASTING_ALLOWED.contains(&command)
 }
 
@@ -1744,17 +1755,17 @@ mod tests {
     #[test]
     fn allow_list_matches_legacy_exits() {
         for name in ["abort", "flee", "disengage", "look", "gossip", "tell"] {
-            assert!(allowed_while_casting(name), "{name}");
+            assert!(builtin_allowed_while_casting(name), "{name}");
         }
         // Legacy CMD_CAST (directly or via CMD_ANY).
         for name in ["cls", "world", "quest", "score", "inventory"] {
-            assert!(allowed_while_casting(name), "{name}");
+            assert!(builtin_allowed_while_casting(name), "{name}");
         }
         // `quit` / `save` / `toggle` are `CMD_ANY ^ CMD_CAST`: refused.
         for name in [
             "north", "kill", "cast", "chant", "get", "sit", "say", "quit", "save", "toggle",
         ] {
-            assert!(!allowed_while_casting(name), "{name}");
+            assert!(!builtin_allowed_while_casting(name), "{name}");
         }
     }
 

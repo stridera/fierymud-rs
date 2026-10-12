@@ -1833,3 +1833,67 @@ async fn command_help_query_fails_with_missing_schema_codes() {
         Some("42703")
     );
 }
+
+/// A database that predates the `Command` policy flag columns (table present, columns
+/// missing) or the whole table fails the policy query with 42703 / 42P01, the codes the
+/// loader's fallback (the built-in lists) keys on. A help-only table must not satisfy it.
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn command_policy_query_fails_with_missing_schema_codes() {
+    let _ = dotenvy::from_path("../../.env");
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .expect("connect");
+    let schema = format!("scratch_cmdpolicy_{}", std::process::id());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&pool)
+        .await
+        .expect("create schema");
+    let result: sqlx::Result<_> = async {
+        sqlx::query(&format!("SET search_path = {schema}"))
+            .execute(&pool)
+            .await?;
+        let no_table = mud_db::command_policy::list_all(&pool).await;
+        sqlx::query(
+            r#"CREATE TABLE "Command" (name text PRIMARY KEY, help_summary text, help_text text)"#,
+        )
+        .execute(&pool)
+        .await?;
+        let no_columns = mud_db::command_policy::list_all(&pool).await;
+        sqlx::query(r#"ALTER TABLE "Command" ADD COLUMN allowed_while_casting boolean NOT NULL DEFAULT false"#)
+            .execute(&pool)
+            .await?;
+        let one_column = mud_db::command_policy::list_all(&pool).await;
+        Ok((no_table, no_columns, one_column))
+    }
+    .await;
+    sqlx::query("SET search_path = public")
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&pool)
+        .await
+        .ok();
+    let (no_table, no_columns, one_column) = result.expect("scratch setup");
+    let code = |e: &sqlx::Error| {
+        e.as_database_error()
+            .and_then(sqlx::error::DatabaseError::code)
+            .map(std::borrow::Cow::into_owned)
+    };
+    assert_eq!(
+        code(&no_table.expect_err("missing table")).as_deref(),
+        Some("42P01")
+    );
+    assert_eq!(
+        code(&no_columns.expect_err("missing columns")).as_deref(),
+        Some("42703")
+    );
+    assert_eq!(
+        code(&one_column.expect_err("partly missing columns")).as_deref(),
+        Some("42703")
+    );
+}

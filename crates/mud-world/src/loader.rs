@@ -4,11 +4,11 @@ use bevy_ecs::prelude::*;
 use mud_db::{
     abilities, ability_components, ability_damage_components, ability_effects, ability_messages,
     ability_restrictions, ability_saving_throw, ability_targeting, achievements, boards, classes,
-    command_help, content_tables, discord_config, effects, game_config, help, levels, liquids,
-    login_message, mob_ai, mob_reset_equipment, mob_resets, mobs, object_abilities,
-    object_reset_contents, object_resets, objects, races, room_exits, rooms, shops, socials,
-    spell_circles, spell_slots, sphere_styles, sqlx::PgPool, system_text, triggers, weather_text,
-    zones,
+    command_help, command_policy, content_tables, discord_config, effects, game_config, help,
+    levels, liquids, login_message, mob_ai, mob_reset_equipment, mob_resets, mobs,
+    object_abilities, object_reset_contents, object_resets, objects, races, room_exits, rooms,
+    shops, socials, spell_circles, spell_slots, sphere_styles, sqlx::PgPool, system_text, triggers,
+    weather_text, zones,
 };
 use tracing::{error, info, warn};
 
@@ -261,6 +261,37 @@ async fn load_command_help(pool: &PgPool) -> sqlx::Result<crate::command_help::C
                  fierylib/data/sql/2026-10-12-command-help-text.sql is applied"
             );
             Ok(crate::command_help::CommandHelp::default())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// `"Command".allowed_while_casting` / `allowed_while_paralyzed` / `keeps_hidden` /
+/// `held_by_cast_lag`. A database without the table or the columns (42P01 / 42703) yields an
+/// empty policy and an ERROR log, so every command keeps its built-in list membership.
+async fn load_command_policy(pool: &PgPool) -> sqlx::Result<crate::command_policy::CommandPolicy> {
+    match command_policy::list_all(pool).await {
+        Ok(rows) => Ok(crate::command_policy::CommandPolicy::from_rows(
+            rows.into_iter().map(|r| {
+                (
+                    r.name,
+                    crate::command_policy::PolicyFlags {
+                        allowed_while_casting: r.allowed_while_casting,
+                        allowed_while_paralyzed: r.allowed_while_paralyzed,
+                        keeps_hidden: r.keeps_hidden,
+                        held_by_cast_lag: r.held_by_cast_lag,
+                    },
+                )
+            }),
+        )),
+        Err(e) if is_missing_schema(&e) => {
+            error!(
+                "\"Command\".allowed_while_casting / allowed_while_paralyzed / keeps_hidden / \
+                 held_by_cast_lag is missing; commands use the built-in policy lists until the \
+                 muditor schema is pushed (prisma db push) and \
+                 fierylib/data/sql/2026-10-12-command-policy-flags.sql is applied"
+            );
+            Ok(crate::command_policy::CommandPolicy::default())
         }
         Err(e) => Err(e),
     }
@@ -996,6 +1027,13 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         "command help text loaded (built-in text fills the rest)"
     );
     world.insert_resource(command_help);
+
+    let command_policy = load_command_policy(pool).await?;
+    info!(
+        commands = command_policy.len(),
+        "command policy flags loaded (built-in lists cover commands without a row)"
+    );
+    world.insert_resource(command_policy);
 
     // ClassSkills: per-class, per-skill (class_id, ability_id) →
     // (min_level, proficiency_cap). Drives the SKILL invoke gate

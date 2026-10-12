@@ -361,7 +361,9 @@ fn backstab_keeps_the_hidden_bonus_and_then_reveals() {
         });
         // `backstab` is on the hide-safe list, so the dispatcher leaves the
         // hiding for the ability itself to read.
-        assert!(hiding::is_hide_safe("backstab", "backstab", false));
+        assert!(hiding::is_hide_safe(
+            &fx.world, "backstab", "backstab", false
+        ));
         super::invoke_ability_with(
             &mut fx.world,
             lurker,

@@ -13,6 +13,7 @@ mod autosave;
 mod camp;
 mod casting;
 mod combat;
+mod command_policy;
 mod commands;
 #[cfg(test)]
 mod content_tables_tests;
