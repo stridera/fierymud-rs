@@ -271,19 +271,29 @@ async fn load_command_help(pool: &PgPool) -> sqlx::Result<crate::command_help::C
 /// empty policy and an ERROR log, so every command keeps its built-in list membership.
 async fn load_command_policy(pool: &PgPool) -> sqlx::Result<crate::command_policy::CommandPolicy> {
     match command_policy::list_all(pool).await {
-        Ok(rows) => Ok(crate::command_policy::CommandPolicy::from_rows(
-            rows.into_iter().map(|r| {
-                (
-                    r.name,
-                    crate::command_policy::PolicyFlags {
-                        allowed_while_casting: r.allowed_while_casting,
-                        allowed_while_paralyzed: r.allowed_while_paralyzed,
-                        keeps_hidden: r.keeps_hidden,
-                        held_by_cast_lag: r.held_by_cast_lag,
-                    },
-                )
-            }),
-        )),
+        Ok(rows) => {
+            let policy =
+                crate::command_policy::CommandPolicy::from_rows(rows.into_iter().map(|r| {
+                    (
+                        r.name,
+                        crate::command_policy::PolicyFlags {
+                            allowed_while_casting: r.allowed_while_casting,
+                            allowed_while_paralyzed: r.allowed_while_paralyzed,
+                            keeps_hidden: r.keeps_hidden,
+                            held_by_cast_lag: r.held_by_cast_lag,
+                        },
+                    )
+                }));
+            for flag in policy.unseeded() {
+                error!(
+                    "\"Command\".{} is false on every row (columns present but never seeded); \
+                     that flag uses the built-in list until \
+                     fierylib/data/sql/2026-10-12-command-policy-flags.sql is applied",
+                    flag.column()
+                );
+            }
+            Ok(policy)
+        }
         Err(e) if is_missing_schema(&e) => {
             error!(
                 "\"Command\".allowed_while_casting / allowed_while_paralyzed / keeps_hidden / \

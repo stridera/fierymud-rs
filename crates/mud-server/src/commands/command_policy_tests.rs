@@ -82,24 +82,68 @@ fn a_catalog_seeded_from_the_lists_changes_nothing() {
 
 #[test]
 fn commands_without_a_row_fall_back_per_command() {
-    // Rows for every other command, all flags off: those answer from the (all-false) rows,
-    // the rest from the lists.
+    // Rows for every other command with every answer inverted from the lists: those answer
+    // from their rows, the rest from the lists.
     let mut world = World::new();
     let with_row = |i: usize| i.is_multiple_of(2);
     world.insert_resource(CommandPolicy::from_rows(
         all_commands()
             .enumerate()
             .filter(|(i, _)| with_row(*i))
-            .map(|(_, c)| (c.names[0].to_string(), PolicyFlags::default())),
+            .map(|(_, c)| {
+                let (a, b, h, l) = builtin(c);
+                (c.names[0].to_string(), flags_of((!a, !b, !h, !l)))
+            }),
     ));
     for (i, cmd) in all_commands().enumerate() {
         let expected = if with_row(i) {
-            (false, false, false, false)
+            let (a, b, h, l) = builtin(cmd);
+            (!a, !b, !h, !l)
         } else {
             builtin(cmd)
         };
         assert_eq!(answers(&world, cmd), expected, "{}", cmd.names[0]);
     }
+}
+
+#[test]
+fn unseeded_columns_fall_back_to_the_builtin_lists() {
+    // Columns exist but the seed patch never ran: a row for every command, all flags false.
+    let policy = CommandPolicy::from_rows(
+        all_commands().map(|c| (c.names[0].to_string(), PolicyFlags::default())),
+    );
+    assert_eq!(policy.unseeded(), PolicyFlag::ALL.to_vec());
+    let mut world = World::new();
+    world.insert_resource(policy);
+    assert_matches_builtin(&world, "unseeded columns");
+}
+
+#[test]
+fn a_seeded_column_is_authoritative_while_the_others_fall_back() {
+    // Only `allowed_while_casting` is seeded (and only `get` has it); the other three
+    // columns are all-false on every row.
+    let mut world = World::new();
+    world.insert_resource(CommandPolicy::from_rows(all_commands().map(|c| {
+        let name = c.names[0];
+        (
+            name.to_string(),
+            PolicyFlags {
+                allowed_while_casting: name == "get",
+                ..PolicyFlags::default()
+            },
+        )
+    })));
+    for cmd in all_commands() {
+        let name = cmd.names[0];
+        let (_, para, hide, lag) = builtin(cmd);
+        assert_eq!(
+            answers(&world, cmd),
+            (name == "get", para, hide, lag),
+            "{name}"
+        );
+    }
+    // `look` is on the casting list but the seeded column says no.
+    assert!(!allowed_while_casting(&world, "look"));
 }
 
 #[test]
@@ -130,19 +174,34 @@ fn a_row_flag_overrides_the_builtin_list() {
 
 #[test]
 fn policy_lookup_reads_each_column() {
-    let policy = CommandPolicy::from_rows([(
-        "x".to_string(),
-        PolicyFlags {
-            keeps_hidden: true,
-            ..PolicyFlags::default()
-        },
-    )]);
+    let policy = CommandPolicy::from_rows([
+        (
+            "x".to_string(),
+            PolicyFlags {
+                keeps_hidden: true,
+                ..PolicyFlags::default()
+            },
+        ),
+        (
+            "z".to_string(),
+            PolicyFlags {
+                allowed_while_casting: true,
+                ..PolicyFlags::default()
+            },
+        ),
+    ]);
     assert_eq!(policy.flag("x", PolicyFlag::KeepsHidden), Some(true));
     assert_eq!(
         policy.flag("x", PolicyFlag::AllowedWhileCasting),
         Some(false)
     );
     assert_eq!(policy.flag("y", PolicyFlag::KeepsHidden), None);
+    // Nobody has the column set: it was never seeded.
+    assert_eq!(policy.flag("x", PolicyFlag::HeldByCastLag), None);
+    assert_eq!(
+        policy.unseeded(),
+        vec![PolicyFlag::AllowedWhileParalyzed, PolicyFlag::HeldByCastLag]
+    );
 }
 
 #[tokio::test]
