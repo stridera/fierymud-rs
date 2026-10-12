@@ -694,8 +694,8 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     let class_rows = classes::list_all(pool).await.map_err(|e| {
         schema_gap(
             e,
-            "column \"Class\".\"campcraft_bonus\" (read by the class catalog)",
-            "apply fierylib/data/sql/2026-10-09-campcraft.sql (and deploy the muditor schema)",
+            "columns \"Class\".\"campcraft_bonus\" and \"Class\".\"tags\" (read by the class catalog)",
+            "apply fierylib/data/sql/2026-10-09-campcraft.sql and 2026-10-12-core-class-tags.sql (and deploy the muditor schema)",
         )
     })?;
     let mut class_catalog = ClassCatalog::default();
@@ -716,6 +716,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 exp_gain_factor: row.exp_gain_factor,
                 alignment_bias: row.alignment_bias,
                 campcraft_bonus: row.campcraft_bonus,
+                tags: row.tags,
                 combat_rates: mud_db::characters::ClassCombatRates {
                     accuracy_per_level: row.accuracy_per_level,
                     evasion_per_level: row.evasion_per_level,

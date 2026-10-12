@@ -27382,6 +27382,7 @@ mod scroll_recall_tests {
             exp_gain_factor: 1.0,
             alignment_bias: 0,
             campcraft_bonus: false,
+            tags: Vec::new(),
             combat_rates: mud_db::characters::ClassCombatRates::default(),
             resistances: HashMap::new(),
         }

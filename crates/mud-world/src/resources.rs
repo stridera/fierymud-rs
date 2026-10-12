@@ -2329,6 +2329,9 @@ pub struct ClassDef {
     /// +1 rest tier when the camper or a group member has a class with
     /// this set (Ranger and Druid in the seeded data).
     pub campcraft_bonus: bool,
+    /// Every `Class.tags` entry, verbatim. The `core:<role>` tags bind the
+    /// class to an engine feature (see [`CoreClasses::TAGS`]).
+    pub tags: Vec<String>,
     /// Per-level combat growth from the `Class` row. New characters start
     /// from `baseline`, and each level-up adds `level_gain`.
     pub combat_rates: mud_db::characters::ClassCombatRates,
@@ -2787,26 +2790,75 @@ impl CoreAbilities {
 }
 
 /// Well-known classes the runtime reaches by role (Monk unarmed damage,
-/// the thief's short hide lag), resolved by `Class.plain_name` from the
-/// [`ClassCatalog`] at boot. Class ids are per-database serial values and
-/// differ between dev and prod, so none is ever hard-coded. A role whose
-/// name is missing is `None`: a warning is logged once at resolve time
-/// and the feature stays off.
+/// the thief's short hide lag), resolved from the [`ClassCatalog`] at boot.
+/// Each role is bound to the row carrying its stable `core:<role>` tag in
+/// `Class.tags` ([`Self::TAGS`]), so a builder can rename the class in
+/// Muditor without silently disabling the feature. A database that has not
+/// been tagged yet still works: a role with no tagged row falls back to its
+/// canonical `plain_name` ([`Self::NAMES`]) and a warning says so. Class ids
+/// are per-database serial values and differ between dev and prod, so none
+/// is ever hard-coded. A role found by neither tag nor name is `None`: a
+/// warning is logged once at resolve time and the feature stays off.
 #[derive(Resource, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CoreClasses {
     pub monk: Option<i32>,
     pub thief: Option<i32>,
 }
 
+/// What [`CoreClasses::resolve_with_report`] had to improvise, for the
+/// logging in [`CoreClasses::resolve`] and for tests.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CoreClassReport {
+    /// Roles (canonical names) bound by their name because no row carries
+    /// the role's tag yet.
+    pub name_fallbacks: Vec<&'static str>,
+    /// Roles whose tag is on several classes: `(tag, ids ascending)`. The
+    /// lowest id wins.
+    pub duplicate_tags: Vec<(&'static str, Vec<i32>)>,
+    /// Roles resolved by name that matched several classes: `(canonical
+    /// name, ids ascending)`. The lowest id wins.
+    pub ambiguous_names: Vec<(&'static str, Vec<i32>)>,
+}
+
 impl CoreClasses {
+    /// Stable role tag (`Class.tags`, matched case-insensitively) for each
+    /// role, in the order of the fields. This is the binding; renaming the
+    /// class does not move it.
+    pub const TAGS: [&'static str; 2] = ["core:monk", "core:thief"];
+
     /// Canonical `Class.plain_name` (case-insensitive) for each role, in
-    /// the order of the fields.
+    /// the order of the fields. Only the fallback for a database whose
+    /// classes carry no [`Self::TAGS`] yet.
     pub const NAMES: [&'static str; 2] = ["Monk", "Thief"];
 
-    /// Resolve every role against `catalog`, warning on each missing name.
+    /// Resolve every role against `catalog`, warning on each name fallback,
+    /// erroring on each duplicated tag, and warning on each role that
+    /// resolves to nothing.
     #[must_use]
     pub fn resolve(catalog: &ClassCatalog) -> Self {
-        let found = Self::resolve_quiet(catalog);
+        let (found, report) = Self::resolve_with_report(catalog);
+        for (tag, ids) in &report.duplicate_tags {
+            tracing::error!(
+                tag = *tag,
+                candidates = ?ids,
+                chosen = ids[0],
+                "core class tag is on several classes; using the lowest id"
+            );
+        }
+        for name in &report.name_fallbacks {
+            tracing::warn!(
+                class = *name,
+                "no class carries the core tag for this role; bound by name (run the core-class-tags SQL patch)"
+            );
+        }
+        for (name, ids) in &report.ambiguous_names {
+            tracing::warn!(
+                class = *name,
+                candidates = ?ids,
+                chosen = ids[0],
+                "core class name matches several classes; using the lowest id"
+            );
+        }
         for name in found.missing() {
             tracing::warn!(
                 class = name,
@@ -2816,22 +2868,59 @@ impl CoreClasses {
         found
     }
 
-    /// [`Self::resolve`] without the logging. A name matching several
-    /// classes resolves to the lowest id, regardless of map order.
+    /// [`Self::resolve`] without the logging. A tagged row beats any name
+    /// match; a tag or name matching several classes resolves to the lowest
+    /// id, regardless of map order.
     #[must_use]
     pub fn resolve_quiet(catalog: &ClassCatalog) -> Self {
-        let find = |canonical: &str| -> Option<i32> {
-            catalog
+        Self::resolve_with_report(catalog).0
+    }
+
+    /// Resolve all roles and report which of them needed the name fallback
+    /// or hit duplicate tags / ambiguous names.
+    #[must_use]
+    pub fn resolve_with_report(catalog: &ClassCatalog) -> (Self, CoreClassReport) {
+        let mut report = CoreClassReport::default();
+        let mut find = |role: usize| -> Option<i32> {
+            let tag = Self::TAGS[role];
+            let canonical = Self::NAMES[role];
+            let mut tagged: Vec<i32> = catalog
+                .by_id
+                .values()
+                .filter(|c| c.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)))
+                .map(|c| c.id)
+                .collect();
+            tagged.sort_unstable();
+            tagged.dedup();
+            if tagged.len() > 1 {
+                report.duplicate_tags.push((tag, tagged.clone()));
+            }
+            if let Some(&id) = tagged.first() {
+                return Some(id);
+            }
+
+            let mut ids: Vec<i32> = catalog
                 .by_id
                 .values()
                 .filter(|c| c.plain_name.eq_ignore_ascii_case(canonical))
                 .map(|c| c.id)
-                .min()
+                .collect();
+            ids.sort_unstable();
+            ids.dedup();
+            if ids.len() > 1 {
+                report.ambiguous_names.push((canonical, ids.clone()));
+            }
+            let id = ids.first().copied();
+            if id.is_some() {
+                report.name_fallbacks.push(canonical);
+            }
+            id
         };
-        Self {
-            monk: find(Self::NAMES[0]),
-            thief: find(Self::NAMES[1]),
-        }
+        let found = Self {
+            monk: find(0),
+            thief: find(1),
+        };
+        (found, report)
     }
 
     /// Canonical names of the roles that did not resolve.

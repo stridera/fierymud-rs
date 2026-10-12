@@ -1,6 +1,6 @@
 //! Content that used to be hard-coded by database id or name and is now
 //! read from the data: class-gated skills (`ClassSkills` /
-//! `KnownAbilities`), class roles resolved by name (`CoreClasses`) and
+//! `KnownAbilities`), class roles resolved by `core:<role>` tag (`CoreClasses`) and
 //! the `Effect.prevents_*` flags. Test-only.
 
 use bevy_ecs::prelude::*;
@@ -42,6 +42,7 @@ fn class(id: i32, plain_name: &str) -> ClassDef {
         exp_gain_factor: 1.0,
         alignment_bias: 0,
         campcraft_bonus: false,
+        tags: Vec::new(),
         combat_rates: mud_db::characters::ClassCombatRates::default(),
         resistances: std::collections::HashMap::new(),
     }
@@ -237,7 +238,7 @@ fn summon_mount_follows_class_skills() {
     );
 }
 
-// ---- Monk / Thief by name ----
+// ---- Monk / Thief by core tag (name fallback) ----
 
 #[test]
 fn core_classes_resolve_by_plain_name_not_id() {
@@ -260,6 +261,97 @@ fn core_classes_resolve_by_plain_name_not_id() {
         CoreClasses::resolve_quiet(&ClassCatalog::default()),
         CoreClasses::default()
     );
+}
+
+fn tagged_class(id: i32, name: &str, tags: &[&str]) -> ClassDef {
+    let mut def = class(id, name);
+    def.tags = tags.iter().map(|t| (*t).to_string()).collect();
+    def
+}
+
+fn class_catalog_of(defs: Vec<ClassDef>) -> ClassCatalog {
+    let mut cat = ClassCatalog::default();
+    for d in defs {
+        cat.by_id.insert(d.id, d);
+    }
+    cat
+}
+
+/// Writer that appends into a shared buffer for log assertions.
+#[derive(Clone, Default)]
+struct LogBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+impl std::io::Write for LogBuf {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(b);
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn log_subscriber(buf: &LogBuf) -> impl tracing::Subscriber + use<> {
+    let sink = buf.clone();
+    tracing_subscriber::fmt()
+        .with_writer(move || sink.clone())
+        .with_ansi(false)
+        .finish()
+}
+
+#[test]
+fn core_classes_bind_by_tag_after_a_rename() {
+    // "Monk" was renamed in Muditor; the tag keeps it bound. A decoy row
+    // still named "Monk" without the tag must not steal the role.
+    let cat = class_catalog_of(vec![
+        tagged_class(7, "Martial Artist", &["core:monk"]),
+        tagged_class(8, "Monk", &[]),
+        tagged_class(9, "Sneak", &["CORE:THIEF", "other"]),
+    ]);
+    let (core, report) = CoreClasses::resolve_with_report(&cat);
+    assert_eq!(core.monk, Some(7));
+    assert_eq!(core.thief, Some(9));
+    assert!(report.duplicate_tags.is_empty());
+    assert!(report.name_fallbacks.is_empty());
+    assert!(core.missing().is_empty());
+}
+
+#[test]
+fn core_classes_fall_back_to_name_and_warn_when_untagged() {
+    let buf = LogBuf::default();
+    let subscriber = log_subscriber(&buf);
+    let cat = class_catalog_of(vec![
+        tagged_class(7, "Martial Artist", &["core:monk"]),
+        tagged_class(260, "Thief", &[]),
+    ]);
+    let (core, report) = CoreClasses::resolve_with_report(&cat);
+    assert_eq!(core.monk, Some(7));
+    assert_eq!(core.thief, Some(260));
+    assert_eq!(report.name_fallbacks, vec!["Thief"]);
+    let core2 = tracing::subscriber::with_default(subscriber, || CoreClasses::resolve(&cat));
+    assert_eq!(core2, core);
+    let log = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+    assert!(log.contains("WARN"), "{log}");
+    assert!(log.contains("bound by name"), "{log}");
+    assert!(log.contains("class=\"Thief\""), "{log}");
+    assert!(!log.contains("class=\"Monk\""), "{log}");
+}
+
+#[test]
+fn core_classes_duplicate_tag_logs_error_and_lowest_id_wins() {
+    let buf = LogBuf::default();
+    let subscriber = log_subscriber(&buf);
+    let cat = class_catalog_of(vec![
+        tagged_class(30, "Monk B", &["core:monk"]),
+        tagged_class(12, "Monk A", &["core:monk"]),
+        tagged_class(21, "Monk C", &["core:monk"]),
+    ]);
+    let (core, report) = CoreClasses::resolve_with_report(&cat);
+    assert_eq!(core.monk, Some(12));
+    assert_eq!(report.duplicate_tags, vec![("core:monk", vec![12, 21, 30])]);
+    let _ = tracing::subscriber::with_default(subscriber, || CoreClasses::resolve(&cat));
+    let log = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+    assert!(log.contains("ERROR"), "{log}");
+    assert!(log.contains("core:monk"), "{log}");
 }
 
 #[test]

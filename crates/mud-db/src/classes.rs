@@ -43,6 +43,9 @@ pub struct ClassRow {
     /// `Class.campcraft_bonus`: classes whose holders (or whose group
     /// members) grant the camp "fieldcraft" rest-tier bonus.
     pub campcraft_bonus: bool,
+    /// Builder-editable `Class.tags`. The `core:<role>` tags (`core:monk`,
+    /// `core:thief`) bind a class to an engine feature regardless of its name.
+    pub tags: Vec<String>,
     /// Per-level combat growth (`Class.accuracy_per_level` etc.): the
     /// rates a character's starting combat columns are derived from and
     /// that each level-up adds on top of.
@@ -74,6 +77,7 @@ pub async fn list_all(pool: &PgPool) -> sqlx::Result<Vec<ClassRow>> {
             exp_gain_factor,
             alignment_bias,
             campcraft_bonus,
+            tags AS "tags!: Vec<String>",
             accuracy_per_level,
             evasion_per_level,
             dex_evasion_mult,

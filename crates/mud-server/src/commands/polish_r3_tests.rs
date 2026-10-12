@@ -49,6 +49,7 @@ fn class(id: i32, name: &str, factor: f64) -> ClassDef {
         exp_gain_factor: factor,
         alignment_bias: 0,
         campcraft_bonus: false,
+        tags: Vec::new(),
         combat_rates: mud_db::characters::ClassCombatRates::default(),
         resistances: HashMap::new(),
     }
