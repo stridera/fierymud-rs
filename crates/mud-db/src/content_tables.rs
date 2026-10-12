@@ -39,6 +39,28 @@ pub async fn list_status_flag_values(pool: &PgPool) -> sqlx::Result<Vec<StatusFl
     .await
 }
 
+/// [`list_status_flag_values`] for a database that predates
+/// `fierylib/data/sql/2026-10-12-status-flag-prevents.sql` (the `prevents_*`
+/// columns do not exist yet): AI values survive, no flag blocks anything. Only
+/// the loader's missing-column fallback should call this.
+pub async fn list_status_flag_values_without_prevents(
+    pool: &PgPool,
+) -> sqlx::Result<Vec<StatusFlagValueRow>> {
+    sqlx::query_as!(
+        StatusFlagValueRow,
+        r#"
+        SELECT flag AS "flag!", ai_value AS "ai_value!",
+               false AS "prevents_movement!",
+               false AS "prevents_casting!",
+               false AS "prevents_speaking!"
+        FROM "StatusFlagValue"
+        ORDER BY flag
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpellSyllableRow {
     pub syllable: String,

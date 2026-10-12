@@ -68,9 +68,22 @@ pub struct LoadStats {
 /// Postgres `undefined_table` / `undefined_column`: the database schema is
 /// older than this build expects.
 fn is_missing_schema(err: &sqlx::Error) -> bool {
+    sqlstate_is_missing_schema(sqlstate(err).as_deref())
+}
+
+/// Postgres `undefined_column` only (a table that exists but predates a patch).
+fn is_missing_column(err: &sqlx::Error) -> bool {
+    sqlstate(err).as_deref() == Some("42703")
+}
+
+fn sqlstate(err: &sqlx::Error) -> Option<String> {
     err.as_database_error()
         .and_then(sqlx::error::DatabaseError::code)
-        .is_some_and(|c| c == "42P01" || c == "42703")
+        .map(std::borrow::Cow::into_owned)
+}
+
+fn sqlstate_is_missing_schema(code: Option<&str>) -> bool {
+    matches!(code, Some("42P01" | "42703"))
 }
 
 /// When `err` is a missing table / column, replace it with one that names
@@ -84,6 +97,72 @@ fn schema_gap(err: sqlx::Error, missing: &str, fix: &str) -> sqlx::Error {
     sqlx::Error::Configuration(
         format!("database schema is behind this build: missing {missing} ({err}); {fix}").into(),
     )
+}
+
+/// Fix named when the `StatusFlagValue.prevents_*` columns are missing.
+const STATUS_FLAG_PREVENTS_FIX: &str = "deploy the muditor schema (prisma db push), then apply \
+     fierylib/data/sql/2026-10-12-status-flag-prevents.sql";
+
+/// `StatusFlagValue` rows. The `prevents_*` columns come from the muditor schema
+/// plus `2026-10-12-status-flag-prevents.sql`; when they are missing (42703)
+/// retry without them so the AI values survive, and log an ERROR that
+/// status-flag blocking is disabled. A missing table (or any other error)
+/// still goes through [`rows_or_empty`].
+async fn load_status_flag_rows(
+    pool: &PgPool,
+) -> sqlx::Result<Vec<content_tables::StatusFlagValueRow>> {
+    let res = content_tables::list_status_flag_values(pool).await;
+    if res.as_ref().err().is_some_and(is_missing_column) {
+        let e = schema_gap(
+            res.expect_err("checked above"),
+            "column \"StatusFlagValue\".prevents_movement/prevents_casting/prevents_speaking",
+            STATUS_FLAG_PREVENTS_FIX,
+        );
+        error!(
+            "{e}; status-flag blocking is DISABLED (no flag prevents movement, casting or speaking, \
+             so e.g. held/paralyzed/silenced effects block nothing) until \
+             fierylib/data/sql/2026-10-12-status-flag-prevents.sql is applied after the muditor \
+             schema push; loading AI values only"
+        );
+        return rows_or_empty(
+            content_tables::list_status_flag_values_without_prevents(pool).await,
+            "table \"StatusFlagValue\"",
+            "every status flag scores 0 in mob gear AI",
+        );
+    }
+    rows_or_empty_with_fix(
+        res,
+        "table \"StatusFlagValue\"",
+        STATUS_FLAG_PREVENTS_FIX,
+        "every status flag scores 0 in mob gear AI and no flag blocks anything",
+    )
+}
+
+/// Build the `StatusFlagValues` resource. Returns `(kept, dropped)` flag-name
+/// pairs for rows that collide in the lowercased `prevents` map (they differ
+/// only by case; the later row wins there).
+fn build_status_flag_values(
+    rows: Vec<content_tables::StatusFlagValueRow>,
+) -> (crate::resources::StatusFlagValues, Vec<(String, String)>) {
+    let mut values = crate::resources::StatusFlagValues::default();
+    let mut collisions = Vec::new();
+    let mut names: HashMap<String, String> = HashMap::new();
+    for r in rows {
+        let key = r.flag.to_ascii_lowercase();
+        if let Some(prev) = names.insert(key.clone(), r.flag.clone()) {
+            collisions.push((r.flag.clone(), prev));
+        }
+        values.prevents.insert(
+            key,
+            crate::resources::FlagPrevents {
+                movement: r.prevents_movement,
+                casting: r.prevents_casting,
+                speaking: r.prevents_speaking,
+            },
+        );
+        values.by_flag.insert(r.flag, r.ai_value);
+    }
+    (values, collisions)
 }
 
 /// A content table the runtime tolerates losing: when `res` failed because the
@@ -190,22 +269,14 @@ pub async fn load_gear_contents(
 /// # Errors
 /// Any database error other than a missing table / column.
 pub async fn load_content_tables(world: &mut World, pool: &PgPool) -> sqlx::Result<()> {
-    let flag_rows = rows_or_empty(
-        content_tables::list_status_flag_values(pool).await,
-        "table \"StatusFlagValue\"",
-        "every status flag scores 0 in mob gear AI",
-    )?;
-    let mut flag_values = crate::resources::StatusFlagValues::default();
-    for r in flag_rows {
-        flag_values.prevents.insert(
-            r.flag.to_ascii_lowercase(),
-            crate::resources::FlagPrevents {
-                movement: r.prevents_movement,
-                casting: r.prevents_casting,
-                speaking: r.prevents_speaking,
-            },
+    let flag_rows = load_status_flag_rows(pool).await?;
+    let (flag_values, collisions) = build_status_flag_values(flag_rows);
+    for (kept, dropped) in &collisions {
+        warn!(
+            kept = %kept,
+            dropped = %dropped,
+            "StatusFlagValue rows differ only by case; the lowercased `prevents` map keeps one (last row wins)"
         );
-        flag_values.by_flag.insert(r.flag, r.ai_value);
     }
     info!(rows = flag_values.by_flag.len(), "StatusFlagValue loaded");
     world.insert_resource(flag_values);
@@ -3267,7 +3338,46 @@ mod light_fuel_tests {
 
 #[cfg(test)]
 mod schema_gap_tests {
-    use super::{is_missing_schema, schema_gap};
+    use super::{
+        build_status_flag_values, is_missing_column, is_missing_schema, schema_gap,
+        sqlstate_is_missing_schema,
+    };
+    use mud_db::content_tables::StatusFlagValueRow;
+
+    #[test]
+    fn sqlstate_classification() {
+        assert!(sqlstate_is_missing_schema(Some("42P01")));
+        assert!(sqlstate_is_missing_schema(Some("42703")));
+        assert!(!sqlstate_is_missing_schema(Some("23505")));
+        assert!(!sqlstate_is_missing_schema(None));
+        // Non-database errors are neither a missing table nor a missing column.
+        assert!(!is_missing_column(&sqlx::Error::PoolTimedOut));
+        assert!(!is_missing_schema(&sqlx::Error::RowNotFound));
+    }
+
+    fn row(flag: &str, ai: i32, movement: bool) -> StatusFlagValueRow {
+        StatusFlagValueRow {
+            flag: flag.to_string(),
+            ai_value: ai,
+            prevents_movement: movement,
+            prevents_casting: false,
+            prevents_speaking: false,
+        }
+    }
+
+    #[test]
+    fn status_flag_values_keep_ai_and_report_case_collisions() {
+        let (v, collisions) = build_status_flag_values(vec![row("HELD", 50, true)]);
+        assert!(collisions.is_empty());
+        assert_eq!(v.value("HELD"), 50);
+        assert!(v.prevents("held").movement);
+
+        let (v, collisions) =
+            build_status_flag_values(vec![row("Held", 10, false), row("HELD", 50, true)]);
+        assert_eq!(collisions, vec![("HELD".to_string(), "Held".to_string())]);
+        assert_eq!(v.by_flag.len(), 2);
+        assert!(v.prevents("held").movement);
+    }
 
     #[test]
     fn non_schema_errors_pass_through_untouched() {
