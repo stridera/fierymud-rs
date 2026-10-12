@@ -2128,3 +2128,23 @@ fn saved_progression_is_exact_when_a_curse_floors_the_maximum() {
     // Base 100 once the curse and the ring are both taken out.
     assert_eq!(base_progression(&mut world, p).unwrap().max_hp, 100);
 }
+
+/// Playtest r7 #15: the room hears "her" for a woman, not "their".
+#[test]
+fn room_wear_line_uses_the_wearers_possessive() {
+    let (mut world, p, _rx) = setup();
+    let room = world.get::<Located>(p).unwrap().0;
+    world.entity_mut(p).insert(Named {
+        name: "Zelda".into(),
+    });
+    world.get_mut::<Profile>(p).unwrap().gender = "female".into();
+    let (watcher, mut wrx) = crate::commands::test_support::player_in(&mut world, room);
+    world.entity_mut(watcher).insert(Named {
+        name: "Watcher".into(),
+    });
+    ring(&mut world, p, 9, "jade", vec![]);
+    dispatch(&mut world, p, "wear jade");
+    let out = drain(&mut wrx);
+    assert!(out.contains("onto her right ring finger"), "{out}");
+    assert!(!out.contains("their"), "{out}");
+}

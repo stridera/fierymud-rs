@@ -2897,8 +2897,7 @@ pub(crate) fn cmd_stat(world: &mut World, player: Entity, args: &str) {
             return;
         };
         found
-    } else if arg.is_empty() || arg.eq_ignore_ascii_case("me") || arg.eq_ignore_ascii_case("self")
-    {
+    } else if arg.is_empty() || arg.eq_ignore_ascii_case("me") || arg.eq_ignore_ascii_case("self") {
         player
     } else {
         let Some(located) = world.get::<Located>(player).copied() else {

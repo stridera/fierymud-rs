@@ -615,6 +615,7 @@ mod violent_cast_tests;
 pub(crate) use combat_commands::cmd_flee;
 pub(crate) use combat_commands::flee_through_exit;
 pub(crate) use combat_commands::hard_wall_label;
+pub(crate) use combat_commands::plural;
 #[path = "commands/enter.rs"]
 mod enter;
 #[path = "commands/feedback.rs"]
@@ -14808,7 +14809,11 @@ pub(crate) fn wear_item(
     // glowing sword goes unnoticed until they actually swing it.
     if let Some(located) = world.get::<Located>(player).copied() {
         let actor_name = name_of(world, player);
+        // The templates say "their"; a character with a sex gets that sex's
+        // possessive (the socials already do).
+        let possessive = Pronouns::of(world, player).possessive;
         let line = to_room
+            .replace("their", possessive)
             .replace("{n}", &actor_name)
             .replace("{p}", &item_name);
         broadcast_room_visual(

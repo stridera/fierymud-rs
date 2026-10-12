@@ -67,9 +67,12 @@ fn stat_world() -> (World, Entity, Rx, Entity) {
         name: "Gandalf".into(),
     });
     let (far, _far_rx) = player_in(&mut world, there);
-    world
-        .entity_mut(far)
-        .insert((Named { name: "Zzfar".into() }, mud_world::Online));
+    world.entity_mut(far).insert((
+        Named {
+            name: "Zzfar".into(),
+        },
+        mud_world::Online,
+    ));
     world.spawn((
         mud_world::Mob,
         Named {
@@ -115,4 +118,47 @@ fn stat_type_words_filter_and_report_misses() {
     assert!(drain(&mut rx).contains("Stats on which player?"));
     super::admin_inspect::cmd_stat(&mut world, staff, "nosuchthing");
     assert!(drain(&mut rx).contains("No 'nosuchthing' here."));
+}
+
+// ---- #9 / #10: repeat follow, inviting yourself ----
+
+fn two_players() -> (World, Entity, Rx, Entity, Rx) {
+    let mut world = World::new();
+    let r = quiet_room(&mut world);
+    let (a, a_rx) = player_in(&mut world, r);
+    world.entity_mut(a).insert(Named {
+        name: "Aria".into(),
+    });
+    let (b, b_rx) = player_in(&mut world, r);
+    world.entity_mut(b).insert(Named {
+        name: "Bram".into(),
+    });
+    (world, a, a_rx, b, b_rx)
+}
+
+#[test]
+fn following_the_same_person_twice_says_so_and_does_not_spam_the_leader() {
+    let (mut world, aria, mut a_rx, bram, mut b_rx) = two_players();
+    super::info::cmd_follow(&mut world, aria, "bram");
+    assert!(drain(&mut a_rx).contains("You start following Bram."));
+    assert!(drain(&mut b_rx).contains("Aria starts following you."));
+    super::info::cmd_follow(&mut world, aria, "bram");
+    let out = drain(&mut a_rx);
+    assert!(out.contains("You are already following Bram."), "{out}");
+    assert!(!out.contains("You start following"), "{out}");
+    assert!(drain(&mut b_rx).is_empty(), "the leader hears nothing");
+    assert_eq!(
+        world.get::<mud_world::Follower>(aria).map(|f| f.0),
+        Some(bram)
+    );
+}
+
+#[test]
+fn inviting_yourself_is_refused_by_name() {
+    let (mut world, aria, mut a_rx, _bram, _b_rx) = two_players();
+    for arg in ["aria", "me", "self"] {
+        super::info::cmd_invite(&mut world, aria, arg);
+        let out = drain(&mut a_rx);
+        assert!(out.contains("You can't invite yourself."), "{arg}: {out}");
+    }
 }

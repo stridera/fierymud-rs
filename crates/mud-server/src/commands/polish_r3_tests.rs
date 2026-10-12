@@ -223,7 +223,7 @@ fn report_says_hp_and_stamina() {
     dispatch(&mut world, p, "report");
     let out = plain(&drain(&mut rx));
     assert!(
-        out.contains("I have 80 (100) hit and 40 (50) movement points"),
+        out.contains("I have 80 (100) hit and 40 (50) stamina points"),
         "{out}"
     );
 }
@@ -572,4 +572,15 @@ fn a_pet_ordered_to_report_includes_its_movement_pool() {
         out.contains("I have 30 (40) hit and 90 (120) movement points"),
         "{out}"
     );
+}
+
+/// Playtest r7 #42: `who 25` is "25 and up", not "25-2147483647".
+#[test]
+fn who_with_one_level_says_plus() {
+    let mut world = world();
+    let (p, mut rx) = player(&mut world, "Reader", 30, None);
+    dispatch(&mut world, p, "who 25");
+    let out = plain(&drain(&mut rx));
+    assert!(out.contains("(levels 25+)"), "{out}");
+    assert!(!out.contains("2147483647"), "{out}");
 }

@@ -1211,8 +1211,14 @@ mod tests {
         }
         start_mend(&mut world, caster);
         assert!(world.get::<Casting>(caster).is_some(), "{}", drain(&mut rx));
-        assert!(world.get::<Fighting>(caster).is_none(), "no melee at cast start");
-        assert!(world.get::<Fighting>(bob).is_none(), "no melee at cast start");
+        assert!(
+            world.get::<Fighting>(caster).is_none(),
+            "no melee at cast start"
+        );
+        assert!(
+            world.get::<Fighting>(bob).is_none(),
+            "no melee at cast start"
+        );
         // The victim lashes out mid-cast: a light hit leaves the wind-up be.
         run_ticks(&mut world, 5);
         crate::commands::engage_combat(&mut world, bob, caster, room);

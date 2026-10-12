@@ -47,22 +47,27 @@ inventory::submit! {
 
 /// Legacy `do_report` wording: "I have 80 (100) hit and 40 (50) movement
 /// points." A mob's movement is its [`MovementPoints`] pool (mounts carry
-/// one); players report their stamina.
+/// one); players report their stamina, under the name the prompt and
+/// `score` use for it.
 pub(crate) fn report_body(world: &World, who: Entity) -> String {
     let hp = world.get::<Health>(who).copied();
     let mv = world
         .get::<MovementPoints>(who)
-        .map(|m| (m.current, m.max))
-        .or_else(|| world.get::<Stamina>(who).map(|s| (s.current, s.max)));
+        .map(|m| (m.current, m.max, "movement"))
+        .or_else(|| {
+            world
+                .get::<Stamina>(who)
+                .map(|s| (s.current, s.max, "stamina"))
+        });
     match (hp, mv) {
-        (Some(h), Some((c, m))) => {
+        (Some(h), Some((c, m, label))) => {
             format!(
-                "I have {} ({}) hit and {c} ({m}) movement points",
+                "I have {} ({}) hit and {c} ({m}) {label} points",
                 h.hp, h.max
             )
         }
         (Some(h), None) => format!("I have {} ({}) hit points", h.hp, h.max),
-        (None, Some((c, m))) => format!("I have {c} ({m}) movement points"),
+        (None, Some((c, m, label))) => format!("I have {c} ({m}) {label} points"),
         (None, None) => "(no vital stats)".to_string(),
     }
 }

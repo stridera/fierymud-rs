@@ -1259,7 +1259,7 @@ inventory::submit! {
 inventory::submit! {
     Command {
         names: &["richtest"],
-        min_role: UserRole::Player,
+        min_role: UserRole::Builder,
         required_perm: None,
         category: Category::Settings,
         help: Help {
@@ -5281,7 +5281,12 @@ pub(crate) fn cmd_sell(world: &mut World, player: Entity, args: &str) {
         let all = if filter.is_empty() {
             carried_unworn_items(world, player)
         } else {
-            crate::commands::item_target::find_items_all(world, player, filter, ItemClass::Inventory)
+            crate::commands::item_target::find_items_all(
+                world,
+                player,
+                filter,
+                ItemClass::Inventory,
+            )
         };
         if all.is_empty() {
             let msg = if filter.is_empty() {
@@ -5294,13 +5299,10 @@ pub(crate) fn cmd_sell(world: &mut World, player: Entity, args: &str) {
         }
         all
     } else if let Some(n) = count {
-        let all = crate::commands::item_target::find_items_all(world, player, rest, ItemClass::Inventory);
+        let all =
+            crate::commands::item_target::find_items_all(world, player, rest, ItemClass::Inventory);
         if all.is_empty() {
-            send_rendered(
-                world,
-                player,
-                &format!("You aren't carrying '{rest}'.\r\n"),
-            );
+            send_rendered(world, player, &format!("You aren't carrying '{rest}'.\r\n"));
             return;
         }
         all.into_iter().take(n).collect()
@@ -5445,9 +5447,7 @@ fn sell_one(
         return Err(format!("{keeper_name} refuses to buy {item_name}.\r\n"));
     }
     if has_object_flag(world, item, mud_db::enums::ObjectFlag::Soulbound) {
-        return Err(format!(
-            "{item_name} is soulbound — it cannot be sold.\r\n"
-        ));
+        return Err(format!("{item_name} is soulbound — it cannot be sold.\r\n"));
     }
     // The shop despawns what it buys; a full bag's contents would be lost.
     if has_contents(world, item) {
@@ -7306,6 +7306,12 @@ pub(crate) fn cmd_who(world: &mut World, player: Entity, args: &str) {
         if lo == hi {
             format!(
                 "\r\n<b:cyan>{} of {} online</> (level {lo}):\r\n",
+                raw_filtered.len(),
+                total_online,
+            )
+        } else if hi == i32::MAX {
+            format!(
+                "\r\n<b:cyan>{} of {} online</> (levels {lo}+):\r\n",
                 raw_filtered.len(),
                 total_online,
             )
@@ -11666,14 +11672,20 @@ fn get_from_container_inner(
                 world,
                 room,
                 &[player],
-                &format!("{player_name} loots {moved} item(s) from {container_name}.\r\n"),
+                &format!(
+                    "{player_name} loots {moved} {} from {container_name}.\r\n",
+                    crate::commands::plural(moved, "item", "items")
+                ),
             );
         }
         if skipped > 0 {
             send_to(
                 world,
                 player,
-                format!("You're too encumbered to carry {skipped} more item(s).\r\n"),
+                format!(
+                    "You're too encumbered to carry {skipped} more {}.\r\n",
+                    crate::commands::plural(skipped, "item", "items")
+                ),
             );
         }
         return;
@@ -11871,7 +11883,10 @@ fn get_all_from_floor(world: &mut World, player: Entity, room: Entity, filter: &
         send_to(
             world,
             player,
-            format!("You're too encumbered to carry {skipped} more item(s).\r\n"),
+            format!(
+                "You're too encumbered to carry {skipped} more {}.\r\n",
+                crate::commands::plural(skipped, "item", "items")
+            ),
         );
     }
     if moved > 0 {
@@ -12051,7 +12066,10 @@ fn put_plain(world: &mut World, player: Entity, args: &str) {
             world,
             room,
             &[player],
-            &format!("{player_name} puts {count} item(s) in {container_name}.\r\n"),
+            &format!(
+                "{player_name} puts {count} {} in {container_name}.\r\n",
+                crate::commands::plural(count, "item", "items")
+            ),
         );
         return;
     }
@@ -12351,14 +12369,20 @@ fn drop_plain(world: &mut World, player: Entity, args: &str) {
                 world,
                 room,
                 &[player],
-                &format!("{player_name} drops {dropped} item(s).\r\n"),
+                &format!(
+                    "{player_name} drops {dropped} {}.\r\n",
+                    crate::commands::plural(dropped, "item", "items")
+                ),
             );
         }
         if blocked > 0 {
             send_msg(
                 world,
                 player,
-                format!("{blocked} item(s) refused to leave your grasp.\r\n"),
+                format!(
+                    "{blocked} {} refused to leave your grasp.\r\n",
+                    crate::commands::plural(blocked, "item", "items")
+                ),
             );
         }
         refresh_player_items_gmcp(world, player);
@@ -13289,7 +13313,11 @@ fn strip_from_preposition(args: &str) -> String {
 pub(crate) fn cmd_pour(world: &mut World, player: Entity, args: &str) {
     let mut parts = args.split_whitespace();
     let Some(src_word) = parts.next() else {
-        send_to(world, player, "Usage: pour <container> [<target container> | out]\r\n");
+        send_to(
+            world,
+            player,
+            "Usage: pour <container> [<target container> | out]\r\n",
+        );
         return;
     };
     // `pour cup out` and `pour cup` both empty the cup onto the ground.
@@ -15633,9 +15661,10 @@ pub(crate) fn cmd_split(world: &mut World, player: Entity, args: &str) {
         world,
         player,
         format!(
-            "You split {} among {} member(s); each receives {}.\r\n",
+            "You split {} among {} {}; each receives {}.\r\n",
             format_amount(amount),
             here.len(),
+            crate::commands::plural(here.len(), "member", "members"),
             format_amount(share)
         ),
     );

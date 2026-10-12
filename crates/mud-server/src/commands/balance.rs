@@ -41,7 +41,7 @@ fn cmd_balance(world: &mut World, player: Entity, _args: &str) {
     // without round-tripping through both.
     let on_hand_line = format_wealth(on_hand).map_or_else(
         || "On hand: nothing.".to_string(),
-        |parts| format!("On hand:  {parts}."),
+        |parts| format!("On hand: {parts}."),
     );
     send_to(
         world,

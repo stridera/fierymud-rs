@@ -370,7 +370,11 @@ async fn mailbox_text(pool: &mud_db::sqlx::PgPool, user_id: &str) -> String {
     if rows.is_empty() {
         return "\r\nYour mailbox is empty.\r\n".to_string();
     }
-    let mut out = format!("\r\nMailbox ({} message(s)):\r\n", rows.len());
+    let mut out = format!(
+        "\r\nMailbox ({} {}):\r\n",
+        rows.len(),
+        crate::commands::plural(rows.len(), "message", "messages")
+    );
     for (i, row) in rows.iter().enumerate() {
         let unread = if row.read_at.is_some() { " " } else { "*" };
         let when = row.sent_at.format("%Y-%m-%d %H:%M");
