@@ -13109,17 +13109,7 @@ pub(crate) fn cmd_pour(world: &mut World, player: Entity, args: &str) {
     if let Some(mut s) = world.get_mut::<mud_world::LiquidContainer>(src) {
         s.remaining -= amount;
     }
-    if let Some(mut d) = world.get_mut::<mud_world::LiquidContainer>(dest) {
-        if d.remaining == 0 {
-            d.liquid = canon_alias;
-            d.poisoned = src_state.poisoned;
-        } else if src_state.poisoned {
-            // Poisoning spreads when topping up a non-poisoned with
-            // poisoned: any bad liquid contaminates the lot.
-            d.poisoned = true;
-        }
-        d.remaining += amount;
-    }
+    add_liquid(world, dest, canon_alias, src_state.poisoned, amount);
     let identified = world.get::<mud_world::Identified>(src).is_some();
     let liquid_label = pour_label(world, &src_state.liquid, identified);
     send_rendered(
@@ -13127,6 +13117,31 @@ pub(crate) fn cmd_pour(world: &mut World, player: Entity, args: &str) {
         player,
         &format!("You pour {amount} units of {liquid_label} from {src_name} into {dest_name}.\r\n"),
     );
+}
+
+/// Add `amount` units of `liquid` to the drink container `dest` (`pour`, `fill`).
+/// An empty destination takes the source's liquid and poison state; a non-empty
+/// one is contaminated when the source is poisoned. A change of the poisoned
+/// state marks the item altered so the next save rewrites the stored delta
+/// (otherwise a stale `poisoned` key in the DB re-poisons it at login).
+fn add_liquid(world: &mut World, dest: Entity, liquid: String, src_poisoned: bool, amount: i32) {
+    let Some(mut d) = world.get_mut::<mud_world::LiquidContainer>(dest) else {
+        return;
+    };
+    let was_poisoned = d.poisoned;
+    if d.remaining == 0 {
+        d.liquid = liquid;
+        d.poisoned = src_poisoned;
+    } else if src_poisoned {
+        // Poisoning spreads when topping up a non-poisoned with
+        // poisoned: any bad liquid contaminates the lot.
+        d.poisoned = true;
+    }
+    d.remaining += amount;
+    let changed = d.poisoned != was_poisoned;
+    if changed {
+        crate::item_alter::mark_dirty(world, dest);
+    }
 }
 
 /// Render the liquid noun for `pour`/`fill` output. Identified
@@ -13261,17 +13276,7 @@ pub(crate) fn cmd_fill(world: &mut World, player: Entity, args: &str) {
     if !src_is_fountain && let Some(mut s) = world.get_mut::<mud_world::LiquidContainer>(src) {
         s.remaining -= amount;
     }
-    if let Some(mut d) = world.get_mut::<mud_world::LiquidContainer>(dest) {
-        if d.remaining == 0 {
-            d.liquid = canon_alias;
-            d.poisoned = src_state.poisoned;
-        } else if src_state.poisoned {
-            // Poisoning spreads when topping up a non-poisoned with
-            // poisoned: any bad liquid contaminates the lot.
-            d.poisoned = true;
-        }
-        d.remaining += amount;
-    }
+    add_liquid(world, dest, canon_alias, src_state.poisoned, amount);
     // Fountains aren't "identified" the way carried containers are,
     // but their proto name is always public knowledge — show the
     // real liquid name. Carried sources get the standard

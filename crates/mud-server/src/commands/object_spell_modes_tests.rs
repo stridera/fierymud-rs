@@ -1072,3 +1072,65 @@ fn summon_dracolich_still_summons_when_an_object_is_named() {
     g.cast("summon dracolich", "");
     assert_eq!(g.followers(), vec![(533, 11)]);
 }
+
+// -- Target order: characters before objects (legacy find_spell_target) -----
+
+impl Fx {
+    fn rat(&mut self) -> Entity {
+        self.world
+            .spawn((
+                Mob,
+                Named {
+                    name: "a rat".into(),
+                },
+                Keywords(vec!["rat".into()]),
+                Located(self.room),
+                Health { hp: 50, max: 50 },
+            ))
+            .id()
+    }
+}
+
+#[test]
+fn cast_poison_rat_hits_the_rat_not_the_rat_tail_in_the_pack() {
+    let mut f = fx();
+    let tail = f.object(f.caster, "rat", ObjectType::Food, |_| {});
+    let rat = f.rat();
+    f.cast("poison", "rat");
+    assert_eq!(f.effects_on(rat), vec!["str".to_string()]);
+    assert!(f.world.get::<FoodPoisoned>(tail).is_none());
+    assert!(f.world.get::<ItemAlterDirty>(tail).is_none());
+}
+
+#[test]
+fn cast_poison_rat_still_poisons_the_tail_when_no_rat_is_here() {
+    let mut f = fx();
+    let tail = f.object(f.caster, "rat", ObjectType::Food, |_| {});
+    let out = f.cast("poison", "rat");
+    assert_eq!(
+        f.world.get::<FoodPoisoned>(tail).map(|p| p.0),
+        Some(true),
+        "{out}"
+    );
+}
+
+#[test]
+fn cast_bless_sword_targets_the_sword_when_no_character_matches() {
+    let mut f = fx();
+    let sword = f.weapon(f.caster);
+    let rat = f.rat();
+    let out = f.cast("bless", "sword");
+    assert!(out.contains("A test sword glows briefly."), "{out}");
+    assert!(f.world.get::<ItemAlterDirty>(sword).is_some());
+    assert!(f.effects_on(rat).is_empty());
+}
+
+#[test]
+fn cast_bless_rat_blesses_the_rat_before_a_carried_rat_item() {
+    let mut f = fx();
+    let sword = f.object(f.caster, "rat", ObjectType::Weapon, |_| {});
+    let rat = f.rat();
+    f.cast("bless", "rat");
+    assert!(f.world.get::<ItemAlterDirty>(sword).is_none());
+    assert!(!f.effects_on(rat).is_empty());
+}

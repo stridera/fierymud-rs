@@ -10232,6 +10232,126 @@ pub(crate) mod tests {
         temp_cleanup(&pool, &[], &[&ch.id], &[]).await;
     }
 
+    /// A poisoned drink container that `pour` refills from a clean source is
+    /// clean again after a save and relog: the pour marks the item altered, so
+    /// the save clears the stale `"poisoned": true` instead of leaving it for
+    /// `item_alter::restore` to re-apply at login.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn refilling_a_poisoned_flask_does_not_repoison_it_on_relog() {
+        use mud_world::LiquidContainer;
+        let Some((pool, _db_lock)) = live_pool().await else {
+            eprintln!("skipping: dev database unavailable");
+            return;
+        };
+        let object: Option<(i32, i32)> =
+            mud_db::sqlx::query_as("SELECT zone_id, id FROM \"Objects\" LIMIT 1")
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+        let Some((oz, oid)) = object else {
+            eprintln!("skipping: no Objects rows");
+            return;
+        };
+        let (_user, ch) = temp_unlinked_char(&pool, "repoison").await;
+        let mut protos = mud_world::ObjectPrototypes::default();
+        let mut proto = crate::commands::test_support::object_proto(
+            oz,
+            oid,
+            mud_db::enums::ObjectType::Drinkcontainer,
+        );
+        proto.liquid = Some(mud_world::LiquidProto {
+            liquid: "water".into(),
+            capacity: 10,
+            remaining: 5,
+            poisoned: false,
+        });
+        protos.by_key.insert((oz, oid), proto);
+        let by_key = protos.by_key.clone();
+        let mut world = World::new();
+        world.insert_resource(SaveCoordinator::default());
+        world.insert_resource(protos);
+        world.insert_resource(mud_world::TriggerCatalog::default());
+        world.insert_resource(mud_world::ObjectAbilityCatalog::default());
+        world.insert_resource(mud_world::LiquidCatalog::default());
+        let room = world.spawn_empty().id();
+        let player = spawn_player_for(&mut world, &ch.id, room);
+        let item = |world: &mut World, name: &str, remaining: i32| {
+            world
+                .spawn((
+                    Item,
+                    Named { name: name.into() },
+                    mud_world::Keywords(vec![name.into()]),
+                    WorldKey { zone: oz, id: oid },
+                    LiquidContainer {
+                        liquid: "water".into(),
+                        capacity: 10,
+                        remaining,
+                        poisoned: false,
+                    },
+                    Located(player),
+                ))
+                .id()
+        };
+        let flask = item(&mut world, "flask", 5);
+        let jug = item(&mut world, "jug", 10);
+        let stored = |pool: PgPool, id: i32| async move {
+            mud_db::sqlx::query_scalar::<_, Option<serde_json::Value>>(
+                "SELECT custom_values -> 'curse' FROM \"CharacterItems\" WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+
+        // Poison spell on the flask, saved: the delta is stored.
+        crate::item_alter::set_poisoned(&mut world, flask, true);
+        crate::item_alter::mark_dirty(&mut world, flask);
+        save(&mut world, player, &pool).await;
+        let pid = world.get::<mud_world::PersistedItemId>(flask).unwrap().0;
+        assert_eq!(stored(pool.clone(), pid).await.unwrap()["poisoned"], true);
+
+        // Drunk dry, then refilled from the clean jug.
+        world.get_mut::<LiquidContainer>(flask).unwrap().remaining = 0;
+        crate::commands::info::cmd_pour(&mut world, player, "jug flask");
+        assert!(!world.get::<LiquidContainer>(flask).unwrap().poisoned);
+        world.despawn(jug);
+        save(&mut world, player, &pool).await;
+        assert_eq!(
+            stored(pool.clone(), pid).await,
+            None,
+            "the stale poisoned key is cleared"
+        );
+
+        let rows = mud_db::character_items::list_for(&pool, &ch.id)
+            .await
+            .unwrap();
+        let mut fresh = World::new();
+        fresh.insert_resource(mud_world::ObjectPrototypes { by_key });
+        fresh.insert_resource(mud_world::TriggerCatalog::default());
+        fresh.insert_resource(mud_world::ObjectAbilityCatalog::default());
+        let fresh_room = fresh.spawn_empty().id();
+        let who = spawn_player_for(&mut fresh, &ch.id, fresh_room);
+        assert_eq!(spawn_inventory(&mut fresh, who, &rows), 1);
+        let loaded = fresh
+            .query_filtered::<Entity, With<Item>>()
+            .iter(&fresh)
+            .next()
+            .unwrap();
+        assert!(
+            !fresh.get::<LiquidContainer>(loaded).unwrap().poisoned,
+            "the refilled flask must not come back poisoned"
+        );
+
+        mud_db::sqlx::query("DELETE FROM \"CharacterItems\" WHERE character_id = $1")
+            .bind(&ch.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        temp_cleanup(&pool, &[], &[&ch.id], &[]).await;
+    }
+
     /// Enchant Weapon's per-instance applies, `MAGIC` flag and barred
     /// alignment ride in the `curse` key of `custom_values`, reload with the
     /// item, and are re-granted on wield rather than baked into any saved

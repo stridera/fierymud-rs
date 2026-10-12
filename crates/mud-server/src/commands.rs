@@ -16323,11 +16323,10 @@ fn resolve_and_gate_target(
     // (or the caster's mount when the ability targets RIDER —
     // BUCK is the canonical case: `cast buck` with no arg should
     // unseat *your* current rider). Anything else → if the
-    // ability's targeting list includes OBJECT_INV, look up a
-    // carried item by keyword first (covers `cast identify
-    // brooch` and friends); otherwise fall through to actor-in-
-    // room. If nothing resolves, abort before applying any
-    // effects.
+    // ability's targeting list includes OBJECT_INV, a character in
+    // the room wins, then a carried item by keyword (covers `cast
+    // identify brooch` and friends), then a room object. If nothing
+    // resolves, abort before applying any effects.
     let valid_targets: Vec<String> = world
         .resource::<AbilityCatalog>()
         .targeting
@@ -16425,20 +16424,31 @@ fn resolve_and_gate_target(
             send_to(world, player, "You are nowhere; can't target.\r\n");
             return None;
         };
-        let inv_match = if allows_inventory_target {
-            find_item(world, player, word, ItemClass::Carried)
-        } else {
-            None
+        // Legacy `find_spell_target` order: a character in the room, then a
+        // carried object, then an object on the floor (`cast poison rat`
+        // hits the rat, not the rat tail in the pack). A spell that only
+        // takes objects keeps the objects first.
+        let allows_actor_target =
+            valid_targets.is_empty() || valid_targets.iter().any(|t| !t.starts_with("OBJECT"));
+        let carried = |world: &mut World| {
+            if allows_inventory_target {
+                find_item(world, player, word, ItemClass::Carried)
+            } else {
+                None
+            }
         };
-        let in_room = inv_match
-            .or_else(|| find_actor_in_room(world, word, located.0, player))
-            .or_else(|| {
-                if allows_room_object_target {
-                    find_item(world, player, word, ItemClass::Room)
-                } else {
-                    None
-                }
-            });
+        let first = if allows_actor_target {
+            find_actor_in_room(world, word, located.0, player).or_else(|| carried(world))
+        } else {
+            carried(world).or_else(|| find_actor_in_room(world, word, located.0, player))
+        };
+        let in_room = first.or_else(|| {
+            if allows_room_object_target {
+                find_item(world, player, word, ItemClass::Room)
+            } else {
+                None
+            }
+        });
         // SUMMON-class spells need to reach players in *other* rooms
         // (that's literally the point). When the in-room lookup
         // misses, fall back to a global online-player search before
