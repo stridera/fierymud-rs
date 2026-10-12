@@ -2819,6 +2819,25 @@ pub(crate) fn find_actor_anywhere(
     viewer: Entity,
     token: &str,
 ) -> Option<Entity> {
+    find_actor_anywhere_of(world, viewer, token, ActorKind::Any)
+}
+
+/// Which actors a world-wide name search considers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ActorKind {
+    Any,
+    Mob,
+    Player,
+}
+
+/// `find_actor_anywhere` limited to mobs or to online players (legacy
+/// `stat mobile` / `stat player` use `find_vis_plr_by_name`).
+pub(crate) fn find_actor_anywhere_of(
+    world: &mut World,
+    viewer: Entity,
+    token: &str,
+    kind: ActorKind,
+) -> Option<Entity> {
     let (index, needle) = commands::parse_indexed_needle(token);
     let key = parse_instance_key(needle);
     let needle = needle.to_ascii_lowercase();
@@ -2838,6 +2857,9 @@ pub(crate) fn find_actor_anywhere(
         for (e, n, kw, loc, wk, is_player, online) in q.iter(world) {
             let is_mob = world.get::<Mob>(e).is_some();
             if !(is_mob || (is_player && online)) {
+                continue;
+            }
+            if (kind == ActorKind::Mob && !is_mob) || (kind == ActorKind::Player && is_mob) {
                 continue;
             }
             let hit = match key {

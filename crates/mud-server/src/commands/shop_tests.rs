@@ -9,7 +9,9 @@ use mud_world::{
     ShopAcceptRule, ShopCatalog, ShopDef, ShopOffering, ShopPetOffering, Shopkeeper, Wealth,
 };
 
-use super::info::{cmd_buy, cmd_give, cmd_inspect, cmd_list, cmd_mount, cmd_sell, cmd_wealth};
+use super::info::{
+    cmd_buy, cmd_give, cmd_inspect, cmd_list, cmd_mount, cmd_sell, cmd_value, cmd_wealth,
+};
 use super::test_support::{Rx, drain, mob_proto, object_proto, player_in};
 
 const SHOP: (i32, i32) = (30, 91);
@@ -546,6 +548,88 @@ fn keeper_with_matching_accepts_rule_buys_at_a_capped_rate() {
     assert!(out.contains("You sell"), "{out}");
     assert_eq!(world.get::<Wealth>(player).unwrap().0, 950);
     assert_eq!(carried_swords(&mut world, player), 0);
+}
+
+fn shop_with_three_swords() -> (World, Entity, Rx) {
+    let mut def = shop_def(sword_offer(0), Vec::new());
+    def.accepts = accepts_weapons();
+    def.sell_profit = 0.5;
+    let (mut world, player, mut rx) = world_with_shop(def, 1_000);
+    for _ in 0..3 {
+        cmd_buy(&mut world, player, "sword");
+    }
+    drain(&mut rx);
+    (world, player, rx)
+}
+
+#[test]
+fn sell_with_a_count_sells_that_many() {
+    let (mut world, player, mut rx) = shop_with_three_swords();
+    assert_eq!(carried_swords(&mut world, player), 3);
+    cmd_sell(&mut world, player, "2 sword");
+    let out = drain(&mut rx);
+    assert_eq!(out.matches("You sell").count(), 2, "{out}");
+    assert_eq!(carried_swords(&mut world, player), 1);
+}
+
+#[test]
+fn sell_all_and_sell_all_dot_item_sell_everything_matching() {
+    let (mut world, player, mut rx) = shop_with_three_swords();
+    cmd_sell(&mut world, player, "all.sword");
+    let out = drain(&mut rx);
+    assert_eq!(out.matches("You sell").count(), 3, "{out}");
+    assert_eq!(carried_swords(&mut world, player), 0);
+
+    let (mut world, player, mut rx) = shop_with_three_swords();
+    cmd_sell(&mut world, player, "all");
+    let out = drain(&mut rx);
+    assert_eq!(out.matches("You sell").count(), 3, "{out}");
+    assert_eq!(carried_swords(&mut world, player), 0);
+    cmd_sell(&mut world, player, "all");
+    let out = drain(&mut rx);
+    assert!(out.contains("aren't carrying anything"), "{out}");
+}
+
+#[test]
+fn sell_all_with_nothing_the_keeper_wants_says_so_once() {
+    let mut def = shop_def(sword_offer(0), Vec::new());
+    def.accepts = Vec::new();
+    let (mut world, player, mut rx) = world_with_shop(def, 1_000);
+    cmd_buy(&mut world, player, "sword");
+    cmd_buy(&mut world, player, "sword");
+    drain(&mut rx);
+    cmd_sell(&mut world, player, "all");
+    let out = drain(&mut rx);
+    assert_eq!(out.matches("isn't interested").count(), 1, "{out}");
+    assert_eq!(carried_swords(&mut world, player), 2);
+}
+
+#[test]
+fn value_in_a_shop_quotes_what_sell_pays() {
+    let (mut world, player, mut rx) = shop_with_three_swords();
+    let before = world.get::<Wealth>(player).unwrap().0;
+    cmd_value(&mut world, player, "sword");
+    let quote = drain(&mut rx);
+    cmd_sell(&mut world, player, "sword");
+    let sale = drain(&mut rx);
+    let paid = world.get::<Wealth>(player).unwrap().0 - before;
+    assert_eq!(paid, 50);
+    let plain = |t: &str| {
+        let mut out = String::new();
+        let mut esc = false;
+        for c in t.chars() {
+            match (esc, c) {
+                (false, '\x1b') => esc = true,
+                (true, 'm') => esc = false,
+                (false, c) => out.push(c),
+                _ => {}
+            }
+        }
+        out
+    };
+    assert!(quote.contains("would pay you"), "{quote}");
+    assert!(plain(&quote).contains("5 silver for"), "{quote}");
+    assert!(plain(&sale).contains("for 5 silver"), "{sale}");
 }
 
 #[test]

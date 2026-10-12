@@ -579,6 +579,9 @@ pub struct CharacterStatePayload<'a> {
     pub description: Option<&'a str>,
     pub wealth: i64,
     pub experience: i32,
+    /// Kill-driven alignment scalar (-1000..=1000), the runtime's
+    /// `CombatStats.alignment`.
+    pub alignment: i32,
     pub skill_points: i32,
     pub hunger: i32,
     pub thirst: i32,
@@ -633,8 +636,9 @@ pub async fn save_state<'e, E: PgExecutor<'e>>(
             wimpy_threshold = $18,
             poof_in = $19,
             poof_out = $20,
-            position = $21
-        WHERE id = $22
+            position = $21,
+            alignment = $22
+        WHERE id = $23
         "#,
         state.hit_points,
         state.stamina,
@@ -666,6 +670,7 @@ pub async fn save_state<'e, E: PgExecutor<'e>>(
         // the override entirely fails the macro check; `as _` is the
         // sweet spot.
         state.position as _,
+        state.alignment,
         character_id,
     )
     .execute(executor)

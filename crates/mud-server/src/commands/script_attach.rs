@@ -97,7 +97,7 @@ fn find_object_around(world: &mut World, player: Entity, needle: &str) -> Option
         .or_else(|| find_object_in_world(world, needle))
 }
 
-fn find_object_in_world(world: &mut World, needle: &str) -> Option<Entity> {
+pub(crate) fn find_object_in_world(world: &mut World, needle: &str) -> Option<Entity> {
     let (index, needle) = parse_indexed_needle(needle);
     let needle = needle.to_ascii_lowercase();
     let mut q = world.query_filtered::<(Entity, &Named, Option<&Keywords>), With<Item>>();

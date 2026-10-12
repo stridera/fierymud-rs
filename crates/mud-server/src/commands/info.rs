@@ -5273,40 +5273,49 @@ pub(crate) fn cmd_sell(world: &mut World, player: Entity, args: &str) {
     if !shopkeeper_sees_customer(world, player, keeper_entity, &keeper_name) {
         return;
     }
-    let Some(item) = find_item(world, player, target_word, ItemClass::Inventory) else {
-        send_rendered(
-            world,
-            player,
-            &format!("You aren't carrying '{target_word}'.\r\n"),
-        );
-        return;
+    // `sell <item>`, `sell <n> <item>`, `sell <n>.<item>` (index, handled by
+    // the lookup), `sell all`, `sell all.<item>`.
+    let (count, rest) = parse_count_prefix(target_word);
+    let batch_filter = parse_all_filter(rest);
+    let items: Vec<Entity> = if let Some(filter) = &batch_filter {
+        let all = if filter.is_empty() {
+            carried_unworn_items(world, player)
+        } else {
+            crate::commands::item_target::find_items_all(world, player, filter, ItemClass::Inventory)
+        };
+        if all.is_empty() {
+            let msg = if filter.is_empty() {
+                "You aren't carrying anything to sell.\r\n".to_string()
+            } else {
+                format!("You aren't carrying anything matching '{filter}'.\r\n")
+            };
+            send_rendered(world, player, &msg);
+            return;
+        }
+        all
+    } else if let Some(n) = count {
+        let all = crate::commands::item_target::find_items_all(world, player, rest, ItemClass::Inventory);
+        if all.is_empty() {
+            send_rendered(
+                world,
+                player,
+                &format!("You aren't carrying '{rest}'.\r\n"),
+            );
+            return;
+        }
+        all.into_iter().take(n).collect()
+    } else {
+        let Some(item) = find_item(world, player, target_word, ItemClass::Inventory) else {
+            send_rendered(
+                world,
+                player,
+                &format!("You aren't carrying '{target_word}'.\r\n"),
+            );
+            return;
+        };
+        vec![item]
     };
     if crate::commands::composition::refuse_shop_trade(world, player) {
-        return;
-    }
-    let item_name = name_of(world, item);
-    // NO_SELL / SOULBOUND gates — quest items and bound gear can't
-    // be liquidated for coin. Done before the shop-catalog lookup
-    // so the player sees a specific reason rather than the generic
-    // "shopkeeper isn't interested" fall-through.
-    if has_restriction(world, item, mud_db::enums::ObjectRestriction::NoSell) {
-        send_msg(
-            world,
-            player,
-            format!("{keeper_name} refuses to buy {item_name}.\r\n"),
-        );
-        return;
-    }
-    if has_object_flag(world, item, mud_db::enums::ObjectFlag::Soulbound) {
-        send_msg(
-            world,
-            player,
-            format!("{item_name} is soulbound — it cannot be sold.\r\n"),
-        );
-        return;
-    }
-    // The shop despawns what it buys; a full bag's contents would be lost.
-    if refuse_nonempty_container(world, player, item, &item_name) {
         return;
     }
     let Some(shop) = world
@@ -5322,6 +5331,39 @@ pub(crate) fn cmd_sell(world: &mut World, player: Entity, args: &str) {
         );
         return;
     };
+    let batch = batch_filter.is_some();
+    let mut sold = 0usize;
+    let mut first_refusal: Option<String> = None;
+    for item in items {
+        match sell_one(world, player, located.0, &keeper_name, &shop, item) {
+            Ok(()) => sold += 1,
+            Err(msg) => {
+                // `sell all` skips what the keeper won't take; a counted
+                // sale stops at the first refusal, like `get 3 x`.
+                if batch {
+                    first_refusal.get_or_insert(msg);
+                } else {
+                    send_msg(world, player, msg);
+                    return;
+                }
+            }
+        }
+    }
+    if sold == 0
+        && let Some(msg) = first_refusal
+    {
+        send_msg(world, player, msg);
+    }
+}
+
+/// Why a shopkeeper won't buy `item`, or the payout when they will.
+fn shop_buy_quote(
+    world: &World,
+    shop: &mud_world::ShopDef,
+    keeper_name: &str,
+    item: Entity,
+) -> Result<i64, String> {
+    let item_name = name_of(world, item);
     let item_proto = world.get::<WorldKey>(item).and_then(|k| {
         world
             .resource::<ObjectPrototypes>()
@@ -5359,23 +5401,61 @@ pub(crate) fn cmd_sell(world: &mut World, player: Entity, args: &str) {
         })
     });
     if !accepted {
-        send_msg(
-            world,
-            player,
-            format!("{keeper_name} isn't interested in {item_name}.\r\n"),
-        );
-        return;
+        return Err(format!(
+            "{keeper_name} isn't interested in {item_name}.\r\n"
+        ));
     }
     let item_key = world.get::<WorldKey>(item).map(|k| (k.zone, k.id));
-    let pay_copper = shop_sell_payout(&shop, base_cost, item_key);
+    let pay_copper = shop_sell_payout(shop, base_cost, item_key);
     if pay_copper <= 0 {
-        send_msg(
-            world,
-            player,
-            format!("{keeper_name} chuckles. \"That's worthless to me.\"\r\n"),
-        );
-        return;
+        return Err(format!(
+            "{keeper_name} chuckles. \"That's worthless to me.\"\r\n"
+        ));
     }
+    Ok(pay_copper)
+}
+
+/// Unequipped items in `player`'s pack, newest first (the `sell all` set).
+fn carried_unworn_items(world: &mut World, player: Entity) -> Vec<Entity> {
+    let mut q = world.query_filtered::<(Entity, &Located), (With<Item>, Without<EquippedSlot>)>();
+    let mut v: Vec<Entity> = q
+        .iter(world)
+        .filter(|(_, l)| l.0 == player)
+        .map(|(e, _)| e)
+        .collect();
+    crate::commands::sort_newest_first(world, player, &mut v, |e| *e);
+    v
+}
+
+/// Sell one carried item to the keeper. `Err` carries the refusal line;
+/// on `Ok` the item is gone, the coin paid, and the sale announced.
+fn sell_one(
+    world: &mut World,
+    player: Entity,
+    room: Entity,
+    keeper_name: &str,
+    shop: &mud_world::ShopDef,
+    item: Entity,
+) -> Result<(), String> {
+    let item_name = name_of(world, item);
+    // NO_SELL / SOULBOUND gates: quest items and bound gear can't be
+    // liquidated for coin. Checked before the shop's accept rules so the
+    // player sees a specific reason rather than the generic fall-through.
+    if has_restriction(world, item, mud_db::enums::ObjectRestriction::NoSell) {
+        return Err(format!("{keeper_name} refuses to buy {item_name}.\r\n"));
+    }
+    if has_object_flag(world, item, mud_db::enums::ObjectFlag::Soulbound) {
+        return Err(format!(
+            "{item_name} is soulbound — it cannot be sold.\r\n"
+        ));
+    }
+    // The shop despawns what it buys; a full bag's contents would be lost.
+    if has_contents(world, item) {
+        return Err(format!(
+            "{item_name} still has things in it. Empty it first.\r\n"
+        ));
+    }
+    let pay_copper = shop_buy_quote(world, shop, keeper_name, item)?;
     if let Some(mut w) = world.get_mut::<Wealth>(player) {
         w.0 = w.0.saturating_add(pay_copper);
     } else {
@@ -5391,10 +5471,11 @@ pub(crate) fn cmd_sell(world: &mut World, player: Entity, args: &str) {
     let player_name = name_of(world, player);
     broadcast_room_except_rendered(
         world,
-        located.0,
+        room,
         &[player],
         &format!("{player_name} sells {item_name}.\r\n"),
     );
+    Ok(())
 }
 
 /// `value <item>`: appraise an item against its proto's `cost`. Renders
@@ -5430,6 +5511,33 @@ pub(crate) fn cmd_value(world: &mut World, player: Entity, args: &str) {
     });
     let item_name = name_of(world, target);
     let item_cap = crate::commands::cap_sentence_start(&item_name);
+    // With a shopkeeper in the room, quote what the keeper would pay (the
+    // same figure `sell` uses); anywhere else, the item's base cost.
+    if let Some(located) = world.get::<Located>(player).copied()
+        && let Some((keeper_entity, keeper_marker)) = {
+            let mut q = world.query_filtered::<(Entity, &Located, &Shopkeeper), With<Mob>>();
+            q.iter(world)
+                .find(|(_, l, _)| l.0 == located.0)
+                .map(|(e, _, s)| (e, *s))
+        }
+        && let Some(shop) = world
+            .resource::<ShopCatalog>()
+            .by_key
+            .get(&(keeper_marker.shop_zone_id, keeper_marker.shop_id))
+            .cloned()
+    {
+        let keeper_name = name_of(world, keeper_entity);
+        let line = match shop_buy_quote(world, &shop, &keeper_name, target) {
+            Ok(pay) => format!(
+                "{} would pay you {} for {item_name}.\r\n",
+                cap_sentence_start(&keeper_name),
+                format_wealth(pay).unwrap_or_else(|| "nothing".to_string())
+            ),
+            Err(refusal) => refusal,
+        };
+        send_rendered(world, player, &line);
+        return;
+    }
     let mut msg = if let Some(p) = &proto {
         if let Some(parts) = format_wealth(i64::from(p.cost)) {
             format!("{item_cap} is worth {parts}.\r\n")
@@ -13181,10 +13289,11 @@ fn strip_from_preposition(args: &str) -> String {
 pub(crate) fn cmd_pour(world: &mut World, player: Entity, args: &str) {
     let mut parts = args.split_whitespace();
     let Some(src_word) = parts.next() else {
-        send_to(world, player, "Usage: pour <container> [target]\r\n");
+        send_to(world, player, "Usage: pour <container> [<target container> | out]\r\n");
         return;
     };
-    let target_word = parts.next();
+    // `pour cup out` and `pour cup` both empty the cup onto the ground.
+    let target_word = parts.next().filter(|w| !w.eq_ignore_ascii_case("out"));
     let Some(src) = find_item(world, player, src_word, ItemClass::Carried) else {
         send_to(
             world,
@@ -15028,14 +15137,18 @@ pub(crate) fn cmd_invite(world: &mut World, player: Entity, args: &str) {
     let Some(located) = world.get::<Located>(player).copied() else {
         return;
     };
+    let own_name = name_of(world, player);
+    if arg.eq_ignore_ascii_case(&own_name)
+        || arg.eq_ignore_ascii_case("self")
+        || arg.eq_ignore_ascii_case("me")
+    {
+        send_to(world, player, "You can't invite yourself.\r\n");
+        return;
+    }
     let Some(target) = find_actor_in_room(world, arg, located.0, player) else {
         send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
         return;
     };
-    if target == player {
-        send_to(world, player, "You can't invite yourself.\r\n");
-        return;
-    }
     if group_pet_toggle(world, player, target) {
         return;
     }
@@ -15604,6 +15717,16 @@ pub(crate) fn cmd_follow(world: &mut World, player: Entity, args: &str) {
         );
         return;
     };
+
+    if world.get::<Follower>(player).is_some_and(|f| f.0 == target) {
+        let target_name = name_of(world, target);
+        send_msg(
+            world,
+            player,
+            format!("You are already following {target_name}.\r\n"),
+        );
+        return;
+    }
 
     // Cycle guard: if target already follows us (or any chain leading back to
     // us), refuse — keeps cmd_move's BFS terminating.

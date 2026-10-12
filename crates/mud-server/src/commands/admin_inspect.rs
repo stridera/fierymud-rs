@@ -13,6 +13,7 @@ use mud_world::{
     WorldKeyIndex, ZoneClimate,
 };
 
+use super::admin_world::{ActorKind, find_actor_anywhere_of};
 use crate::TickCount;
 use crate::commands::{
     AdminAuditLog, Category, Command, Connection, DbPool, Help, ItemClass, cap_sentence_start,
@@ -2801,6 +2802,46 @@ pub(crate) fn cmd_rstat(world: &mut World, player: Entity, args: &str) {
     }
     send_to(world, player, out);
 }
+#[derive(Clone, Copy)]
+enum StatKind {
+    Player,
+    Mobile,
+    Object,
+    File,
+}
+
+/// The type word of `stat <type> <name>`: any prefix of `player`, `mobile`,
+/// `object` or `file`. A bare prefix only counts when a name follows (so
+/// `stat f` alone is still a name); the full word always counts.
+fn stat_type_word(word: &str, has_name: bool) -> Option<StatKind> {
+    let w = word.to_ascii_lowercase();
+    if w.is_empty() {
+        return None;
+    }
+    let forms = [
+        ("player", StatKind::Player),
+        ("mobile", StatKind::Mobile),
+        ("mob", StatKind::Mobile),
+        ("object", StatKind::Object),
+        ("file", StatKind::File),
+    ];
+    forms
+        .into_iter()
+        .find(|(full, _)| *full == w || (has_name && full.starts_with(&w)))
+        .map(|(_, k)| k)
+}
+
+/// An online player by name for `stat player` (yourself included).
+fn stat_player(world: &mut World, player: Entity, name: &str) -> Option<Entity> {
+    if name.eq_ignore_ascii_case("me")
+        || name.eq_ignore_ascii_case("self")
+        || name.eq_ignore_ascii_case(&name_of(world, player))
+    {
+        return Some(player);
+    }
+    find_actor_anywhere_of(world, player, name, ActorKind::Player)
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn cmd_stat(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
@@ -2813,24 +2854,70 @@ pub(crate) fn cmd_stat(world: &mut World, player: Entity, args: &str) {
         cmd_rstat(world, player, &rest);
         return;
     }
-    let target =
-        if arg.is_empty() || arg.eq_ignore_ascii_case("me") || arg.eq_ignore_ascii_case("self") {
-            player
-        } else {
-            let Some(located) = world.get::<Located>(player).copied() else {
-                send_to(world, player, "You are nowhere.\r\n");
-                return;
-            };
-            // Try actor (mob/player) first, then item (room or carried).
-            let needle = arg.to_ascii_lowercase();
-            let actor = find_actor_in_room(world, arg, located.0, player);
-            let item = actor.or_else(|| find_item(world, player, &needle, ItemClass::RoomFirst));
-            let Some(found) = item else {
-                send_to(world, player, format!("No '{arg}' here.\r\n"));
-                return;
-            };
-            found
+    // `stat player|mobile|object|file <name>` (legacy do_stat: the type word
+    // is a prefix, and the search is world-wide, not just this room).
+    let (type_word, type_rest) = match arg.split_once(char::is_whitespace) {
+        Some((w, r)) => (w, r.trim()),
+        None => (arg, ""),
+    };
+    let kind = stat_type_word(type_word, !type_rest.is_empty());
+    if let Some(kind) = kind
+        && type_rest.is_empty()
+    {
+        let what = match kind {
+            StatKind::Mobile => "mobile",
+            StatKind::Player | StatKind::File => "player",
+            StatKind::Object => "object",
         };
+        send_to(world, player, format!("Stats on which {what}?\r\n"));
+        return;
+    }
+    let target = if let Some(kind) = kind {
+        let found = match kind {
+            StatKind::Mobile => find_actor_anywhere_of(world, player, type_rest, ActorKind::Mob),
+            StatKind::Player => stat_player(world, player, type_rest),
+            StatKind::Object => find_item(world, player, type_rest, ItemClass::RoomFirst)
+                .or_else(|| super::script_attach::find_object_in_world(world, type_rest)),
+            StatKind::File => {
+                // Offline characters come from the database (`viewchar`).
+                let Some(online) = stat_player(world, player, type_rest) else {
+                    super::admin_management::cmd_viewchar(world, player, type_rest);
+                    return;
+                };
+                Some(online)
+            }
+        };
+        let Some(found) = found else {
+            let msg = match kind {
+                StatKind::Mobile => "No such mobile around.",
+                StatKind::Player | StatKind::File => "No such player around.",
+                StatKind::Object => "No such object around.",
+            };
+            send_to(world, player, format!("{msg}\r\n"));
+            return;
+        };
+        found
+    } else if arg.is_empty() || arg.eq_ignore_ascii_case("me") || arg.eq_ignore_ascii_case("self")
+    {
+        player
+    } else {
+        let Some(located) = world.get::<Located>(player).copied() else {
+            send_to(world, player, "You are nowhere.\r\n");
+            return;
+        };
+        // Legacy order: this room's actors, then carried / room items, then
+        // an actor anywhere, then an item anywhere.
+        let needle = arg.to_ascii_lowercase();
+        let found = find_actor_in_room(world, arg, located.0, player)
+            .or_else(|| find_item(world, player, &needle, ItemClass::RoomFirst))
+            .or_else(|| find_actor_anywhere_of(world, player, arg, ActorKind::Any))
+            .or_else(|| super::script_attach::find_object_in_world(world, arg));
+        let Some(found) = found else {
+            send_to(world, player, format!("No '{arg}' here.\r\n"));
+            return;
+        };
+        found
+    };
 
     // Live items share the `ostat` renderer (stat bonuses, locks, the
     // CURSED marker) and append their instance state.

@@ -1193,6 +1193,43 @@ mod tests {
         assert!(slots(&world, caster).in_flight.is_empty());
     }
 
+    #[test]
+    fn hostile_cast_on_a_pk_target_starts_no_melee_and_lands_even_if_the_victim_hits_back() {
+        let (mut world, room, _) = world_with_spell(2);
+        world
+            .resource_mut::<AbilityCatalog>()
+            .by_name
+            .get_mut("mend")
+            .unwrap()
+            .violent = true;
+        let (caster, mut rx) = caster_in(&mut world, room);
+        let (bob, _b) = bob_in(&mut world, room);
+        for e in [caster, bob] {
+            world.entity_mut(e).insert(mud_world::PlayerFlags(vec![
+                mud_db::enums::PlayerFlag::PkEnabled,
+            ]));
+        }
+        start_mend(&mut world, caster);
+        assert!(world.get::<Casting>(caster).is_some(), "{}", drain(&mut rx));
+        assert!(world.get::<Fighting>(caster).is_none(), "no melee at cast start");
+        assert!(world.get::<Fighting>(bob).is_none(), "no melee at cast start");
+        // The victim lashes out mid-cast: a light hit leaves the wind-up be.
+        run_ticks(&mut world, 5);
+        crate::commands::engage_combat(&mut world, bob, caster, room);
+        assert!(world.get::<Casting>(caster).is_some());
+        run_ticks(&mut world, handler_ticks(8) + 2);
+        let out = drain(&mut rx);
+        assert!(world.get::<Casting>(caster).is_none());
+        assert!(
+            out.contains("You complete your spell"),
+            "the wind-up ran to the end: {out}"
+        );
+        assert!(
+            world.get::<Fighting>(bob).is_some(),
+            "the fight starts when the spell lands"
+        );
+    }
+
     const CLASS: i32 = 7;
     const OTHER: i32 = 3;
 

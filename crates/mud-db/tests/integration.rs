@@ -1389,6 +1389,7 @@ async fn character_progression_round_trips() {
         description: None,
         wealth: 0,
         experience: 11_000,
+        alignment: -37,
         skill_points: 0,
         hunger: 0,
         thirst: 0,
@@ -1432,6 +1433,8 @@ async fn character_progression_round_trips() {
         .expect("present");
     assert_eq!(read(&row), progression);
     assert_eq!((row.hit_points, row.experience), (400, 11_000));
+    // Alignment (kill-driven) survives a save and reload (playtest r7 #28).
+    assert_eq!(row.alignment, -37);
 
     // An ordinary autosave (save_state only) must not undo the level.
     mud_db::characters::save_state(&pool, &char_id, &state(390))

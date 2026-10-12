@@ -606,6 +606,9 @@ mod playtest_b1_tests;
 #[path = "commands/playtest_r2_tests.rs"]
 mod playtest_r2_tests;
 #[cfg(test)]
+#[path = "commands/playtest_r7_tests.rs"]
+mod playtest_r7_tests;
+#[cfg(test)]
 #[path = "commands/violent_cast_tests.rs"]
 mod violent_cast_tests;
 #[cfg(test)]

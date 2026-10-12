@@ -5339,6 +5339,9 @@ pub(crate) struct PlayerSaveSnapshot {
     description: Option<String>,
     wealth: i64,
     experience: i32,
+    /// Kill-driven alignment scalar (`CombatStats.alignment`); no gear or
+    /// effect shifts it, so the live value is the base value.
+    alignment: i32,
     skill_points: i32,
     hunger: i32,
     thirst: i32,
@@ -5439,6 +5442,7 @@ pub(crate) fn snapshot_player(
     let description = world.get::<Description>(entity).map(|d| d.0.clone());
     let wealth = world.get::<Wealth>(entity).map_or(0, |w| w.0);
     let experience = world.get::<Profile>(entity).map_or(0, |p| p.experience);
+    let alignment = world.get::<CombatStats>(entity).map_or(0, |c| c.alignment);
     let skill_points = world
         .get::<mud_world::SkillPoints>(entity)
         .map_or(0, |s| s.0);
@@ -5857,6 +5861,7 @@ pub(crate) fn snapshot_player(
         description,
         wealth,
         experience,
+        alignment,
         skill_points,
         hunger,
         thirst,
@@ -6363,6 +6368,7 @@ pub(crate) async fn write_snapshot(
             description: snap.description.as_deref(),
             wealth: snap.wealth,
             experience: snap.experience,
+            alignment: snap.alignment,
             skill_points: snap.skill_points,
             hunger: snap.hunger,
             thirst: snap.thirst,
@@ -14165,5 +14171,32 @@ pub(crate) mod tests {
         .unwrap();
         assert!(still_set, "last_logout untouched by the refused login");
         temp_cleanup(&pool, &[], &[&c.id], &[]).await;
+    }
+
+    /// Playtest r7 #28: kill-driven alignment rode in memory only and fell
+    /// back to the stored value on relog. The save snapshot carries it.
+    #[test]
+    fn snapshot_carries_the_live_alignment() {
+        let mut world = World::new();
+        let room = world.spawn_empty().id();
+        let e = world
+            .spawn((
+                Account {
+                    user_id: String::new(),
+                    character_id: "c-align".into(),
+                    role: mud_db::enums::UserRole::Player,
+                    account_role: mud_db::enums::UserRole::Player,
+                    perms: vec![],
+                },
+                Health { hp: 10, max: 10 },
+                Located(room),
+                CombatStats {
+                    alignment: 42,
+                    ..CombatStats::default()
+                },
+            ))
+            .id();
+        let snap = snapshot_player(&mut world, e, 1).expect("snapshot");
+        assert_eq!(snap.alignment, 42);
     }
 }
