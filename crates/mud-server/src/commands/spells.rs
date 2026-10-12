@@ -511,6 +511,7 @@ pub(crate) fn resolve_study_ability(
         .or_else(|| catalog.find_by_prefix(&needle, None, None))
         .cloned()
 }
+#[allow(clippy::too_many_lines)]
 pub(crate) fn cmd_study(world: &mut World, player: Entity, args: &str) {
     use mud_world::SpellSlotData;
     let Some(profile) = world.get::<Profile>(player).cloned() else {
@@ -522,6 +523,10 @@ pub(crate) fn cmd_study(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "You have no class.\r\n");
         return;
     };
+    if args.trim().is_empty() && !god {
+        list_learnable(world, player);
+        return;
+    }
     let Some(def) = resolve_study_ability(world.resource::<AbilityCatalog>(), args) else {
         let typed = args.trim();
         if typed.is_empty() {
@@ -549,6 +554,26 @@ pub(crate) fn cmd_study(world: &mut World, player: Entity, args: &str) {
             world,
             player,
             format!("{} isn't on your class's list.\r\n", def.name),
+        );
+        return;
+    }
+    // A spell is filed under a circle the class unlocks at a level; a
+    // character below it cannot learn the spell yet.
+    let spell_min_level = world
+        .resource::<SpellSlotData>()
+        .spell_min_level(class_id, def.id);
+    if !god
+        && on_spell_list
+        && let Some(min) = spell_min_level
+        && profile.level < min
+    {
+        send_to(
+            world,
+            player,
+            format!(
+                "You must reach level {min} before you can learn {}.\r\n",
+                def.name
+            ),
         );
         return;
     }
@@ -593,14 +618,108 @@ pub(crate) fn cmd_study(world: &mut World, player: Entity, args: &str) {
             entries: vec![(def.id, start, true)],
         });
     }
-    send_to(
-        world,
-        player,
+    // A skill starts at a set proficiency worth showing; a spell is just
+    // known, and `practice` is where its proficiency shows.
+    let message = if on_spell_list {
+        format!("You commit {} to memory.\r\n", def.name)
+    } else {
         format!(
             "You commit {} to memory. (proficiency {start})\r\n",
             def.name
-        ),
-    );
+        )
+    };
+    send_to(world, player, message);
+}
+
+/// A spell, chant or song the character's class offers at their level that
+/// they have not yet learned.
+pub(crate) struct Learnable {
+    pub circle: i32,
+    pub name: String,
+}
+
+/// Everything `study <name>` would accept right now: abilities on the class's
+/// circle lists whose circle the character has reached, minus what they
+/// already know and minus quest-only abilities (a quest hands those out).
+/// Sorted by circle, then name. Empty for classless characters and staff.
+pub(crate) fn learnable_abilities(world: &World, player: Entity) -> Vec<Learnable> {
+    use mud_world::SpellSlotData;
+    let Some(profile) = world.get::<Profile>(player) else {
+        return Vec::new();
+    };
+    let Some(class_id) = profile.class_id else {
+        return Vec::new();
+    };
+    if mud_world::bypasses_restrictions(world, player) {
+        return Vec::new();
+    }
+    let (Some(slot_data), Some(catalog)) = (
+        world.get_resource::<SpellSlotData>(),
+        world.get_resource::<AbilityCatalog>(),
+    ) else {
+        return Vec::new();
+    };
+    let level = profile.level;
+    let known = world.get::<KnownAbilities>(player);
+    let mut out: Vec<Learnable> = catalog
+        .by_name
+        .values()
+        .filter(|d| d.kind != mud_db::abilities::AbilityKind::Skill && !d.quest_only)
+        .filter_map(|d| {
+            let circle = *slot_data.ability_circle.get(&(class_id, d.id))?;
+            let unlocked = slot_data
+                .circle_min_level(class_id, circle)
+                .is_none_or(|min| level >= min);
+            (unlocked && !known.is_some_and(|k| k.has_any(d.id))).then(|| Learnable {
+                circle,
+                name: d.name.clone(),
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.circle.cmp(&b.circle).then_with(|| a.name.cmp(&b.name)));
+    out.dedup_by(|a, b| a.circle == b.circle && a.name == b.name);
+    out
+}
+
+/// `study` with no argument: what the character can learn right now.
+fn list_learnable(world: &mut World, player: Entity) {
+    let learnable = learnable_abilities(world, player);
+    if learnable.is_empty() {
+        send_to(
+            world,
+            player,
+            "There is nothing new for you to study at your level.\r\n",
+        );
+        return;
+    }
+    let width = crate::layout::wrap_width(world, player);
+    let mut out = String::from("You can study:\r\n");
+    let mut circles: Vec<i32> = learnable.iter().map(|l| l.circle).collect();
+    circles.dedup();
+    for circle in circles {
+        let names: Vec<&str> = learnable
+            .iter()
+            .filter(|l| l.circle == circle)
+            .map(|l| l.name.as_str())
+            .collect();
+        let head = format!("  Circle {circle}: ");
+        let hang = head.len();
+        for (n, line) in crate::layout::wrap_paragraph(&names.join(", "), width, hang, hang)
+            .iter()
+            .enumerate()
+        {
+            // The first line carries the circle label in place of its indent.
+            if n == 0 {
+                out.push_str(&head);
+                out.push_str(line.trim_start());
+            } else {
+                out.push_str(line);
+            }
+            out.push_str("\r\n");
+        }
+    }
+    out.push_str("Type 'study <name>' to learn one.\r\n");
+    send_to(world, player, out);
 }
 /// Pooled slots recover on their own, so there is nothing to prepare:
 /// `memorize` / `forget` with no argument show the slot pool, and with

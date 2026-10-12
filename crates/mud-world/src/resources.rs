@@ -1959,6 +1959,26 @@ impl SpellSlotData {
             .min()
     }
 
+    /// Level at which `class_id` unlocks `circle`; `None` when the class has
+    /// no such circle on record.
+    #[must_use]
+    pub fn circle_min_level(&self, class_id: i32, circle: i32) -> Option<i32> {
+        self.class_circles
+            .get(&class_id)?
+            .iter()
+            .find(|(c, _)| *c == circle)
+            .map(|(_, min)| *min)
+    }
+
+    /// Level a class must reach before it can learn `ability_id`: the unlock
+    /// level of the circle the class files it under. `None` when the class
+    /// has no circle for it (or no level on record for that circle).
+    #[must_use]
+    pub fn spell_min_level(&self, class_id: i32, ability_id: i32) -> Option<i32> {
+        let circle = *self.ability_circle.get(&(class_id, ability_id))?;
+        self.circle_min_level(class_id, circle)
+    }
+
     /// Maximum slots for `class_id` at character `level`, broken
     /// down by circle. Includes only circles whose `min_level <=
     /// level`. Returns `Vec<(circle, slots)>` sorted by circle.
@@ -3742,6 +3762,20 @@ mod tests {
         assert_eq!(data.slots_for(1, 1), vec![(1, 1)]);
         // At level 5, both circles available.
         assert_eq!(data.slots_for(1, 5), vec![(1, 2), (2, 1)]);
+    }
+
+    #[test]
+    fn spell_min_level_is_the_unlock_level_of_its_circle() {
+        let mut data = spell_data_two_classes();
+        data.ability_circle.insert((1, 100), 1);
+        data.ability_circle.insert((1, 101), 2);
+        assert_eq!(data.circle_min_level(1, 2), Some(5));
+        assert_eq!(data.circle_min_level(1, 9), None);
+        assert_eq!(data.spell_min_level(1, 100), Some(1));
+        assert_eq!(data.spell_min_level(1, 101), Some(5));
+        // Not on the class's list at all.
+        assert_eq!(data.spell_min_level(1, 999), None);
+        assert_eq!(data.spell_min_level(4, 100), None);
     }
 
     #[test]

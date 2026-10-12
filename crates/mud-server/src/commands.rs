@@ -863,7 +863,7 @@ mod skills_extra;
 #[path = "commands/spawn_effects_tests.rs"]
 mod spawn_effects_tests;
 #[path = "commands/spells.rs"]
-mod spells;
+pub(crate) mod spells;
 #[cfg(test)]
 #[path = "commands/staff_access_tests.rs"]
 mod staff_access_tests;
@@ -2876,7 +2876,7 @@ fn flush_lua_outbox(world: &mut World) {
             .collect();
         for r in recipients {
             let line = script_line_for(&mut sentence_start, r, &msg);
-            send_to(world, r, line);
+            send_prose(world, r, line);
         }
     }
     // Direct one-to-one delivery (actor:send). send_to silently no-ops
@@ -2884,7 +2884,7 @@ fn flush_lua_outbox(world: &mut World) {
     // players) — that's the desired behavior.
     for (target, msg) in direct {
         let line = script_line_for(&mut direct_sentence_start, target, &msg);
-        send_to(world, target, line);
+        send_prose(world, target, line);
     }
 
     // Players a script walked through an exit (`actor:move`): they see the
@@ -24705,7 +24705,7 @@ pub(crate) fn broadcast_room_except_rendered(
     targets.retain(|e| !except.contains(e));
     let msg = cap_sentence_start(raw_msg);
     for t in targets {
-        send_to(world, t, msg.as_str());
+        send_prose(world, t, msg.as_str());
     }
 }
 
@@ -24723,7 +24723,7 @@ pub(crate) fn broadcast_room_anonymised(
     targets.retain(|e| !except.contains(e));
     for t in targets {
         let msg = cap_sentence_start(&anonymise_for(world, t, actors, raw_msg));
-        send_to(world, t, msg);
+        send_prose(world, t, msg);
     }
 }
 
@@ -24819,7 +24819,7 @@ pub(crate) fn broadcast_room_visual(
     let msg = cap_sentence_start(raw_msg);
     for t in targets {
         if visible_here || sees_characters_in_dark(world, t) {
-            send_to(world, t, msg.as_str());
+            send_prose(world, t, msg.as_str());
         }
     }
 }

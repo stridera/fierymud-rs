@@ -735,6 +735,30 @@ fn list_pads_by_visible_width_not_tag_length() {
 }
 
 #[test]
+fn list_rows_fit_80_columns_even_with_long_names_and_prices() {
+    // N10: fixed 40/28 column widths made rows 85-95 columns wide.
+    let (mut world, player, mut rx) = world_with_shop(mixed_shop(), 1_000);
+    edit_sword(&mut world, |p| {
+        p.name = "a very long ornamental ceremonial steel sword of the northern wastes".to_string();
+        p.cost = 987_654_321;
+    });
+    cmd_list(&mut world, player, "");
+    let out = strip_ansi(&drain(&mut rx));
+    for line in out.lines() {
+        assert!(
+            line.chars().count() <= 80,
+            "{} cols: {line}\n{out}",
+            line.chars().count()
+        );
+    }
+    let sword = out.lines().find(|l| l.contains("a very long")).unwrap();
+    assert!(sword.contains("..."), "long names are shortened: {sword}");
+    let header = out.lines().find(|l| l.contains("Price")).unwrap();
+    let mare = out.lines().find(|l| l.contains("a stout mare")).unwrap();
+    assert_eq!(header.find("Price"), mare.find("4 gold"), "{out}");
+}
+
+#[test]
 fn buy_with_a_count_buys_that_many() {
     let (mut world, player, mut rx) = world_with_shop(shop_def(sword_offer(0), Vec::new()), 1_000);
     cmd_buy(&mut world, player, "3 sword");

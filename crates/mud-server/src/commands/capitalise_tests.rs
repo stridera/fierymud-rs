@@ -98,8 +98,11 @@ fn spell_room_message_capitalises_a_mob_short_description() {
     let mine = drain(&mut rx);
     let seen = drain(&mut wrx);
     assert!(mine.contains("A swamp troll is brutally burnt."), "{mine}");
+    // Room lines wider than the terminal are wrapped now, so compare the
+    // sentence with its line breaks folded back into spaces.
+    let seen_flat = seen.replace("\r\n", " ");
     assert!(
-        seen.contains("A swamp troll is brutally burnt and nearly torn to pieces, but somehow managed to survive!"),
+        seen_flat.contains("A swamp troll is brutally burnt and nearly torn to pieces, but somehow managed to survive!"),
         "{seen}"
     );
 }
@@ -522,6 +525,33 @@ fn lua_outbox_capitalises_room_and_direct_lines() {
     assert!(seen.contains("The Knight Templar says hi"), "{seen}");
     assert!(seen.contains("https://fierymud.org rocks"), "{seen}");
     assert!(seen.contains("The knight nods"), "{seen}");
+}
+
+/// N10: a script line wider than the player's terminal is wrapped like room
+/// text instead of running to 194 columns.
+#[test]
+fn lua_outbox_wraps_long_script_lines_to_the_terminal() {
+    let mut fx = fixture();
+    let room = fx.a;
+    let (p, mut rx) = player(&mut fx.world, room, "Ann");
+    let _ = drain(&mut rx);
+    let speech = "The Warrior Coach says, 'You don't need to use a \"training\" or \"practice\" \
+                  command. Skills increase gradually as you use them, so go out and fight.'";
+    assert!(speech.len() > 120);
+    {
+        let mut out = fx
+            .world
+            .get_resource_or_insert_with(mud_world::LuaOutbox::default);
+        out.messages.push((room, speech.to_string(), None));
+        out.direct.push((p, speech.to_string()));
+    }
+    super::flush_lua_outbox(&mut fx.world);
+    let seen = drain(&mut rx);
+    assert!(seen.lines().count() >= 4, "{seen}");
+    for line in seen.lines() {
+        assert!(line.chars().count() <= 80, "{} cols: {line}", line.len());
+    }
+    assert!(seen.contains("go out and fight.'"), "{seen}");
 }
 
 /// Several `send` lines make one paragraph (kerristone travel echo): only

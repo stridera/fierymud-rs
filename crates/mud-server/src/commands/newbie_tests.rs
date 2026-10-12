@@ -506,3 +506,215 @@ fn a_tell_to_a_mob_in_the_room_reaches_its_speech_script() {
     super::dispatch(&mut world, player, "tell nobody hi");
     assert!(drain(&mut rx).contains("'nobody' isn't online."));
 }
+
+// ---- N7: spells are learned with `study`, and the game says so -------------
+
+const SORCERER: i32 = 1;
+const MAGIC_MISSILE: i32 = 100;
+const BURNING_HANDS: i32 = 101;
+const FIREBALL_S: i32 = 102;
+const EMPOWER: i32 = 103;
+const QUEST_SPELL: i32 = 104;
+
+/// A level-1 Elf Sorcerer: circle 1 from level 1, circle 2 from level 9.
+/// Magic Missile is also an elven innate, Empower (circle 2 here) another.
+fn sorcerer_world() -> (World, Entity, Rx) {
+    let (mut world, player, rx) = warrior_world();
+    let mut catalog = AbilityCatalog::default();
+    for (id, name) in [
+        (MAGIC_MISSILE, "Magic Missile"),
+        (BURNING_HANDS, "Burning Hands"),
+        (FIREBALL_S, "Fireball"),
+        (EMPOWER, "Empower"),
+        (QUEST_SPELL, "Quest Bolt"),
+    ] {
+        let mut def = ability_def(id, name, AbilityKind::Spell);
+        def.quest_only = id == QUEST_SPELL;
+        catalog.by_name.insert(name.to_ascii_lowercase(), def);
+    }
+    world.insert_resource(catalog);
+    let mut slots = SpellSlotData::default();
+    slots.class_circles.insert(SORCERER, vec![(1, 1), (2, 9)]);
+    for (id, circle) in [
+        (MAGIC_MISSILE, 1),
+        (BURNING_HANDS, 1),
+        (FIREBALL_S, 2),
+        (EMPOWER, 2),
+        (QUEST_SPELL, 1),
+    ] {
+        slots.ability_circle.insert((SORCERER, id), circle);
+    }
+    world.insert_resource(slots);
+    let mut races = mud_world::RaceAbilitiesData::default();
+    races.insert("ELF", MAGIC_MISSILE, 100);
+    races.insert("ELF", EMPOWER, 100);
+    world.insert_resource(races);
+    world.entity_mut(player).insert((
+        Profile {
+            level: 1,
+            class_id: Some(SORCERER),
+            race: "ELF".into(),
+            experience: 0,
+            gender: "female".into(),
+        },
+        KnownAbilities {
+            entries: vec![(MAGIC_MISSILE, 1000, true), (EMPOWER, 1000, true)],
+        },
+    ));
+    (world, player, rx)
+}
+
+#[test]
+fn bare_study_lists_what_the_class_can_learn_at_this_level() {
+    let (mut world, player, mut rx) = sorcerer_world();
+    super::spells::cmd_study(&mut world, player, "");
+    let out = drain(&mut rx);
+    assert!(out.contains("Circle 1: Burning Hands"), "{out}");
+    // Known (Magic Missile), above the level (Fireball), quest-only: absent.
+    assert!(!out.contains("Magic Missile"), "{out}");
+    assert!(!out.contains("Fireball"), "{out}");
+    assert!(!out.contains("Quest Bolt"), "{out}");
+    assert!(out.contains("Type 'study <name>' to learn one."), "{out}");
+
+    super::spells::cmd_study(&mut world, player, "burning hands");
+    let learned = drain(&mut rx);
+    assert!(
+        learned.contains("You commit Burning Hands to memory.\r\n"),
+        "no proficiency number on a spell: {learned}"
+    );
+    super::spells::cmd_study(&mut world, player, "");
+    assert!(
+        drain(&mut rx).contains("nothing new for you to study"),
+        "list is empty once everything available is learned"
+    );
+}
+
+#[test]
+fn study_refuses_a_spell_whose_circle_is_not_unlocked_yet() {
+    let (mut world, player, mut rx) = sorcerer_world();
+    super::spells::cmd_study(&mut world, player, "fireball");
+    let out = drain(&mut rx);
+    assert!(
+        out.contains("You must reach level 9 before you can learn Fireball."),
+        "{out}"
+    );
+    assert!(
+        !world
+            .get::<KnownAbilities>(player)
+            .unwrap()
+            .has_any(FIREBALL_S)
+    );
+    world.get_mut::<Profile>(player).unwrap().level = 9;
+    super::spells::cmd_study(&mut world, player, "fireball");
+    assert!(drain(&mut rx).contains("You commit Fireball to memory."));
+}
+
+#[test]
+fn level_up_and_first_login_say_how_many_spells_can_be_learned() {
+    let (mut world, player, mut rx) = sorcerer_world();
+    crate::combat::announce_learnable(&mut world, player);
+    let out = drain(&mut rx);
+    assert!(
+        out.contains("You can learn 1 spell at your level. Type 'study' to see them."),
+        "{out}"
+    );
+    // Nothing to say for a warrior (no spell lists).
+    let (mut world, player, mut rx) = warrior_world();
+    crate::combat::announce_learnable(&mut world, player);
+    assert_eq!(drain(&mut rx), "");
+}
+
+#[test]
+fn spells_hides_a_racial_innate_the_class_has_not_reached_yet() {
+    let (mut world, player, mut rx) = sorcerer_world();
+    super::info::cmd_spells(&mut world, player, "");
+    let out = drain(&mut rx);
+    // Magic Missile is circle 1, available; Empower is circle 2, level 9.
+    assert!(out.contains("Magic Missile"), "{out}");
+    assert!(!out.contains("Empower"), "{out}");
+    world.get_mut::<Profile>(player).unwrap().level = 9;
+    super::info::cmd_spells(&mut world, player, "");
+    assert!(drain(&mut rx).contains("Empower"));
+}
+
+// ---- N14: `where corpse` ----------------------------------------------------
+
+fn link(world: &mut World, from: Entity, dir: Direction, to: Entity) {
+    world.get_mut::<Exits>(from).unwrap().0.insert(
+        dir,
+        mud_world::ExitData {
+            to: Some(to),
+            state: mud_db::enums::ExitState::Open,
+            key: None,
+            description: None,
+            keywords: Vec::new(),
+            is_hidden: false,
+            is_pickproof: false,
+            is_bashable: false,
+            hit_points: None,
+        },
+    );
+}
+
+fn named_room(world: &mut World, name: &str, zone: i32, id: i32) -> Entity {
+    world
+        .spawn((
+            Room,
+            Named { name: name.into() },
+            Exits::default(),
+            mud_world::WorldKey { zone, id },
+        ))
+        .id()
+}
+
+#[test]
+fn where_corpse_names_the_room_and_the_way_back() {
+    let mut world = World::new();
+    // Temple -north-> Square (Town Center) -east-> Square (Town Center).
+    let temple = named_room(&mut world, "Temple", 30, 1);
+    let square_a = named_room(&mut world, "Town Center", 30, 5);
+    let square_b = named_room(&mut world, "Town Center", 30, 12);
+    link(&mut world, temple, Direction::North, square_a);
+    link(&mut world, square_a, Direction::East, square_b);
+    let (player, mut rx) = player_in(&mut world, temple);
+    world.entity_mut(player).insert(mud_world::Account {
+        user_id: "u".into(),
+        character_id: "char-a".into(),
+        role: mud_db::enums::UserRole::Player,
+        account_role: mud_db::enums::UserRole::Player,
+        perms: vec![],
+    });
+    let _ = drain(&mut rx);
+
+    super::admin_world::cmd_where(&mut world, player, "corpse");
+    assert!(drain(&mut rx).contains("no corpse"), "no corpse yet");
+
+    world.spawn((
+        mud_world::Item,
+        Named {
+            name: "the corpse of Tester".into(),
+        },
+        Located(square_b),
+        mud_world::Corpse,
+        mud_world::PlayerCorpse,
+        crate::corpses::PlayerCorpseOwner("char-a".into()),
+    ));
+    super::admin_world::cmd_where(&mut world, player, "corpse");
+    let out = drain(&mut rx);
+    assert!(
+        out.contains("Your corpse lies in Town Center  [30:12]."),
+        "{out}"
+    );
+    assert!(
+        out.contains("2 rooms away; head north."),
+        "the id and the first step tell the three Town Centers apart: {out}"
+    );
+
+    // Standing on it, and one step away.
+    world.entity_mut(player).insert(Located(square_b));
+    super::admin_world::cmd_where(&mut world, player, "corpse");
+    assert!(drain(&mut rx).contains("right here"));
+    world.entity_mut(player).insert(Located(square_a));
+    super::admin_world::cmd_where(&mut world, player, "corpse");
+    assert!(drain(&mut rx).contains("1 room away; head east."));
+}

@@ -35,6 +35,7 @@ mod item_decay;
 mod item_spawn;
 mod layout;
 mod login;
+mod login_menu;
 mod memorize;
 mod mob_ai;
 #[cfg(test)]

@@ -27,11 +27,13 @@ inventory::submit! {
         required_perm: None,
         category: Category::Info,
         help: Help {
-            usage: "where [<name> | all]",
+            usage: "where [<name> | corpse | all]",
             summary: "Show your location, a named player's location, or list all online.",
             long: "With no argument, prints your own current room \
                    (name, zone, id). With a player name, prints that \
-                   online player's current room. 'where all' (Builder+ \
+                   online player's current room. 'where corpse' tells \
+                   you where your own corpse lies and which way to go. \
+                   'where all' (Builder+ \
                    only) lists every online player and where they are.\r\n\
                    \r\n\
                    Immortal+: 'where <name>' also searches live mobs \
@@ -757,6 +759,14 @@ pub(crate) fn cmd_where(world: &mut World, player: Entity, args: &str) {
         return;
     }
 
+    // `where corpse`: where your own corpse lies and the way back to it. Room
+    // names repeat (eight rooms are called Town Center), so a name alone does
+    // not say where to go.
+    if matches!(arg.to_ascii_lowercase().as_str(), "corpse" | "my corpse") {
+        where_corpse(world, player);
+        return;
+    }
+
     // `where all` / `where list` retains the original Builder+ listing
     // — every online player + their room. Mortals get the gate refusal
     // here rather than at the dispatcher so the help-text contract
@@ -834,6 +844,93 @@ pub(crate) fn cmd_where(world: &mut World, player: Entity, args: &str) {
         ),
     );
 }
+/// Most rooms `where corpse` will walk looking for the way to a corpse.
+const CORPSE_PATH_MAX_DEPTH: i32 = 200;
+
+/// The exit to take from `start` toward the nearest room in `goals`, and how
+/// many rooms away it is. Open and closed doors are passable (locked ones and
+/// exits the viewer has not found are not). `None` when no path exists.
+fn first_step_toward(
+    world: &World,
+    viewer: Entity,
+    start: Entity,
+    goals: &std::collections::HashSet<Entity>,
+) -> Option<(mud_db::enums::Direction, i32)> {
+    use mud_db::enums::{Direction, ExitState};
+    use std::collections::{HashSet, VecDeque};
+    let mut visited: HashSet<Entity> = HashSet::from([start]);
+    let mut queue: VecDeque<(Entity, Option<Direction>, i32)> = VecDeque::from([(start, None, 0)]);
+    while let Some((room, first, dist)) = queue.pop_front() {
+        if let Some(dir) = first
+            && goals.contains(&room)
+        {
+            return Some((dir, dist));
+        }
+        if dist >= CORPSE_PATH_MAX_DEPTH {
+            continue;
+        }
+        let Some(exits) = world.get::<mud_world::Exits>(room) else {
+            continue;
+        };
+        for (dir, exit) in &exits.0 {
+            if exit.state == ExitState::Locked
+                || commands::exit_is_hidden_to(world, viewer, room, *dir, exit)
+            {
+                continue;
+            }
+            let Some(to) = exit.to else { continue };
+            if visited.insert(to) {
+                queue.push_back((to, first.or(Some(*dir)), dist + 1));
+            }
+        }
+    }
+    None
+}
+
+/// `where corpse`.
+fn where_corpse(world: &mut World, player: Entity) {
+    let corpses = crate::corpses::corpses_of(world, player);
+    let rooms: Vec<Entity> = corpses
+        .iter()
+        .filter_map(|c| world.get::<Located>(*c).map(|l| l.0))
+        .filter(|r| world.get::<mud_world::Room>(*r).is_some())
+        .collect();
+    if rooms.is_empty() {
+        send_to(world, player, "You have no corpse lying about.\r\n");
+        return;
+    }
+    let here = world.get::<Located>(player).map(|l| l.0);
+    if here.is_some_and(|h| rooms.contains(&h)) {
+        send_to(world, player, "Your corpse is right here.\r\n");
+        return;
+    }
+    let goals: std::collections::HashSet<Entity> = rooms.iter().copied().collect();
+    let path = here.and_then(|h| first_step_toward(world, player, h, &goals));
+    let mut out = String::new();
+    for room in &rooms {
+        out.push_str(&format!(
+            "Your corpse lies in {}",
+            name_or(world, *room, "(unknown)")
+        ));
+        if crate::room_access::room_visible_to(world, player, *room) {
+            let (zone, id) = world
+                .get::<WorldKey>(*room)
+                .map_or((-1, -1), |k| (k.zone, k.id));
+            out.push_str(&format!("  [{zone}:{id}]"));
+        }
+        out.push_str(".\r\n");
+    }
+    match path {
+        Some((dir, dist)) => out.push_str(&format!(
+            "The nearest is {dist} room{} away; head {}.\r\n",
+            if dist == 1 { "" } else { "s" },
+            commands::direction_name(dir)
+        )),
+        None => out.push_str("You can't see a way from here.\r\n"),
+    }
+    send_rendered(world, player, &out);
+}
+
 /// Rows shown per section of a staff `where <name>` before the overflow
 /// footer (a short needle like "a" would otherwise flood the screen).
 const WHERE_SECTION_LIMIT: usize = 100;

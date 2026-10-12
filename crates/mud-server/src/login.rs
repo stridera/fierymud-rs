@@ -2372,8 +2372,8 @@ impl ConnRouter {
                     }
                     let _ = ctx.outbound.try_send(
                         format!(
-                            "Great — let's set up '{identifier}'. Pick a password \
-                             at least {MIN_NEW_PASSWORD_LEN} characters long.\r\n"
+                            "Great — let's set up '{identifier}'.\r\n\
+                             Pick a password, at least {MIN_NEW_PASSWORD_LEN} characters.\r\n"
                         )
                         .into_bytes(),
                     );
@@ -2581,17 +2581,19 @@ impl ConnRouter {
                 character_name,
                 password_plaintext,
             } => {
-                let Some(race) = match_playable_race(world, trimmed) else {
-                    let _ = ctx.outbound.try_send(
-                        format!("'{trimmed}' isn't one of the available races.\r\n").into_bytes(),
-                    );
-                    ctx.stage = Stage::AwaitingRace {
-                        email,
-                        character_name,
-                        password_plaintext,
-                    };
-                    send_race_prompt(&ctx.outbound, world);
-                    return;
+                let race = match match_playable_race(world, trimmed) {
+                    crate::login_menu::Pick::Found(race) => race,
+                    other => {
+                        ctx.stage = Stage::AwaitingRace {
+                            email,
+                            character_name,
+                            password_plaintext,
+                        };
+                        reject_menu_pick(&ctx.outbound, trimmed, other, "race", || {
+                            send_race_prompt(&ctx.outbound, world);
+                        });
+                        return;
+                    }
                 };
                 // Advance to class selection. Catalog comes from the
                 // world-scope resource the loader populated at boot.
@@ -2610,18 +2612,20 @@ impl ConnRouter {
                 password_plaintext,
                 race,
             } => {
-                let Some((class_id, class_plain_name)) = match_base_class(world, trimmed) else {
-                    let _ = ctx.outbound.try_send(
-                        format!("'{trimmed}' isn't one of the available classes.\r\n").into_bytes(),
-                    );
-                    ctx.stage = Stage::AwaitingClass {
-                        email,
-                        character_name,
-                        password_plaintext,
-                        race,
-                    };
-                    send_class_prompt(&ctx.outbound, world);
-                    return;
+                let (class_id, class_plain_name) = match match_base_class(world, trimmed) {
+                    crate::login_menu::Pick::Found(class) => class,
+                    other => {
+                        ctx.stage = Stage::AwaitingClass {
+                            email,
+                            character_name,
+                            password_plaintext,
+                            race,
+                        };
+                        reject_menu_pick(&ctx.outbound, trimmed, other, "class", || {
+                            send_class_prompt(&ctx.outbound, world);
+                        });
+                        return;
+                    }
                 };
                 ctx.stage = Stage::AwaitingGender {
                     email,
@@ -2664,7 +2668,7 @@ impl ConnRouter {
                     world.resource::<mud_world::RaceCatalog>(),
                     &race,
                 );
-                send_stat_review(&ctx.outbound, &stats);
+                send_stat_review(&ctx.outbound, world, &stats, class_id, &class_plain_name);
                 ctx.stage = Stage::ReviewStatRoll {
                     email,
                     character_name,
@@ -2695,7 +2699,13 @@ impl ConnRouter {
                         world.resource::<mud_world::RaceCatalog>(),
                         &race,
                     );
-                    send_stat_review(&ctx.outbound, &new_stats);
+                    send_stat_review(
+                        &ctx.outbound,
+                        world,
+                        &new_stats,
+                        class_id,
+                        &class_plain_name,
+                    );
                     ctx.stage = Stage::ReviewStatRoll {
                         email,
                         character_name,
@@ -4859,8 +4869,11 @@ fn show_enter_game(
             commands::send_to(
                 world,
                 entity,
-                "Try:  look  ·  exits  ·  score  ·  inventory  ·  help newbie\r\n\r\n",
+                "Try:  look  ·  exits  ·  score  ·  inventory  ·  help newbie\r\n\
+                 New to the game?  'help academy' says where to find the Training Academy.\r\n\r\n",
             );
+            // Casters learn their first spells with `study`; say so.
+            crate::combat::announce_learnable(world, entity);
         }
         // Room.AddPlayer updates the "who's here" panel of anyone
         // already in the room; the text line covers plain telnet.
@@ -6952,72 +6965,79 @@ fn check_new_character_name(world: &World, name: &str) -> Result<(), String> {
 
 /// Races a new character may pick: every `Races` row flagged `playable`
 /// in the database, as the `Characters.race` enum text (`HUMAN`,
-/// `HALF_ELF`, ...), sorted by that text so the listing is stable.
+/// `HALF_ELF`, ...), sorted by the race's display name so the listing is
+/// stable.
+#[cfg(test)]
 fn playable_races(world: &World) -> Vec<String> {
-    let Some(catalog) = world.get_resource::<mud_world::RaceCatalog>() else {
-        return Vec::new();
-    };
-    let mut races: Vec<String> = catalog
-        .by_race
-        .values()
-        .filter(|r| r.playable)
-        .map(|r| r.race.clone())
-        .collect();
-    races.sort_unstable();
-    races
+    crate::login_menu::race_options(world)
+        .into_iter()
+        .map(|o| o.value)
+        .collect()
 }
 
-/// Render the race-selection prompt. Lists the playable races in a
-/// single comma-joined line; players type any of the names back.
+/// Render the race-selection menu: one race per line with its size,
+/// alignment and strongest stats, all read from the `Races` table.
 fn send_race_prompt(outbound: &Outbound, world: &World) {
-    let mut msg = String::from("Available races: ");
-    msg.push_str(&playable_races(world).join(", "));
-    msg.push_str("\r\nRace: ");
-    send_prompt(outbound, msg.into_bytes());
+    send_prompt(
+        outbound,
+        crate::login_menu::render_race_menu(world).into_bytes(),
+    );
 }
 
-/// Match a freshly-typed race against the playable list. Returns
-/// the canonical SHOUTCASE form on success — used as both the
-/// pretty echo and the `Characters.race` enum value at INSERT
-/// time. Case-insensitive equality only; partial-match would be
-/// ambiguous between e.g. ELF and `HALF_ELF`.
-fn match_playable_race(world: &World, input: &str) -> Option<String> {
-    let needle = input.trim().to_ascii_uppercase();
-    playable_races(world).into_iter().find(|r| *r == needle)
+/// Match a freshly-typed race against the playable list: its number, its
+/// name (`Half-Elf`, `half elf`, `HALF_ELF`) or an unambiguous start of
+/// one. `Found` carries the `Characters.race` enum text.
+fn match_playable_race(world: &World, input: &str) -> crate::login_menu::Pick<String> {
+    crate::login_menu::pick(&crate::login_menu::race_options(world), input)
 }
 
-/// Render the class-selection prompt. Lists every `ClassCatalog`
-/// entry with `is_subclass = false` — the four base classes today
-/// (Sorcerer / Cleric / Warrior / Rogue). Subclass specializations
-/// (Paladin, Diabolist, Pyromancer, …) lock in via a follow-on
-/// stage once the gating data lands.
+/// Render the class-selection menu. Lists every `ClassCatalog` entry with
+/// `is_subclass = false` (the four base classes today), each with its key
+/// stat and a one-sentence description. Subclass specializations
+/// (Paladin, Diabolist, Pyromancer, ...) lock in via a follow-on stage once
+/// the gating data lands.
 fn send_class_prompt(outbound: &Outbound, world: &World) {
-    let mut bases: Vec<String> = world
-        .resource::<mud_world::ClassCatalog>()
-        .by_id
-        .values()
-        .filter(|c| !c.is_subclass)
-        .map(|c| c.plain_name.clone())
-        .collect();
-    bases.sort();
-    let mut msg = String::from("Available classes: ");
-    msg.push_str(&bases.join(", "));
-    msg.push_str("\r\nClass: ");
-    send_prompt(outbound, msg.into_bytes());
+    send_prompt(
+        outbound,
+        crate::login_menu::render_class_menu(world).into_bytes(),
+    );
 }
 
-/// Look up a base class by `plain_name`, case-insensitively.
-/// Returns `(class_id, canonical_plain_name)` on hit so the caller
-/// can echo the canonical-cased form and stash the id for the
-/// future `Characters` INSERT.
-fn match_base_class(world: &World, input: &str) -> Option<(i32, String)> {
-    let needle = input.trim().to_ascii_lowercase();
-    world
-        .resource::<mud_world::ClassCatalog>()
-        .by_id
-        .values()
-        .find(|c| !c.is_subclass && c.plain_name.to_ascii_lowercase() == needle)
-        .map(|c| (c.id, c.plain_name.clone()))
+/// Look up a base class by number, name or unambiguous name prefix. `Found`
+/// carries `(class_id, canonical_plain_name)` so the caller can echo the
+/// canonical-cased form and stash the id for the `Characters` INSERT.
+fn match_base_class(world: &World, input: &str) -> crate::login_menu::Pick<(i32, String)> {
+    crate::login_menu::pick(&crate::login_menu::class_options(world), input)
+}
+
+/// Answer a menu line that did not pick anything: `?` shows the list again,
+/// an ambiguous start of a name says which names fit, anything else says it
+/// is not on the list. Ends with a short prompt, not the whole menu.
+fn reject_menu_pick<T>(
+    outbound: &Outbound,
+    typed: &str,
+    result: crate::login_menu::Pick<T>,
+    noun: &str,
+    relist: impl FnOnce(),
+) {
+    use crate::login_menu::{Pick, ambiguity_message, wants_relist};
+    if wants_relist(typed) {
+        relist();
+        return;
+    }
+    let message = match result {
+        Pick::Ambiguous(labels) => ambiguity_message(typed, &labels),
+        _ => format!(
+            "'{}' isn't one of the available {noun}s. Type a name or number from the list.\r\n",
+            typed.trim()
+        ),
+    };
+    let _ = outbound.try_send(message.into_bytes());
+    let label = if noun == "race" { "Race" } else { "Class" };
+    send_prompt(
+        outbound,
+        format!("{label} ('?' shows the list): ").into_bytes(),
+    );
 }
 
 /// Render the gender-selection prompt. Lists the three accepted
@@ -7042,11 +7062,19 @@ fn match_playable_gender(input: &str) -> Option<&'static str> {
 /// Render the freshly-rolled stat block + accept/reroll prompt.
 /// Bonuses come from the same `CoreStats::bonus` helper used by
 /// score so the player sees what their numbers will mean before
-/// committing.
-fn send_stat_review(outbound: &Outbound, stats: &CoreStats) {
+/// committing, followed by what the bracketed bonus is and which stat the
+/// chosen class leans on.
+fn send_stat_review(
+    outbound: &Outbound,
+    world: &World,
+    stats: &CoreStats,
+    class_id: i32,
+    class_name: &str,
+) {
+    let key_stat = crate::login_menu::class_key_stat(world, class_id);
     let line = format!(
         "Rolled stats:\r\n  STR {:>3} ({:+})  INT {:>3} ({:+})  WIS {:>3} ({:+})\r\n  \
-         DEX {:>3} ({:+})  CON {:>3} ({:+})  CHA {:>3} ({:+})\r\nAccept or reroll? \
+         DEX {:>3} ({:+})  CON {:>3} ({:+})  CHA {:>3} ({:+})\r\n{}Accept or reroll? \
          (accept/reroll): ",
         stats.strength,
         CoreStats::bonus(stats.strength),
@@ -7060,6 +7088,7 @@ fn send_stat_review(outbound: &Outbound, stats: &CoreStats) {
         CoreStats::bonus(stats.constitution),
         stats.charisma,
         CoreStats::bonus(stats.charisma),
+        crate::login_menu::stat_explainer(class_name, key_stat.as_deref()),
     );
     send_prompt(outbound, line.into_bytes());
 }
@@ -7529,29 +7558,42 @@ pub(crate) mod tests {
 
     #[test]
     fn race_match_is_case_insensitive() {
+        use crate::login_menu::Pick;
         let world = world_with_races(&[("HUMAN", true), ("HALF_ELF", true), ("ELF", true)]);
         assert_eq!(
-            match_playable_race(&world, "human").as_deref(),
-            Some("HUMAN")
+            match_playable_race(&world, "human"),
+            Pick::Found("HUMAN".into())
         );
         assert_eq!(
-            match_playable_race(&world, "Half_Elf").as_deref(),
-            Some("HALF_ELF")
+            match_playable_race(&world, "Half_Elf"),
+            Pick::Found("HALF_ELF".into())
         );
-        assert_eq!(match_playable_race(&world, "ELF").as_deref(), Some("ELF"));
+        assert_eq!(
+            match_playable_race(&world, "ELF"),
+            Pick::Found("ELF".into())
+        );
     }
 
     #[test]
-    fn race_match_rejects_partial_or_unknown() {
+    fn race_match_takes_a_unique_prefix_and_rejects_unknown() {
+        use crate::login_menu::Pick;
         let world = world_with_races(&[("HUMAN", true), ("ELF", true), ("HALF_ELF", true)]);
-        // No prefix matching — ELF and HALF_ELF would collide.
-        assert_eq!(match_playable_race(&world, "hu"), None);
+        // N9: `hum` is enough for Human; `elf` is Elf, not Half-Elf.
+        assert_eq!(
+            match_playable_race(&world, "hu"),
+            Pick::Found("HUMAN".into())
+        );
+        assert_eq!(
+            match_playable_race(&world, "elf"),
+            Pick::Found("ELF".into())
+        );
         // Not in the catalog at all.
-        assert_eq!(match_playable_race(&world, "DRAGON_FIRE"), None);
+        assert_eq!(match_playable_race(&world, "DRAGON_FIRE"), Pick::None);
     }
 
     #[test]
     fn race_picker_follows_the_playable_column() {
+        use crate::login_menu::Pick;
         // GNOLL is playable in the data though the old const never listed
         // it; GOLIATH was in the const but is flagged non-playable here.
         let world = world_with_races(&[
@@ -7562,18 +7604,17 @@ pub(crate) mod tests {
         ]);
         assert_eq!(playable_races(&world), vec!["GNOLL", "HUMAN"]);
         assert_eq!(
-            match_playable_race(&world, "gnoll").as_deref(),
-            Some("GNOLL")
+            match_playable_race(&world, "gnoll"),
+            Pick::Found("GNOLL".into())
         );
-        assert_eq!(match_playable_race(&world, "GOLIATH"), None);
-        assert_eq!(match_playable_race(&world, "DEMON"), None);
+        assert_eq!(match_playable_race(&world, "GOLIATH"), Pick::None);
+        assert_eq!(match_playable_race(&world, "DEMON"), Pick::None);
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
         send_race_prompt(&tx, &world);
         let text = String::from_utf8_lossy(&rx.try_recv().unwrap()).into_owned();
-        assert!(
-            text.contains("Available races: GNOLL, HUMAN\r\nRace: "),
-            "{text}"
-        );
+        assert!(text.contains("1) GNOLL"), "{text}");
+        assert!(text.contains("2) HUMAN"), "{text}");
+        assert!(text.ends_with("Race: "), "{text}");
         assert!(
             !text.contains("GOLIATH") && !text.contains("DEMON"),
             "{text}"
@@ -7581,10 +7622,48 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn an_ambiguous_or_unknown_race_gets_a_short_reprompt() {
+        // Everything queued, minus the IAC EOR frames that end a prompt.
+        fn drain_text(rx: &mut tokio::sync::mpsc::Receiver<Vec<u8>>) -> String {
+            let mut text = String::new();
+            while let Ok(frame) = rx.try_recv() {
+                if frame.first() != Some(&0xFF) {
+                    text.push_str(&String::from_utf8_lossy(&frame));
+                }
+            }
+            text
+        }
+        let world = world_with_races(&[("HALF_ELF", true), ("HALFLING", true)]);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let result = match_playable_race(&world, "half");
+        reject_menu_pick(&tx, "half", result, "race", || {
+            send_race_prompt(&tx, &world);
+        });
+        let text = drain_text(&mut rx);
+        assert!(
+            text.contains("could be HALFLING or HALF_ELF")
+                || text.contains("could be HALF_ELF or HALFLING"),
+            "{text}"
+        );
+        assert!(text.ends_with("Race ('?' shows the list): "), "{text}");
+        assert!(!text.contains("Choose your race"), "{text}");
+        // `?` shows the menu again instead.
+        let result = match_playable_race(&world, "?");
+        reject_menu_pick(&tx, "?", result, "race", || {
+            send_race_prompt(&tx, &world);
+        });
+        let menu = drain_text(&mut rx);
+        assert!(menu.contains("Choose your race"), "{menu}");
+    }
+
+    #[test]
     fn race_picker_is_empty_without_a_catalog() {
         let world = World::new();
         assert!(playable_races(&world).is_empty());
-        assert_eq!(match_playable_race(&world, "HUMAN"), None);
+        assert_eq!(
+            match_playable_race(&world, "HUMAN"),
+            crate::login_menu::Pick::None
+        );
     }
 
     #[test]
@@ -8987,6 +9066,8 @@ pub(crate) mod tests {
 
         let out = drain(&mut rx);
         let hint = out.find("Try:").expect(&out);
+        // N8: every start gets the Academy pointer, not just the Temple room.
+        assert!(out.contains("'help academy'"), "{out}");
         let title = out.find("The Grand Hall").expect(&out);
         assert!(
             out.find("Welcome, Tester.").unwrap() < hint && hint < title,

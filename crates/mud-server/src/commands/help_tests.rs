@@ -131,3 +131,52 @@ fn staff_only_row_hides_from_players_but_a_player_row_serves_them() {
     assert!(out.contains("Release to return"), "{out}");
     assert!(!out.contains("Staff notes."), "{out}");
 }
+
+/// N12: the newbie page promises an index from a bare `help`; it used to dump
+/// every command, including ones the character does not have.
+#[test]
+fn bare_help_is_an_index_of_the_guides_not_a_dump_of_every_command() {
+    let mut world = world_with_help(vec![
+        entry(1, "newbie", "Getting Started", "Welcome.", 0),
+        entry(2, "shops", "Shops", "Buy and sell.", 0),
+        entry(3, "secret", "Staff Notes", "Hidden.", 100),
+    ]);
+    let (p, mut rx) = player(&mut world, 5);
+    dispatch(&mut world, p, "help");
+    let out = text(&mut rx);
+    assert!(
+        out.contains("help newbie") && out.contains("Getting Started"),
+        "{out}"
+    );
+    assert!(out.contains("help shops"), "{out}");
+    assert!(!out.contains("Staff Notes"), "level-gated: {out}");
+    assert!(!out.contains("Available commands:"), "{out}");
+    assert!(out.contains("'commands' lists every command"), "{out}");
+    let plain = out.replace("\x1b[0m", "").replace("\x1b[2m", "");
+    for line in plain.lines() {
+        assert!(line.chars().count() <= 80, "{line}");
+    }
+}
+
+#[test]
+fn bare_help_falls_back_to_the_command_list_without_guides() {
+    let mut world = world_with_help(vec![]);
+    let (p, mut rx) = player(&mut world, 5);
+    dispatch(&mut world, p, "help");
+    assert!(text(&mut rx).contains("Available commands:"));
+}
+
+/// N12: `help rest` promised that regeneration "will" scale with posture; it
+/// already does (see regen.rs), so the page says so.
+#[test]
+fn help_rest_describes_the_posture_regeneration_that_exists() {
+    let mut world = world_with_help(vec![]);
+    let (p, mut rx) = player(&mut world, 5);
+    dispatch(&mut world, p, "help rest");
+    let out = text(&mut rx)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(out.contains("standing restores stamina only"), "{out}");
+    assert!(!out.contains("future"), "{out}");
+}

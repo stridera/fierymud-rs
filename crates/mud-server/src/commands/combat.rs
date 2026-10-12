@@ -1367,6 +1367,20 @@ fn attack_with_switch_roll(world: &mut World, player: Entity, target_name: &str,
         crate::combat::engage_swing_now(world, player, target);
     }
 }
+/// How much tougher a target is than the viewer, as a ratio (`1.0` is an
+/// even match). Each side's strength is its hit points times its damage
+/// output (`1 + attack_power / 10`) times the chance its swing lands, so
+/// level shows up through the accuracy and evasion that grow with it.
+/// Sides are `(max_hp, attack_power, hit_chance_pct)`.
+pub(crate) fn consider_ratio(me: (i32, i32, i32), target: (i32, i32, i32)) -> f64 {
+    let strength = |(hp, dmg, chance): (i32, i32, i32)| {
+        f64::from(hp.max(1))
+            * (1.0 + f64::from(dmg.max(0)) / 10.0)
+            * (f64::from(chance.clamp(1, 99)) / 100.0)
+    };
+    strength(target) / strength(me).max(f64::MIN_POSITIVE)
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn cmd_consider(world: &mut World, player: Entity, target_word: &str) {
     let target_word = target_word.trim();
@@ -1412,11 +1426,14 @@ pub(crate) fn cmd_consider(world: &mut World, player: Entity, target_word: &str)
         return;
     }
 
-    // Score = max_hp scaled by damage output (1 + dmg/10). Compare ratio to
-    // self. The cutoffs are chosen by feel — easy to retune later.
-    let self_score = f64::from(self_max_hp) * (1.0 + f64::from(self_dmg) / 10.0);
-    let target_score = f64::from(target_max_hp) * (1.0 + f64::from(target_dmg) / 10.0);
-    let ratio = target_score / self_score.max(1.0);
+    // Hit chances feed the verdict as well as the staff readout: a target
+    // you can barely hit is not "no match" however few hit points it has.
+    let your_chance = crate::combat::hit_chance_pct(self_accuracy, target_evasion);
+    let their_chance = crate::combat::hit_chance_pct(target_accuracy, self_evasion);
+    let ratio = consider_ratio(
+        (self_max_hp, self_dmg, your_chance),
+        (target_max_hp, target_dmg, their_chance),
+    );
 
     let verdict = if ratio < 0.30 {
         "is no match for you."
@@ -1443,8 +1460,6 @@ pub(crate) fn cmd_consider(world: &mut World, player: Entity, target_word: &str)
     // verbal impression of the target's wound state instead of an
     // exact integer. Staff need the numbers for tuning passes.
     let staff = crate::commands::is_staff(world, player);
-    let your_chance = crate::combat::hit_chance_pct(self_accuracy, target_evasion);
-    let their_chance = crate::combat::hit_chance_pct(target_accuracy, self_evasion);
     let target_hp = world.get::<Health>(target).map_or(0, |h| h.hp).max(0);
     let target_pct = if target_max_hp > 0 {
         (target_hp * 100) / target_max_hp
@@ -4248,5 +4263,67 @@ mod playtest_fix_tests {
         let out = bash_text("neutral");
         assert!(out.contains("knocking it down"), "{out}");
         assert!(!out.contains("them"), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod consider_tests {
+    use super::*;
+    use crate::commands::test_support::{drain, player_in};
+    use mud_world::{CombatStats, Health, Mob};
+
+    #[test]
+    fn an_even_match_is_one_and_hit_chance_moves_the_ratio() {
+        assert!((consider_ratio((100, 0, 50), (100, 0, 50)) - 1.0).abs() < 1e-9);
+        // Hitting half as often makes the same target twice as tough.
+        let hard_to_hit = consider_ratio((100, 0, 25), (100, 0, 50));
+        assert!((hard_to_hit - 2.0).abs() < 1e-9, "{hard_to_hit}");
+        // Being hit more often makes it tougher too.
+        assert!(consider_ratio((100, 0, 50), (100, 0, 90)) > 1.5);
+    }
+
+    fn verdict_for(my_accuracy: i32, mob_hp: i32) -> String {
+        let mut world = World::new();
+        let room = world.spawn_empty().id();
+        let (player, mut rx) = player_in(&mut world, room);
+        world.entity_mut(player).insert((
+            Health { hp: 100, max: 100 },
+            CombatStats {
+                accuracy: my_accuracy,
+                evasion: 0,
+                attack_power: 2,
+                ..Default::default()
+            },
+        ));
+        world.spawn((
+            Mob,
+            mud_world::Named {
+                name: "a rabbit".into(),
+            },
+            Located(room),
+            Health {
+                hp: mob_hp,
+                max: mob_hp,
+            },
+            CombatStats {
+                accuracy: 40,
+                evasion: 60,
+                attack_power: 2,
+                ..Default::default()
+            },
+        ));
+        let _ = drain(&mut rx);
+        cmd_consider(&mut world, player, "rabbit");
+        drain(&mut rx)
+    }
+
+    /// N11: a level-1 character who cannot hit a rabbit is not told it is
+    /// "no match" just because the rabbit has few hit points.
+    #[test]
+    fn a_target_you_cannot_hit_is_not_no_match() {
+        let miss = verdict_for(0, 15);
+        assert!(!miss.contains("no match for you"), "{miss}");
+        let hit = verdict_for(200, 15);
+        assert!(hit.contains("no match for you"), "{hit}");
     }
 }

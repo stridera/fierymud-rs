@@ -2507,7 +2507,7 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
                  Your corpse lies in <b:yellow>{death_room_name}</> — it will \
                  keep for several days.\r\n\
                  Type <b:cyan>release</> to return to your recall point, then \
-                 head back for your gear.\r\n"
+                 head back for your gear. \"where corpse\" shows the way.\r\n"
             ),
         );
         broadcast_room_except_rendered(
@@ -2806,6 +2806,15 @@ fn finish_mob_death(world: &mut World, victim: Entity) {
     }
 }
 
+/// The line that tells a killer coin is lying on the corpse. Sent with
+/// `send_prose`: with a long victim name it runs past 80 columns unwrapped.
+fn corpse_coin_hint(coin_text: &str, victim_name: &str) -> String {
+    format!(
+        "{coin_text} lies among the remains of {victim_name}. \
+         ('get all from corpse' to claim, or set 'autoloot' to auto-collect.)\r\n"
+    )
+}
+
 /// On mob death: total the proto's `wealth` plus any coin the mob carries
 /// (`Wealth`, e.g. scavenged piles), find the first player
 /// engaged with the victim, and route the coin onto either the killer
@@ -2861,14 +2870,7 @@ fn award_kill_coin(
             e.insert(mud_world::CoinPile(coin));
         }
         let msg = crate::commands::format_wealth(coin).unwrap_or_else(|| "no coin".to_string());
-        send_to(
-            world,
-            killer,
-            format!(
-                "{msg} lies among the remains of {victim_name}. \
-                 ('get all from corpse' to claim, or set 'autoloot' to auto-collect.)\r\n"
-            ),
-        );
+        crate::commands::send_prose(world, killer, corpse_coin_hint(&msg, victim_name));
         return;
     }
 
@@ -3368,6 +3370,21 @@ pub(crate) fn grant_level_skills(world: &mut World, entity: Entity, level: i32) 
     );
 }
 
+/// Tell a player how many spells they can learn now and how to see them.
+/// Silent when there is nothing to study.
+pub(crate) fn announce_learnable(world: &mut World, entity: Entity) {
+    let count = crate::commands::spells::learnable_abilities(world, entity).len();
+    if count == 0 {
+        return;
+    }
+    let plural = if count == 1 { "spell" } else { "spells" };
+    send_to(
+        world,
+        entity,
+        format!("You can learn {count} {plural} at your level. Type 'study' to see them.\r\n"),
+    );
+}
+
 /// Promote `entity` while its XP clears the next threshold and the next
 /// level is `<= max_level` — incrementing `Profile.level`, expanding
 /// `Health.max` and `Stamina.max` by the row's gain values, and
@@ -3494,6 +3511,9 @@ pub(crate) fn level_up_to(world: &mut World, entity: Entity, max_level: i32) {
         );
         // Class skills this level unlocks (legacy `update_skills`).
         grant_level_skills(world, entity, next);
+        // Spells are learned with `study`, so say when there is something to
+        // learn (a level-up used to mention only practice points).
+        announce_learnable(world, entity);
         // Room broadcast — leveling up is a moment of triumph
         // worth surfacing to anyone watching. Bystanders see
         // "X surges with newfound power and rises to level N!"
@@ -4044,6 +4064,18 @@ mod tests {
         run_combat_tick(&mut world);
         assert!(world.get_entity(target).is_err(), "target died");
         assert_eq!(world.get::<Located>(item).map(|l| l.0), Some(attacker));
+    }
+
+    #[test]
+    fn corpse_coin_hint_wraps_to_80_columns() {
+        let hint = corpse_coin_hint("1 gold, 5 silver", "a small brown rabbit");
+        assert!(hint.len() > 80, "{hint}");
+        let wrapped = crate::layout::wrap_lines(&hint, 80);
+        assert!(wrapped.lines().count() >= 2, "{wrapped}");
+        for line in wrapped.lines() {
+            assert!(line.chars().count() <= 80, "{} cols: {line}", line.len());
+        }
+        assert!(wrapped.contains("to claim, or set 'autoloot'"), "{wrapped}");
     }
 
     #[test]

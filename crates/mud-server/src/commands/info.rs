@@ -2300,9 +2300,9 @@ inventory::submit! {
         help: Help {
             usage: "rest",
             summary: "Rest in place.",
-            long: "Changes your posture to resting. Slightly more relaxed \
-                   than sitting; future hp/stamina regen will scale with \
-                   posture.",
+            long: "Changes your posture to resting. Posture sets how fast you \
+                   recover: standing restores stamina only, sitting a little \
+                   hit points as well, resting more, and sleeping the most.",
         },
         run: cmd_rest,
     }
@@ -3033,6 +3033,35 @@ impl HelpScope {
     }
 }
 
+/// The short index a bare `help` shows a player: the authored guide
+/// articles (`HelpEntry` category `guide`) by keyword and title, then where to
+/// find the full command list. `None` when the catalog has no guides for this
+/// viewer, so `help` falls back to the command listing.
+fn guide_index(world: &World, viewer_level: i32) -> Option<String> {
+    let catalog = world.get_resource::<HelpCatalog>()?;
+    let mut guides: Vec<(&str, &str)> = catalog
+        .entries
+        .values()
+        .filter(|e| e.category.as_deref() == Some("guide") && e.min_level <= viewer_level)
+        .filter_map(|e| Some((e.keywords.first()?.as_str(), e.title.as_str())))
+        .collect();
+    if guides.is_empty() {
+        return None;
+    }
+    guides.sort_unstable();
+    guides.dedup();
+    let key_w = guides.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+    let mut out = String::from("\r\n<b:cyan>Help topics</>\r\n\r\n");
+    for (keyword, title) in guides {
+        out.push_str(&format!("  <cyan>help {keyword:<key_w$}</>  {title}\r\n"));
+    }
+    out.push_str(
+        "\r\n<dim>'commands' lists every command you can use.\r\n\
+         'help <command>' or 'help <topic>' explains one.</>\r\n",
+    );
+    Some(out)
+}
+
 fn run_help(world: &mut World, player: Entity, args: &str, scope: HelpScope) {
     const HELP_INDEX_COL_WIDTH: usize = 16;
     let (role, perms) = world
@@ -3042,6 +3071,13 @@ fn run_help(world: &mut World, player: Entity, args: &str, scope: HelpScope) {
         });
 
     let topic = args.trim().to_ascii_lowercase();
+    if topic.is_empty() && matches!(scope, HelpScope::Player) {
+        let viewer_level = world.get::<Profile>(player).map_or(0, |p| p.level);
+        if let Some(index) = guide_index(world, viewer_level) {
+            send_to(world, player, index);
+            return;
+        }
+    }
     if topic.is_empty() {
         let mut by_cat: HashMap<Category, Vec<&Command>> = HashMap::new();
         for cmd in all_commands() {
@@ -4286,6 +4322,99 @@ fn shopkeeper_sees_customer(
     false
 }
 
+/// One line of a shop's `list` table.
+struct ShopRow {
+    number: usize,
+    name: String,
+    price: String,
+    stock: String,
+    /// The viewer's class cannot use this ware (shown as a red tag).
+    unusable: bool,
+}
+
+/// `unlimited`, or how many are left.
+fn shop_stock_text(amount: i32) -> String {
+    if amount < 0 {
+        "unlimited".to_string()
+    } else {
+        amount.to_string()
+    }
+}
+
+/// The tag a `list` row carries for a ware the viewer cannot use.
+const SHOP_CANT_USE_TAG: &str = "  <red>(can't use)</>";
+
+/// Shorten a plain name to `max` visible characters with a trailing `...`.
+/// Names that carry colour tags are returned whole.
+fn shorten_plain_name(name: &str, max: usize) -> String {
+    if name.contains('<') || name.chars().count() <= max {
+        return name.to_string();
+    }
+    let kept: String = name.chars().take(max.saturating_sub(3)).collect();
+    format!("{}...", kept.trim_end())
+}
+
+/// Column widths shared by every table of one `list` reply.
+struct ShopWidths {
+    name: usize,
+    price: usize,
+    stock: usize,
+}
+
+/// Size the columns to the longest entry among `rows` instead of a fixed
+/// width, and let the name column give way when a row would run past
+/// `width`, so no row wraps on an 80 column terminal.
+fn shop_widths(rows: &[&ShopRow], width: usize) -> ShopWidths {
+    const MIN_NAME_W: usize = 12;
+    let longest = |f: &dyn Fn(&ShopRow) -> usize, floor: usize| {
+        rows.iter().copied().map(f).max().unwrap_or(0).max(floor)
+    };
+    let price = longest(&|r| visible_width(&r.price), "Price".len());
+    let stock = longest(&|r| visible_width(&r.stock), "Stock".len());
+    let name = longest(&|r| visible_width(&r.name), "Item".len());
+    let tag = if rows.iter().any(|r| r.unusable) {
+        visible_width(SHOP_CANT_USE_TAG)
+    } else {
+        0
+    };
+    // "  " + number + " " + name + " " + price + " " + stock + tag
+    let fixed = 2 + SHOP_NUMBER_W + 1 + 1 + price + 1 + stock + tag;
+    ShopWidths {
+        name: name.min(width.saturating_sub(fixed).max(MIN_NAME_W)),
+        price,
+        stock,
+    }
+}
+
+const SHOP_NUMBER_W: usize = 3;
+
+/// Append a shop table (`#`, name, price, stock) to `out`.
+fn push_shop_table(out: &mut String, name_header: &str, rows: &[ShopRow], w: &ShopWidths) {
+    out.push_str(&format!(
+        "  {:<SHOP_NUMBER_W$} {} {} {}\r\n",
+        "#",
+        pad_visible(name_header, w.name),
+        pad_visible("Price", w.price),
+        "Stock"
+    ));
+    for row in rows {
+        out.push_str(&format!(
+            "  {:<SHOP_NUMBER_W$} {} {} {}{}\r\n",
+            row.number,
+            pad_visible(&shorten_plain_name(&row.name, w.name), w.name),
+            pad_visible(&row.price, w.price),
+            // The tag follows the stock text directly; pad only when a tag
+            // is shown so an untagged row has no trailing blanks.
+            if row.unusable {
+                pad_visible(&row.stock, w.stock)
+            } else {
+                row.stock.clone()
+            },
+            if row.unusable { SHOP_CANT_USE_TAG } else { "" }
+        ));
+    }
+}
+
 /// `list`: find a shopkeeper in the player's room and dump the catalog
 /// as `# | item | price | stock`. Stock `unlimited` for `-1`. Price
 /// falls back to the proto's base `cost * buy_profit` when the row's
@@ -4373,87 +4502,62 @@ pub(crate) fn cmd_list(world: &mut World, player: Entity, args: &str) {
         );
         return;
     }
-    if !item_rows.is_empty() {
+    let mut item_table: Vec<ShopRow> = Vec::new();
+    for (i, offer) in item_rows {
+        let proto = object_protos.get(&(offer.object_zone_id, offer.object_id));
+        let item_name = proto.map_or_else(
+            || format!("(missing {}/{})", offer.object_zone_id, offer.object_id),
+            |p| p.name.clone(),
+        );
+        let base_cost = proto.map_or(0, |p| p.cost);
+        let price_copper = shop_offer_price(offer, base_cost, buy_profit);
+        // Legacy shops never said; a newcomer who buys boots their class
+        // cannot wear loses most of their purse to the resale loss, so
+        // flag wares this character could not use.
+        item_table.push(ShopRow {
+            number: i + 1,
+            name: item_name,
+            price: format_wealth(price_copper).unwrap_or_else(|| "free".to_string()),
+            stock: shop_stock_text(offer.amount),
+            unusable: proto.is_some_and(|p| crate::commands::proto_unusable_by(world, player, p)),
+        });
+    }
+    let mut pet_table: Vec<ShopRow> = Vec::new();
+    for (i, offer) in pet_rows {
+        let proto = mob_protos.get(&(offer.mob_zone_id, offer.mob_id));
+        let mob_name = proto.map_or_else(
+            || format!("(missing {}/{})", offer.mob_zone_id, offer.mob_id),
+            |p| p.name.clone(),
+        );
+        // Pet price: override wins; else mob.level * 100 (legacy
+        // CircleMUD convention).
+        let price_copper: i64 = if offer.price > 0 {
+            i64::from(offer.price)
+        } else {
+            proto.map_or(0, |p| i64::from(p.level) * 100)
+        };
+        pet_table.push(ShopRow {
+            number: shop.items.len() + i + 1,
+            name: mob_name,
+            price: format_wealth(price_copper).unwrap_or_else(|| "free".to_string()),
+            stock: shop_stock_text(offer.amount),
+            unusable: false,
+        });
+    }
+    // One set of column widths for both tables, so prices line up between
+    // the wares and the pets.
+    let all_rows: Vec<&ShopRow> = item_table.iter().chain(pet_table.iter()).collect();
+    let widths = shop_widths(&all_rows, crate::layout::wrap_width(world, player));
+    if !item_table.is_empty() {
         out.push_str(&format!(
             "\r\n{} offers:\r\n",
             crate::commands::cap_sentence_start(&keeper_name)
         ));
-        out.push_str(&format!(
-            "  {:<3} {} {} {}\r\n",
-            "#",
-            pad_visible("Item", 40),
-            pad_visible("Price", 28),
-            "Stock"
-        ));
-        for (i, offer) in item_rows {
-            let proto = object_protos.get(&(offer.object_zone_id, offer.object_id));
-            let item_name = proto.map_or_else(
-                || format!("(missing {}/{})", offer.object_zone_id, offer.object_id),
-                |p| p.name.clone(),
-            );
-            let base_cost = proto.map_or(0, |p| p.cost);
-            let price_copper = shop_offer_price(offer, base_cost, buy_profit);
-            let price_str = format_wealth(price_copper).unwrap_or_else(|| "free".to_string());
-            let stock_str = if offer.amount < 0 {
-                "unlimited".to_string()
-            } else {
-                offer.amount.to_string()
-            };
-            // Legacy shops never said; a newcomer who buys boots their class
-            // cannot wear loses most of their purse to the resale loss, so
-            // flag wares this character could not use.
-            let unusable =
-                proto.is_some_and(|p| crate::commands::proto_unusable_by(world, player, p));
-            out.push_str(&format!(
-                "  {:<3} {} {} {}{}\r\n",
-                i + 1,
-                pad_visible(&item_name, 40),
-                pad_visible(&price_str, 28),
-                stock_str,
-                if unusable {
-                    "  <red>(can't use)</>"
-                } else {
-                    ""
-                }
-            ));
-        }
+        push_shop_table(&mut out, "Item", &item_table, &widths);
     }
-    if !pet_rows.is_empty() {
+    if !pet_table.is_empty() {
         out.push_str(&format!("\r\n{keeper_name} has pets for hire:\r\n"));
-        out.push_str(&format!(
-            "  {:<3} {} {} {}\r\n",
-            "#",
-            pad_visible("Mob", 40),
-            pad_visible("Price", 28),
-            "Stock"
-        ));
-        for (i, offer) in pet_rows {
-            let proto = mob_protos.get(&(offer.mob_zone_id, offer.mob_id));
-            let mob_name = proto.map_or_else(
-                || format!("(missing {}/{})", offer.mob_zone_id, offer.mob_id),
-                |p| p.name.clone(),
-            );
-            // Pet price: override wins; else mob.level * 100 (legacy
-            // CircleMUD convention).
-            let price_copper: i64 = if offer.price > 0 {
-                i64::from(offer.price)
-            } else {
-                proto.map_or(0, |p| i64::from(p.level) * 100)
-            };
-            let price_str = format_wealth(price_copper).unwrap_or_else(|| "free".to_string());
-            let stock_str = if offer.amount < 0 {
-                "unlimited".to_string()
-            } else {
-                offer.amount.to_string()
-            };
-            out.push_str(&format!(
-                "  {:<3} {} {} {}\r\n",
-                shop.items.len() + i + 1,
-                pad_visible(&mob_name, 40),
-                pad_visible(&price_str, 28),
-                stock_str
-            ));
-        }
+        push_shop_table(&mut out, "Mob", &pet_table, &widths);
         out.push_str("\r\nUse 'buy <#|name>' (or 'hire') to take one along.\r\n");
     }
     if shop.items.is_empty() && shop.pets.is_empty() {
@@ -14570,6 +14674,7 @@ pub(crate) fn cmd_spells(world: &mut World, player: Entity, args: &str) {
     // Resolve the caster's class so we can look up per-circle assignments.
     // Used only when we group by circle; `spells all` ignores it.
     let class_id = world.get::<Profile>(player).and_then(|p| p.class_id);
+    let caster_level = world.get::<Profile>(player).map_or(1, |p| p.level);
     let slot_data = world.resource::<mud_world::SpellSlotData>();
 
     let matches_filter = |def: &mud_world::AbilityDef| -> bool {
@@ -14652,6 +14757,17 @@ pub(crate) fn cmd_spells(world: &mut World, player: Entity, args: &str) {
             .unwrap_or(0);
         // A racial innate the class has no circle for is listed by `innate`.
         if circle == 0 && super::innate::is_racial_grant(world, player, def.id) {
+            continue;
+        }
+        // A racial innate the class files under a circle it has not reached
+        // yet (an Elf sorcerer's Empower, circle 8) is not a spell of theirs
+        // to cast at this level; `innate` still lists it.
+        if circle > 0
+            && super::innate::is_racial_grant(world, player, def.id)
+            && class_id
+                .and_then(|cid| slot_data.circle_min_level(cid, circle))
+                .is_some_and(|min| caster_level < min)
+        {
             continue;
         }
         if let Some((lo, hi)) = circle_range
