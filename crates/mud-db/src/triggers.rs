@@ -141,6 +141,7 @@ pub async fn list_mob_triggers(pool: &PgPool) -> sqlx::Result<Vec<MobTriggerLink
         r#"
         SELECT mob_zone_id, mob_id, trigger_zone_id, trigger_id
         FROM "MobTriggers"
+        ORDER BY mob_zone_id, mob_id, created_at, trigger_zone_id, trigger_id
         "#
     )
     .fetch_all(pool)

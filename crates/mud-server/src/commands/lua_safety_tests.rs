@@ -627,3 +627,66 @@ fn bribe_trigger_reads_value_and_the_coin_split_as_numbers() {
         .and_then(|v| v.as_str().map(str::to_string));
     assert_eq!(paid.as_deref(), Some("12345:12:3:4:5"));
 }
+
+/// Legacy `bribe_mtrigger` runs only the first BRIBE trigger, in attach
+/// order, whose minimum (`num_args`, copper) the coins meet. The mob keeps
+/// the coins even when no trigger qualifies.
+#[test]
+fn bribe_fires_only_the_first_trigger_whose_minimum_is_met() {
+    let mut fx: Fx = fixture();
+    let a = fx.a;
+    let (payer, _rx) = player(&mut fx.world, a, "Payer");
+    fx.world.entity_mut(payer).insert(mud_world::Wealth(1_000));
+    let trainer = mob(&mut fx.world, a, "trainer", (900, 20), 5);
+    fx.world
+        .entity_mut(trainer)
+        .insert(AttachedTriggers(vec![(900, 13), (900, 14)]));
+    let mut catalog = TriggerCatalog::default();
+    for (id, minimum) in [(13, 42), (14, 30)] {
+        let mut def = trigger(
+            900,
+            id,
+            TriggerEvent::Bribe,
+            &format!("self:setvar('t{id}', tostring(value))"),
+        );
+        def.num_args = minimum;
+        catalog.by_key.insert((900, id), def);
+    }
+    fx.world.insert_resource(catalog);
+    let fired = |world: &World, id: i32| {
+        world
+            .resource::<EntityVariableCache>()
+            .get(EntityType::Mob, 900, 20, &format!("t{id}"))
+            .and_then(|v| v.as_str().map(str::to_string))
+    };
+
+    super::info::cmd_bribe(&mut fx.world, payer, "50 trainer");
+    assert_eq!(fired(&fx.world, 13).as_deref(), Some("50"));
+    assert_eq!(
+        fired(&fx.world, 14),
+        None,
+        "only the first qualifying fires"
+    );
+
+    super::info::cmd_bribe(&mut fx.world, payer, "35 trainer");
+    assert_eq!(
+        fired(&fx.world, 13).as_deref(),
+        Some("50"),
+        "42 > 35: skipped"
+    );
+    assert_eq!(fired(&fx.world, 14).as_deref(), Some("35"));
+
+    super::info::cmd_bribe(&mut fx.world, payer, "10 trainer");
+    assert_eq!(fired(&fx.world, 13).as_deref(), Some("50"));
+    assert_eq!(fired(&fx.world, 14).as_deref(), Some("35"));
+
+    assert_eq!(
+        fx.world.get::<mud_world::Wealth>(trainer).map(|w| w.0),
+        Some(95),
+        "the mob keeps every coin, qualifying trigger or not"
+    );
+    assert_eq!(
+        fx.world.get::<mud_world::Wealth>(payer).map(|w| w.0),
+        Some(905)
+    );
+}

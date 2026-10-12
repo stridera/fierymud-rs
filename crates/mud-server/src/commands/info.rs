@@ -4278,33 +4278,37 @@ pub(crate) fn cmd_bribe(world: &mut World, player: Entity, args: &str) {
         ),
     );
     // Fire BRIBE on target. Bodies get DG's `value` (total copper) and the
-    // `platinum` / `gold` / `silver` / `copper` breakdown as numbers.
-    let to_fire: Vec<(i32, i32, String, String)> = {
-        if let Some(at) = world.get::<AttachedTriggers>(target) {
-            let keys = at.0.clone();
-            let catalog = world.resource::<TriggerCatalog>();
-            keys.into_iter()
-                .filter_map(|(z, i)| {
-                    let def = catalog.by_key.get(&(z, i))?;
-                    if def.flags.contains(&mud_world::TriggerEvent::Bribe) {
-                        Some((z, i, def.name.clone(), def.commands.clone()))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        } else {
-            Vec::new()
-        }
-    };
-    for (zone, id, _name, body) in to_fire {
+    // `platinum` / `gold` / `silver` / `copper` breakdown as numbers. Legacy
+    // `bribe_mtrigger` runs only the first trigger, in attach order, whose
+    // minimum (`num_args`, in copper) the coins meet. The mob keeps the coins
+    // whether or not any trigger qualifies.
+    let to_fire = world.get::<AttachedTriggers>(target).and_then(|at| {
+        first_bribe_trigger(&at.0, world.resource::<TriggerCatalog>(), amount)
+            .map(|def| def.commands.clone())
+    });
+    if let Some(body) = to_fire {
         let _ = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
             host.set_bindings(bribe_bindings(amount));
             host.exec_for_listener_with_extras(world, target, player, &body, &[])
         });
         crate::commands::drain_lua_outbox(world);
-        let _ = (zone, id); // referenced for the closure capture only
     }
+}
+
+/// The BRIBE trigger legacy `bribe_mtrigger` would run for `amount` copper:
+/// the first of `attached` (attach order) carrying a BRIBE flag whose
+/// minimum (`num_args`) is at most `amount`.
+fn first_bribe_trigger<'a>(
+    attached: &[(i32, i32)],
+    catalog: &'a TriggerCatalog,
+    amount: i64,
+) -> Option<&'a mud_world::TriggerDef> {
+    attached
+        .iter()
+        .filter_map(|key| catalog.by_key.get(key))
+        .find(|def| {
+            def.flags.contains(&mud_world::TriggerEvent::Bribe) && amount >= i64::from(def.num_args)
+        })
 }
 
 /// The numeric globals a BRIBE body reads, from a total in copper: DG's

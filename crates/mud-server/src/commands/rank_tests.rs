@@ -647,27 +647,26 @@ fn forced_and_scripted_quit_are_refused() {
 
 /// `set <player> gold N` sets N gold coins (not N copper), as `help set`
 /// says; the other denominations keep their count, `wealth` is the raw
-/// copper total.
+/// copper total. Each coin field is absolute: repeating it changes nothing
+/// and setting 0 undoes it. Gold, silver and copper hold 0-9 in the
+/// canonical split, so a larger count clamps instead of carrying (carrying
+/// made the second `set gold 20` add 20 again).
 #[test]
 fn set_coin_fields_use_coin_units() {
     let mut world = World::new();
     let god = spawn(&mut world, "Chinok", 105, UserRole::Player);
     let coins = |world: &World| world.get::<mud_world::Wealth>(god).map_or(0, |w| w.0);
 
-    dispatch(&mut world, god, "set me gold 20");
-    assert_eq!(coins(&world), 2_000, "20 gold = 2 platinum, not 20 copper");
+    dispatch(&mut world, god, "set me gold 4");
+    assert_eq!(coins(&world), 400, "4 gold, not 4 copper");
     dispatch(&mut world, god, "set me silver 5");
-    assert_eq!(coins(&world), 2_050, "gold untouched");
+    assert_eq!(coins(&world), 450, "gold untouched");
     dispatch(&mut world, god, "set me platinum 3");
-    assert_eq!(coins(&world), 3_050, "silver untouched");
+    assert_eq!(coins(&world), 3_450, "gold and silver untouched");
     dispatch(&mut world, god, "set me copper 7");
-    assert_eq!(coins(&world), 3_057);
-    dispatch(&mut world, god, "set me gold 1000");
-    assert_eq!(
-        coins(&world),
-        103_057,
-        "1000 gold plus the 3 platinum and 57 copper"
-    );
+    assert_eq!(coins(&world), 3_457);
+    dispatch(&mut world, god, "set me platinum 1000");
+    assert_eq!(coins(&world), 1_000_457, "platinum is unbounded");
     dispatch(&mut world, god, "set me wealth 1234");
     assert_eq!(coins(&world), 1_234, "wealth is raw copper");
     dispatch(&mut world, god, "set me gold -5");
@@ -676,4 +675,36 @@ fn set_coin_fields_use_coin_units() {
         1_034,
         "a negative count clamps at zero coins of that kind"
     );
+}
+
+#[test]
+fn set_coin_fields_are_absolute_and_repeatable() {
+    let mut world = World::new();
+    let god = spawn(&mut world, "Chinok", 105, UserRole::Player);
+    let coins = |world: &World| world.get::<mud_world::Wealth>(god).map_or(0, |w| w.0);
+    dispatch(&mut world, god, "set me wealth 1234");
+
+    for field in ["platinum 7", "gold 20", "silver 20", "copper 20", "gold 3"] {
+        dispatch(&mut world, god, &format!("set me {field}"));
+        let once = coins(&world);
+        dispatch(&mut world, god, &format!("set me {field}"));
+        dispatch(&mut world, god, &format!("set me {field}"));
+        assert_eq!(coins(&world), once, "set {field} repeated changes nothing");
+    }
+    // 20 gold, silver, copper clamped to 9 each; platinum 7, then gold 3.
+    assert_eq!(coins(&world), 7_000 + 3 * 100 + 90 + 9);
+
+    // Setting 0 undoes it: only that denomination goes.
+    dispatch(&mut world, god, "set me gold 0");
+    assert_eq!(coins(&world), 7_099);
+    dispatch(&mut world, god, "set me platinum 0");
+    assert_eq!(coins(&world), 99);
+    dispatch(&mut world, god, "set me silver 0");
+    dispatch(&mut world, god, "set me copper 0");
+    assert_eq!(coins(&world), 0);
+
+    dispatch(&mut world, god, "set me gold 20");
+    assert_eq!(coins(&world), 900, "clamped to the 9 gold a purse holds");
+    dispatch(&mut world, god, "set me gold 0");
+    assert_eq!(coins(&world), 0);
 }

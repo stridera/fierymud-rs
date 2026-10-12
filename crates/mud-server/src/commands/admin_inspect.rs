@@ -1737,20 +1737,16 @@ const SET_FIELDS: &[(&str, &[&str], &str)] = &[
         &["plat"],
         "platinum coins on hand (other coins kept; clamped >= 0)",
     ),
-    (
-        "gold",
-        &[],
-        "gold coins on hand (other coins kept; clamped >= 0)",
-    ),
+    ("gold", &[], "gold coins on hand, 0-9 (other coins kept)"),
     (
         "silver",
         &[],
-        "silver coins on hand (other coins kept; clamped >= 0)",
+        "silver coins on hand, 0-9 (other coins kept)",
     ),
     (
         "copper",
         &[],
-        "copper coins on hand (other coins kept; clamped >= 0)",
+        "copper coins on hand, 0-9 (other coins kept)",
     ),
     ("wealth", &[], "total coin on hand in copper (clamped >= 0)"),
     ("alignment", &["align"], "CombatStats.alignment (signed)"),
@@ -1765,21 +1761,41 @@ enum Coin {
     Copper,
 }
 
-/// New copper total after setting how many coins of one denomination are
-/// on hand (legacy `do_set`'s `platinum` / `gold` / `silver` / `copper`):
-/// the other denominations keep their count. The purse is a single copper
-/// total (1 platinum = 10 gold = 100 silver = 1000 copper), so a
-/// denomination's current count is its place in the canonical split:
-/// platinum is everything from 1000 up, gold the hundreds digit, silver
-/// the tens, copper the units.
-fn with_coin_count(total: i64, coin: Coin, count: i64) -> i64 {
-    let (unit, current) = match coin {
-        Coin::Platinum => (1000, total / 1000),
-        Coin::Gold => (100, total % 1000 / 100),
-        Coin::Silver => (10, total % 100 / 10),
-        Coin::Copper => (1, total % 10),
+/// Most coins of one sub-platinum denomination the canonical split holds:
+/// ten of them are one of the next denomination up.
+const MAX_SUBPLATINUM_COINS: i64 = 9;
+
+/// Set how many coins of one denomination are on hand (legacy `do_set`'s
+/// `platinum` / `gold` / `silver` / `copper`) and return the new copper total
+/// with the count actually set. The purse is a single copper total
+/// (1 platinum = 10 gold = 100 silver = 1000 copper), shown as the canonical
+/// split: platinum is everything from 1000 up, gold the hundreds digit,
+/// silver the tens, copper the units. Decompose that split, replace just the
+/// one denomination, recompose; the others keep their count.
+///
+/// Gold, silver and copper hold 0-9 in that split (ten would read back as
+/// one of the next denomination up), so a larger count clamps to 9. Carrying
+/// instead made the field relative: the second `set gold 20` found 0 gold
+/// (the first became 2 platinum) and added 20 again. Platinum is unbounded.
+/// Setting is absolute, so repeating it changes nothing and setting 0 undoes it.
+fn with_coin_count(total: i64, coin: Coin, count: i64) -> (i64, i64) {
+    let total = total.max(0);
+    let mut split = [
+        total / 1000,
+        total % 1000 / 100,
+        total % 100 / 10,
+        total % 10,
+    ];
+    let (slot, cap) = match coin {
+        Coin::Platinum => (0, i64::MAX / 1000),
+        Coin::Gold => (1, MAX_SUBPLATINUM_COINS),
+        Coin::Silver => (2, MAX_SUBPLATINUM_COINS),
+        Coin::Copper => (3, MAX_SUBPLATINUM_COINS),
     };
-    (total + (count.max(0) - current) * unit).max(0)
+    let count = count.clamp(0, cap);
+    split[slot] = count;
+    let [platinum, gold, silver, copper] = split;
+    (platinum * 1000 + gold * 100 + silver * 10 + copper, count)
 }
 
 /// Level at which the legacy-ADMIN `set` fields open up (Coder, 104).
@@ -1879,6 +1895,7 @@ pub(crate) fn cmd_set(world: &mut World, player: Entity, args: &str) {
     };
     let value_i64 = i64::from(value_i32);
 
+    let mut shown_value = value_word.to_string();
     let applied = match field.as_str() {
         "level" => {
             // Rank rules (see `authorize_level_change`): audited, keyed on
@@ -1938,12 +1955,21 @@ pub(crate) fn cmd_set(world: &mut World, player: Entity, args: &str) {
             }),
         "platinum" | "plat" | "gold" | "silver" | "copper" | "wealth" => {
             let on_hand = world.get::<Wealth>(target).map_or(0, |w| w.0);
-            let new_total = match field.as_str() {
-                "wealth" => value_i64.max(0),
-                "platinum" | "plat" => with_coin_count(on_hand, Coin::Platinum, value_i64),
-                "gold" => with_coin_count(on_hand, Coin::Gold, value_i64),
-                "silver" => with_coin_count(on_hand, Coin::Silver, value_i64),
-                _ => with_coin_count(on_hand, Coin::Copper, value_i64),
+            let coin = match field.as_str() {
+                "platinum" | "plat" => Some(Coin::Platinum),
+                "gold" => Some(Coin::Gold),
+                "silver" => Some(Coin::Silver),
+                "copper" => Some(Coin::Copper),
+                _ => None,
+            };
+            let new_total = if let Some(coin) = coin {
+                let (total, set) = with_coin_count(on_hand, coin, value_i64);
+                if set != value_i64 {
+                    shown_value = format!("{set} (clamped; gold, silver and copper hold 0-9)");
+                }
+                total
+            } else {
+                value_i64.max(0)
             };
             if let Some(mut w) = world.get_mut::<Wealth>(target) {
                 w.0 = new_total;
@@ -1971,7 +1997,7 @@ pub(crate) fn cmd_set(world: &mut World, player: Entity, args: &str) {
         send_to(
             world,
             player,
-            format!("Set {target_name}.{field} = {value_word}.\r\n"),
+            format!("Set {target_name}.{field} = {shown_value}.\r\n"),
         );
     } else {
         send_msg(

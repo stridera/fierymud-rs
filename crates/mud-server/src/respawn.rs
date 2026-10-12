@@ -84,6 +84,19 @@ pub(crate) fn door_reset_pass(world: &mut World, tick: u64) {
     if due.is_empty() {
         return;
     }
+    let occupied: HashSet<Entity> = world
+        .query_filtered::<&Located, With<Player>>()
+        .iter(world)
+        .map(|l| l.0)
+        .collect();
+    // An `Empty` zone with a player inside cannot reset yet. Drop it before
+    // the slice is cut, or a handful of long-occupied zones (most overdue
+    // first) would fill every pass and starve the zones that can reset.
+    let occupied_zones: HashSet<Entity> = occupied
+        .iter()
+        .filter_map(|&room| world.get::<Located>(room).map(|l| l.0))
+        .collect();
+    due.retain(|d| d.1 != ResetMode::Empty || !occupied_zones.contains(&d.0));
     // Most overdue first, a bounded slice per pass (see the constant).
     due.sort_by(|a, b| b.3.cmp(&a.3).then(a.0.cmp(&b.0)));
     due.truncate(DOOR_RESET_ZONES_PER_PASS);
@@ -98,19 +111,7 @@ pub(crate) fn door_reset_pass(world: &mut World, tick: u64) {
             rooms_by_zone.entry(located.0).or_default().push(room);
         }
     }
-    let occupied: HashSet<Entity> = world
-        .query_filtered::<&Located, With<Player>>()
-        .iter(world)
-        .map(|l| l.0)
-        .collect();
-    for (zone, mode, period, _) in due {
-        if mode == ResetMode::Empty
-            && occupied
-                .iter()
-                .any(|&room| world.get::<Located>(room).is_some_and(|l| l.0 == zone))
-        {
-            continue;
-        }
+    for (zone, _mode, period, _) in due {
         let rooms = rooms_by_zone.remove(&zone).unwrap_or_default();
         let skipped = reset_zone_doors(world, &rooms, &occupied);
         let next = if skipped {
@@ -1579,6 +1580,49 @@ mod door_reset_tests {
         open_both(&mut world, a, b);
         door_reset_pass(&mut world, PERIOD * 100);
         assert_eq!(state(&world, a, Direction::East), ExitState::Open);
+    }
+
+    /// Occupied `Empty` zones stay due until their players leave. They must
+    /// not fill the bounded slice (most overdue first) and starve the
+    /// `Normal` zones that can reset right now.
+    #[test]
+    fn occupied_empty_zones_do_not_hog_the_slice() {
+        let mut world = World::new();
+        let target = world.spawn_empty().id();
+        let room_in = |world: &mut World, mode: ResetMode, last_reset: u64| {
+            let zone = world
+                .spawn((
+                    Named { name: "z".into() },
+                    ZoneDoorReset::new(mode, 10, last_reset),
+                ))
+                .id();
+            let mut exits = Exits::default();
+            exits
+                .0
+                .insert(Direction::East, door(target, ExitState::Open));
+            let mut defaults = ExitDefaults::default();
+            defaults
+                .0
+                .insert(Direction::East, (ExitState::Locked, Some(50)));
+            world.spawn((Room, Located(zone), exits, defaults)).id()
+        };
+        // More overdue than the Normal zones (reset at 0, not 100).
+        let occupied: Vec<Entity> = (0..DOOR_RESET_ZONES_PER_PASS)
+            .map(|_| room_in(&mut world, ResetMode::Empty, 0))
+            .collect();
+        for &room in &occupied {
+            world.spawn((Player, Located(room)));
+        }
+        let normal: Vec<Entity> = (0..3)
+            .map(|_| room_in(&mut world, ResetMode::Normal, 100))
+            .collect();
+        door_reset_pass(&mut world, 10 * 600 + 100);
+        for &room in &normal {
+            assert_eq!(state(&world, room, Direction::East), ExitState::Locked);
+        }
+        for &room in &occupied {
+            assert_eq!(state(&world, room, Direction::East), ExitState::Open);
+        }
     }
 
     /// Prod scale (190 zones, 13k rooms, all on the same lifespan so they all
