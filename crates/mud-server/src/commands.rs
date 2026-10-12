@@ -808,6 +808,9 @@ mod mob_ai_spawn_tests;
 #[path = "commands/mob_hold_tests.rs"]
 mod mob_hold_tests;
 #[cfg(test)]
+#[path = "commands/newbie_tests.rs"]
+mod newbie_tests;
+#[cfg(test)]
 #[path = "commands/order_tests.rs"]
 mod order_tests;
 #[cfg(test)]
@@ -2828,18 +2831,25 @@ pub(crate) fn drain_lua_outbox(world: &mut World) {
 
 fn flush_lua_outbox(world: &mut World) {
     use mud_world::LuaOutbox;
-    let (messages, direct, commands, corpse_loot) = if world.contains_resource::<LuaOutbox>() {
-        let mut out = world.resource_mut::<LuaOutbox>();
-        (
-            std::mem::take(&mut out.messages),
-            std::mem::take(&mut out.direct),
-            std::mem::take(&mut out.commands),
-            std::mem::take(&mut out.corpse_loot),
-        )
-    } else {
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new())
-    };
-    if messages.is_empty() && direct.is_empty() && commands.is_empty() && corpse_loot.is_empty() {
+    let (messages, direct, commands, corpse_loot, arrivals) =
+        if world.contains_resource::<LuaOutbox>() {
+            let mut out = world.resource_mut::<LuaOutbox>();
+            (
+                std::mem::take(&mut out.messages),
+                std::mem::take(&mut out.direct),
+                std::mem::take(&mut out.commands),
+                std::mem::take(&mut out.corpse_loot),
+                std::mem::take(&mut out.arrivals),
+            )
+        } else {
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
+        };
+    if messages.is_empty()
+        && direct.is_empty()
+        && commands.is_empty()
+        && corpse_loot.is_empty()
+        && arrivals.is_empty()
+    {
         return;
     }
     // Items a script moved out of a player corpse into a player's hands:
@@ -2875,6 +2885,23 @@ fn flush_lua_outbox(world: &mut World) {
     for (target, msg) in direct {
         let line = script_line_for(&mut direct_sentence_start, target, &msg);
         send_to(world, target, line);
+    }
+
+    // Players a script walked through an exit (`actor:move`): they see the
+    // room they landed in, then the room's GREET and POSTENTRY triggers run,
+    // exactly as after a typed move. Runs after the script's own lines so the
+    // escort text comes first, and before its queued commands (which may
+    // close the gate behind the mover).
+    for mover in arrivals {
+        if world.get_entity(mover).is_err() {
+            continue;
+        }
+        let Some(room) = world.get::<Located>(mover).map(|l| l.0) else {
+            continue;
+        };
+        info::look_after_move(world, mover);
+        crate::triggers::fire_greet_in_room(world, mover, room);
+        crate::triggers::fire_room_entry(world, room, mover, mud_world::TriggerEvent::Postentry);
     }
 
     // Queued `actor:command(text)` invocations. Re-enters dispatch as
@@ -10737,6 +10764,23 @@ fn practice_god(world: &mut World, player: Entity, name: &str) {
     send_to(world, player, msg);
 }
 
+/// The proficiency ceiling `class_id` has for `ability_id`: spells and the
+/// like carry it on the circle table, skills on the class skill table.
+fn class_proficiency_cap(world: &World, class_id: i32, ability_id: i32) -> Option<i32> {
+    world
+        .resource::<mud_world::SpellSlotData>()
+        .ability_cap
+        .get(&(class_id, ability_id))
+        .copied()
+        .or_else(|| {
+            world
+                .get_resource::<mud_world::ClassSkillsData>()?
+                .proficiency_cap
+                .get(&(class_id, ability_id))
+                .copied()
+        })
+}
+
 /// `practice <ability>`: bump proficiency by 5, capped at the
 /// class's `proficiency_cap`. Refuses unknown abilities, abilities
 /// off the player's class list, abilities not in `KnownAbilities`,
@@ -10768,11 +10812,7 @@ pub(crate) fn practice_one(world: &mut World, player: Entity, name: &str) {
         );
         return;
     };
-    let cap = world
-        .resource::<mud_world::SpellSlotData>()
-        .ability_cap
-        .get(&(class_id, def.id))
-        .copied();
+    let cap = class_proficiency_cap(world, class_id, def.id);
     let Some(cap) = cap else {
         send_msg(
             world,
@@ -14366,6 +14406,59 @@ pub(crate) fn wear_refusal(
         return Some(refusal);
     }
     None
+}
+
+/// True when `player` could not wear an item made from `proto`: its class,
+/// race or alignment restriction (or size band) excludes them. Staff are never
+/// excluded. Same rules as [`wear_refusal`], for a ware still on a shop shelf.
+pub(crate) fn proto_unusable_by(
+    world: &World,
+    player: Entity,
+    proto: &mud_world::ObjectProto,
+) -> bool {
+    if is_staff(world, player) || mud_world::bypasses_restrictions(world, player) {
+        return false;
+    }
+    let profile = world.get::<Profile>(player);
+    if !proto.restricted_alignments.is_empty() {
+        let bucket = mud_db::enums::Alignment::from_score(
+            world.get::<CombatStats>(player).map_or(0, |c| c.alignment),
+        );
+        if proto.restricted_alignments.contains(&bucket) {
+            return true;
+        }
+    }
+    if let Some(cid) = profile.and_then(|p| p.class_id)
+        && proto.restricted_class_ids.contains(&cid)
+    {
+        return true;
+    }
+    if let Some(p) = profile {
+        if proto
+            .restricted_races
+            .iter()
+            .any(|r| r.eq_ignore_ascii_case(&p.race))
+        {
+            return true;
+        }
+        if !proto.allowed_races.is_empty()
+            && !proto
+                .allowed_races
+                .iter()
+                .any(|r| r.eq_ignore_ascii_case(&p.race))
+        {
+            return true;
+        }
+    }
+    world.get::<mud_world::Sized>(player).is_some_and(|w| {
+        size_band_refusal(
+            w.0,
+            proto.min_size.as_deref(),
+            proto.max_size.as_deref(),
+            "",
+        )
+        .is_some()
+    })
 }
 
 /// Wear one specific carried item (legacy `perform_wear`). Returns

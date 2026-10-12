@@ -4,12 +4,12 @@
 
 use bevy_ecs::prelude::*;
 use mud_db::enums::{PlayerFlag, UserRole};
-use mud_world::{IgnoreList, LastTeller, Named, Online, Player, TellLog};
+use mud_world::{IgnoreList, LastTeller, Located, Mob, Named, Online, Player, TellLog};
 
 use crate::commands::{
-    Account, Category, Command, DbPool, Help, Prevent, effect_prevents, format_idle, has_flag,
-    name_approval_gate, name_of, send_comm_channel_text, send_msg, send_rendered, send_to,
-    try_insert,
+    Account, Category, Command, DbPool, Help, Prevent, effect_prevents, find_actor_in_room,
+    format_idle, has_flag, name_approval_gate, name_of, send_comm_channel_text, send_msg,
+    send_rendered, send_to, try_insert,
 };
 
 inventory::submit! {
@@ -153,6 +153,16 @@ fn deliver_tell(world: &mut World, player: Entity, target_name: &str, message: &
             .map(|(e, _)| e)
     };
     let Some(target) = target else {
+        // Legacy `do_tell` also reaches a mob standing in the same room, and
+        // that is how a `SPEECH_TO` script is spoken to (`tell instructor
+        // hello teacher`).
+        if let Some(room) = world.get::<Located>(player).map(|l| l.0)
+            && let Some(mob) = find_actor_in_room(world, target_name, room, player)
+            && world.get::<Mob>(mob).is_some()
+        {
+            tell_mob(world, player, mob, message);
+            return;
+        }
         send_rendered(world, player, &format!("'{target_name}' isn't online.\r\n"));
         return;
     };
@@ -238,6 +248,25 @@ fn deliver_tell(world: &mut World, player: Entity, target_name: &str, message: &
             }
         });
     }
+}
+
+/// A tell to a mob in the same room: the speaker sees the usual line and the
+/// mob's `SPEECH` / `SPEECH_TO` scripts hear it (legacy `speech_to_mtrigger`).
+fn tell_mob(world: &mut World, player: Entity, mob: Entity, message: &str) {
+    let player_name = name_of(world, player);
+    let mob_name = name_of(world, mob);
+    if has_flag(world, player, PlayerFlag::NoRepeat) {
+        send_to(world, player, "Ok.\r\n");
+    } else {
+        send_rendered(
+            world,
+            player,
+            &format!("<cyan>You tell <b:cyan>{mob_name}</>, \"{message}\"</>\r\n"),
+        );
+    }
+    let gmcp_text = format!("{player_name} tells {mob_name}, \"{message}\"");
+    send_comm_channel_text(world, player, "tells", &player_name, &gmcp_text);
+    crate::triggers::fire_speech_at(world, mob, player, message);
 }
 
 fn cmd_reply(world: &mut World, player: Entity, args: &str) {

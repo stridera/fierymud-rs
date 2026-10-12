@@ -3332,6 +3332,42 @@ pub(crate) fn authorize_level_change(
     verdict
 }
 
+/// Teach `entity` the class skills level `level` unlocks, and say so. Skills
+/// they already have are left alone.
+pub(crate) fn grant_level_skills(world: &mut World, entity: Entity, level: i32) {
+    let Some(class_id) = world
+        .get::<mud_world::Profile>(entity)
+        .and_then(|p| p.class_id)
+    else {
+        return;
+    };
+    let mut known = world
+        .get::<mud_world::KnownAbilities>(entity)
+        .cloned()
+        .unwrap_or_default();
+    let granted = crate::login::grant_class_skills_for(world, Some(class_id), level, &mut known);
+    if granted.is_empty() {
+        return;
+    }
+    let names: Vec<String> = {
+        let catalog = world.resource::<mud_world::AbilityCatalog>();
+        let mut names: Vec<String> = catalog
+            .by_name
+            .values()
+            .filter(|d| granted.contains(&d.id))
+            .map(|d| d.name.clone())
+            .collect();
+        names.sort();
+        names
+    };
+    world.entity_mut(entity).insert(known);
+    send_to(
+        world,
+        entity,
+        format!("You can now use: {}.\r\n", names.join(", ")),
+    );
+}
+
 /// Promote `entity` while its XP clears the next threshold and the next
 /// level is `<= max_level` — incrementing `Profile.level`, expanding
 /// `Health.max` and `Stamina.max` by the row's gain values, and
@@ -3456,6 +3492,8 @@ pub(crate) fn level_up_to(world: &mut World, entity: Entity, max_level: i32) {
                  You gained {granted} practice {plural}.\r\n",
             ),
         );
+        // Class skills this level unlocks (legacy `update_skills`).
+        grant_level_skills(world, entity, next);
         // Room broadcast — leveling up is a moment of triumph
         // worth surfacing to anyone watching. Bystanders see
         // "X surges with newfound power and rises to level N!"

@@ -535,16 +535,35 @@ pub(crate) fn cmd_study(world: &mut World, player: Entity, args: &str) {
         }
         return;
     };
-    if !god
-        && !world
-            .resource::<SpellSlotData>()
-            .ability_circle
-            .contains_key(&(class_id, def.id))
-    {
+    // A class's list is its spell circles plus its skill table. A skill also
+    // has a level to reach before it can be learned.
+    let on_spell_list = world
+        .resource::<SpellSlotData>()
+        .ability_circle
+        .contains_key(&(class_id, def.id));
+    let skill_min_level = world
+        .get_resource::<mud_world::ClassSkillsData>()
+        .and_then(|d| d.min_level_for(class_id, def.id));
+    if !god && !on_spell_list && skill_min_level.is_none() {
         send_msg(
             world,
             player,
             format!("{} isn't on your class's list.\r\n", def.name),
+        );
+        return;
+    }
+    if !god
+        && !on_spell_list
+        && let Some(min) = skill_min_level
+        && profile.level < min
+    {
+        send_to(
+            world,
+            player,
+            format!(
+                "You must reach level {min} before you can learn {}.\r\n",
+                def.name
+            ),
         );
         return;
     }
@@ -559,18 +578,28 @@ pub(crate) fn cmd_study(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, format!("You already know {}.\r\n", def.name));
         return;
     }
+    // A skill starts at the low proficiency every class skill starts at;
+    // a spell is simply known.
+    let start = if on_spell_list {
+        1
+    } else {
+        mud_world::STARTING_SKILL_PROFICIENCY
+    };
     if let Some(mut known) = world.get_mut::<KnownAbilities>(player) {
-        known.entries.push((def.id, 1, true));
+        known.entries.push((def.id, start, true));
         known.entries.sort_by_key(|(id, _, _)| *id);
     } else {
         world.entity_mut(player).insert(KnownAbilities {
-            entries: vec![(def.id, 1, true)],
+            entries: vec![(def.id, start, true)],
         });
     }
     send_to(
         world,
         player,
-        format!("You commit {} to memory. (proficiency 1)\r\n", def.name),
+        format!(
+            "You commit {} to memory. (proficiency {start})\r\n",
+            def.name
+        ),
     );
 }
 /// Pooled slots recover on their own, so there is nothing to prepare:

@@ -1,3 +1,4 @@
+pub mod class_skills;
 pub mod components;
 pub mod god;
 pub mod item_spawn;
@@ -12,6 +13,7 @@ pub mod stat_roll;
 pub mod targeting;
 pub mod wake_effects;
 
+pub use class_skills::{STARTING_SKILL_PROFICIENCY, grant_class_skills};
 pub use god::{GOD_PROFICIENCY, bypasses_restrictions, known_abilities_of, proficiency_of};
 pub use stat_roll::{STAT_SCALE_MAX, roll_starting_stats};
 pub use wake_effects::{RoomWakeRow, WakeEffectCatalog, WakeRow, load_wake_effect_catalog};
@@ -85,11 +87,11 @@ pub use resources::{
     RaceCatalog, RaceDef, RaceDefaults, RaceEffect, RaceEffectCatalog, RaceStatCaps, RecallRooms,
     ReservedNames, RoomEnvironmentalEffects, RuntimeConfig, SavingThrow, ScriptError,
     ScriptErrorLog, Season, ShopAcceptRule, ShopCatalog, ShopDef, ShopOffering, ShopPetOffering,
-    SocialDef, SocialRegistry, SpellSlotData, SpellSyllables, StatusFlagValues, SystemMessages,
-    SystemTextEntry, SystemTexts, TargetingRule, TempBand, TriggerAttach, TriggerCatalog,
-    TriggerDef, TriggerEvent, TriggerHistoryEntry, TriggerHistoryLog, WeatherCatalog,
-    WeatherDriftLocks, WeatherState, WizLock, WorldKeyIndex, effective_level, effective_race,
-    month_name, parse_resistance_json,
+    SocialDef, SocialRegistry, SpellSlotData, SpellSyllables, StartingKit, StartingKitItem,
+    StatusFlagValues, SystemMessages, SystemTextEntry, SystemTexts, TargetingRule, TempBand,
+    TriggerAttach, TriggerCatalog, TriggerDef, TriggerEvent, TriggerHistoryEntry,
+    TriggerHistoryLog, WeatherCatalog, WeatherDriftLocks, WeatherState, WizLock, WorldKeyIndex,
+    effective_level, effective_race, month_name, parse_resistance_json,
 };
 pub use resources::{
     clamp_sell_profit, class_exp_factor, exp_to_reach, is_starstar, scale_exp, stars_for_name,

@@ -1414,6 +1414,33 @@ impl CreationRecipes {
     }
 }
 
+/// One `StartingKit` row: an item a new character is handed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartingKitItem {
+    /// Class the row is limited to; `None` applies to every class.
+    pub class_id: Option<i32>,
+    pub object_zone_id: i32,
+    pub object_id: i32,
+    pub quantity: i32,
+}
+
+/// `StartingKit` rows in table order (the order items are handed out),
+/// loaded at boot. Read once, when a character is created.
+#[derive(Resource, Default, Debug)]
+pub struct StartingKit {
+    pub items: Vec<StartingKitItem>,
+}
+
+impl StartingKit {
+    /// The items `class_id` starts with: the all-class rows and its own, in
+    /// table order. A classless character gets the all-class rows only.
+    pub fn for_class(&self, class_id: Option<i32>) -> impl Iterator<Item = &StartingKitItem> {
+        self.items
+            .iter()
+            .filter(move |i| i.class_id.is_none() || i.class_id == class_id)
+    }
+}
+
 /// One `RaceEffects` row: a permanent effect every member of the race
 /// carries.
 #[derive(Debug, Clone)]
@@ -2204,6 +2231,11 @@ pub struct LuaOutbox {
     /// into `player`'s possession. mud-server records it in the corpse
     /// loot ledger (the same as a `get`) after the Lua call returns.
     pub corpse_loot: Vec<(Entity, Entity)>,
+    /// A script walked this player through an exit (`actor:move`). mud-server
+    /// gives the mover what a typed move gives: the new room's look, the
+    /// room's GREET triggers and its POSTENTRY triggers. Without it a
+    /// scripted escort lands in silence and the lesson mob never greets.
+    pub arrivals: Vec<Entity>,
 }
 
 /// Catalog of every shop, loaded from `Shops` + `ShopItems` at startup.

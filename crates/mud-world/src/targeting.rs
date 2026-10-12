@@ -25,10 +25,15 @@ pub fn is_abbrev(word: &str, candidate: &str) -> bool {
 /// Builders no longer hyphenate keywords by hand, so this is how aliases
 /// written against `short-sword` keep working.
 fn word_matches(word: &str, names: &[&str]) -> bool {
+    // A hyphen separates words in a name too (legacy `isname` skipped to the
+    // next name after any non-letter): `monster` targets the legacy keyword
+    // `horrible-little-monster`, which the Academy's tutorial mobs carry as
+    // their only keyword.
     let direct = |w: &str| {
-        names
-            .iter()
-            .any(|name| name.split_whitespace().any(|n| is_abbrev(w, n)))
+        names.iter().any(|name| {
+            name.split(|c: char| c.is_whitespace() || c == '-')
+                .any(|n| is_abbrev(w, n))
+        })
     };
     if direct(word) {
         return true;
@@ -191,6 +196,25 @@ mod tests {
         assert!(entity_matches("half-elf", "a guard", Some(&k)));
         assert!(entity_matches("half-e", "a guard", Some(&k)));
         assert!(entity_matches("half-guard", "a guard", Some(&k)));
+    }
+
+    #[test]
+    fn a_hyphenated_keyword_also_matches_by_its_parts() {
+        let k = kw(&["horrible-little-monster"]);
+        assert!(entity_matches(
+            "monster",
+            "a horrible little monster",
+            Some(&k)
+        ));
+        assert!(entity_matches("hor", "a horrible little monster", Some(&k)));
+        assert!(entity_matches("horrible-little-monster", "x", Some(&k)));
+        assert!(!entity_matches(
+            "onster",
+            "a horrible little monster",
+            Some(&k)
+        ));
+        let k = kw(&["academy-recruiter"]);
+        assert!(entity_matches("recruiter", "the Recruiter", Some(&k)));
     }
 
     #[test]

@@ -1767,6 +1767,22 @@ fn set_script_var(lua: &Lua, entity: Entity, key: &str, value: &str) -> mlua::Re
     })
 }
 
+/// Lua value for a stored quest variable, the way the trigger corpus reads
+/// it (DG semantics): an unset (or empty) variable is `nil`, so
+/// `if v then` / `v or 0` work; a numeric one is an integer, so `v == 2`,
+/// `v + 1` and `v >= 3` work; anything else stays a string (`"complete"`).
+/// Variables are stored as strings, and a string `"2"` never `==` the number
+/// `2` in Lua, which left every numeric-stage check in the corpus false.
+fn quest_var_to_lua(lua: &Lua, stored: Option<&str>) -> mlua::Result<Value> {
+    let Some(s) = stored.filter(|s| !s.is_empty()) else {
+        return Ok(Value::Nil);
+    };
+    match s.parse::<i64>() {
+        Ok(n) => Ok(Value::Integer(n)),
+        Err(_) => Ok(Value::String(lua.create_string(s)?)),
+    }
+}
+
 /// Recursively convert an mlua `Value` into `serde_json::Value`. Used
 /// by the `:setvar` binding so trigger bodies can stash arbitrary
 /// shapes in `EntityVariables`. Numbers / strings / booleans / nil
@@ -3004,7 +3020,7 @@ impl UserData for LuaActor {
         );
         methods.add_method(
             "get_quest_var",
-            |lua, this, key: String| -> mlua::Result<String> {
+            |lua, this, key: String| -> mlua::Result<Value> {
                 // The corpus convention is `actor:get_quest_var
                 // ("NAME:varname")` — quest name and var name
                 // joined with a colon. We map that to our
@@ -3018,7 +3034,7 @@ impl UserData for LuaActor {
                     w.get::<mud_world::ScriptVars>(this.entity)
                         .and_then(|sv| sv.0.get(&storage_key).cloned())
                 })?;
-                Ok(val.unwrap_or_default())
+                quest_var_to_lua(lua, val.as_deref())
             },
         );
         methods.add_method(
@@ -3323,6 +3339,12 @@ impl UserData for LuaActor {
                     return;
                 };
                 mud_world::movement::move_to_room(world, this.entity, target);
+                if world.get::<Player>(this.entity).is_some() {
+                    if !world.contains_resource::<LuaOutbox>() {
+                        world.insert_resource(LuaOutbox::default());
+                    }
+                    world.resource_mut::<LuaOutbox>().arrivals.push(this.entity);
+                }
             })
         });
 

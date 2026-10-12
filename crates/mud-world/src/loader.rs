@@ -817,6 +817,27 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     }
     world.insert_resource(creation_recipes);
 
+    // StartingKit: the pack a new character is handed. A database that
+    // predates the table boots with an empty kit (new characters start with
+    // nothing) rather than refusing to start; any other failure is fatal.
+    let kit_rows = rows_or_empty_with_fix(
+        mud_db::starting_kit::list_all(pool).await,
+        "table \"StartingKit\"",
+        "apply fierylib/data/sql/2026-10-12-starting-kit.sql (and deploy the muditor schema)",
+        "new characters start with an empty pack",
+    )?;
+    world.insert_resource(crate::resources::StartingKit {
+        items: kit_rows
+            .into_iter()
+            .map(|r| crate::resources::StartingKitItem {
+                class_id: r.class_id,
+                object_zone_id: r.object_zone_id,
+                object_id: r.object_id,
+                quantity: r.quantity,
+            })
+            .collect(),
+    });
+
     // Pass 4c.6: race defaults + full catalog. `RaceDefaults` carries
     // the narrow size + start-room maps that older callers consult.
     // `RaceCatalog` hydrates the full Race row — stat caps,

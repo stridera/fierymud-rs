@@ -1145,6 +1145,10 @@ pub struct ConnRouter {
     /// Test seam: name of a per-character table whose load should fail
     /// with an injected error. Always `None` in production.
     load_fault: Option<&'static str>,
+    /// Ids of characters created this session that have not been handed their
+    /// starting kit yet. Consumed by the first `complete_login`, so only a
+    /// brand-new character gets the kit, once.
+    fresh_characters: std::collections::HashSet<String>,
 }
 
 /// Per-connection capability snapshot. Updated by the telnet
@@ -1566,6 +1570,7 @@ impl ConnRouter {
             auth_tx,
             auth_rx: Some(auth_rx),
             close_conn: mud_net::close_connection,
+            fresh_characters: std::collections::HashSet::new(),
             save_wait: PREVIOUS_SAVE_WAIT,
             load_fault: None,
         }
@@ -3098,10 +3103,11 @@ impl ConnRouter {
                 return;
             }
         };
-        // Internal IDs (character_id, user_id) intentionally
-        // omitted from the player-facing welcome — they're
-        // diagnostic and live in `clientinfo` for staff.
-        let _ = character_id;
+        // Internal IDs (user_id) intentionally omitted from the
+        // player-facing welcome — they're diagnostic and live in
+        // `clientinfo` for staff. The character id marks this character as
+        // brand new, so the login below hands them their starting kit.
+        self.fresh_characters.insert(character_id);
         let _ = user_id;
         let _ = ctx.outbound.try_send(
             format!(
@@ -4451,7 +4457,12 @@ impl ConnRouter {
 
         let LoginCtx { outbound, .. } = self.login.remove(&conn_id).unwrap();
         let entity = spawn_player(world, &user, &char_row, outbound);
-        let item_count = spawn_inventory(world, entity, &item_rows);
+        let mut item_count = spawn_inventory(world, entity, &item_rows);
+        // A character created this session starts with the starting kit
+        // (legacy `give_newbie_eq`).
+        if self.fresh_characters.remove(&char_row.id) {
+            item_count += give_starting_kit(world, entity);
+        }
         // From here the entity is the truth for this character: a grant that
         // takes the turn next must go through the world, not the rows.
         coordinator.set_session_live(&char_row.id, true);
@@ -4463,7 +4474,13 @@ impl ConnRouter {
         // spawn_player above is the *unmodified* DB row; this pass
         // stacks the gear-derived deltas on top.
         crate::equip_apply::recompute_equipped_keeping_vitals(world, entity);
-        let known_abilities = KnownAbilities::from_rows(&ability_rows);
+        let mut known_abilities = KnownAbilities::from_rows(&ability_rows);
+        grant_class_skills_for(
+            world,
+            char_row.class_id,
+            char_row.level,
+            &mut known_abilities,
+        );
         let ability_count = known_abilities.entries.len();
         let aliases = mud_world::Aliases::from_rows(&alias_rows);
         let alias_count = aliases.entries.len();
@@ -6215,6 +6232,71 @@ async fn load_persisted(
         alias_rows,
         all_chars,
     })
+}
+
+/// Hand a brand-new character their starting kit (legacy `give_newbie_eq`):
+/// the `StartingKit` rows for their class, in table order, spawned into their
+/// pack. A row naming an object the world lacks is logged and skipped. Returns
+/// how many items were handed over; the next autosave persists them.
+pub(crate) fn give_starting_kit(world: &mut World, player: Entity) -> usize {
+    let class_id = world.get::<Profile>(player).and_then(|p| p.class_id);
+    let wanted: Vec<(i32, i32, i32)> = world
+        .get_resource::<mud_world::StartingKit>()
+        .map(|kit| {
+            kit.for_class(class_id)
+                .map(|i| (i.object_zone_id, i.object_id, i.quantity))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut given = 0;
+    for (zone, id, quantity) in wanted {
+        let proto = world
+            .resource::<ObjectPrototypes>()
+            .by_key
+            .get(&(zone, id))
+            .cloned();
+        let Some(proto) = proto else {
+            warn!(
+                zone,
+                id, "StartingKit names an object that is not loaded; skipping"
+            );
+            continue;
+        };
+        for _ in 0..quantity.max(1) {
+            crate::item_spawn::spawn_item_from_proto(world, &proto, player);
+            given += 1;
+        }
+    }
+    if given > 0 {
+        commands::send_to(
+            world,
+            player,
+            "Your pack holds some starting gear. Type 'inventory' to see it.\r\n",
+        );
+    }
+    given
+}
+
+/// Give a character the class skills their level has unlocked (legacy
+/// `update_skills`): a new character starts with their level-1 kit, and a
+/// character saved before the grant existed picks up what they are owed. A
+/// classless character, or a world without the class tables, gets nothing.
+pub(crate) fn grant_class_skills_for(
+    world: &World,
+    class_id: Option<i32>,
+    level: i32,
+    known: &mut KnownAbilities,
+) -> Vec<i32> {
+    let Some(class_id) = class_id else {
+        return Vec::new();
+    };
+    let (Some(skills), Some(catalog)) = (
+        world.get_resource::<mud_world::ClassSkillsData>(),
+        world.get_resource::<mud_world::AbilityCatalog>(),
+    ) else {
+        return Vec::new();
+    };
+    mud_world::grant_class_skills(known, class_id, level, skills, catalog)
 }
 
 /// Re-read a character's row after waiting on its pending save, so the

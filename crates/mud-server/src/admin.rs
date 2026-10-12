@@ -1976,7 +1976,13 @@ fn session_create(
     // skill lookup, alias expansion, etc.) work for virtual sessions.
     // Without this, every ability formula referencing `skill` resolves
     // to 0 because KnownAbilities is missing.
-    let known_abilities = mud_world::KnownAbilities::from_rows(abilities);
+    let mut known_abilities = mud_world::KnownAbilities::from_rows(abilities);
+    crate::login::grant_class_skills_for(
+        world,
+        character.class_id,
+        character.level,
+        &mut known_abilities,
+    );
     let ability_count = known_abilities.entries.len();
     let alias_set = mud_world::Aliases::from_rows(aliases);
     let alias_count = alias_set.entries.len();

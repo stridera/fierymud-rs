@@ -4399,12 +4399,22 @@ pub(crate) fn cmd_list(world: &mut World, player: Entity, args: &str) {
             } else {
                 offer.amount.to_string()
             };
+            // Legacy shops never said; a newcomer who buys boots their class
+            // cannot wear loses most of their purse to the resale loss, so
+            // flag wares this character could not use.
+            let unusable =
+                proto.is_some_and(|p| crate::commands::proto_unusable_by(world, player, p));
             out.push_str(&format!(
-                "  {:<3} {} {} {}\r\n",
+                "  {:<3} {} {} {}{}\r\n",
                 i + 1,
                 pad_visible(&item_name, 40),
                 pad_visible(&price_str, 28),
-                stock_str
+                stock_str,
+                if unusable {
+                    "  <red>(can't use)</>"
+                } else {
+                    ""
+                }
             ));
         }
     }
