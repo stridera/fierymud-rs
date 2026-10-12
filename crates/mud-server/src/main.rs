@@ -638,6 +638,7 @@ async fn main() {
                 timed!(casting::casting_tick),
                 timed!(commands::info::pending_summon_tick),
                 timed!(combat::combat_tick),
+                timed!(effects::break_on_combat_tick),
                 timed!(combat::corpse_decay_tick),
                 timed!(item_decay::item_decay_tick),
                 timed!(effects::effects_tick),

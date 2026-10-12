@@ -19,18 +19,17 @@ const EFFECT: i32 = 10;
 /// A world where `flagspell` is a real spell applying the `status` flag
 /// `flag`, and a level-20 caster ("Caster") who knows it.
 fn caster_with_flag_spell(flag: &str) -> (Fx, Entity, Rx) {
+    caster_with_spell_row(serde_json::json!({ "flag": flag, "duration": 60 }))
+}
+
+/// [`caster_with_flag_spell`] with the whole `status` effect row given.
+fn caster_with_spell_row(row: serde_json::Value) -> (Fx, Entity, Rx) {
     let mut fx = fixture();
     let mut catalog = mud_world::AbilityCatalog::default();
     let mut spell = ability_def(SPELL, "Flagspell", AbilityKind::Spell);
     spell.cast_time_rounds = 0;
     catalog.by_name.insert("flagspell".to_string(), spell);
-    catalog.effects_for.insert(
-        SPELL,
-        vec![(
-            EFFECT,
-            Some(serde_json::json!({ "flag": flag, "duration": 60 })),
-        )],
-    );
+    catalog.effects_for.insert(SPELL, vec![(EFFECT, Some(row))]);
     fx.world.insert_resource(catalog);
     let mut effects = mud_world::EffectCatalog::default();
     effects.by_id.insert(
@@ -212,6 +211,53 @@ fn familiarity_keeps_aggressive_mobs_from_starting_a_fight() {
     assert!(!mob_will_start_fight(&fx.world, wolf, p), "friend after");
     super::remove_effect_named(&mut fx.world, p, "familiarity");
     assert!(mob_will_start_fight(&fx.world, wolf, p), "hostile again");
+}
+
+/// Disguise (issue #143): familiarity that ends when its bearer enters
+/// combat. Cast through the spell path; peaceful commands keep it, a
+/// fight (started by the bearer or by the mob) ends it.
+fn disguise_row() -> serde_json::Value {
+    serde_json::json!({ "flag": "familiarity", "duration": 60, "breakOnCombat": true })
+}
+
+#[test]
+fn disguise_survives_peaceful_actions() {
+    let (mut fx, p, mut rx) = caster_with_spell_row(disguise_row());
+    let wolf = mob_in(&mut fx, "a grey wolf", -1000);
+    cast(&mut fx, p);
+    assert!(fx.world.get::<mud_world::Familiar>(p).is_some());
+    for cmd in ["look", "say hello", "inventory"] {
+        dispatch(&mut fx.world, p, cmd);
+        crate::effects::break_on_combat_tick(&mut fx.world);
+    }
+    assert!(fx.world.get::<mud_world::Familiar>(p).is_some());
+    assert!(!mob_will_start_fight(&fx.world, wolf, p), "still a friend");
+    let _ = drain(&mut rx);
+}
+
+#[test]
+fn disguise_ends_when_the_bearer_attacks() {
+    let (mut fx, p, mut rx) = caster_with_spell_row(disguise_row());
+    let _wolf = mob_in(&mut fx, "a grey wolf", 0);
+    cast(&mut fx, p);
+    let _ = drain(&mut rx);
+    dispatch(&mut fx.world, p, "kill wolf");
+    assert!(fx.world.get::<mud_world::Fighting>(p).is_some(), "fighting");
+    crate::effects::break_on_combat_tick(&mut fx.world);
+    assert!(fx.world.get::<mud_world::Familiar>(p).is_none());
+    assert!(drain(&mut rx).contains("Your familiarity fades."));
+}
+
+#[test]
+fn disguise_ends_when_the_bearer_is_attacked() {
+    let (mut fx, p, _rx) = caster_with_spell_row(disguise_row());
+    let wolf = mob_in(&mut fx, "a grey wolf", 0);
+    cast(&mut fx, p);
+    // The mob swings first: both sides are `Fighting`.
+    fx.world.entity_mut(wolf).insert(mud_world::Fighting(p));
+    fx.world.entity_mut(p).insert(mud_world::Fighting(wolf));
+    crate::effects::break_on_combat_tick(&mut fx.world);
+    assert!(fx.world.get::<mud_world::Familiar>(p).is_none());
 }
 
 /// Run `mob_helpers_engage` with the familiarity roll pinned to `roll`

@@ -207,6 +207,38 @@ fn sync_stunned_all(world: &mut World) {
 /// gives it `EFF_MINOR_PARALYSIS`, which any hit breaks.
 pub(crate) const FREEZE_SOURCE: &str = "fear-freeze";
 
+/// The values `key` takes on the ability effect rows that back the status
+/// instance `inst`: for every row of the instance's own ability whose
+/// `flag` is the instance's name, the row's override param, else the
+/// effect's default. Empty for an instance with no ability (rend's bleed,
+/// admin tests) or no matching row. The data-driven switches on a status
+/// (`breakOnDamage`, `breakOnCombat`, ...) all read through here.
+fn status_row_params(world: &World, inst: &EffectInstance, key: &str) -> Vec<serde_json::Value> {
+    let (Some(ability), Some(abilities), Some(effects)) = (
+        inst.ability_id,
+        world.get_resource::<AbilityCatalog>(),
+        world.get_resource::<EffectCatalog>(),
+    ) else {
+        return Vec::new();
+    };
+    let field = |v: Option<&serde_json::Value>, key: &str| v.and_then(|v| v.get(key)).cloned();
+    abilities
+        .effects_for
+        .get(&ability)
+        .into_iter()
+        .flatten()
+        .filter_map(|(effect_id, over)| {
+            let defaults = effects.by_id.get(effect_id).map(|d| &d.default_params);
+            let pick = |key| field(over.as_ref(), key).or_else(|| field(defaults, key));
+            pick("flag")
+                .and_then(|f| f.as_str().map(str::to_ascii_lowercase))
+                .is_some_and(|f| f == inst.name.to_ascii_lowercase())
+                .then(|| pick(key))
+                .flatten()
+        })
+        .collect()
+}
+
 /// Does this status instance break when its bearer is hit? Data first:
 /// the ability's own effect row says `breakOnDamage` in its override
 /// params (else the effect's defaults) for the status flag the instance
@@ -218,27 +250,9 @@ fn breaks_on_hit(world: &World, inst: &EffectInstance) -> bool {
     if matches!(&inst.source, mud_world::EffectSource::Other(s) if s == FREEZE_SOURCE) {
         return true;
     }
-    let (Some(ability), Some(abilities), Some(effects)) = (
-        inst.ability_id,
-        world.get_resource::<AbilityCatalog>(),
-        world.get_resource::<EffectCatalog>(),
-    ) else {
-        return false;
-    };
-    let field = |v: Option<&serde_json::Value>, key: &str| v.and_then(|v| v.get(key)).cloned();
-    abilities
-        .effects_for
-        .get(&ability)
-        .into_iter()
-        .flatten()
-        .any(|(effect_id, over)| {
-            let defaults = effects.by_id.get(effect_id).map(|d| &d.default_params);
-            let pick = |key| field(over.as_ref(), key).or_else(|| field(defaults, key));
-            pick("flag")
-                .and_then(|f| f.as_str().map(str::to_ascii_lowercase))
-                .is_some_and(|f| f == inst.name.to_ascii_lowercase())
-                && pick("breakOnDamage").and_then(|b| b.as_bool()) == Some(true)
-        })
+    status_row_params(world, inst, "breakOnDamage")
+        .iter()
+        .any(|b| b.as_bool() == Some(true))
 }
 
 /// Legacy `damage()` (fight.cpp:1650-1666): which message set a broken
@@ -322,6 +336,72 @@ pub(crate) fn break_on_hit(world: &mut World, attacker: Entity, victim: Entity) 
         }
     }
     true
+}
+
+/// Does this status instance end when its bearer enters combat? Data
+/// first, like [`breaks_on_hit`]: the ability's effect row for the status
+/// flag says `breakOnCombat: true` (Disguise, and the Statue and Hearthsong
+/// rows that place it). The optional `breakMessage` / `breakRoomMessage`
+/// params replace the ability's wear-off lines for that break.
+fn combat_break_params(
+    world: &World,
+    inst: &EffectInstance,
+) -> Option<(Option<String>, Option<String>)> {
+    if !status_row_params(world, inst, "breakOnCombat")
+        .iter()
+        .any(|b| b.as_bool() == Some(true))
+    {
+        return None;
+    }
+    let text = |key| {
+        status_row_params(world, inst, key)
+            .into_iter()
+            .find_map(|v| v.as_str().map(str::to_string))
+    };
+    Some((text("breakMessage"), text("breakRoomMessage")))
+}
+
+/// Drop every status marked `breakOnCombat` from anyone who is fighting
+/// (they started the fight, or were drawn into it). Each affected ability
+/// ends through [`remove_effect_instance`], the same teardown a dispel
+/// uses, and the bearer and the room get one wear-off message per ability
+/// (Statue backs two instances but ends once). Runs every tick right after
+/// `combat_tick`, so the bearer loses it when `Fighting` appears, not when
+/// the first round lands; non-combat actions never reach it.
+pub fn break_on_combat_tick(world: &mut World) {
+    type Ended = (Entity, Entity, String, i32, Option<String>, Option<String>);
+    let fighters: std::collections::HashSet<Entity> = world
+        .query_filtered::<Entity, With<mud_world::Fighting>>()
+        .iter(world)
+        .collect();
+    if fighters.is_empty() {
+        return;
+    }
+    let breaking: Vec<Ended> = {
+        let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
+        q.iter(world)
+            .filter(|(_, inst, applied)| inst.ability_id.is_some() && fighters.contains(&applied.0))
+            .filter_map(|(e, inst, applied)| {
+                let (msg, room) = combat_break_params(world, inst)?;
+                Some((applied.0, e, inst.name.clone(), inst.ability_id?, msg, room))
+            })
+            .collect()
+    };
+    let mut told: std::collections::HashSet<(Entity, i32)> = std::collections::HashSet::new();
+    for (target, e, name, ability, msg, room) in breaking {
+        // A sibling's hook may already have taken it.
+        if world.get::<EffectInstance>(e).is_some() {
+            remove_effect_instance(world, target, e);
+        }
+        if !told.insert((target, ability)) {
+            continue;
+        }
+        if msg.is_some() || room.is_some() {
+            send_wearoff_templates(world, target, &name, msg.as_deref(), room.as_deref());
+        } else {
+            send_wearoff_messages(world, target, &name, Some(ability));
+        }
+    }
 }
 
 /// One effect tick = one second.
@@ -676,13 +756,31 @@ pub(crate) fn send_wearoff_messages(
                 .map(|m| (m.wearoff_to_target.clone(), m.wearoff_to_room.clone()))
         })
         .unwrap_or((None, None));
+    send_wearoff_templates(
+        world,
+        target,
+        name,
+        wearoff_target.as_deref(),
+        wearoff_room.as_deref(),
+    );
+}
+
+/// [`send_wearoff_messages`] with the lines already in hand: `target_line`
+/// to the bearer (else the terse default), `room_line` to the room.
+fn send_wearoff_templates(
+    world: &mut World,
+    target: Entity,
+    name: &str,
+    target_line: Option<&str>,
+    room_line: Option<&str>,
+) {
     let target_name = name_of(world, target);
     let target_p = crate::commands::Pronouns::of(world, target);
     // Wear-off has no separate caster on hand: the effect's
     // bearer stands in for `{actor.*}` and `{target.*}` alike.
     // The bearer reads their own line in the second person
     // ("Your berserker fury fades."); the room sees the name.
-    let target_msg = wearoff_target.as_deref().map_or_else(
+    let target_msg = target_line.map_or_else(
         || format!("Your {name} fades.\r\n"),
         |t| {
             let line = crate::commands::render_ability_template(
@@ -696,7 +794,7 @@ pub(crate) fn send_wearoff_messages(
         },
     );
     send_msg(world, target, target_msg);
-    if let Some(line) = wearoff_room.as_deref()
+    if let Some(line) = room_line
         && let Some(located) = world.get::<Located>(target).copied()
     {
         let rendered = crate::commands::render_ability_template(
@@ -1304,5 +1402,154 @@ mod tests {
         let mut h = hit_fixture("mesmerized", Some(true));
         crate::commands::apply_damage(&mut h.world, h.victim, 5);
         assert_eq!(effect_count(&mut h, "mesmerized"), 1);
+    }
+
+    // -- break on combat (Disguise, issue #143) ----------------------------
+
+    /// Ability 88 = "Disguise": two `familiarity` status instances (Statue
+    /// style, one ability backing two rows) on `bearer`, whose rows carry
+    /// `over`. A watcher stands in the room.
+    struct Disguised {
+        world: World,
+        bearer: Entity,
+        foe: Entity,
+        brx: Rx,
+        wrx: Rx,
+    }
+
+    fn disguised(over: serde_json::Value, instances: usize) -> Disguised {
+        let mut world = World::new();
+        let room = world.spawn_empty().id();
+        let (bearer, brx) = player_in(&mut world, room);
+        let (foe, _frx) = player_in(&mut world, room);
+        let (watcher, wrx) = player_in(&mut world, room);
+        world.entity_mut(watcher).insert(mud_world::Named {
+            name: "Watcher".into(),
+        });
+        world.entity_mut(bearer).insert(mud_world::Named {
+            name: "Tester".into(),
+        });
+        world.init_resource::<EffectCatalog>();
+        let mut abilities = AbilityCatalog::default();
+        abilities.effects_for.insert(88, vec![(900, Some(over))]);
+        abilities.messages.insert(
+            88,
+            mud_world::AbilityMessageSet {
+                wearoff_to_target: Some("Your disguise melts away.".into()),
+                wearoff_to_room: Some("{actor.name}'s disguise melts away.".into()),
+                ..Default::default()
+            },
+        );
+        world.insert_resource(abilities);
+        world.entity_mut(bearer).insert(mud_world::Familiar);
+        for _ in 0..instances {
+            world.spawn((
+                EffectInstance {
+                    kind: 900,
+                    name: "familiarity".into(),
+                    strength: 1,
+                    remaining_secs: 300,
+                    source: mud_world::EffectSource::Spell,
+                    ability_id: Some(88),
+                },
+                AppliedTo(bearer),
+            ));
+        }
+        Disguised {
+            world,
+            bearer,
+            foe,
+            brx,
+            wrx,
+        }
+    }
+
+    fn disguise_count(d: &mut Disguised) -> usize {
+        let bearer = d.bearer;
+        let mut q = d.world.query::<(&EffectInstance, &AppliedTo)>();
+        q.iter(&d.world).filter(|(_, a)| a.0 == bearer).count()
+    }
+
+    fn break_row() -> serde_json::Value {
+        serde_json::json!({ "flag": "familiarity", "breakOnCombat": true })
+    }
+
+    #[test]
+    fn peaceful_actions_keep_a_break_on_combat_status() {
+        let mut d = disguised(break_row(), 1);
+        break_on_combat_tick(&mut d.world);
+        assert_eq!(disguise_count(&mut d), 1);
+        assert!(d.world.get::<mud_world::Familiar>(d.bearer).is_some());
+        assert!(drain(&mut d.brx).is_empty());
+    }
+
+    #[test]
+    fn attacking_ends_it_with_the_wearoff_lines_and_the_marker() {
+        let mut d = disguised(break_row(), 1);
+        d.world
+            .entity_mut(d.bearer)
+            .insert(mud_world::Fighting(d.foe));
+        break_on_combat_tick(&mut d.world);
+        assert_eq!(disguise_count(&mut d), 0);
+        assert!(d.world.get::<mud_world::Familiar>(d.bearer).is_none());
+        assert!(drain(&mut d.brx).contains("Your disguise melts away."));
+        assert!(drain(&mut d.wrx).contains("Tester's disguise melts away."));
+    }
+
+    #[test]
+    fn being_drawn_into_a_fight_ends_it_too() {
+        let mut d = disguised(break_row(), 1);
+        // The foe is the one fighting; the bearer is only the target.
+        d.world
+            .entity_mut(d.bearer)
+            .insert(mud_world::Fighting(d.foe));
+        d.world
+            .entity_mut(d.foe)
+            .insert(mud_world::Fighting(d.bearer));
+        break_on_combat_tick(&mut d.world);
+        assert_eq!(disguise_count(&mut d), 0);
+    }
+
+    #[test]
+    fn one_ability_with_two_instances_ends_once_with_one_message() {
+        let mut d = disguised(break_row(), 2);
+        d.world
+            .entity_mut(d.bearer)
+            .insert(mud_world::Fighting(d.foe));
+        break_on_combat_tick(&mut d.world);
+        assert_eq!(disguise_count(&mut d), 0);
+        let out = drain(&mut d.brx);
+        assert_eq!(out.matches("melts away").count(), 1, "{out}");
+    }
+
+    #[test]
+    fn a_status_not_marked_break_on_combat_survives_the_fight() {
+        for over in [
+            serde_json::json!({ "flag": "familiarity" }),
+            serde_json::json!({ "flag": "familiarity", "breakOnCombat": false }),
+            serde_json::json!({ "flag": "bless", "breakOnCombat": true }),
+        ] {
+            let mut d = disguised(over.clone(), 1);
+            d.world
+                .entity_mut(d.bearer)
+                .insert(mud_world::Fighting(d.foe));
+            break_on_combat_tick(&mut d.world);
+            assert_eq!(disguise_count(&mut d), 1, "{over}");
+            assert!(drain(&mut d.brx).is_empty(), "{over}");
+        }
+    }
+
+    #[test]
+    fn break_messages_in_the_row_replace_the_wearoff_lines() {
+        let mut over = break_row();
+        over["breakMessage"] = "The song no longer hides you.".into();
+        let mut d = disguised(over, 1);
+        d.world
+            .entity_mut(d.bearer)
+            .insert(mud_world::Fighting(d.foe));
+        break_on_combat_tick(&mut d.world);
+        let out = drain(&mut d.brx);
+        assert!(out.contains("The song no longer hides you."), "{out}");
+        assert!(!out.contains("melts away"), "{out}");
     }
 }
