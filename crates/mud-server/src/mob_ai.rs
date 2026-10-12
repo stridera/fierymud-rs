@@ -1029,21 +1029,18 @@ fn wears_shield(world: &World, mob: Entity) -> bool {
 
 /// Whether the mob wields a weapon of damage type `wanted` (lowercase). The
 /// legacy families `piercing`, `slashing` and `bludgeoning` stand for the
-/// damage types that belong to them.
+/// damage types that belong to them, as decided by `combat::weapon_family`
+/// (the single damage-type to family table).
 fn wields_weapon_type(world: &World, mob: Entity, wanted: &str) -> bool {
-    let family: &[&str] = match wanted {
-        "piercing" => &["pierce", "stab"],
-        "slashing" => &["slash"],
-        "bludgeoning" => &["bludgeon", "pound", "crush", "maul"],
-        _ => &[],
-    };
     [Slot::Wield, Slot::Hold].into_iter().any(|slot| {
         worn_in(world, mob, slot)
             .and_then(|item| proto_of(world, item))
             .filter(|p| p.r#type == ObjectType::Weapon)
             .and_then(|p| p.weapon_damage_type.as_deref())
-            .map(str::to_ascii_lowercase)
-            .is_some_and(|t| t == wanted || family.contains(&t.as_str()))
+            .is_some_and(|t| {
+                t.eq_ignore_ascii_case(wanted)
+                    || crate::combat::weapon_family(t).is_some_and(|f| f == wanted)
+            })
     })
 }
 

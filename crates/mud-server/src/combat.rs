@@ -376,7 +376,7 @@ fn roll_evasion(world: &World, defender: Entity) -> Option<&'static str> {
 /// `weapon_proficiency`: slash/whip/claw, bludgeon/crush/pound/maul,
 /// sting/pierce/stab). Elemental and generic types (hit, fire, blast, ...)
 /// belong to no family. Case-insensitive; `None` when untyped.
-fn weapon_family(damage_type: &str) -> Option<&'static str> {
+pub(crate) fn weapon_family(damage_type: &str) -> Option<&'static str> {
     match damage_type.to_ascii_lowercase().as_str() {
         "slash" | "whip" | "claw" => Some("slashing"),
         "bludgeon" | "crush" | "pound" | "maul" => Some("bludgeoning"),

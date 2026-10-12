@@ -326,6 +326,11 @@ fn requires_weapon_type_matches_the_wielded_damage_type() {
         ("Crush", "bludgeoning", true),
         ("Pierce", "slashing", false),
         ("Fire", "fire", true),
+        ("Whip", "slashing", true),
+        ("Claw", "slashing", true),
+        ("Sting", "piercing", true),
+        ("Maul", "bludgeoning", true),
+        ("Whip", "piercing", false),
     ] {
         let r = with_conditions(
             rule(KICK, AiKind::Skill, AiTarget::Auto),
