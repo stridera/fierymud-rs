@@ -315,7 +315,11 @@ impl ClassCombatRates {
         let dex_bonus = f64::from(((dexterity - 50) / 5).clamp(-10, 10));
         // Bounded inputs (level <= ~110, small rates), so the casts are exact.
         #[allow(clippy::cast_possible_truncation)]
-        let r = |v: f64| v.round() as i32;
+        // Ties round to even, matching Python's `round()` and Postgres
+        // `round(double precision)` (fierylib's baseline derivation), not
+        // Rust's half-away-from-zero `round()`: a .5 rate otherwise drifts
+        // by a point against seeded/imported characters.
+        let r = |v: f64| v.round_ties_even() as i32;
         CombatBaseline {
             accuracy: 50 + r(self.accuracy_per_level * lvl),
             evasion: 50 + r(dex_bonus * self.dex_evasion_mult) + r(self.evasion_per_level * lvl),
@@ -1398,6 +1402,30 @@ mod combat_baseline_tests {
         assert_eq!(g.accuracy, 27);
         assert_eq!(g.attack_power, 50);
         assert_eq!(g.evasion, 20);
+    }
+
+    #[test]
+    fn half_rates_round_ties_to_even() {
+        // Exact binary halves: 0.5*1 -> 0, 0.5*3 = 1.5 -> 2, 0.5*5 = 2.5 -> 2,
+        // 0.5*7 = 3.5 -> 4. `f64::round` would give 1, 2, 3, 4.
+        let r = ClassCombatRates {
+            accuracy_per_level: 0.5,
+            evasion_per_level: 0.5,
+            dex_evasion_mult: 1.0,
+            attack_power_per_level: 0.5,
+            base_crit_chance: 5,
+        };
+        for (level, want) in [(1, 0), (2, 1), (3, 2), (5, 2), (7, 4)] {
+            let b = r.baseline(level, 50);
+            assert_eq!(b.attack_power, want, "attack_power at level {level}");
+            assert_eq!(b.accuracy, 50 + want, "accuracy at level {level}");
+            assert_eq!(b.evasion, 50 + want, "evasion at level {level}");
+        }
+        // Growth stays the difference of the rounded baselines.
+        let g = r.level_gain(3, 5);
+        assert_eq!(g.attack_power, 0);
+        let g = r.level_gain(1, 3);
+        assert_eq!(g.attack_power, 2);
     }
 
     #[test]
