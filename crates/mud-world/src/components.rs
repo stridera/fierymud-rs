@@ -1275,6 +1275,15 @@ pub struct ItemTimer {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Decomposing;
 
+/// Marker on an item whose proto carries the DECOMPOSING flag (legacy
+/// `ITEM_DECOMP`, e.g. the Ice Dagger): it rots only while no creature
+/// holds it. The instance's `ObjectFlags` carry DECOMPOSING only while
+/// it is actually rotting (legacy `start_decomposing` / `stop_decomposing`
+/// set and clear the flag); this marker remembers that it may rot again
+/// the next time it leaves a creature's possession.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct DecaysUnheld;
+
 /// Coin amount (in copper). On a corpse (or other container) it is
 /// the money inside, claimed by `get all from <corpse>` onto the
 /// player's `Wealth`. On a standalone `Item` it is a loose pile on the
@@ -2771,7 +2780,9 @@ pub struct SlotReservation {
 /// Spell-slot pool for caster classes. Legacy slot model: at level
 /// `L` you have `SpellSlotData.progression[(L, C)]` slots in circle
 /// `C`. A slot is "free" if no `SpellCooldown` for that circle is in
-/// `in_flight` and no [`SlotReservation`] holds it. Starting a cast
+/// `in_flight` and no [`SlotReservation`] holds it. `in_flight` is the
+/// recovery queue in cast order; only its head recovers (see
+/// [`recover_head`](Self::recover_head)). Starting a cast
 /// reserves a slot; completing the spell with a charge result commits
 /// the reservation into a cooldown (recovery starts then); an aborted
 /// or refused cast releases it untouched. Persisted to
@@ -2832,6 +2843,21 @@ impl SpellSlots {
             total_secs: r.recover_secs,
         });
         true
+    }
+
+    /// Drain `delta` seconds from the slot at the head of the recovery
+    /// queue. Legacy `spell_slot_restore_tick`: `in_flight` is one queue
+    /// in cast order across every circle, and only its front entry has a
+    /// running timer; the next slot's timer starts once the front one has
+    /// recovered (surplus seconds are not carried over). Returns the
+    /// circle of a slot that just recovered.
+    pub fn recover_head(&mut self, delta: i32) -> Option<i32> {
+        let head = self.in_flight.first_mut()?;
+        head.secs_remaining -= delta;
+        if head.secs_remaining > 0 {
+            return None;
+        }
+        Some(self.in_flight.remove(0).circle)
     }
 }
 

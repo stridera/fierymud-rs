@@ -667,3 +667,84 @@ fn ice_dagger_announces_the_conjuring_before_the_wielding() {
     let wielded = out.find("wield").expect(&out);
     assert!(conjured < wielded, "{out}");
 }
+
+#[test]
+fn a_conjured_decomposing_dagger_does_not_rot_while_held_but_does_once_dropped() {
+    use mud_db::enums::ObjectFlag;
+    let mut f = ice_dagger_fx();
+    f.world
+        .resource_mut::<ObjectPrototypes>()
+        .by_key
+        .get_mut(&(10, 47))
+        .unwrap()
+        .flags = vec![ObjectFlag::Magic, ObjectFlag::Decomposing];
+    f.cast("'ice dagger'");
+    let dagger = {
+        let mut q = f
+            .world
+            .query_filtered::<Entity, With<mud_world::DecaysUnheld>>();
+        q.single(&f.world).expect("one conjured dagger")
+    };
+    let rotting = |w: &World| {
+        w.get::<mud_world::ObjectFlags>(dagger)
+            .is_some_and(|fl| fl.has(ObjectFlag::Decomposing))
+    };
+    assert!(!rotting(&f.world), "wielded: not decomposing");
+    assert!(f.world.get::<mud_world::ItemTimer>(dagger).is_none());
+    for _ in 0..3 {
+        crate::item_decay::item_decay_tick(&mut f.world);
+    }
+    assert!(f.world.get::<mud_world::ItemTimer>(dagger).is_none());
+    assert!(!rotting(&f.world));
+
+    // Drop it on the floor.
+    let room = f.world.get::<Located>(f.caster).unwrap().0;
+    f.world
+        .entity_mut(dagger)
+        .remove::<mud_world::EquippedSlot>()
+        .insert(Located(room));
+    crate::item_decay::item_decay_tick(&mut f.world);
+    assert!(f.world.get::<mud_world::ItemTimer>(dagger).is_some());
+    assert!(rotting(&f.world), "dropped: decomposing");
+}
+
+fn ice_dagger_messages() -> mud_world::AbilityMessageSet {
+    mud_world::AbilityMessageSet {
+        success_to_caster: Some("<b:white>You conjure a dagger of ice.</>".into()),
+        success_to_room: Some("{actor.name} conjures a dagger of ice.".into()),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn the_room_hears_the_conjuring_before_the_wielding() {
+    let mut f = ice_dagger_fx();
+    f.world
+        .resource_mut::<mud_world::AbilityCatalog>()
+        .messages
+        .insert(ABILITY, ice_dagger_messages());
+    let room = f.world.get::<Located>(f.caster).unwrap().0;
+    let (_watcher, mut watcher_rx) = player_in(&mut f.world, room);
+    f.cast("'ice dagger'");
+    let seen = drain(&mut watcher_rx);
+    let conjured = seen.find("conjures a dagger of ice").expect(&seen);
+    let wielded = seen.find("wields").expect(&seen);
+    assert!(conjured < wielded, "{seen}");
+    assert_eq!(
+        seen.matches("conjures a dagger of ice").count(),
+        1,
+        "told once: {seen}"
+    );
+}
+
+#[test]
+fn the_caster_cast_line_keeps_its_colour() {
+    let mut f = ice_dagger_fx();
+    f.world
+        .resource_mut::<mud_world::AbilityCatalog>()
+        .messages
+        .insert(ABILITY, ice_dagger_messages());
+    let out = f.cast("'ice dagger'");
+    let at = out.find("You conjure a dagger of ice.").expect(&out);
+    assert!(out[..at].contains('\x1b'), "coloured: {out:?}");
+}

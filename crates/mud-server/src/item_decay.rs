@@ -12,8 +12,8 @@
 use bevy_ecs::prelude::*;
 use mud_db::enums::{ObjectFlag, ObjectType};
 use mud_world::{
-    CoinPile, Corpse, Decomposing, Description, Item, ItemTimer, Keywords, Located, LooseCoins,
-    Named, ObjectFlags, ObjectPrototypes, WorldKey,
+    CoinPile, Corpse, DecaysUnheld, Decomposing, Description, Item, ItemTimer, Keywords, Located,
+    LooseCoins, Named, ObjectFlags, ObjectPrototypes, WorldKey,
 };
 
 use crate::commands::{broadcast_room_except_rendered, cap_sentence_start, send_msg};
@@ -41,6 +41,58 @@ fn stop_decomposing_carried(world: &mut World) {
             em.remove::<ItemTimer>();
         }
     }
+}
+
+/// Legacy `obj_from_char` / `unequip_char` / `obj_to_room` call
+/// `start_decomposing` and `obj_to_char` / `equip_char` call
+/// `stop_decomposing`; items here move through too many paths to hook, so
+/// this sweep settles every DECOMPOSING-flagged item (`DecaysUnheld`,
+/// e.g. the Ice Dagger) by where it sits. Held or worn by a creature: not
+/// decomposing, and the instance's DECOMPOSING flag is cleared (the
+/// timer itself is removed by `stop_decomposing_carried`). Lying in a room,
+/// or in a container there: the flag is set and `start_decomposing`
+/// starts the clock. A corpse's contents never decompose.
+fn settle_unheld_decay(world: &mut World) {
+    let flagged: Vec<Entity> = {
+        let mut q = world.query_filtered::<Entity, (With<DecaysUnheld>, With<Item>)>();
+        q.iter(world).collect()
+    };
+    for item in flagged {
+        let rotting = world
+            .get::<ObjectFlags>(item)
+            .is_some_and(|f| f.has(ObjectFlag::Decomposing));
+        if held_by_creature(world, item) {
+            if rotting && let Some(mut f) = world.get_mut::<ObjectFlags>(item) {
+                f.0.retain(|x| *x != ObjectFlag::Decomposing);
+            }
+        } else if lies_in_room(world, item) {
+            if !rotting && let Some(mut f) = world.get_mut::<ObjectFlags>(item) {
+                f.0.push(ObjectFlag::Decomposing);
+            }
+            if world.get::<Decomposing>(item).is_none() && world.get::<ItemTimer>(item).is_none() {
+                start_decomposing(world, item);
+            }
+        }
+    }
+}
+
+/// True when `item` lies in a room, directly or through containers, and
+/// no corpse is among them (a corpse's contents never decompose).
+fn lies_in_room(world: &World, item: Entity) -> bool {
+    let mut at = item;
+    for _ in 0..64 {
+        let Some(holder) = world.get::<Located>(at).map(|l| l.0) else {
+            return false;
+        };
+        if world.get::<mud_world::Room>(holder).is_some() {
+            return true;
+        }
+        if world.get::<Corpse>(holder).is_some() {
+            return false;
+        }
+        at = holder;
+    }
+    false
 }
 
 /// True when the outermost holder of `item` (through any depth of
@@ -71,6 +123,7 @@ fn held_by_creature(world: &World, item: Entity) -> bool {
 /// torch went. Runs at the same 1-Hz cadence as corpse decay.
 pub fn item_decay_tick(world: &mut World) {
     stop_decomposing_carried(world);
+    settle_unheld_decay(world);
     // Snapshot first so we can both mutate timers AND despawn
     // without re-borrowing the query.
     let snapshots: Vec<(Entity, i32)> = {
@@ -606,5 +659,112 @@ mod tests {
         assert!(world.get::<Decomposing>(torch).is_none());
         item_decay_tick(&mut world);
         assert_eq!(world.get::<ItemTimer>(torch).unwrap().remaining_secs, 999);
+    }
+
+    // ---- DECOMPOSING-flagged items rot only when unheld (#35) ----
+
+    /// A flagged item the way `spawn_item` makes one that is held: the
+    /// DECOMPOSING flag is not up, only the `DecaysUnheld` marker.
+    fn flagged(world: &mut World, name: &str, at: Entity) -> Entity {
+        let e = item(world, name, at);
+        world
+            .entity_mut(e)
+            .insert((DecaysUnheld, ObjectFlags(vec![ObjectFlag::Magic])));
+        e
+    }
+
+    fn rotting_flag(world: &World, e: Entity) -> bool {
+        world
+            .get::<ObjectFlags>(e)
+            .is_some_and(|f| f.has(ObjectFlag::Decomposing))
+    }
+
+    #[test]
+    fn a_held_or_worn_decomposing_item_has_no_clock() {
+        let mut world = World::new();
+        let room = world.spawn(mud_world::Room).id();
+        let player = world.spawn((mud_world::Player, Located(room))).id();
+        let dagger = flagged(&mut world, "dagger", player);
+        let worn = flagged(&mut world, "blade", player);
+        world
+            .entity_mut(worn)
+            .insert(mud_world::EquippedSlot(mud_world::Slot::Wield));
+        for _ in 0..5 {
+            item_decay_tick(&mut world);
+        }
+        for e in [dagger, worn] {
+            assert!(world.get::<ItemTimer>(e).is_none());
+            assert!(world.get::<Decomposing>(e).is_none());
+            assert!(!rotting_flag(&world, e));
+        }
+    }
+
+    #[test]
+    fn dropping_it_starts_the_clock_and_picking_it_up_stops_it() {
+        let mut world = World::new();
+        let room = world.spawn(mud_world::Room).id();
+        let player = world.spawn((mud_world::Player, Located(room))).id();
+        let dagger = flagged(&mut world, "dagger", player);
+        item_decay_tick(&mut world);
+        assert!(world.get::<ItemTimer>(dagger).is_none());
+
+        // drop
+        world.entity_mut(dagger).insert(Located(room));
+        item_decay_tick(&mut world);
+        let t = world.get::<ItemTimer>(dagger).expect("clock started");
+        // Level 0 + 11 hours, less the second the starting sweep already ran.
+        assert_eq!(t.remaining_secs, 11 * SECS_PER_MUD_HOUR - 1);
+        assert!(world.get::<Decomposing>(dagger).is_some());
+        assert!(rotting_flag(&world, dagger), "shows as decomposing now");
+        item_decay_tick(&mut world);
+        assert_eq!(
+            world.get::<ItemTimer>(dagger).unwrap().remaining_secs,
+            11 * SECS_PER_MUD_HOUR - 2
+        );
+
+        // get
+        world.entity_mut(dagger).insert(Located(player));
+        item_decay_tick(&mut world);
+        assert!(world.get::<ItemTimer>(dagger).is_none());
+        assert!(!rotting_flag(&world, dagger));
+
+        // give to another character: held there, still no clock
+        let other = world.spawn((mud_world::Player, Located(room))).id();
+        world.entity_mut(dagger).insert(Located(other));
+        item_decay_tick(&mut world);
+        assert!(world.get::<ItemTimer>(dagger).is_none());
+
+        // and dropped again, it starts afresh
+        world.entity_mut(dagger).insert(Located(room));
+        item_decay_tick(&mut world);
+        assert!(world.get::<ItemTimer>(dagger).is_some());
+    }
+
+    #[test]
+    fn put_in_a_container_on_the_floor_it_rots_but_not_in_a_carried_one_or_a_corpse() {
+        let mut world = World::new();
+        let room = world.spawn(mud_world::Room).id();
+        let player = world.spawn((mud_world::Player, Located(room))).id();
+        let chest = item(&mut world, "chest", room);
+        let satchel = item(&mut world, "satchel", player);
+        let bones = corpse(&mut world, room);
+        let in_chest = flagged(&mut world, "a", chest);
+        let in_satchel = flagged(&mut world, "b", satchel);
+        let in_corpse = flagged(&mut world, "c", bones);
+        item_decay_tick(&mut world);
+        assert!(world.get::<ItemTimer>(in_chest).is_some());
+        assert!(world.get::<ItemTimer>(in_satchel).is_none());
+        assert!(world.get::<ItemTimer>(in_corpse).is_none());
+    }
+
+    #[test]
+    fn a_decomposing_item_that_rots_away_is_destroyed() {
+        let mut world = World::new();
+        let room = world.spawn(mud_world::Room).id();
+        let dagger = flagged(&mut world, "dagger", room);
+        item_decay_tick(&mut world);
+        world.get_mut::<ItemTimer>(dagger).unwrap().remaining_secs = 1;
+        item_decay_tick(&mut world);
+        assert!(world.get_entity(dagger).is_err());
     }
 }

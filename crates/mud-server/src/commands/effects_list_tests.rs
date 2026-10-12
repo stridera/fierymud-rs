@@ -185,6 +185,27 @@ fn permanent_effects_show_their_source() {
 }
 
 #[test]
+fn worn_item_origin_keeps_the_items_colours() {
+    let (mut world, player, mut rx) = setup();
+    let ring = world
+        .spawn(Named {
+            name: "a <red>glowing</> ring".to_string(),
+        })
+        .id();
+    add_sourced(&mut world, player, "fly", "worn_item", Some(ring));
+    cmd_effects(&mut world, player, "");
+    let raw = drain(&mut rx);
+    let at = raw.find("glowing").expect("item name shown");
+    assert!(
+        raw[..at]
+            .rfind('\x1b')
+            .is_some_and(|esc| raw[esc..at].contains("31")),
+        "red escape directly before the item's name: {raw:?}"
+    );
+    assert!(!raw.contains("<red>"), "tags are rendered: {raw:?}");
+}
+
+#[test]
 fn permanent_effect_without_known_source_has_no_suffix() {
     let (mut world, player, mut rx) = setup();
     add_effect(&mut world, player, "infravision", -1, None);

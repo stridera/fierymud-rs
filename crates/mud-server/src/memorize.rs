@@ -1,5 +1,5 @@
-//! Spell-slot recovery tick. Decrements `secs_remaining` on the
-//! oldest in-flight cooldown per circle for every online caster, and for every
+//! Spell-slot recovery tick. Decrements `secs_remaining` on the head of the
+//! recovery queue (`SpellSlots::in_flight`) for every online caster, and for every
 //! caster mob running spell AI (a mob carries `MobAi` only with
 //! `mob_ai.enabled` on, so with it off this tick sees players alone). A mob
 //! recovers on the same ladder: sitting doubles the pace, and a meditating mob
@@ -13,9 +13,10 @@
 //!                   trickles back slots; pairs with the user-flagged
 //!                   "you don't become useless in a group" intent.
 //!
-//! Per-circle sequential queueing means casting seven circle-1 spells
-//! at once spreads them into a 30/60/90/... recover ladder rather than
-//! all completing on the same tick — strategy matters.
+//! Recovery is one queue per caster, in cast order, across all circles
+//! (legacy `spellcasts` vector): only the head slot's timer runs, so three
+//! casts take three recoveries back to back (30/60/90 for circle 1) rather
+//! than all completing on the same tick.
 //!
 //! Mirrors legacy `charge_mem` + the regen event in `spell_mem.cpp`;
 //! the legacy `get_spellslot_restore_rate` formula's race/class branches
@@ -101,38 +102,9 @@ pub fn memorize_tick(world: &mut World) {
                         .map_or(0, |c| c.0),
                 fighting.is_some(),
             );
-            // Sequential per-circle recovery — see the head-of-file
-            // doc note. Only the lowest-remaining entry per circle
-            // is ticked; siblings in the same circle wait their turn.
-            let mut indices_to_tick: std::collections::HashMap<i32, (usize, i32)> =
-                std::collections::HashMap::new();
-            for (i, cd) in slots.in_flight.iter().enumerate() {
-                let entry = indices_to_tick
-                    .entry(cd.circle)
-                    .or_insert((i, cd.secs_remaining));
-                if cd.secs_remaining < entry.1 {
-                    *entry = (i, cd.secs_remaining);
-                }
-            }
-            let tick_indices: std::collections::HashSet<usize> =
-                indices_to_tick.values().map(|(i, _)| *i).collect();
-            let mut just_restored: Vec<i32> = Vec::new();
-            let mut idx = 0;
-            slots.in_flight.retain_mut(|cd| {
-                let keep = if tick_indices.contains(&idx) {
-                    cd.secs_remaining -= delta;
-                    if cd.secs_remaining <= 0 {
-                        just_restored.push(cd.circle);
-                        false
-                    } else {
-                        true
-                    }
-                } else {
-                    true
-                };
-                idx += 1;
-                keep
-            });
+            // One global recovery queue, as in legacy: only the head slot's
+            // timer runs, whatever its circle; the next starts after it.
+            let just_restored: Vec<i32> = slots.recover_head(delta).into_iter().collect();
             if !just_restored.is_empty() {
                 restored.push((entity, just_restored));
             }
@@ -183,5 +155,123 @@ mod tests {
         assert_eq!(effective_delta(1, false, 100, false), 2);
         // Always at least 1 when there's any recovery to do.
         assert_eq!(effective_delta(1, false, -50, true), 1);
+    }
+
+    // ---- sequential recovery queue (#133) ----
+
+    use mud_world::{Online, SpellCooldown};
+
+    fn cd(circle: i32, secs: i32) -> SpellCooldown {
+        SpellCooldown {
+            circle,
+            secs_remaining: secs,
+            total_secs: secs,
+        }
+    }
+
+    fn slots_of(queue: Vec<SpellCooldown>) -> SpellSlots {
+        let mut s = SpellSlots::default();
+        s.in_flight = queue;
+        s
+    }
+
+    /// A standing caster (1 s drained per tick) with the given queue.
+    fn caster_with(world: &mut World, queue: Vec<SpellCooldown>) -> Entity {
+        let slots = slots_of(queue);
+        world
+            .spawn((Online, Posture(PostureKind::Standing), slots))
+            .id()
+    }
+
+    /// Run one recovery second (every `RECOVER_PERIOD_TICKS`th tick).
+    fn one_second(world: &mut World, n: u64) {
+        world.insert_resource(TickCount(n * RECOVER_PERIOD_TICKS));
+        memorize_tick(world);
+    }
+
+    fn queue(world: &World, e: Entity) -> Vec<(i32, i32)> {
+        world
+            .get::<SpellSlots>(e)
+            .unwrap()
+            .in_flight
+            .iter()
+            .map(|c| (c.circle, c.secs_remaining))
+            .collect()
+    }
+
+    #[test]
+    fn three_casts_recover_one_after_another() {
+        let mut world = World::new();
+        let e = caster_with(&mut world, vec![cd(1, 30), cd(1, 30), cd(1, 30)]);
+        let mut restored_at = Vec::new();
+        for sec in 1..=95u64 {
+            one_second(&mut world, sec);
+            let left = world.get::<SpellSlots>(e).unwrap().in_flight.len();
+            while restored_at.len() < 3 - left {
+                restored_at.push(sec);
+            }
+        }
+        // Total time is ~3x a single recovery, not 1x.
+        assert_eq!(restored_at, vec![30, 60, 90]);
+        assert!(queue(&world, e).is_empty());
+    }
+
+    #[test]
+    fn only_the_head_timer_runs_and_the_next_starts_fresh() {
+        let mut world = World::new();
+        let e = caster_with(&mut world, vec![cd(1, 30), cd(1, 30), cd(2, 35)]);
+        for sec in 1..=10u64 {
+            one_second(&mut world, sec);
+        }
+        assert_eq!(queue(&world, e), vec![(1, 20), (1, 30), (2, 35)]);
+        for sec in 11..=30u64 {
+            one_second(&mut world, sec);
+        }
+        // The head came back; the second slot only now begins counting.
+        assert_eq!(queue(&world, e), vec![(1, 30), (2, 35)]);
+        one_second(&mut world, 31);
+        assert_eq!(queue(&world, e), vec![(1, 29), (2, 35)]);
+    }
+
+    #[test]
+    fn the_queue_spans_circles_in_cast_order() {
+        let mut world = World::new();
+        // A circle 3 slot cast first blocks the circle 1 slot behind it.
+        let e = caster_with(&mut world, vec![cd(3, 50), cd(1, 30)]);
+        for sec in 1..=49u64 {
+            one_second(&mut world, sec);
+        }
+        assert_eq!(queue(&world, e), vec![(3, 1), (1, 30)]);
+        one_second(&mut world, 50);
+        assert_eq!(queue(&world, e), vec![(1, 30)]);
+    }
+
+    #[test]
+    fn meditating_speeds_the_head_slot_and_overflow_is_not_carried() {
+        let mut world = World::new();
+        let e = caster_with(&mut world, vec![cd(1, 5), cd(1, 30)]);
+        // Standing + meditating drains 2 s per tick: 5 s -> 3 -> 1 -> restored.
+        world.entity_mut(e).insert(Meditating);
+        for sec in 1..=3u64 {
+            one_second(&mut world, sec);
+        }
+        assert_eq!(queue(&world, e), vec![(1, 30)], "overflow second is lost");
+    }
+
+    #[test]
+    fn recover_head_reports_the_restored_circle() {
+        let mut s = slots_of(vec![cd(4, 2), cd(1, 30)]);
+        assert_eq!(s.recover_head(1), None);
+        assert_eq!(s.recover_head(1), Some(4));
+        assert_eq!(s.in_flight.len(), 1);
+        assert_eq!(SpellSlots::default().recover_head(5), None);
+    }
+
+    #[test]
+    fn queue_order_survives_a_save_round_trip() {
+        let s = slots_of(vec![cd(3, 40), cd(1, 30), cd(2, 12)]);
+        let back: SpellSlots = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        let order: Vec<i32> = back.in_flight.iter().map(|c| c.circle).collect();
+        assert_eq!(order, vec![3, 1, 2]);
     }
 }

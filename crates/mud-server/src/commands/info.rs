@@ -1538,7 +1538,9 @@ inventory::submit! {
             summary: "Show your spell-slot pool and any in-flight cooldowns.",
             long: "Pooled slot model (legacy): each circle has \
                    'class+level' slots; casting consumes a slot and \
-                   starts a per-circle cooldown timer. Slots regenerate \
+                   queues its recovery. Slots recover one at a time, in \
+                   the order you cast: the next slot's timer starts only \
+                   once the one ahead of it is back. They recover \
                    on their own under Sleeping / Resting / Sitting \
                    postures (faster while Meditating). Format \
                    'Circle N: free/max  (recovering: 12s, 30s)'. \
@@ -13992,10 +13994,9 @@ fn permanent_origin(
     use mud_world::mob_effects::{is_race_effect, is_worn_item_effect};
     if is_worn_item_effect(source) {
         let raw = item.map(|i| name_of(world, i)).filter(|n| !n.is_empty())?;
-        return Some(format!(
-            "from {}",
-            render_color_tags(&raw, ColorMode::Strip)
-        ));
+        // Keep the item's own colour tags: this line is rendered for the
+        // player's client, unlike the plain-text GMCP feed.
+        return Some(format!("from {raw}"));
     }
     if is_race_effect(source) {
         let race = world

@@ -16,8 +16,9 @@ use bevy_ecs::prelude::*;
 use mud_db::enums::ObjectFlag;
 
 use crate::components::{
-    AttachedTriggers, BoardLink, Description, FromObjectReset, Item, ItemTimer, Keywords,
-    LiquidContainer, Located, Mob, Named, ObjectFlags, ObjectRestrictions, Player, WorldKey,
+    AttachedTriggers, BoardLink, DecaysUnheld, Description, FromObjectReset, Item, ItemTimer,
+    Keywords, LiquidContainer, Located, Mob, Named, ObjectFlags, ObjectRestrictions, Player,
+    WorldKey,
 };
 use crate::resources::{ObjectProto, TriggerCatalog};
 
@@ -138,8 +139,21 @@ fn spawn_item(
     if let Some(keys) = trigger_keys {
         bundle.insert(AttachedTriggers(keys));
     }
+    // DECOMPOSING (legacy `ITEM_DECOMP`) is the state "currently rotting",
+    // and legacy `obj_to_char` / `equip_char` clear it for anything a player
+    // takes. So an instance minted into a creature's hands, pack or worn
+    // slot (conjure, buy, login restore) starts without it; `DecaysUnheld`
+    // lets the decay sweep bring it back when the item is dropped.
+    let held_at_spawn = held_by_creature_chain(bundle.world(), location);
     if !proto.flags.is_empty() {
-        bundle.insert(ObjectFlags(proto.flags.clone()));
+        let mut flags = proto.flags.clone();
+        if flags.contains(&ObjectFlag::Decomposing) {
+            bundle.insert(DecaysUnheld);
+            if held_at_spawn {
+                flags.retain(|f| *f != ObjectFlag::Decomposing);
+            }
+        }
+        bundle.insert(ObjectFlags(flags));
     }
     if !proto.restrictions.is_empty() {
         bundle.insert(ObjectRestrictions(proto.restrictions.clone()));
@@ -149,7 +163,7 @@ fn spawn_item(
     // worn slot (login restore, chest withdraw, buy, conjure) is carried, and
     // legacy `unhide_object` clears hiddenness on pickup, so it would only
     // leave the item hidden even from its owner once dropped.
-    let carried = held_by_creature_chain(bundle.world(), location);
+    let carried = held_at_spawn;
     if !carried && let Some(h) = proto.initial_hiddenness() {
         bundle.insert(h);
     }

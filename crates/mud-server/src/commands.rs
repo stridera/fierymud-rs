@@ -17564,6 +17564,9 @@ pub(crate) fn invoke_ability_core(
     // room messages (the generic cast header and success templates would
     // double them).
     let mut custom_messaging = false;
+    // Set when a conjure-and-wield arm has already told the room, so the
+    // post-loop room line does not repeat after the wield line.
+    let mut room_line_sent = false;
     // Set by a multi-bolt damage arm, which sends the victim and room
     // templates once per bolt itself.
     let mut per_hit_messaging = false;
@@ -18758,6 +18761,19 @@ pub(crate) fn invoke_ability_core(
                 // end of the loop, so send it ahead of wear_item's own message.
                 if wield && let Some(header) = pending_header.take() {
                     send_to(world, player, header);
+                }
+                // Bystanders read the same order: the conjuring, then the
+                // "wields" line wear_item broadcasts.
+                if wield && !room_line_sent {
+                    room_line_sent = true;
+                    broadcast_cast_room_line(
+                        world,
+                        player,
+                        target_entity,
+                        messages_pre.as_ref(),
+                        (&actor_name_pre, actor_p_pre),
+                        (&target_name_pre, target_p_pre),
+                    );
                 }
                 if wield && wear_item(world, player, created, WearWhere::Hands(Slot::Wield), false)
                 {
@@ -21006,46 +21022,21 @@ pub(crate) fn invoke_ability_core(
     // Room broadcast: success_to_room (or success_self_room when
     // self-targeted). Skipped if the ability has no template — the
     // dispatcher previously emitted nothing to bystanders, so this
-    // is purely additive.
-    let room_template = messages.as_ref().and_then(|m| {
-        if target_entity == player {
-            m.success_self_room
-                .as_deref()
-                .or(m.success_to_room.as_deref())
-        } else {
-            m.success_to_room.as_deref()
-        }
-    });
+    // is purely additive. A conjure-and-wield arm has already told the
+    // room (ahead of its own wield line) and sets `room_line_sent`.
     if !applied_msgs.is_empty()
         && !custom_messaging
         && !per_hit_messaging
         && !refreshed
-        && let Some(t) = room_template
-        && let Some(located) = world.get::<Located>(player).copied()
+        && !room_line_sent
     {
-        // Bystanders see actor + target as third parties — never reflexive.
-        let rendered = render_ability_template(
-            t,
+        broadcast_cast_room_line(
+            world,
+            player,
+            target_entity,
+            messages.as_ref(),
             (&actor_name, actor_p_pre),
             (&target_name_raw, target_p_pre),
-            false,
-            Viewer::Bystander,
-        );
-        let mut except: Vec<Entity> = vec![player];
-        if target_entity != player {
-            except.push(target_entity);
-        }
-        // Observers who cannot see the caster or the target get "someone".
-        let mut actors: Vec<(Entity, &str)> = vec![(player, actor_name.as_str())];
-        if target_entity != player {
-            actors.push((target_entity, target_name_raw.as_str()));
-        }
-        broadcast_room_anonymised(
-            world,
-            located.0,
-            &except,
-            &actors,
-            &format!("{rendered}\r\n"),
         );
     }
     // Per-condition cleanse lines (Cure Blind's "Your vision returns!").
@@ -21649,6 +21640,53 @@ pub(crate) enum Viewer {
     Target,
     /// Anyone else in the room.
     Bystander,
+}
+
+/// Tell the bystanders about a completed cast: the ability's
+/// `success_to_room` (or `success_self_room` when self-targeted) line,
+/// anonymised for observers who cannot see the caster or the target.
+fn broadcast_cast_room_line(
+    world: &mut World,
+    player: Entity,
+    target_entity: Entity,
+    messages: Option<&mud_world::AbilityMessageSet>,
+    actor: (&str, Pronouns),
+    target: (&str, Pronouns),
+) {
+    let room_template = messages.and_then(|m| {
+        if target_entity == player {
+            m.success_self_room
+                .as_deref()
+                .or(m.success_to_room.as_deref())
+        } else {
+            m.success_to_room.as_deref()
+        }
+    });
+    let Some(t) = room_template else {
+        return;
+    };
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return;
+    };
+    let (actor_name, target_name) = (actor.0, target.0);
+    // Bystanders see actor + target as third parties — never reflexive.
+    let rendered = render_ability_template(t, actor, target, false, Viewer::Bystander);
+    let mut except: Vec<Entity> = vec![player];
+    if target_entity != player {
+        except.push(target_entity);
+    }
+    // Observers who cannot see the caster or the target get "someone".
+    let mut actors: Vec<(Entity, &str)> = vec![(player, actor_name)];
+    if target_entity != player {
+        actors.push((target_entity, target_name));
+    }
+    broadcast_room_anonymised(
+        world,
+        located.0,
+        &except,
+        &actors,
+        &format!("{rendered}\r\n"),
+    );
 }
 
 /// Substitute `{actor.X}` / `{target.X}` placeholders in an
