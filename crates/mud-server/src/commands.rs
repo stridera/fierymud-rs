@@ -17567,6 +17567,8 @@ pub(crate) fn invoke_ability_core(
     // Set when a conjure-and-wield arm has already told the room, so the
     // post-loop room line does not repeat after the wield line.
     let mut room_line_sent = false;
+    // Set by a `create` effect with `wield: true` whose hands were full.
+    let mut wield_refused = false;
     // Set by a multi-bolt damage arm, which sends the victim and room
     // templates once per bolt itself.
     let mut per_hit_messaging = false;
@@ -18748,6 +18750,10 @@ pub(crate) fn invoke_ability_core(
                             player,
                             format!("Your hands are not free to wield {}.\r\n", proto.name),
                         );
+                        // Legacy fails the cast at completion with only that
+                        // line: no success text to the caster or the room, and
+                        // nothing is conjured (so nothing can go missing).
+                        wield_refused = true;
                         applied_msgs.push(format!("{pretty} (hands not free)"));
                         continue;
                     }
@@ -18782,7 +18788,7 @@ pub(crate) fn invoke_ability_core(
                         pretty, proto.name
                     ));
                 } else {
-                    applied_msgs.push(format!("{} ({} appears in your hands)", pretty, proto.name));
+                    applied_msgs.push(format!("{} ({} appears in your pack)", pretty, proto.name));
                 }
             }
             "portal" => {
@@ -20935,7 +20941,8 @@ pub(crate) fn invoke_ability_core(
             || lower.contains("(mob nosummon")
             || lower.contains("(room nosummon")
             || lower.contains("(arena asymmetry")
-            || lower.contains("(target not dead"))
+            || lower.contains("(target not dead")
+            || lower.contains("(hands not free"))
     });
     let refreshed = recast_refresh && !custom_messaging && any_non_refusal;
     if refreshed {
@@ -21029,6 +21036,7 @@ pub(crate) fn invoke_ability_core(
         && !per_hit_messaging
         && !refreshed
         && !room_line_sent
+        && !wield_refused
     {
         broadcast_cast_room_line(
             world,
@@ -24614,6 +24622,32 @@ pub(crate) fn broadcast_room_visible(
     targets.retain(|e| !except.contains(e) && can_see_player(world, *e, sender));
     let msg = cap_sentence_start(raw_msg);
     for t in targets {
+        send_to(world, t, msg.as_str());
+    }
+}
+
+/// World-wide announcement about `subject` (legacy `all_except_printf`, used
+/// for "The ground shakes slightly with the arrival of $n." on entering the
+/// game and "The world seems to pause momentarily as $n leaves this realm."
+/// on leaving it): every connected, in-game player except `subject` gets
+/// the line. Legacy has no player toggle for it. It skipped staff with a
+/// wizinvis level; here anyone the recipient cannot see (wizinvis above the
+/// recipient's level, or magical invisibility they cannot pierce) is not
+/// announced either. Blindness does not matter, as with the global channels.
+pub(crate) fn broadcast_world_announcement(world: &mut World, subject: Entity, raw_msg: &str) {
+    let targets: Vec<Entity> = {
+        let mut q = world
+            .query_filtered::<Entity, (With<Player>, With<mud_world::Online>, With<Connection>)>();
+        q.iter(world).collect()
+    };
+    let msg = cap_sentence_start(raw_msg);
+    for t in targets {
+        if t == subject
+            || hidden_by_magic_from(world, t, subject)
+            || wiz_hidden_from(world, t, subject)
+        {
+            continue;
+        }
         send_to(world, t, msg.as_str());
     }
 }

@@ -501,13 +501,36 @@ fn a_create_effect_with_wield_puts_the_object_in_the_wield_slot() {
 #[test]
 fn a_create_effect_with_wield_makes_nothing_when_the_hand_is_full() {
     let mut f = ice_dagger_fx();
-    f.cast("'ice dagger'");
+    let room = f.world.get::<Located>(f.caster).unwrap().0;
+    let (watcher, mut watcher_rx) = player_in(&mut f.world, room);
+    f.world.entity_mut(watcher).insert(mud_world::Named {
+        name: "Watcher".into(),
+    });
+    let first = f.cast("'ice dagger'");
+    drain(&mut watcher_rx);
     let out = f.cast("'ice dagger'");
     assert!(
         out.contains("Your hands are not free to wield a dagger of ice"),
         "{out}"
     );
     assert_eq!(f.carried(), vec![(10, 47)], "still just the first one");
+    assert_eq!(
+        wielded(&mut f),
+        vec![(10, 47)],
+        "first dagger stays wielded"
+    );
+    // The failed cast is only the refusal: the success line of the first
+    // (working) cast must not appear, for the caster or the room.
+    let success_line = first
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.contains("wield"))
+        .unwrap_or_else(|| panic!("no success line in first cast: {first}"))
+        .to_string();
+    assert!(!out.contains(&success_line), "{out}");
+    assert_eq!(out.trim().lines().count(), 1, "{out}");
+    let seen = drain(&mut watcher_rx);
+    assert!(seen.trim().is_empty(), "room told of a failed cast: {seen}");
 }
 
 #[test]

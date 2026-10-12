@@ -1459,6 +1459,18 @@ fn retire_player(world: &mut World, entity: Entity, pool: &PgPool) -> bool {
     // clients without GMCP support also see the departure —
     // without this, players in the room had no signal an
     // ally just logged out / disconnected.
+    // Legacy `remove_player_from_game`: everyone online hears of the departure
+    // (quit, camp, rent, idle kick, dropped link timing out alike).
+    {
+        let player_name = commands::name_of(world, entity);
+        commands::broadcast_world_announcement(
+            world,
+            entity,
+            &format!(
+                "The world seems to pause momentarily as {player_name} leaves this realm.\r\n"
+            ),
+        );
+    }
     if let Some(room) = world.get::<Located>(entity).map(|l| l.0) {
         commands::broadcast_room_player_diff(world, room, entity, "RemovePlayer");
         let player_name = commands::name_of(world, entity);
@@ -4820,6 +4832,12 @@ fn show_enter_game(
             entity,
             &[entity],
             &commands::cap_sentence_start(&format!("{player_name} has entered the game.\r\n")),
+        );
+        // Legacy `enter_player_game`: everyone online hears of the arrival.
+        commands::broadcast_world_announcement(
+            world,
+            entity,
+            &format!("The ground shakes slightly with the arrival of {player_name}.\r\n"),
         );
         commands::info::cmd_look(world, entity, "");
     }
@@ -8909,6 +8927,68 @@ pub(crate) mod tests {
         );
         let mine = drain(&mut my_rx);
         assert!(!mine.contains("has entered the game"), "{mine}");
+    }
+
+    #[test]
+    fn everyone_online_hears_of_an_arrival_but_not_those_who_cannot_see_the_arrival() {
+        let mut world = World::new();
+        let room = enter_game_room(&mut world);
+        let far = world.spawn(mud_world::Room).id();
+        let (me, mut my_rx) = enter_game_player(&mut world, room, "Tester");
+        let (_far, mut far_rx) = enter_game_player(&mut world, far, "Faraway");
+        let (low, mut low_rx) = enter_game_player(&mut world, far, "Lowly");
+        let (high, mut high_rx) = enter_game_player(&mut world, far, "Highly");
+        world.entity_mut(low).get_mut::<Profile>().unwrap().level = 10;
+        world.entity_mut(high).get_mut::<Profile>().unwrap().level = 60;
+        world.entity_mut(me).insert(mud_world::WizInvis(50));
+
+        show_enter_game(&mut world, me, "Tester", false, false);
+        let line = "The ground shakes slightly with the arrival of Tester.";
+        assert!(
+            !drain(&mut far_rx).contains(line),
+            "level 20 sees wizinvis 50"
+        );
+        assert!(!drain(&mut low_rx).contains(line));
+        assert!(drain(&mut high_rx).contains(line));
+        assert!(!drain(&mut my_rx).contains("ground shakes"));
+
+        // Visible arrival: far-away players hear it exactly once.
+        world.entity_mut(me).remove::<mud_world::WizInvis>();
+        show_enter_game(&mut world, me, "Tester", false, false);
+        let seen = drain(&mut far_rx);
+        assert_eq!(seen.matches(line).count(), 1, "{seen}");
+        // Magical invisibility hides it from those who cannot pierce it.
+        world.entity_mut(me).insert(mud_world::Invisible);
+        show_enter_game(&mut world, me, "Tester", false, false);
+        assert!(!drain(&mut far_rx).contains(line));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn quit_is_announced_world_wide_unless_the_quitter_is_wizinvis() {
+        let mut world = World::new();
+        world.insert_resource(mud_world::SocialRegistry::default());
+        let pool = failing_pool();
+        world.insert_resource(SaveCoordinator::default());
+        let mut router = ConnRouter::new();
+        router.close_conn = |_| true;
+        let room = world.spawn(mud_world::Room).id();
+        let far = world.spawn(mud_world::Room).id();
+        let (_leaver, _rx_leaver) = playing_in(&mut router, &mut world, room, 1, "Leaver");
+        let (far_e, mut far_rx) = playing_in(&mut router, &mut world, far, 2, "Faraway");
+        world.entity_mut(far_e).insert(mud_world::Online);
+
+        router.on_line(1, "quit".into(), &pool, &mut world).await;
+        let seen = drain(&mut far_rx);
+        assert!(
+            seen.contains("The world seems to pause momentarily as Leaver leaves this realm."),
+            "{seen}"
+        );
+
+        let (hidden, _rx) = playing_in(&mut router, &mut world, room, 3, "Ghosty");
+        world.entity_mut(hidden).insert(mud_world::WizInvis(100));
+        router.on_line(3, "quit".into(), &pool, &mut world).await;
+        let seen = drain(&mut far_rx);
+        assert!(!seen.contains("Ghosty"), "{seen}");
     }
 
     #[tokio::test(flavor = "current_thread")]
