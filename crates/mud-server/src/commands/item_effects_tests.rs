@@ -1446,7 +1446,19 @@ fn cleanse_paths_return_a_cast_resistance_to_its_baseline() {
 #[test]
 fn cancel_returns_a_cast_resistance_to_its_baseline() {
     let (mut world, p, mut rx) = setup();
-    cast_fire_ward(&mut world, p, 10, 30, 600);
+    // `cancel` only drops spells, so the ward needs a (beneficial) source.
+    let mut ward = super::test_support::ability_def(
+        RESIST,
+        "Fire Ward",
+        mud_db::abilities::AbilityKind::Spell,
+    );
+    ward.violent = false;
+    world
+        .resource_mut::<mud_world::AbilityCatalog>()
+        .by_name
+        .insert("fire_ward".into(), ward);
+    let ward_fx = cast_fire_ward(&mut world, p, 10, 30, 600);
+    world.get_mut::<EffectInstance>(ward_fx).unwrap().ability_id = Some(RESIST);
     dispatch(&mut world, p, "cancel resistance");
     let _ = drain(&mut rx);
     assert_eq!(fire_resistance(&world, p), Some(10));

@@ -195,12 +195,13 @@ inventory::submit! {
         category: Category::Combat,
         help: Help {
             usage: "cancel [<effect>]",
-            summary: "Drop a non-permanent buff from yourself.",
-            long: "With no arg, lists effects you can cancel \
-                   (anything not flagged permanent). With an effect \
-                   name, finds the matching 'EffectInstance' on you \
-                   and despawns it. Permanent effects (e.g. innate \
-                   resistances) refuse to cancel.",
+            summary: "Drop one of your own timed beneficial spells.",
+            long: "With no arg, lists the effects you can cancel. With an \
+                   effect name (a prefix works; quote multi-word names), \
+                   ends that beneficial spell on you right away, exactly \
+                   as if it had worn off. Permanent effects (racial or \
+                   from gear) and harmful ones cannot be cancelled, and \
+                   you cannot cancel while fighting.",
         },
         run: cmd_cancel,
     }
@@ -334,20 +335,137 @@ pub(crate) fn cmd_abort(world: &mut World, player: Entity, _args: &str) {
         "You're not even casting a spell right now. (Use 'cancel <effect>' to drop an active buff.)\r\n",
     );
 }
+/// Why an effect on the player can or cannot be dropped with `cancel`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CancelStatus {
+    /// A timed, beneficial spell effect (or a wall the player may drop).
+    Ok,
+    /// Race / worn-item innate, or an effect with no end.
+    Permanent,
+    /// A debuff: hostile or violent source ability, or a `debuff`-tagged
+    /// effect definition.
+    Harmful,
+    /// No source ability to vouch that it is beneficial (bleed, fear's
+    /// stun, rest's Refreshed, admin effects).
+    NotASpell,
+}
+
+/// One effect `cancel` considers: its listing label and the names it
+/// answers to.
+struct CancelRow {
+    entity: Entity,
+    name: String,
+    label: String,
+    /// Source ability's plain name, so `cancel enhance` works next to the
+    /// stat label.
+    src: Option<String>,
+    ability_id: Option<i32>,
+    remaining: i32,
+    status: CancelStatus,
+}
+
+/// Classify one effect for `cancel`. Beneficial is read from existing
+/// data: an effect is harmful when its source ability is hostile or
+/// violent (the same split the mob AI buff / debuff tally uses) or its
+/// `Effect` row carries the `debuff` tag. There is no explicit
+/// beneficial flag in the schema. A god may drop anything but a race or
+/// item innate, whose lifetime belongs to its source.
+fn cancel_status(
+    world: &World,
+    inst: &EffectInstance,
+    harmful_abilities: &std::collections::HashMap<i32, bool>,
+    god: bool,
+) -> CancelStatus {
+    if mud_world::mob_effects::is_innate_effect(&inst.source) {
+        return CancelStatus::Permanent;
+    }
+    if god {
+        return CancelStatus::Ok;
+    }
+    if inst.remaining_secs < 0 {
+        return CancelStatus::Permanent;
+    }
+    let Some(&ability_harmful) = inst.ability_id.and_then(|id| harmful_abilities.get(&id)) else {
+        return CancelStatus::NotASpell;
+    };
+    let debuff_tagged = world
+        .get_resource::<mud_world::EffectCatalog>()
+        .and_then(|c| c.by_id.get(&inst.kind))
+        .is_some_and(|def| def.tags.iter().any(|t| t.eq_ignore_ascii_case("debuff")));
+    if ability_harmful || debuff_tagged {
+        CancelStatus::Harmful
+    } else {
+        CancelStatus::Ok
+    }
+}
+
+/// How well `needle` names a row: 0 exact, 1 in-order word prefix (`ench`,
+/// `stone s`), 2 each typed word begins some word of a name (`skin`).
+fn cancel_match_tier(needle: &str, row: &CancelRow) -> Option<u8> {
+    use mud_world::targeting::{NameRank, names_match, rank_ability_name};
+    let words = |s: &str| s.replace(['_', '-'], " ");
+    let names: Vec<String> = std::iter::once(row.label.as_str())
+        .chain(std::iter::once(row.name.as_str()))
+        .chain(row.src.as_deref())
+        .map(words)
+        .collect();
+    let best = names
+        .iter()
+        .map(|n| rank_ability_name(needle, n))
+        .min_by_key(|r| match r {
+            NameRank::Exact => 0,
+            NameRank::Prefix => 1,
+            NameRank::None => 2,
+        });
+    match best {
+        Some(NameRank::Exact) => Some(0),
+        Some(NameRank::Prefix) => Some(1),
+        _ => names_match(needle, names.iter().map(String::as_str)).then_some(2),
+    }
+}
+
+/// The first row at the best tier: the first exact match, else the first
+/// prefix match, else the first loose word match.
+fn pick_cancel_row<'a>(needle: &str, rows: &[&'a CancelRow]) -> Option<&'a CancelRow> {
+    rows.iter()
+        .filter_map(|r| cancel_match_tier(needle, r).map(|t| (t, *r)))
+        .min_by_key(|(t, _)| *t)
+        .map(|(_, r)| r)
+}
+
+/// `cancel [<effect>]`: drop one of your own timed, beneficial spell
+/// effects before it wears off. Out of combat only, instant. The effect
+/// ends through the expiry path ([`crate::effects::remove_effect_instance`]
+/// after the normal wear-off text), so stat and flag reversals, hooks and
+/// the GMCP effect list behave exactly as on a natural wear-off.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
-    let needle = args.trim().to_ascii_lowercase();
-    // Snapshot every effect on the player + its source-ability
-    // plain_name (when the originating ability is known). The
-    // ability name is what the user sees on `effects` ("from
-    // Enhance Ability"), so matching against it lets `cancel
-    // enhance` work alongside `cancel cha`.
-    let ability_names: std::collections::HashMap<i32, String> = world
+    let god = mud_world::bypasses_restrictions(world, player);
+    let needle = if args.trim_start().starts_with(['\'', '"']) {
+        crate::commands::parse_quoted_first_token(args).0
+    } else {
+        args.trim().to_string()
+    }
+    .to_ascii_lowercase();
+    // id -> (plain name, hostile or violent). The plain name is what the
+    // user sees on `effects` ("from Enhance Ability"), so `cancel enhance`
+    // works alongside `cancel cha`.
+    let abilities: std::collections::HashMap<i32, (String, bool)> = world
         .resource::<crate::commands::AbilityCatalog>()
         .by_name
         .values()
-        .map(|d| (d.id, d.plain_name.replace('_', " ").to_ascii_lowercase()))
+        .map(|d| {
+            (
+                d.id,
+                (
+                    d.plain_name.replace('_', " ").to_ascii_lowercase(),
+                    d.violent || crate::commands::ability_is_hostile(world, d),
+                ),
+            )
+        })
         .collect();
+    let harmful: std::collections::HashMap<i32, bool> =
+        abilities.iter().map(|(id, (_, h))| (*id, *h)).collect();
     // Also pull effects in the player's current room when the name
     // starts with "wall-" — that's the caster (or any room
     // occupant) cleaning up a barrier they no longer want. Other
@@ -358,73 +476,105 @@ pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
     // are scoped narrowly enough that "anyone in the room can
     // drop one" matches the immediate, blocking-the-only-path UX.
     let player_room = world.get::<mud_world::Located>(player).map(|l| l.0);
-    let cancellable: Vec<(Entity, String, Option<String>, i32, String)> = {
+    let rows: Vec<CancelRow> = {
         let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
-        q.iter(world)
-            .filter(|(_, inst, a)| {
+        let mut rows = Vec::new();
+        for (e, inst, a) in q.iter(world) {
+            let is_wall = a.0 != player
+                && player_room.is_some_and(|r| a.0 == r)
+                && inst.name.starts_with("wall-");
+            if a.0 != player && !is_wall {
+                continue;
+            }
+            let status = if is_wall {
                 if inst.remaining_secs < 0 {
-                    return false;
+                    CancelStatus::Permanent
+                } else {
+                    CancelStatus::Ok
                 }
-                if a.0 == player {
-                    return true;
-                }
-                player_room.is_some_and(|r| a.0 == r) && inst.name.starts_with("wall-")
-            })
-            .map(|(e, inst, _)| {
-                let src = inst
+            } else {
+                cancel_status(world, inst, &harmful, god)
+            };
+            rows.push(CancelRow {
+                entity: e,
+                name: inst.name.clone(),
+                label: super::info::effect_label(world, inst),
+                src: inst
                     .ability_id
-                    .and_then(|id| ability_names.get(&id).cloned());
-                (
-                    e,
-                    inst.name.clone(),
-                    src,
-                    inst.remaining_secs,
-                    super::info::effect_label(world, inst),
-                )
-            })
-            .collect()
+                    .and_then(|id| abilities.get(&id).map(|(n, _)| n.clone())),
+                ability_id: inst.ability_id,
+                remaining: inst.remaining_secs,
+                status,
+            });
+        }
+        rows
     };
-    if cancellable.is_empty() {
-        send_to(world, player, "You have no effects you can cancel.\r\n");
-        return;
-    }
+    let cancellable: Vec<&CancelRow> = rows
+        .iter()
+        .filter(|r| r.status == CancelStatus::Ok)
+        .collect();
     if needle.is_empty() {
-        let mut out = format!("\r\n{} cancellable effect(s):\r\n", cancellable.len());
-        for (_, _, _, remaining, shown) in &cancellable {
-            let hours = super::info::format_effect_hours(*remaining);
-            // A spell's row is named for its ability, so it needs no
-            // "from ..." attribution.
-            out.push_str(&format!("  {shown} ({hours})\r\n"));
+        if cancellable.is_empty() {
+            send_to(world, player, "You have no effects you can cancel.\r\n");
+            return;
+        }
+        // An ability that applies several effects lists as one row.
+        let mut seen = std::collections::HashSet::new();
+        let listed: Vec<&&CancelRow> = cancellable
+            .iter()
+            .filter(|r| r.ability_id.is_none_or(|id| seen.insert(id)))
+            .collect();
+        let mut out = format!("\r\n{} cancellable effect(s):\r\n", listed.len());
+        for r in listed {
+            let hours = super::info::format_effect_hours(r.remaining);
+            out.push_str(&format!("  {} ({hours})\r\n", r.label));
         }
         out.push_str("\r\nUse 'cancel <name>' to drop one.\r\n");
         send_to(world, player, out);
         return;
     }
-    let target = cancellable
-        .iter()
-        .find(|(_, name, src, _, label)| {
-            let words = |s: &str| s.replace(['_', '-'], " ");
-            mud_world::targeting::names_match(&needle, std::iter::once(words(name).as_str()))
-                || mud_world::targeting::names_match(
-                    &needle,
-                    std::iter::once(words(label).as_str()),
-                )
-                || src.as_deref().is_some_and(|s| {
-                    mud_world::targeting::names_match(&needle, std::iter::once(words(s).as_str()))
-                })
-        })
-        .map(|(e, ..)| *e);
-    let Some(target_effect) = target else {
+    if !god && crate::commands::in_combat(world, player) {
         send_to(
             world,
             player,
-            format!("No cancellable effect matching '{needle}' on you.\r\n"),
+            "You can't cancel an effect in the middle of a fight!\r\n",
         );
         return;
+    }
+    let Some(chosen) = pick_cancel_row(&needle, &cancellable) else {
+        // Name the reason when the match is an effect that cannot go.
+        let others: Vec<&CancelRow> = rows
+            .iter()
+            .filter(|r| r.status != CancelStatus::Ok)
+            .collect();
+        let msg = match pick_cancel_row(&needle, &others) {
+            Some(r) => {
+                let why = match r.status {
+                    CancelStatus::Permanent => "it is permanent",
+                    CancelStatus::Harmful => "it is harmful, not a blessing",
+                    _ => "it is not a spell you can drop",
+                };
+                format!("You can't cancel {}: {why}.\r\n", r.label)
+            }
+            None => format!("No cancellable effect matching '{needle}' on you.\r\n"),
+        };
+        send_to(world, player, msg);
+        return;
     };
-    let removed_name = world
-        .get::<EffectInstance>(target_effect)
-        .map_or_else(|| "?".to_string(), |i| i.name.clone());
+    let label = chosen.label.clone();
+    let removed_name = chosen.name.clone();
+    let chosen_ability = chosen.ability_id;
+    // Every effect the same ability applied goes together (Statue: statue
+    // plus familiarity), so the spell is truly dropped.
+    let doomed: Vec<Entity> = match chosen_ability {
+        Some(id) => cancellable
+            .iter()
+            .filter(|r| r.ability_id == Some(id))
+            .map(|r| r.entity)
+            .collect(),
+        None => vec![chosen.entity],
+    };
+    let target_effect = chosen.entity;
     // If this is a wall, the room carries a RoomBlockedExits map
     // keyed on Direction that effect-expiry normally cleans up via
     // `effects_tick`. Despawning the EffectInstance directly skips
@@ -435,7 +585,8 @@ pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
     // broadcast the dissolve to other players in the room so they
     // get the same "wall is gone" signal `effects_tick` would
     // emit on a natural expiry.
-    if removed_name.starts_with("wall-") {
+    let is_wall = removed_name.starts_with("wall-");
+    if is_wall {
         let target_room = world.get::<AppliedTo>(target_effect).map(|a| a.0);
         let mut dissolved: Option<(mud_db::enums::Direction, String, bevy_ecs::entity::Entity)> =
             None;
@@ -481,11 +632,19 @@ pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
             }
         }
     }
-    let bearer = world
-        .get::<AppliedTo>(target_effect)
-        .map_or(player, |a| a.0);
-    crate::effects::remove_effect_instance(world, bearer, target_effect);
-    send_to(world, player, format!("You cancel {removed_name}.\r\n"));
+    send_to(world, player, format!("You cancel {label}.\r\n"));
+    // The normal wear-off text first (a wall's dissolve was broadcast
+    // above), then the same early-removal path dispel uses.
+    if !is_wall {
+        crate::effects::send_wearoff_messages(world, player, &removed_name, chosen_ability);
+    }
+    for e in doomed {
+        // A hook or sibling removal may already have taken it.
+        if world.get::<EffectInstance>(e).is_some() {
+            let bearer = world.get::<AppliedTo>(e).map_or(player, |a| a.0);
+            crate::effects::remove_effect_instance(world, bearer, e);
+        }
+    }
 }
 /// Resolve what `study` was given with the cast matcher: quoted or unquoted
 /// multi-word names, an exact name first, then a name prefix.

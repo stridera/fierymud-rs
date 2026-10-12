@@ -566,6 +566,9 @@ pub(crate) use boards::compose_board_step;
 #[cfg(test)]
 #[path = "commands/buff_strip_gate_tests.rs"]
 mod buff_strip_gate_tests;
+#[cfg(test)]
+#[path = "commands/cancel_tests.rs"]
+mod cancel_tests;
 #[path = "commands/channels.rs"]
 mod channels;
 #[path = "commands/clan_chat.rs"]

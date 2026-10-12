@@ -620,6 +620,67 @@ pub(crate) fn strip_non_innate_effects(world: &mut World, target: Entity) -> usi
     removed
 }
 
+/// The wear-off text an ending effect shows: the ability's
+/// `wearoff_to_target` line (else a terse "Your <name> fades.") to the
+/// bearer, and its `wearoff_to_room` line, when it has one, to the room.
+/// `ability_id` is None for hardcoded effects (rend's bleed, gouge's
+/// blind, admin tests), which fall through to the terse default. Shared
+/// by natural expiry ([`effects_tick`]) and the player's `cancel`.
+pub(crate) fn send_wearoff_messages(
+    world: &mut World,
+    target: Entity,
+    name: &str,
+    ability_id: Option<i32>,
+) {
+    let (wearoff_target, wearoff_room) = ability_id
+        .and_then(|aid| {
+            world
+                .resource::<AbilityCatalog>()
+                .messages
+                .get(&aid)
+                .map(|m| (m.wearoff_to_target.clone(), m.wearoff_to_room.clone()))
+        })
+        .unwrap_or((None, None));
+    let target_name = name_of(world, target);
+    let target_p = crate::commands::Pronouns::of(world, target);
+    // Wear-off has no separate caster on hand: the effect's
+    // bearer stands in for `{actor.*}` and `{target.*}` alike.
+    // The bearer reads their own line in the second person
+    // ("Your berserker fury fades."); the room sees the name.
+    let target_msg = wearoff_target.as_deref().map_or_else(
+        || format!("Your {name} fades.\r\n"),
+        |t| {
+            let line = crate::commands::render_ability_template(
+                t,
+                (&target_name, target_p),
+                (&target_name, target_p),
+                true,
+                crate::commands::Viewer::Actor,
+            );
+            format!("{line}\r\n")
+        },
+    );
+    send_msg(world, target, target_msg);
+    if let Some(line) = wearoff_room.as_deref()
+        && let Some(located) = world.get::<Located>(target).copied()
+    {
+        let rendered = crate::commands::render_ability_template(
+            line,
+            (&target_name, target_p),
+            (&target_name, target_p),
+            false,
+            crate::commands::Viewer::Bystander,
+        );
+        crate::commands::broadcast_room_anonymised(
+            world,
+            located.0,
+            &[target],
+            &[(target, target_name.as_str())],
+            &format!("{rendered}\r\n"),
+        );
+    }
+}
+
 /// Decrement remaining duration on every active effect; despawn ones whose
 /// duration hit zero (with a "fades" message to the target if it has a
 /// connection); also despawn any effect whose target entity has gone away.
@@ -748,53 +809,7 @@ pub fn effects_tick(world: &mut World) {
             // summoner instead.
             let is_summon = name.starts_with("summoned-");
             if !is_summon {
-                let (wearoff_target, wearoff_room) = ability_id
-                    .and_then(|aid| {
-                        world
-                            .resource::<AbilityCatalog>()
-                            .messages
-                            .get(&aid)
-                            .map(|m| (m.wearoff_to_target.clone(), m.wearoff_to_room.clone()))
-                    })
-                    .unwrap_or((None, None));
-                let target_name = name_of(world, target);
-                let target_p = crate::commands::Pronouns::of(world, target);
-                // Wear-off has no separate caster on hand: the effect's
-                // bearer stands in for `{actor.*}` and `{target.*}` alike.
-                // The bearer reads their own line in the second person
-                // ("Your berserker fury fades."); the room sees the name.
-                let target_msg = wearoff_target.as_deref().map_or_else(
-                    || format!("Your {name} fades.\r\n"),
-                    |t| {
-                        let line = crate::commands::render_ability_template(
-                            t,
-                            (&target_name, target_p),
-                            (&target_name, target_p),
-                            true,
-                            crate::commands::Viewer::Actor,
-                        );
-                        format!("{line}\r\n")
-                    },
-                );
-                send_msg(world, target, target_msg);
-                if let Some(line) = wearoff_room.as_deref()
-                    && let Some(located) = world.get::<Located>(target).copied()
-                {
-                    let rendered = crate::commands::render_ability_template(
-                        line,
-                        (&target_name, target_p),
-                        (&target_name, target_p),
-                        false,
-                        crate::commands::Viewer::Bystander,
-                    );
-                    crate::commands::broadcast_room_anonymised(
-                        world,
-                        located.0,
-                        &[target],
-                        &[(target, target_name.as_str())],
-                        &format!("{rendered}\r\n"),
-                    );
-                }
+                send_wearoff_messages(world, target, &name, ability_id);
             }
             // Same reversal as a dispel / cleanse (stat delta, resistance,
             // alignment tag, markers); only the wear-off text and the
