@@ -2984,6 +2984,13 @@ pub(crate) fn flush_prompts(world: &mut World) {
     let recipients = PROMPT_RECIPIENTS.with(|r| std::mem::take(&mut *r.borrow_mut()));
     for entity in recipients {
         if world.get_entity(entity).is_ok() {
+            // A player waiting on a database job (`save`, ...) gets their
+            // prompt after the answer: the job's completion prints and so
+            // marks them again. A prompt now would land ahead of the
+            // output it is meant to follow.
+            if off_tick::is_busy(world, entity) {
+                continue;
+            }
             send_prompt(world, entity);
         } else if let Some(state) = world.get_resource::<PromptState>() {
             state.forget(entity);
@@ -24910,13 +24917,17 @@ pub(crate) fn send_char_vitals(world: &mut World, target: Entity) {
         .and_then(|p| level_progress_for(world, target, p))
         // Gods have no level progress; the client keeps its gauge at 0.
         .map_or(0, |lp| lp.percent);
+    // `apply_damage` pushes this frame the moment a lethal blow lands, while
+    // hp is still below zero and before `handle_death` settles it. A client
+    // never sees the overkill: the dying read 0, like the ghost they become.
+    let hp = h.hp.max(0);
     let payload = serde_json::json!({
-        "hp": h.hp,
+        "hp": hp,
         "max_hp": h.max,
         "mv": s.current,
         "max_mv": s.max,
         "next_level_pct": next_level_pct,
-        "string": format!("H:{}/{} V:{}/{}", h.hp, h.max, s.current, s.max),
+        "string": format!("H:{}/{} V:{}/{}", hp, h.max, s.current, s.max),
     })
     .to_string();
     // Change-gated: the mid-tick push from `apply_damage` records its

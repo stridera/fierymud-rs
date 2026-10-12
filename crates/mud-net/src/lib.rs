@@ -471,7 +471,7 @@ fn throttle_allow(st: &mut GateState, ip: IpAddr, now: Instant) -> Throttle {
 
 /// Why a freshly accepted socket was turned away.
 enum Refusal {
-    /// Dropped silently (banned or rate-throttled peers get no courtesy).
+    /// Dropped silently (banned peers get no courtesy).
     Silent,
     /// Dropped after a one-line explanation of a capacity limit.
     Notice(&'static str),
@@ -479,6 +479,7 @@ enum Refusal {
 
 const NOTICE_PER_IP: &str =
     "Too many connections from your address. Please close other sessions and try again.\r\n";
+const NOTICE_THROTTLED: &str = "Too many connections from your address; please wait a moment.\r\n";
 const NOTICE_FULL: &str = "The server is full. Please try again later.\r\n";
 /// Budget for writing a refusal notice before the socket is dropped.
 const REFUSAL_WRITE_TIMEOUT: Duration = Duration::from_millis(500);
@@ -516,11 +517,11 @@ fn admit_or_log(
         Ok(guard) => Ok(guard),
         Err(Reject::Throttled { first: true }) => {
             warn!(%peer, "throttle: rejecting{kind} connection — over rate limit");
-            Err(Refusal::Silent)
+            Err(Refusal::Notice(NOTICE_THROTTLED))
         }
         Err(Reject::Throttled { first: false }) => {
             debug!(%peer, "throttle: rejecting{kind} connection (continuing flood)");
-            Err(Refusal::Silent)
+            Err(Refusal::Notice(NOTICE_THROTTLED))
         }
         Err(Reject::MaxConnections) => {
             warn!(%peer, max = limits.max_connections, "max_connections reached; refusing{kind}");
@@ -2368,6 +2369,42 @@ mod limit_tests {
             InboundKind::Line(l) => assert_eq!(l, "look"),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn a_throttled_connection_is_told_why_before_the_close() {
+        let (addr, _gate, _rx) = start(Limits {
+            max_per_ip: 50,
+            ..fast_limits()
+        })
+        .await;
+        let mut held = Vec::new();
+        for _ in 0..MAX_CONNECTS_PER_MIN {
+            let mut c = connect_from("127.0.0.7", addr).await;
+            let mut b = [0u8; 16];
+            assert!(c.read(&mut b).await.unwrap() > 0);
+            held.push(c);
+        }
+        // Over the per-minute rate: the first rejection, then a continuing
+        // flood, both get the same line instead of a silent EOF.
+        for _ in 0..2 {
+            let mut over = connect_from("127.0.0.7", addr).await;
+            let mut notice = Vec::new();
+            assert!(
+                tokio::time::timeout(WAIT, over.read_to_end(&mut notice))
+                    .await
+                    .is_ok(),
+                "throttled connection must be closed"
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&notice),
+                "Too many connections from your address; please wait a moment.\r\n"
+            );
+        }
+        // Another address is unaffected.
+        let mut other = connect_from("127.0.0.8", addr).await;
+        let mut b = [0u8; 16];
+        assert!(other.read(&mut b).await.unwrap() > 0);
     }
 
     #[tokio::test]

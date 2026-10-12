@@ -128,6 +128,9 @@ where
                     "That took too long and was abandoned. Try again in a moment.\r\n",
                 ),
             }
+            // `flush_prompts` held this player's prompt while the job ran;
+            // whatever the finish step printed (or did not) is followed by one.
+            super::mark_for_prompt(player);
         });
         let _ = tx.send(done);
     };

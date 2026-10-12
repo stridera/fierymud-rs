@@ -619,6 +619,20 @@ fn hp_change_sends_only_vitals() {
 }
 
 #[test]
+fn overkill_damage_never_shows_negative_hp_in_vitals() {
+    let (mut fx, p, mut rx) = world_with_skills();
+    drain_bytes(&mut rx);
+    // The lethal blow's mid-tick push: hp is below zero until handle_death.
+    let (dead, _) = super::apply_damage(&mut fx.world, p, 80);
+    assert!(dead);
+    assert_eq!(fx.world.get::<Health>(p).unwrap().hp, -30);
+    let fr = frames(&drain_bytes(&mut rx));
+    let vitals = parse(&of(&fr, "Char.Vitals")[0], "Char.Vitals");
+    assert_eq!(vitals["hp"], 0, "{vitals}");
+    assert_eq!(vitals["string"], "H:0/50 V:30/30", "{vitals}");
+}
+
+#[test]
 fn renegotiation_resends_per_prompt_panels() {
     let (mut fx, p, mut rx) = world_with_skills();
     super::send_prompt(&mut fx.world, p);

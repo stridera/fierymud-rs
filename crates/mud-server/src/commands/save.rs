@@ -271,6 +271,31 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn the_prompt_follows_saved_instead_of_preceding_it() {
+        let (mut world, player, mut rx) = world_with_player();
+        world
+            .entity_mut(player)
+            .insert(mud_world::Prompt("PROMPT> ".to_string()));
+        let pool = pool();
+        dispatch_with_async(&mut world, player, &pool, "save").await;
+        // End of the typing turn: the player is waiting on the write, so
+        // no prompt yet (it would sit ahead of "Saved.").
+        crate::commands::flush_prompts(&mut world);
+        assert!(!drain(&mut rx).contains("PROMPT>"));
+        settle().await;
+        // The completion tick: "Saved." and then the prompt, in that order.
+        drain_command_jobs(&mut world);
+        crate::commands::flush_prompts(&mut world);
+        let out = drain(&mut rx);
+        // The test pool has no database behind it, so the answer is the
+        // failure line; either answer starts "Save".
+        let saved = out.find("Save").expect("an answer");
+        let prompt = out.find("PROMPT>").expect("prompt after the answer");
+        assert!(saved < prompt, "{out}");
+        assert_eq!(out.matches("PROMPT>").count(), 1, "{out}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn saved_is_only_printed_after_the_write_commits() {
         let (mut world, player, mut rx) = world_with_player();
         start_save(&mut world, player, slow_writer(true), SAVE_TURN_RETRIES);

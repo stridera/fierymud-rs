@@ -1875,7 +1875,10 @@ fn apply_swing(world: &mut World, s: &Swing) {
     // flag. Damage value color-graded by magnitude (chip dim, mid plain,
     // heavy yellow, big red) so the player's eye lands on the meaningful
     // hits. Crit tag bold red.
-    let crit_tag = if outcome == SwingOutcome::Crit {
+    // A crit that the target's armor, immunity or hardness reduced to nothing
+    // did no harm, so it is not announced as one.
+    let crit_landed = outcome == SwingOutcome::Crit && damage > 0;
+    let crit_tag = if crit_landed {
         " <b:red>(critical hit!)</>"
     } else {
         ""
@@ -1957,7 +1960,7 @@ fn apply_swing(world: &mut World, s: &Swing) {
     // "X critically hits Y!" beat the attacker/target are already
     // seeing. Damage stays hidden (info-leak — mortal observers
     // can't see exact numbers; staff get them via `consider`).
-    let room_crit_tag = if outcome == SwingOutcome::Crit {
+    let room_crit_tag = if crit_landed {
         " <b:red>(critical!)</>"
     } else {
         ""
@@ -3978,6 +3981,56 @@ mod tests {
         }
         assert_eq!(out.matches("slipped away").count(), 1, "{out}");
         assert!(world.get::<Fighting>(attacker).is_none());
+    }
+
+    /// A player attacker that always crits (crit chance 100) swings once at
+    /// `target`; returns what the attacker was sent.
+    fn crit_swing_output(world: &mut World, room: Entity, target: Entity) -> String {
+        let attacker = make_attacker(world, room, target, 10);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+        world.entity_mut(attacker).insert((
+            Player,
+            crate::commands::Connection(tx),
+            CombatStats {
+                accuracy: 200,
+                crit_chance: 100,
+                ..Default::default()
+            },
+        ));
+        run_combat_tick(world);
+        let mut out = String::new();
+        while let Ok(bytes) = rx.try_recv() {
+            out.push_str(&String::from_utf8_lossy(&bytes));
+        }
+        out
+    }
+
+    #[test]
+    fn a_crit_that_deals_damage_is_announced() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let target = make_target(&mut world, room, 500);
+        let out = crit_swing_output(&mut world, room, target);
+        assert!(out.contains("(critical hit!)"), "{out}");
+        assert!(!out.contains("for 0 damage"), "{out}");
+    }
+
+    #[test]
+    fn a_crit_that_deals_no_damage_is_not_called_critical() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let target = make_target(&mut world, room, 500);
+        // Immune to physical: the crit lands but does nothing.
+        world.entity_mut(target).insert(mud_world::Resistances(
+            [(mud_db::enums::ElementType::Physical, 100)]
+                .into_iter()
+                .collect(),
+        ));
+        let out = crit_swing_output(&mut world, room, target);
+        // The damage figure is colour-wrapped: "for <dim>0</> damage".
+        assert!(out.contains("0\u{1b}[0m damage"), "{out}");
+        assert!(!out.contains("critical"), "{out}");
+        assert_eq!(world.get::<Health>(target).unwrap().hp, 500);
     }
 
     #[test]
