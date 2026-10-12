@@ -554,6 +554,35 @@ fn lua_outbox_wraps_long_script_lines_to_the_terminal() {
     assert!(seen.contains("go out and fight.'"), "{seen}");
 }
 
+/// A tag-only line (`</>`) between two speeches does not make the next
+/// speech a continuation (academy instructor's greeting).
+#[test]
+fn lua_outbox_ignores_tag_only_lines_when_tracking_sentences() {
+    let mut fx = fixture();
+    let room = fx.a;
+    let (p, mut rx) = player(&mut fx.world, room, "Ann");
+    let _ = drain(&mut rx);
+    {
+        let mut out = fx
+            .world
+            .get_resource_or_insert_with(mud_world::LuaOutbox::default);
+        for line in [
+            "the Instructor tells you, 'Pick a lesson.'",
+            "</>",
+            "the Instructor tells you, 'Say <b:green>skip</> to move on.'",
+        ] {
+            out.direct.push((p, line.to_string()));
+        }
+    }
+    super::flush_lua_outbox(&mut fx.world);
+    let seen = drain(&mut rx);
+    assert_eq!(
+        seen.matches("The Instructor tells you").count(),
+        2,
+        "{seen}"
+    );
+}
+
 /// Several `send` lines make one paragraph (kerristone travel echo): only
 /// the line that opens a sentence is capitalised, continuations are left
 /// as the script wrote them, and each sentence start is capitalised.

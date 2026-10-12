@@ -164,7 +164,8 @@ fn cmd_petition(world: &mut World, player: Entity, args: &str) {
         return;
     }
     if effect_prevents(world, player, Prevent::Speaking) {
-        send_to(world, player, "Your voice is silenced.\r\n");
+        let msg = crate::commands::prevent_refusal(world, player, Prevent::Speaking);
+        send_to(world, player, msg);
         return;
     }
     let player_name = name_of(world, player);

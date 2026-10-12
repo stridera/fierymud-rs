@@ -164,6 +164,7 @@ const KNOW_SPELL_KEY: &str = "know_spell";
 /// Staff commands are always allowed (legacy `CMD_ANY`).
 const CASTING_ALLOWED: &[&str] = &[
     "abort",
+    "cancel",
     "alert",
     "cls",
     "world",
@@ -1683,7 +1684,7 @@ mod tests {
             );
         }
         assert!(world.get::<Casting>(caster).is_some(), "still casting");
-        for line in ["inventory", "equipment"] {
+        for line in ["inventory", "equipment", "cancel"] {
             dispatch(&mut world, caster, line);
             assert!(
                 !drain(&mut rx).contains("busy spellcasting"),

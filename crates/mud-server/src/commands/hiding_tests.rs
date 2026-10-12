@@ -872,31 +872,66 @@ fn class_mob(world: &mut World, room: Entity, id: i32, class: i32, level: i32) -
         .id()
 }
 
+/// One whole mob pulse: [`crate::wander::mob_hide_tick`] on each of the
+/// 100 consecutive ticks a mob's staggered slot can fall on.
+fn hide_pulse(world: &mut World) {
+    let start = world.resource::<crate::TickCount>().0;
+    for t in 0..100 {
+        world.insert_resource(crate::TickCount(start + t));
+        crate::wander::mob_hide_tick(world);
+    }
+    world.insert_resource(crate::TickCount(start + 100));
+}
+
 #[test]
 fn a_mob_that_knows_hide_hides_on_the_mob_pulse() {
     let (mut world, room) = mob_hide_world();
     let thief = class_mob(&mut world, room, 1, THIEF, 20);
     let novice = class_mob(&mut world, room, 2, NOVICE, 20);
-    // Off the pulse nothing happens, on it only the mob with the skill hides.
-    world.insert_resource(crate::TickCount(101));
-    crate::wander::mob_hide_tick(&mut world);
-    assert!(!hiding::is_hidden(&world, thief));
-    world.insert_resource(crate::TickCount(100));
-    crate::wander::mob_hide_tick(&mut world);
+    world.insert_resource(crate::TickCount(0));
     // Skill 26 (the legacy mob roll's mean at level 20), DEX 80 / INT 60:
-    // random(.., 195) + DEX bonus 13, so a roll can floor at 0; try a few.
+    // random(.., 195) + DEX bonus 13, so a roll can floor at 0; try a few
+    // pulses. Each mob gets one attempt per pulse.
     for _ in 0..50 {
         if hiding::is_hidden(&world, thief) {
             break;
         }
-        advance(&mut world, 100);
-        crate::wander::mob_hide_tick(&mut world);
+        hide_pulse(&mut world);
     }
     assert!(hiding::is_hidden(&world, thief), "the thief hides");
     assert!(
         !hiding::is_hidden(&world, novice),
         "no hide skill, no hiding"
     );
+}
+
+#[test]
+fn a_mob_gets_one_hide_attempt_per_pulse_spread_over_the_ticks() {
+    let (mut world, room) = mob_hide_world();
+    let mobs: Vec<Entity> = (0..300)
+        .map(|_| class_mob(&mut world, room, 1, THIEF, 20))
+        .collect();
+    world.insert_resource(crate::TickCount(0));
+    let mut busy_ticks = 0;
+    let mut attempts = 0;
+    for t in 0..100 {
+        world.insert_resource(crate::TickCount(t));
+        let lagged_before = mobs
+            .iter()
+            .filter(|&&m| world.get::<super::info::HideLag>(m).is_some())
+            .count();
+        crate::wander::mob_hide_tick(&mut world);
+        let lagged_after = mobs
+            .iter()
+            .filter(|&&m| world.get::<super::info::HideLag>(m).is_some())
+            .count();
+        if lagged_after > lagged_before {
+            busy_ticks += 1;
+        }
+        attempts = lagged_after;
+    }
+    assert_eq!(attempts, mobs.len(), "every mob tried once in the pulse");
+    assert!(busy_ticks >= 50, "spread over many ticks: {busy_ticks}");
 }
 
 #[test]
@@ -920,10 +955,9 @@ fn mob_auto_hide_skips_the_mobs_legacy_skips() {
     let owner = world.spawn((mud_world::Player, Located(elsewhere))).id();
     let pet = class_mob(&mut world, room, 6, THIEF, 20);
     world.entity_mut(pet).insert(Follower(owner));
-    world.insert_resource(crate::TickCount(100));
+    world.insert_resource(crate::TickCount(0));
     for _ in 0..60 {
-        crate::wander::mob_hide_tick(&mut world);
-        advance(&mut world, 100);
+        hide_pulse(&mut world);
     }
     for (mob, why) in [
         (fighting, "fighting"),
@@ -1303,4 +1337,67 @@ fn a_hidden_proto_item_in_a_carried_bag_is_visible_but_hidden_on_the_floor_until
     let out = drain(&mut srx);
     assert!(out.contains("a rusty hinge"), "{out}");
     assert!(super::senses::item_visible_to(&fx.world, seeker, floor));
+}
+
+/// Prod-shaped first sweeps of the mob hide pulse: 5.5k mobs over ~4k
+/// archetypes, one in eight of them a thief that knows `hide`. Prints the
+/// timings; in release it also bounds them.
+#[test]
+fn mob_hide_pulse_stays_cheap_on_a_prod_sized_world() {
+    const MOBS: usize = 5500;
+    let (mut world, _room) = mob_hide_world();
+    let rooms: Vec<Entity> = (0..400)
+        .map(|_| world.spawn((Room, Exits::default())).id())
+        .collect();
+    for (id, class) in [(1, THIEF), (2, NOVICE)] {
+        let mut proto =
+            super::test_support::mob_proto(30, id, mud_db::enums::MobProfession::Trainer);
+        proto.class_id = Some(class);
+        proto.level = 20;
+        world
+            .resource_mut::<mud_world::MobPrototypes>()
+            .by_key
+            .insert((30, id), proto);
+    }
+    for i in 0..MOBS {
+        let mob = world
+            .spawn((
+                Mob,
+                Named {
+                    name: format!("mob {i}"),
+                },
+                Located(rooms[i % rooms.len()]),
+                mud_world::WorldKey {
+                    zone: 30,
+                    id: if i % 8 == 0 { 1 } else { 2 },
+                },
+                CoreStats {
+                    dexterity: 80,
+                    intelligence: 60,
+                    ..CoreStats::default()
+                },
+            ))
+            .id();
+        crate::archetype_noise::shape(&mut world, mob, i + 1);
+    }
+    let archetypes = world.archetypes().len();
+    // (whole pulse, slowest single tick) for the first pulses.
+    let mut times = Vec::new();
+    for pulse in 0..4u64 {
+        let mut worst = std::time::Duration::ZERO;
+        let start = std::time::Instant::now();
+        for t in 0..100 {
+            world.insert_resource(crate::TickCount(100 * pulse + t));
+            let tick_start = std::time::Instant::now();
+            crate::wander::mob_hide_tick(&mut world);
+            worst = worst.max(tick_start.elapsed());
+        }
+        times.push((start.elapsed(), worst));
+    }
+    eprintln!("mob_hide_tick {MOBS} mobs / {archetypes} archetypes (pulse, worst tick): {times:?}");
+    if !cfg!(debug_assertions) {
+        for (_, worst) in &times {
+            assert!(worst.as_millis() < 5, "a hide tick took {worst:?}");
+        }
+    }
 }

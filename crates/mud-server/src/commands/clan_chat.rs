@@ -60,7 +60,8 @@ fn cmd_ctell(world: &mut World, player: Entity, args: &str) {
         return;
     }
     if effect_prevents(world, player, Prevent::Speaking) {
-        send_to(world, player, "Your voice is silenced.\r\n");
+        let msg = crate::commands::prevent_refusal(world, player, Prevent::Speaking);
+        send_to(world, player, msg);
         return;
     }
     let Some((clan_id, abbrev)) = world

@@ -101,6 +101,19 @@ fn mortal_look_at_mob_hides_level_and_shows_composition_and_condition() {
 }
 
 #[test]
+fn condition_line_opens_with_a_capital_for_an_article_name() {
+    let (mut world, player, mut rx) =
+        world_with_mob("HUMAN", "male", Size::Large, Composition::Plant);
+    cmd_look(&mut world, player, "treant");
+    let out = plain(&mut rx);
+    assert!(
+        out.contains("A gnarled treant is in excellent shape."),
+        "{out}"
+    );
+    assert!(!out.contains("\r\na gnarled treant is"), "{out}");
+}
+
+#[test]
 fn flesh_mob_gets_size_only_like_legacy() {
     let (mut world, player, mut rx) =
         world_with_mob("HUMAN", "female", Size::Medium, Composition::Flesh);

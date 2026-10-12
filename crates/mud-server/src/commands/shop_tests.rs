@@ -868,3 +868,40 @@ fn a_fluid_body_can_neither_buy_nor_sell() {
     cmd_sell(&mut world, player, "sword");
     assert!(drain(&mut rx).contains("You sell"));
 }
+
+#[test]
+fn narrow_terminal_drops_the_unlimited_stock_column_before_cutting_names() {
+    let offers: Vec<ShopOffering> = [7, 8, 9]
+        .iter()
+        .map(|id| ShopOffering {
+            object_zone_id: 30,
+            object_id: *id,
+            amount: -1,
+            price: 0,
+        })
+        .collect();
+    let (mut world, player, mut rx) = world_with_shop(shop_def(offers, Vec::new()), 1_000);
+    {
+        let mut objects = world.resource_mut::<ObjectPrototypes>();
+        for (id, name, cost) in [(8, "a wooden club", 10), (9, "a two-handed sword", 20_000)] {
+            let mut p = object_proto(30, id, ObjectType::Weapon);
+            p.name = name.to_string();
+            p.cost = cost;
+            objects.by_key.insert((30, id), p);
+        }
+    }
+    world.entity_mut(player).insert(mud_world::ClientWidth(40));
+    cmd_list(&mut world, player, "");
+    let out = strip_ansi(&drain(&mut rx));
+    assert!(out.contains("a two-handed sword"), "name kept whole: {out}");
+    assert!(out.contains("a wooden club"), "{out}");
+    assert!(!out.contains("..."), "{out}");
+    assert!(!out.contains("unlimited"), "stock column dropped: {out}");
+    for line in out.lines() {
+        assert!(line.chars().count() <= 40, "{line}\n{out}");
+    }
+    // Plenty of room: the column stays.
+    world.entity_mut(player).insert(mud_world::ClientWidth(120));
+    cmd_list(&mut world, player, "");
+    assert!(drain(&mut rx).contains("unlimited"));
+}

@@ -53,6 +53,14 @@ fn wander_slot(mob: Entity, tick: u64) -> bool {
     (u64::from(mob.index_u32()) + tick).is_multiple_of(WANDER_PERIOD_TICKS)
 }
 
+/// True when `mob` is due its once-per-[`SCAVENGER_PERIOD_TICKS`] pulse work
+/// on `tick`: `(index + tick)` is a multiple of the period. Like
+/// [`wander_slot`], consecutive entity indices land on consecutive ticks, so
+/// every mob is due exactly once per period.
+fn pulse_slot(mob: Entity, tick: u64) -> bool {
+    (u64::from(mob.index_u32()) + tick).is_multiple_of(SCAVENGER_PERIOD_TICKS)
+}
+
 /// True when the room's sector counts as "water" for AQUATIC-mob
 /// movement: SHALLOWS, WATER, UNDERWATER. Beach / swamp aren't water
 /// — fish can't crawl onto a beach.
@@ -249,11 +257,15 @@ pub fn wander_tick(world: &mut World) {
 /// what is left, so a world without the `hide` ability does no work. The
 /// `hide` wait state ([`crate::commands::info::hide_with_roll`]) stops a
 /// mob re-rolling while it is still lagged.
+///
+/// Every mob still gets one attempt per pulse, but staggered by entity index
+/// ([`pulse_slot`]) so each tick handles about 1/100 of them. Handling them
+/// all on the pulse tick cost 100-130 ms in a debug build with ~5.5k mobs
+/// (hundreds of rolls plus the structural moves that add `Hiddenness` and the
+/// lag component, the first of which builds a new archetype each), a slow tick
+/// every 10 s.
 pub fn mob_hide_tick(world: &mut World) {
     let tick = world.resource::<TickCount>().0;
-    if !tick.is_multiple_of(SCAVENGER_PERIOD_TICKS) {
-        return;
-    }
     let Some(hide_id) = world
         .get_resource::<mud_world::AbilityCatalog>()
         .and_then(|c| c.by_name.get("hide"))
@@ -263,12 +275,16 @@ pub fn mob_hide_tick(world: &mut World) {
     };
     let candidates: Vec<Entity> = {
         let mut q = world.query_filtered::<
-            (Entity, Option<&MobBehaviors>),
+            Entity,
             (With<Mob>, Without<mud_world::Hiddenness>, Without<Fighting>),
         >();
         q.iter(world)
-            .filter(|(_, beh)| !beh.is_some_and(|b| b.has(MobBehavior::NoClassAi)))
-            .map(|(e, _)| e)
+            .filter(|&e| pulse_slot(e, tick))
+            .filter(|&e| {
+                !world
+                    .get::<MobBehaviors>(e)
+                    .is_some_and(|b| b.has(MobBehavior::NoClassAi))
+            })
             .collect()
     };
     for mob in candidates {

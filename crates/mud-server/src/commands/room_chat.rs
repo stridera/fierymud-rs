@@ -172,7 +172,8 @@ fn cmd_say(world: &mut World, player: Entity, message: &str) {
         return;
     }
     if effect_prevents(world, player, Prevent::Speaking) {
-        send_to(world, player, "Your voice is silenced.\r\n");
+        let msg = crate::commands::prevent_refusal(world, player, Prevent::Speaking);
+        send_to(world, player, msg);
         return;
     }
     let Some(located) = world.get::<Located>(player).copied() else {
@@ -385,7 +386,8 @@ fn cmd_insult(world: &mut World, player: Entity, args: &str) {
         return;
     }
     if effect_prevents(world, player, Prevent::Speaking) {
-        send_to(world, player, "Your voice is silenced.\r\n");
+        let msg = crate::commands::prevent_refusal(world, player, Prevent::Speaking);
+        send_to(world, player, msg);
         return;
     }
     let Some(located) = world.get::<Located>(player).copied() else {

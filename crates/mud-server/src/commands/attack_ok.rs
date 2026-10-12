@@ -146,7 +146,7 @@ pub(crate) fn attack_ok(world: &mut World, ch: Entity, victim: Entity, verbose: 
         .get::<MobBehaviors>(victim)
         .is_some_and(|b| b.has(MobBehavior::Peaceful))
     {
-        let n = cap_sentence_start(&name_of(world, victim));
+        let n = crate::commands::lower_leading_article(&name_of(world, victim));
         let refl = reflexive(world, victim);
         say(
             world,

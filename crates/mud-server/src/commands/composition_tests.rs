@@ -744,7 +744,7 @@ fn stone_skin_lands_on_a_solid_body() {
 }
 
 #[test]
-fn turning_to_water_strips_stone_skin_silently() {
+fn turning_to_water_strips_stone_skin_with_its_wearoff_line() {
     let mut s = scene();
     spell_fixture(&mut s);
     cast(&mut s.fx.world, s.mortal, "stone skin");
@@ -758,7 +758,9 @@ fn turning_to_water_strips_stone_skin_silently() {
     assert_eq!(instances_of(&mut s.fx.world, s.mortal, STONE_SKIN), 0);
     assert_eq!(instances_of(&mut s.fx.world, s.mortal, WATERFORM), 1);
     let out = said(&mut s.mortal_rx);
-    assert!(!out.contains("fades"), "silent strip: {out}");
+    // Legacy `remove_unsuitable_spells` goes through `active_effect_remove`,
+    // which says the spell's wear-off text.
+    assert_eq!(out.matches("fades").count(), 1, "one wear-off line: {out}");
 }
 
 #[test]

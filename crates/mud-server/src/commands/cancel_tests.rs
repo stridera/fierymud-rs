@@ -230,6 +230,33 @@ fn cancel_refuses_in_combat() {
 }
 
 #[test]
+fn cancel_list_in_combat_says_it_is_locked() {
+    let (mut world, room, p, mut rx) = setup();
+    buff(&mut world, p, STONE_SKIN, 300, 3);
+    dispatch(&mut world, p, "cancel");
+    let out = drain(&mut rx);
+    assert!(out.contains("1 cancellable effect:"), "singular: {out}");
+    assert!(out.contains("Use 'cancel <name>'"), "{out}");
+    let foe = world
+        .spawn((Located(room), Health { hp: 10, max: 10 }))
+        .id();
+    world.entity_mut(p).insert(Fighting(foe));
+    dispatch(&mut world, p, "cancel");
+    let out = drain(&mut rx);
+    assert!(out.contains("Stone Skin"), "{out}");
+    assert!(out.contains("middle of a fight"), "{out}");
+    assert!(!out.contains("Use 'cancel <name>'"), "{out}");
+}
+
+#[test]
+fn cancel_collapses_repeated_whitespace_in_the_name() {
+    let (mut world, _room, p, mut rx) = setup();
+    let skin = buff(&mut world, p, STONE_SKIN, 300, 3);
+    dispatch(&mut world, p, "cancel Stone   Skin");
+    assert!(!alive(&world, skin), "{}", drain(&mut rx));
+}
+
+#[test]
 fn cancel_refuses_when_someone_is_fighting_you() {
     let (mut world, room, p, mut rx) = setup();
     let e = buff(&mut world, p, BLESS, 300, 7);

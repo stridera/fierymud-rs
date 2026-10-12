@@ -153,11 +153,14 @@ fn waterform_sets_water_composition_and_restores_flesh() {
         "{out}"
     );
     // Only a body of flesh can take the change: a second cast is refused.
+    drain(&mut rx);
     cast_self(&mut fx, mage, "waterform");
+    let second = drain(&mut rx);
     assert!(
-        drain(&mut rx).contains("Your body cannot sustain this change."),
-        "second cast"
+        second.contains("Your body cannot sustain this change."),
+        "second cast: {second}"
     );
+
     assert_eq!(actor_composition(&fx.world, mage), Composition::Water);
     // Expiry (or dispel) removes the last backing instance.
     let instances: Vec<Entity> = {
@@ -211,4 +214,53 @@ fn vaporform_is_mist_and_look_shows_the_new_composition() {
     super::info::cmd_look(&mut fx.world, watcher, "mage");
     let out = strip_ansi(&drain(&mut wrx));
     assert!(out.contains("composed of mist"), "{out}");
+}
+
+#[test]
+fn a_second_form_spell_on_a_fluid_target_does_not_claim_success() {
+    let mut fx = Fx::new();
+    let rooms = corridor(&mut fx, 1);
+    let (mage, mut rx) = fx.person("Mage", 30, rooms[0]);
+    let (bob, mut brx) = fx.person("Bob", 30, rooms[0]);
+    fx.world
+        .entity_mut(bob)
+        .insert(mud_world::Keywords(vec!["bob".into()]));
+    form_fixture(&mut fx, "Waterform", "waterform");
+    crate::commands::invoke_ability_with(
+        &mut fx.world,
+        mage,
+        "waterform bob",
+        AbilityKind::Spell,
+        "cast",
+        false,
+        true,
+        true,
+        Some(bob),
+    );
+    let first = drain(&mut rx);
+    assert!(first.contains("Waterform"), "first cast lands: {first}");
+    assert_eq!(actor_composition(&fx.world, bob), Composition::Water);
+    drain(&mut brx);
+    crate::commands::invoke_ability_with(
+        &mut fx.world,
+        mage,
+        "waterform bob",
+        AbilityKind::Spell,
+        "cast",
+        false,
+        true,
+        true,
+        Some(bob),
+    );
+    let second = drain(&mut rx);
+    eprintln!("FIRST={first:?} SECOND={second:?}");
+    assert!(!second.contains("You cast"), "reads as success: {second}");
+    assert!(
+        second.contains("unable to alter Bob's substance"),
+        "caster is told why: {second}"
+    );
+    assert!(
+        drain(&mut brx).contains("Your body cannot sustain this change."),
+        "target is told"
+    );
 }

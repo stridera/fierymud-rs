@@ -1455,6 +1455,60 @@ const PARALYSIS_ALLOWED: &[&str] = &[
     "world",
 ];
 
+/// Commands a stunned character may still run. Legacy knocks a stunned
+/// character down to `STANCE_STUNNED`, and `command_interpreter` refuses
+/// every command whose minimum stance is higher: only the passive info,
+/// settings and exit commands (stance `DEAD` / `INCAP`) are left, so no
+/// `look`, no `sit` / `stand`, no `drop`, no speech or emotes.
+const STUN_ALLOWED: &[&str] = &[
+    "abort",
+    "alias",
+    "bug",
+    "clear",
+    "cls",
+    "color",
+    "commands",
+    "consent",
+    "credits",
+    "date",
+    "display",
+    "experience",
+    "help",
+    "idea",
+    "innate",
+    "ignore",
+    "info",
+    "lasttells",
+    "lastgos",
+    "level",
+    "motd",
+    "news",
+    "petition",
+    "policy",
+    "prompt",
+    "quest",
+    "quit",
+    "return",
+    "score",
+    "songs",
+    "socials",
+    "spells",
+    "title",
+    "time",
+    "toggle",
+    "trophy",
+    "typo",
+    "uptime",
+    "version",
+    "who",
+    "whoami",
+    "wizlist",
+    "world",
+];
+
+/// Legacy line for a command refused by stance while `STANCE_STUNNED`.
+const STUNNED_MSG: &str = "All you can do right now is think about the stars!\r\n";
+
 /// Legacy `command_interpreter` paralysis / mesmerize gate: a paralysed
 /// character may run only [`PARALYSIS_ALLOWED`] (staff commands are never
 /// blocked, like [`casting_blocks`]); a mesmerized one (below level 100)
@@ -1467,7 +1521,7 @@ fn hold_gate(world: &mut World, player: Entity, cmd: &Command) -> bool {
     if world.get::<Stunned>(player).is_none() {
         return false;
     }
-    let (mut paralyzed, mut mesmerized) = (false, false);
+    let (mut paralyzed, mut mesmerized, mut stunned) = (false, false, false);
     {
         let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
         for (eff, applied) in q.iter(world) {
@@ -1478,6 +1532,10 @@ fn hold_gate(world: &mut World, player: Entity, cmd: &Command) -> bool {
                 paralyzed = true;
             } else if eff.name.eq_ignore_ascii_case("mesmerized") {
                 mesmerized = true;
+            } else if eff.name.eq_ignore_ascii_case("stun")
+                || eff.name.eq_ignore_ascii_case("stunned")
+            {
+                stunned = true;
             }
         }
     }
@@ -1486,6 +1544,14 @@ fn hold_gate(world: &mut World, player: Entity, cmd: &Command) -> bool {
         && !cmd.names.iter().any(|n| PARALYSIS_ALLOWED.contains(n))
     {
         send_to(world, player, "You're paralyzed to the bone!\r\n");
+        return true;
+    }
+    if stunned
+        && !paralyzed
+        && cmd.min_role == UserRole::Player
+        && !cmd.names.iter().any(|n| STUN_ALLOWED.contains(n))
+    {
+        send_to(world, player, STUNNED_MSG);
         return true;
     }
     if mesmerized && world.get::<Profile>(player).is_none_or(|p| p.level < 100) {
@@ -1931,6 +1997,19 @@ pub(crate) fn speech_blocked_asleep(world: &mut World, player: Entity, command: 
     sleeping_refusal(world, player)
 }
 
+/// True while a `stun` effect (not paralysis or mesmerize, which have their
+/// own gates) is active on `entity`.
+fn is_plain_stunned(world: &mut World, entity: Entity) -> bool {
+    if world.get::<Stunned>(entity).is_none() {
+        return false;
+    }
+    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+    q.iter(world).any(|(eff, applied)| {
+        applied.0 == entity
+            && (eff.name.eq_ignore_ascii_case("stun") || eff.name.eq_ignore_ascii_case("stunned"))
+    })
+}
+
 /// Socials are `do_action` at `STANCE_RESTING` in legacy, except `dream`
 /// (`STANCE_SLEEPING`). Sends the refusal when `player` is asleep.
 pub(crate) fn social_blocked_asleep(world: &mut World, player: Entity, social: &str) -> bool {
@@ -1942,6 +2021,10 @@ pub(crate) fn social_blocked_asleep(world: &mut World, player: Entity, social: &
         .is_none_or(|r| r.get(social).is_none())
     {
         return false;
+    }
+    if is_plain_stunned(world, player) {
+        send_to(world, player, STUNNED_MSG);
+        return true;
     }
     sleeping_refusal(world, player)
 }
@@ -4162,6 +4245,20 @@ mod tests {
             "abort", "cancel",
         ] {
             assert!(names.contains(&name), "spell/skill '{name}' missing");
+        }
+    }
+
+    #[test]
+    fn lower_leading_article_reads_mid_sentence() {
+        for (name, want) in [
+            ("A well-built Rogue", "a well-built Rogue"),
+            ("An old Beggar", "an old Beggar"),
+            ("The Instructor", "the Instructor"),
+            ("Aaron", "Aaron"),
+            ("Theodore", "Theodore"),
+            ("the beetle", "the beetle"),
+        ] {
+            assert_eq!(super::lower_leading_article(name), want);
         }
     }
 
@@ -16957,7 +17054,11 @@ pub(crate) fn invoke_ability_core(
         send_to(
             world,
             player,
-            format!("No {} matching '{needle}'.\r\n", kind.label()),
+            format!(
+                "No {} matching '{}'.\r\n",
+                kind.label(),
+                needle.replace('_', " ")
+            ),
         );
         return;
     };
@@ -16986,7 +17087,8 @@ pub(crate) fn invoke_ability_core(
     if !matches!(kind, mud_db::abilities::AbilityKind::Skill)
         && effect_prevents(world, player, Prevent::Casting)
     {
-        send_to(world, player, "Your magic is suppressed.\r\n");
+        let msg = prevent_refusal(world, player, Prevent::Casting);
+        send_to(world, player, msg);
         return;
     }
     // Already-casting refusal stays at this point in the pipeline so
@@ -20804,6 +20906,14 @@ pub(crate) fn invoke_ability_core(
                         target_entity,
                         "Your body cannot sustain this change.\r\n",
                     );
+                    if target_entity != player {
+                        let victim = name_of(world, target_entity);
+                        send_msg(
+                            world,
+                            player,
+                            format!("The spell is unable to alter {victim}'s substance.\r\n"),
+                        );
+                    }
                     applied_msgs.push(format!("{pretty} (body cannot change)"));
                     continue;
                 }
@@ -21126,7 +21236,8 @@ pub(crate) fn invoke_ability_core(
             || lower.contains("(room nosummon")
             || lower.contains("(arena asymmetry")
             || lower.contains("(target not dead")
-            || lower.contains("(hands not free"))
+            || lower.contains("(hands not free")
+            || lower.contains("(body cannot change"))
     });
     let refreshed = recast_refresh && !custom_messaging && any_non_refusal;
     if refreshed {
@@ -22937,6 +23048,12 @@ pub(crate) enum Prevent {
 /// check alone misses status-flag immobilizers like WEB; the
 /// per-flag rows catch them. G2.4.
 pub(crate) fn effect_prevents(world: &mut World, target: Entity, kind: Prevent) -> bool {
+    blocking_effect_name(world, target, kind).is_some()
+}
+
+/// The name of the first active effect on `target` that [`effect_prevents`]
+/// counts for `kind`, if any. Lets a refusal name its real cause.
+fn blocking_effect_name(world: &mut World, target: Entity, kind: Prevent) -> Option<String> {
     let active: Vec<(i32, String)> = {
         let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
         q.iter(world)
@@ -22945,9 +23062,9 @@ pub(crate) fn effect_prevents(world: &mut World, target: Entity, kind: Prevent) 
             .collect()
     };
     if active.is_empty() {
-        return false;
+        return None;
     }
-    let type_blocks = active.iter().any(|(id, _)| {
+    if let Some((_, name)) = active.iter().find(|(id, _)| {
         world
             .get_resource::<EffectCatalog>()
             .and_then(|catalog| catalog.by_id.get(id))
@@ -22956,22 +23073,37 @@ pub(crate) fn effect_prevents(world: &mut World, target: Entity, kind: Prevent) 
                 Prevent::Casting => def.prevents_casting,
                 Prevent::Movement => def.prevents_movement,
             })
-    });
-    if type_blocks {
-        return true;
+    }) {
+        return Some(name.clone());
     }
-    world
-        .get_resource::<mud_world::StatusFlagValues>()
-        .is_some_and(|flags| {
-            active.iter().any(|(_, name)| {
-                let p = flags.prevents(name);
-                match kind {
-                    Prevent::Speaking => p.speaking,
-                    Prevent::Casting => p.casting,
-                    Prevent::Movement => p.movement,
-                }
-            })
+    let flags = world.get_resource::<mud_world::StatusFlagValues>()?;
+    active
+        .iter()
+        .find(|(_, name)| {
+            let p = flags.prevents(name);
+            match kind {
+                Prevent::Speaking => p.speaking,
+                Prevent::Casting => p.casting,
+                Prevent::Movement => p.movement,
+            }
         })
+        .map(|(_, name)| name.clone())
+}
+
+/// The refusal line for an action that [`effect_prevents`] just blocked,
+/// worded for the effect that blocks it (a stun is not a silence). Falls
+/// back to a per-action line for any other effect.
+pub(crate) fn prevent_refusal(world: &mut World, target: Entity, kind: Prevent) -> &'static str {
+    let name = blocking_effect_name(world, target, kind).unwrap_or_default();
+    match (name.to_ascii_lowercase().as_str(), kind) {
+        ("stun" | "stunned", _) => "You are too stunned to do that.\r\n",
+        ("webbed", Prevent::Movement) => "You are stuck in a web!\r\n",
+        ("held" | "hold_person" | "paralyzed", _) => "You're paralyzed to the bone!\r\n",
+        ("mesmerized", _) => "You are too preoccupied with pretty illusions to do that.\r\n",
+        (_, Prevent::Speaking) => "Your voice is silenced.\r\n",
+        (_, Prevent::Casting) => "Your magic is suppressed.\r\n",
+        (_, Prevent::Movement) => "You can't move right now.\r\n",
+    }
 }
 
 /// Remove the given effect entities from `target` through
@@ -24029,6 +24161,19 @@ pub(crate) fn fix_possessive_article(name: &str) -> String {
 /// the article. Legacy `act()` ran `CAP()` over every formatted line;
 /// the room broadcasts, `send_msg` and `render_ability_template` do the
 /// same through this.
+/// `name` for use mid-sentence: a capitalised leading article
+/// ("A well-built Rogue", "The Instructor") drops to lower case so the line
+/// reads "But the Instructor ..." rather than "But The Instructor ...".
+pub(crate) fn lower_leading_article(name: &str) -> String {
+    let first = name.split_whitespace().next().unwrap_or("");
+    if matches!(first, "A" | "An" | "The") {
+        let mut chars = name.chars();
+        let head = chars.next().map(|c| c.to_ascii_lowercase());
+        return head.into_iter().chain(chars).collect();
+    }
+    name.to_string()
+}
+
 pub(crate) fn cap_sentence_start(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
@@ -24088,7 +24233,9 @@ fn script_line_for(
 ) -> String {
     let at_start = sentence_start.get(&recipient).copied().unwrap_or(true);
     let line = format!("{msg}\r\n");
-    if !msg.trim().is_empty() {
+    // A line of nothing but colour tags (`</>` closing a block) says nothing
+    // visible, so it neither ends nor continues the sentence before it.
+    if visible_width(msg.trim()) > 0 {
         sentence_start.insert(recipient, script_line_ends_sentence(&line));
     }
     cap_script_line_at(&line, at_start)
@@ -25960,7 +26107,8 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
         return;
     }
     if effect_prevents(world, player, Prevent::Movement) {
-        send_to(world, player, "You can't move right now.\r\n");
+        let msg = prevent_refusal(world, player, Prevent::Movement);
+        send_to(world, player, msg);
         return;
     }
     // Combat lock: walking out of a fight is cheating. Players must

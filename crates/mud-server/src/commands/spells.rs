@@ -447,7 +447,10 @@ pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
     } else {
         args.trim().to_string()
     }
-    .to_ascii_lowercase();
+    .to_ascii_lowercase()
+    .split_whitespace()
+    .collect::<Vec<_>>()
+    .join(" ");
     // id -> (plain name, hostile or violent). The plain name is what the
     // user sees on `effects` ("from Enhance Ability"), so `cancel enhance`
     // works alongside `cancel cha`.
@@ -536,12 +539,17 @@ pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
             .iter()
             .filter(|r| r.ability_id.is_none_or(|id| seen.insert(id)))
             .collect();
-        let mut out = format!("\r\n{} cancellable effect(s):\r\n", listed.len());
+        let plural = if listed.len() == 1 { "" } else { "s" };
+        let mut out = format!("\r\n{} cancellable effect{plural}:\r\n", listed.len());
         for r in listed {
             let hours = super::info::format_effect_hours(r.remaining);
             out.push_str(&format!("  {} ({hours})\r\n", r.label));
         }
-        out.push_str("\r\nUse 'cancel <name>' to drop one.\r\n");
+        if !god && crate::commands::in_combat(world, player) {
+            out.push_str("\r\nYou can't cancel an effect in the middle of a fight!\r\n");
+        } else {
+            out.push_str("\r\nUse 'cancel <name>' to drop one.\r\n");
+        }
         send_to(world, player, out);
         return;
     }

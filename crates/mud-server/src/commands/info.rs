@@ -3543,6 +3543,8 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
     // any trailing reset from render_color_tags terminates cleanly before
     // the literal " is sleeping here." / " is bleeding." text.
     let name_rendered = render_color_tags(&name, mode);
+    // Sentence-initial uses read "The Recruiter ...", not "the Recruiter ...".
+    let name_head = render_color_tags(&crate::commands::cap_sentence_start(&name), mode);
     // Bold-cyan name as the headline, matching identify's title.
     // Builder-authored color tags on the name still flow through
     // — render_color_tags handles nested layers correctly.
@@ -3565,7 +3567,7 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
         && p != PostureKind::Standing
     {
         out.push_str(&format!(
-            "<b:cyan>{name_rendered}</> is <yellow>{}</> here.\r\n",
+            "<b:cyan>{name_head}</> is <yellow>{}</> here.\r\n",
             p.label()
         ));
     }
@@ -3618,13 +3620,13 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
                 "a"
             };
             out.push_str(&format!(
-                "<b:cyan>{name_rendered}</> is {article} {race_label}{class_label} {stature}.\r\n",
+                "<b:cyan>{name_head}</> is {article} {race_label}{class_label} {stature}.\r\n",
             ));
         } else {
             let lvl_open = who_level_color(prof.level).unwrap_or("");
             let lvl_close = if lvl_open.is_empty() { "" } else { "</>" };
             out.push_str(&format!(
-                "<b:cyan>{name_rendered}</> is a level {lvl_open}{}{lvl_close} \
+                "<b:cyan>{name_head}</> is a level {lvl_open}{}{lvl_close} \
                  {race_label}{class_label}.\r\n",
                 prof.level,
             ));
@@ -3676,7 +3678,7 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
         let lvl_open = who_level_color(proto.level).unwrap_or("");
         let lvl_close = if lvl_open.is_empty() { "" } else { "</>" };
         out.push_str(&format!(
-            "<b:cyan>{name_rendered}</> is level {lvl_open}{}{lvl_close}.\r\n",
+            "<b:cyan>{name_head}</> is level {lvl_open}{}{lvl_close}.\r\n",
             proto.level
         ));
     }
@@ -3689,12 +3691,12 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
         let cond_open = vital_color_tag(hp.hp, hp.max).unwrap_or("");
         let cond_close = if cond_open.is_empty() { "" } else { "</>" };
         out.push_str(&format!(
-            "<b:cyan>{name_rendered}</> {cond_open}{cond}{cond_close}.\r\n",
+            "<b:cyan>{name_head}</> {cond_open}{cond}{cond_close}.\r\n",
         ));
     }
     if world.get::<Shopkeeper>(target).is_some() {
         out.push_str(&format!(
-            "{name_rendered} is a merchant — try 'list' to see their wares.\r\n"
+            "{name_head} is a merchant — try 'list' to see their wares.\r\n"
         ));
     }
     // Surface non-shopkeeper professions on examine so players
@@ -3727,14 +3729,14 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
             };
             if let Some(line) = line {
                 out.push_str(&crate::commands::cap_sentence_start(&format!(
-                    "{name_rendered} is {line}\r\n"
+                    "{name_head} is {line}\r\n"
                 )));
             }
         }
     }
     if world.get::<mud_world::Flying>(target).is_some() {
         out.push_str(&crate::commands::cap_sentence_start(&format!(
-            "{name_rendered} hovers in mid-air.\r\n"
+            "{name_head} hovers in mid-air.\r\n"
         )));
     }
     // Mob latent parity (Wave 2.L) atmospheric flavor lines.
@@ -4332,10 +4334,13 @@ struct ShopRow {
     unusable: bool,
 }
 
+/// Stock text of a ware the keeper never runs out of.
+const SHOP_UNLIMITED_TEXT: &str = "unlimited";
+
 /// `unlimited`, or how many are left.
 fn shop_stock_text(amount: i32) -> String {
     if amount < 0 {
-        "unlimited".to_string()
+        SHOP_UNLIMITED_TEXT.to_string()
     } else {
         amount.to_string()
     }
@@ -4363,24 +4368,33 @@ struct ShopWidths {
 
 /// Size the columns to the longest entry among `rows` instead of a fixed
 /// width, and let the name column give way when a row would run past
-/// `width`, so no row wraps on an 80 column terminal.
+/// `width`, so no row wraps on an 80 column terminal. A narrow terminal
+/// first drops the `Stock` column when every ware is unlimited (it says
+/// nothing then), so the item names stay readable before they are cut.
 fn shop_widths(rows: &[&ShopRow], width: usize) -> ShopWidths {
     const MIN_NAME_W: usize = 12;
     let longest = |f: &dyn Fn(&ShopRow) -> usize, floor: usize| {
         rows.iter().copied().map(f).max().unwrap_or(0).max(floor)
     };
     let price = longest(&|r| visible_width(&r.price), "Price".len());
-    let stock = longest(&|r| visible_width(&r.stock), "Stock".len());
+    let mut stock = longest(&|r| visible_width(&r.stock), "Stock".len());
     let name = longest(&|r| visible_width(&r.name), "Item".len());
     let tag = if rows.iter().any(|r| r.unusable) {
         visible_width(SHOP_CANT_USE_TAG)
     } else {
         0
     };
-    // "  " + number + " " + name + " " + price + " " + stock + tag
-    let fixed = 2 + SHOP_NUMBER_W + 1 + 1 + price + 1 + stock + tag;
+    // "  " + number + " " + name + " " + price + [" " + stock] + tag
+    let fixed = |stock: usize| {
+        2 + SHOP_NUMBER_W + 1 + 1 + price + if stock > 0 { 1 + stock } else { 0 } + tag
+    };
+    if name > width.saturating_sub(fixed(stock))
+        && rows.iter().all(|r| r.stock == SHOP_UNLIMITED_TEXT)
+    {
+        stock = 0;
+    }
     ShopWidths {
-        name: name.min(width.saturating_sub(fixed).max(MIN_NAME_W)),
+        name: name.min(width.saturating_sub(fixed(stock)).max(MIN_NAME_W)),
         price,
         stock,
     }
@@ -4388,28 +4402,49 @@ fn shop_widths(rows: &[&ShopRow], width: usize) -> ShopWidths {
 
 const SHOP_NUMBER_W: usize = 3;
 
-/// Append a shop table (`#`, name, price, stock) to `out`.
+/// Append a shop table (`#`, name, price, stock) to `out`. A `stock` width
+/// of zero leaves the stock column out.
 fn push_shop_table(out: &mut String, name_header: &str, rows: &[ShopRow], w: &ShopWidths) {
+    let show_stock = w.stock > 0;
+    let stock_cell = |text: &str| {
+        if show_stock {
+            format!(" {text}")
+        } else {
+            String::new()
+        }
+    };
     out.push_str(&format!(
-        "  {:<SHOP_NUMBER_W$} {} {} {}\r\n",
+        "  {:<SHOP_NUMBER_W$} {} {}{}\r\n",
         "#",
         pad_visible(name_header, w.name),
-        pad_visible("Price", w.price),
-        "Stock"
+        if show_stock {
+            pad_visible("Price", w.price)
+        } else {
+            "Price".to_string()
+        },
+        stock_cell("Stock"),
     ));
     for row in rows {
+        let price_cell = if show_stock || row.unusable {
+            pad_visible(&row.price, w.price)
+        } else {
+            row.price.clone()
+        };
+        // The tag follows the stock text directly; pad only when a tag
+        // is shown so an untagged row has no trailing blanks.
+        let stock_text = if !show_stock {
+            String::new()
+        } else if row.unusable {
+            stock_cell(&pad_visible(&row.stock, w.stock))
+        } else {
+            stock_cell(&row.stock)
+        };
         out.push_str(&format!(
-            "  {:<SHOP_NUMBER_W$} {} {} {}{}\r\n",
+            "  {:<SHOP_NUMBER_W$} {} {}{}{}\r\n",
             row.number,
             pad_visible(&shorten_plain_name(&row.name, w.name), w.name),
-            pad_visible(&row.price, w.price),
-            // The tag follows the stock text directly; pad only when a tag
-            // is shown so an untagged row has no trailing blanks.
-            if row.unusable {
-                pad_visible(&row.stock, w.stock)
-            } else {
-                row.stock.clone()
-            },
+            price_cell,
+            stock_text,
             if row.unusable { SHOP_CANT_USE_TAG } else { "" }
         ));
     }
@@ -12865,7 +12900,7 @@ pub(crate) fn cmd_walk(world: &mut World, player: Entity, _args: &str) {
 /// Tick before which the hider may not hide again (legacy `WAIT_STATE`
 /// after `do_hide`; only `hide` itself honours it).
 #[derive(Component, Debug, Clone, Copy)]
-struct HideLag {
+pub(super) struct HideLag {
     until: u64,
 }
 

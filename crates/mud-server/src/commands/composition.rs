@@ -403,8 +403,10 @@ pub(crate) fn refuse_mount(world: &mut World, rider: Entity, mount: Entity) -> b
 
 /// Legacy `remove_unsuitable_spells`: strip every effect whose ability is
 /// tagged `requires_rigid` from `target` while its body is not solid. They
-/// go silently through the same teardown a natural expiry uses
-/// ([`crate::effects::remove_effect_instance`]). Returns how many ended.
+/// go through the same teardown a natural expiry uses
+/// ([`crate::effects::remove_effect_instance`]), and like legacy's
+/// `active_effect_remove` each spell says its wear-off text once.
+/// Returns how many effects ended.
 pub(crate) fn strip_unsuitable_effects(world: &mut World, target: Entity) -> usize {
     let rigid_only = requires_rigid_abilities(world);
     strip_effects_of(world, target, &rigid_only)
@@ -438,18 +440,22 @@ fn strip_effects_of(
     {
         return 0;
     }
-    let doomed: Vec<Entity> = {
+    let doomed: Vec<(Entity, String, Option<i32>)> = {
         let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
         q.iter(world)
             .filter(|(_, inst, applied)| {
                 applied.0 == target && inst.ability_id.is_some_and(|id| rigid_only.contains(&id))
             })
-            .map(|(e, ..)| e)
+            .map(|(e, inst, _)| (e, inst.name.clone(), inst.ability_id))
             .collect()
     };
     let mut removed = 0;
-    for e in doomed {
+    let mut told = std::collections::HashSet::new();
+    for (e, name, ability_id) in doomed {
         if world.get::<EffectInstance>(e).is_some() {
+            if told.insert(ability_id) {
+                crate::effects::send_wearoff_messages(world, target, &name, ability_id);
+            }
             crate::effects::remove_effect_instance(world, target, e);
             removed += 1;
         }

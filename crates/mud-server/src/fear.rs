@@ -197,7 +197,8 @@ pub(crate) fn can_flee_now(world: &mut World, actor: Entity) -> bool {
         }
     }
     if effect_prevents(world, actor, Prevent::Movement) {
-        send_to(world, actor, "You can't move!\r\n");
+        let msg = crate::commands::prevent_refusal(world, actor, Prevent::Movement);
+        send_to(world, actor, msg);
         return false;
     }
     if world.get::<RiddenBy>(actor).is_some() {
