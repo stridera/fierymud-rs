@@ -696,6 +696,94 @@ pub fn base_core_stats(world: &World, wearer: Entity) -> Option<CoreStats> {
     Some(stats)
 }
 
+/// The level-driven values of a character as they should be saved: level
+/// and the maxima / combat skill WITHOUT worn gear and without buff or
+/// debuff effects. Both are re-applied at login on top of the saved row
+/// (gear by `recompute_equipped_for`, effects by the effect restore), so the
+/// row must hold the base or each relog would stack them again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BaseProgression {
+    pub level: i32,
+    pub max_hp: i32,
+    pub max_stamina: i32,
+    pub accuracy: i32,
+    pub evasion: i32,
+    pub attack_power: i32,
+    pub crit_chance: i32,
+}
+
+/// Which saved progression value an apply key (`max_hp`, `accuracy`, ...)
+/// moves. The same aliases `apply_modify_delta` accepts.
+fn progression_slot(key: &str) -> Option<usize> {
+    Some(match key {
+        "max_hp" => 0,
+        "max_move" | "max_stamina" | "stamina_max" => 1,
+        "accuracy" => 2,
+        "evasion" => 3,
+        "attack_power" => 4,
+        _ => return None,
+    })
+}
+
+/// [`BaseProgression`] for `wearer`: the live values minus every gear grant
+/// (`GrantedDeltas`) and every effect `ModifyDelta` on them. The maxima are
+/// computed from the unclamped running total (the current maximum plus its
+/// `StatOverflow` ledger entry, as in [`gear_offsets`]), so a clamp that cut
+/// a grant short does not make the subtraction overshoot. `None` when the
+/// entity lacks a profile, health, stamina or combat stats (not a player).
+#[must_use]
+pub fn base_progression(world: &mut World, wearer: Entity) -> Option<BaseProgression> {
+    let level = world.get::<mud_world::Profile>(wearer)?.level;
+    let health = world.get::<Health>(wearer).copied()?;
+    let stamina = world.get::<Stamina>(wearer).copied()?;
+    let combat = world.get::<mud_world::CombatStats>(wearer).copied()?;
+    // Nominal totals per slot: max_hp, max_stamina, accuracy, evasion, AP.
+    let mut applied = [0_i32; 5];
+    let add = |applied: &mut [i32; 5], key: &str, amount: i32| {
+        if let Some(i) = progression_slot(key) {
+            applied[i] = applied[i].saturating_add(amount);
+        }
+    };
+    if let Some(contents) = world.get::<mud_world::Contents>(wearer) {
+        for item in contents.iter() {
+            if let Some(g) = world.get::<GrantedDeltas>(item) {
+                for (key, amount) in &g.deltas {
+                    add(&mut applied, key, *amount);
+                }
+            }
+        }
+    }
+    let mut effects = world.query::<(&AppliedTo, &mud_world::ModifyDelta)>();
+    for (applied_to, delta) in effects.iter(world) {
+        if applied_to.0 == wearer {
+            add(&mut applied, &delta.target, delta.amount);
+        }
+    }
+    let ledger = |key: &str| {
+        world
+            .get::<mud_world::StatOverflow>(wearer)
+            .and_then(|o| o.0.get(key).copied())
+            .unwrap_or(0)
+    };
+    Some(BaseProgression {
+        level,
+        max_hp: health
+            .max
+            .saturating_add(ledger("max_hp"))
+            .saturating_sub(applied[0])
+            .max(1),
+        max_stamina: stamina
+            .max
+            .saturating_add(ledger("max_stamina"))
+            .saturating_sub(applied[1])
+            .max(0),
+        accuracy: combat.accuracy.saturating_sub(applied[2]),
+        evasion: combat.evasion.saturating_sub(applied[3]),
+        attack_power: combat.attack_power.saturating_sub(applied[4]),
+        crit_chance: combat.crit_chance,
+    })
+}
+
 /// A current-points value (hp, stamina) as it should be saved: capped at
 /// the gear-less maximum (`max - max_offset`), never below 1 for a living
 /// wearer. Login re-applies the gear WITHOUT topping current points up

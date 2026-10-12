@@ -1341,3 +1341,111 @@ async fn curse_delta_persists_through_corpse_loot_and_overwrite() {
 
     corpse_test_cleanup(&pool, &[&owner, &looter]).await;
 }
+
+/// Level, maxima and combat skill written by `save_progression` come back
+/// through `find_by_name`, next to a `save_state` in the same transaction,
+/// and a later `save_state` alone leaves them untouched.
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn character_progression_round_trips() {
+    use mud_db::characters::{CharacterStatePayload, ProgressionPayload};
+    let pool = pool().await;
+    let user_id = testplayer_user_id(&pool).await;
+    let suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let name = format!("Progress{suffix}");
+    let char_id = mud_db::characters::create(
+        &pool,
+        &mud_db::characters::NewCharacter {
+            user_id: &user_id,
+            name: &name,
+            race: "HUMAN",
+            gender: "neutral",
+            class_id: 1,
+            strength: 13,
+            intelligence: 13,
+            wisdom: 13,
+            dexterity: 13,
+            constitution: 13,
+            charisma: 13,
+            name_approved: true,
+            password_hash: "",
+        },
+    )
+    .await
+    .expect("create");
+    let state = |hp: i32| CharacterStatePayload {
+        hit_points: hp,
+        stamina: 50,
+        current_room_zone_id: None,
+        current_room_id: None,
+        recall_room_zone_id: None,
+        recall_room_id: None,
+        player_flags: &[],
+        prompt: "> ",
+        title: None,
+        description: None,
+        wealth: 0,
+        experience: 11_000,
+        skill_points: 0,
+        hunger: 0,
+        thirst: 0,
+        invis_level: 0,
+        freeze_level: None,
+        wimpy_threshold: 0,
+        poof_in: None,
+        poof_out: None,
+        position: mud_db::enums::Position::Standing,
+    };
+    let progression = ProgressionPayload {
+        level: 12,
+        hit_points_max: 412,
+        stamina_max: 187,
+        accuracy: 83,
+        evasion: 91,
+        attack_power: 60,
+        crit_chance: 9,
+    };
+    let mut tx = pool.begin().await.expect("begin");
+    mud_db::characters::save_state(&mut *tx, &char_id, &state(400))
+        .await
+        .expect("save_state");
+    mud_db::characters::save_progression(&mut *tx, &char_id, &progression)
+        .await
+        .expect("save_progression");
+    tx.commit().await.expect("commit");
+
+    let read = |row: &mud_db::characters::CharacterRow| ProgressionPayload {
+        level: row.level,
+        hit_points_max: row.hit_points_max,
+        stamina_max: row.stamina_max,
+        accuracy: row.accuracy,
+        evasion: row.evasion,
+        attack_power: row.attack_power,
+        crit_chance: row.crit_chance,
+    };
+    let row = mud_db::characters::find_by_name(&pool, &name)
+        .await
+        .expect("find")
+        .expect("present");
+    assert_eq!(read(&row), progression);
+    assert_eq!((row.hit_points, row.experience), (400, 11_000));
+
+    // An ordinary autosave (save_state only) must not undo the level.
+    mud_db::characters::save_state(&pool, &char_id, &state(390))
+        .await
+        .expect("save_state again");
+    let row = mud_db::characters::find_by_name(&pool, &name)
+        .await
+        .expect("find")
+        .expect("present");
+    assert_eq!(read(&row), progression);
+    assert_eq!(row.hit_points, 390);
+
+    sqlx::query!(r#"DELETE FROM "Characters" WHERE id = $1"#, char_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}

@@ -5338,6 +5338,8 @@ pub(crate) struct PlayerSaveSnapshot {
     ability_rows: Vec<mud_db::character_abilities::CharacterAbilityRow>,
     alias_rows: Vec<mud_db::character_aliases::CharacterAliasRow>,
     core_stats_payload: Option<mud_db::characters::CoreStatsPayload>,
+    /// Level and base maxima / combat skill (no gear, no effects).
+    pub(crate) progression_payload: Option<mud_db::characters::ProgressionPayload>,
     now_inst: std::time::Instant,
     new_time_played: Option<i32>,
     /// The player died and the corpse is not committed yet: this write
@@ -5378,11 +5380,18 @@ pub(crate) fn snapshot_player(
     // character row keeps the values without it (else every relog stacks
     // the bonus again).
     let gear = crate::equip_apply::gear_offsets(world, entity);
+    // Level and the maxima / combat skill that grow with it, as base values
+    // (gear and effects are re-applied at login). Current points are capped
+    // at the saved maximum so the row never holds hp > hit_points_max.
+    let base_progression = crate::equip_apply::base_progression(world, entity);
     let hp = world.get::<Health>(entity).map_or(0, |h| {
-        crate::equip_apply::base_current(h.hp, h.max, gear.max_hp)
+        let cap = base_progression.map_or(h.max.saturating_sub(gear.max_hp), |b| b.max_hp);
+        crate::equip_apply::base_current(h.hp, cap, 0)
     });
     let stamina = world.get::<Stamina>(entity).map_or(0, |s| {
-        crate::equip_apply::base_current(s.current, s.max, gear.max_stamina)
+        let cap =
+            base_progression.map_or(s.max.saturating_sub(gear.max_stamina), |b| b.max_stamina);
+        crate::equip_apply::base_current(s.current, cap, 0)
     });
     let (zone_id, room_id) = world
         .get::<Located>(entity)
@@ -5744,6 +5753,15 @@ pub(crate) fn snapshot_player(
         .unwrap_or_default();
     let core_stats_payload: Option<mud_db::characters::CoreStatsPayload> =
         crate::equip_apply::base_core_stats(world, entity).map(Into::into);
+    let progression_payload = base_progression.map(|b| mud_db::characters::ProgressionPayload {
+        level: b.level,
+        hit_points_max: b.max_hp,
+        stamina_max: b.max_stamina,
+        accuracy: b.accuracy,
+        evasion: b.evasion,
+        attack_power: b.attack_power,
+        crit_chance: b.crit_chance,
+    });
     // Time-played accumulator. We compute the deltas now, but only
     // bump the in-memory anchor AFTER the tx commits — otherwise a
     // rolled-back save would advance the local counter without the
@@ -5837,6 +5855,7 @@ pub(crate) fn snapshot_player(
         ability_rows,
         alias_rows,
         core_stats_payload,
+        progression_payload,
         now_inst,
         new_time_played,
         death,
@@ -6324,6 +6343,9 @@ pub(crate) async fn write_snapshot(
     mud_db::character_aliases::save_for(&mut tx, cid, &snap.alias_rows).await?;
     if let Some(stats) = &snap.core_stats_payload {
         characters::save_core_stats(&mut *tx, cid, stats).await?;
+    }
+    if let Some(progression) = &snap.progression_payload {
+        characters::save_progression(&mut *tx, cid, progression).await?;
     }
     tx.commit().await?;
     if let Some(id) = corpse_id {

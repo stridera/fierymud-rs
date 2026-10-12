@@ -15,7 +15,7 @@ use mud_world::{
 use super::dispatch;
 use super::test_support::{Rx, drain, object_proto, player_in};
 use crate::equip_apply::{
-    GrantedDeltas, base_core_stats, base_current, despawn_item, gear_offsets,
+    GrantedDeltas, base_core_stats, base_current, base_progression, despawn_item, gear_offsets,
     recompute_equipped_for, recompute_equipped_keeping_vitals, release_gear,
 };
 
@@ -2008,4 +2008,111 @@ fn max_hp_buff_raises_the_maximum_only_and_expiry_is_exact() {
     let h = world.get::<Health>(p).unwrap();
     assert_eq!((h.hp, h.max), (40, 100));
     assert!(crate::commands::stat_overflow_entries(&world, p).is_empty());
+}
+
+/// Level, maxima and combat skill the way the save writes them.
+fn with_progression_components(world: &mut World, p: Entity) {
+    world.entity_mut(p).insert((
+        mud_world::Stamina {
+            current: 80,
+            max: 80,
+        },
+        mud_world::CombatStats {
+            accuracy: 60,
+            evasion: 55,
+            attack_power: 20,
+            crit_chance: 7,
+            ..Default::default()
+        },
+    ));
+}
+
+/// A buff / debuff the way spells record it: the stat is changed through
+/// `apply_modify_delta` and a `ModifyDelta` rides on the effect entity.
+fn buff(world: &mut World, p: Entity, target: &str, amount: i32) {
+    assert!(crate::commands::apply_modify_delta(
+        world, p, target, amount
+    ));
+    world.spawn((
+        EffectInstance {
+            kind: MODIFY,
+            name: "buff".into(),
+            strength: 1,
+            remaining_secs: 60,
+            source: EffectSource::Other("test".into()),
+            ability_id: None,
+        },
+        AppliedTo(p),
+        mud_world::ModifyDelta {
+            target: target.into(),
+            amount,
+        },
+    ));
+}
+
+#[test]
+fn saved_progression_is_the_base_without_gear_or_effects() {
+    let (mut world, p, mut rx) = setup();
+    with_progression_components(&mut world, p);
+    let bare = base_progression(&mut world, p).unwrap();
+    assert_eq!((bare.level, bare.max_hp, bare.max_stamina), (10, 100, 80));
+    assert_eq!(
+        (
+            bare.accuracy,
+            bare.evasion,
+            bare.attack_power,
+            bare.crit_chance
+        ),
+        (60, 55, 20, 7)
+    );
+
+    ring(
+        &mut world,
+        p,
+        40,
+        "might",
+        vec![
+            modify("max_hp", 30),
+            modify("max_stamina", 12),
+            modify("accuracy", 9),
+            modify("attack_power", 4),
+        ],
+    );
+    wear(&mut world, p, &mut rx, "might");
+    buff(&mut world, p, "max_hp", 20);
+    buff(&mut world, p, "evasion", 15);
+    // Live values carry the gear and the buffs...
+    assert_eq!(world.get::<Health>(p).unwrap().max, 150);
+    assert_eq!(world.get::<mud_world::Stamina>(p).unwrap().max, 92);
+    assert_eq!(world.get::<mud_world::CombatStats>(p).unwrap().accuracy, 69);
+    assert_eq!(world.get::<mud_world::CombatStats>(p).unwrap().evasion, 70);
+    // ...the saved row does not.
+    assert_eq!(base_progression(&mut world, p).unwrap(), bare);
+}
+
+#[test]
+fn saved_progression_keeps_level_up_gains_made_under_gear() {
+    let (mut world, p, mut rx) = setup();
+    with_progression_components(&mut world, p);
+    ring(&mut world, p, 41, "vital", vec![modify("max_hp", 25)]);
+    wear(&mut world, p, &mut rx, "vital");
+    // A level-up gain lands on top of the gear-inflated maximum.
+    assert!(crate::commands::apply_modify_delta(
+        &mut world, p, "max_hp", 17
+    ));
+    world.get_mut::<Profile>(p).unwrap().level = 11;
+    let b = base_progression(&mut world, p).unwrap();
+    assert_eq!((b.level, b.max_hp), (11, 117), "gain kept, gear dropped");
+}
+
+#[test]
+fn saved_progression_is_exact_when_a_curse_floors_the_maximum() {
+    let (mut world, p, mut rx) = setup();
+    with_progression_components(&mut world, p);
+    buff(&mut world, p, "max_hp", -150);
+    ring(&mut world, p, 42, "small", vec![modify("max_hp", 30)]);
+    wear(&mut world, p, &mut rx, "small");
+    assert_eq!(world.get::<Health>(p).unwrap().max, 1, "still floored");
+    // Base 100 once the curse and the ring are both taken out.
+    assert_eq!(base_progression(&mut world, p).unwrap().max_hp, 100);
 }

@@ -476,3 +476,209 @@ fn classless_level_up_uses_the_default_rates() {
         (want.accuracy, want.evasion, want.attack_power)
     );
 }
+
+// --- Level-ups survive the save --------------------------------------------
+
+/// Give a spawned test character the pools a real player has, at `level`
+/// with `hp` / `stamina` maxima and the class baseline for that level.
+fn with_pools(
+    world: &mut World,
+    e: Entity,
+    level: i32,
+    hp_max: i32,
+    stamina_max: i32,
+    rates: &mud_db::characters::ClassCombatRates,
+) {
+    let b = rates.baseline(level, 80);
+    world.entity_mut(e).insert((
+        mud_world::Health {
+            hp: hp_max,
+            max: hp_max,
+        },
+        mud_world::Stamina {
+            current: stamina_max,
+            max: stamina_max,
+        },
+        mud_world::SkillPoints(0),
+        mud_world::CombatStats {
+            accuracy: b.accuracy,
+            evasion: b.evasion,
+            attack_power: b.attack_power,
+            crit_chance: b.crit_chance,
+            ..Default::default()
+        },
+    ));
+}
+
+#[test]
+fn level_up_then_save_then_reload_keeps_level_hp_and_combat_stats() {
+    const WARRIOR: i32 = 4;
+    let mut world = world();
+    let warrior = rates_class(WARRIOR, 2.7, 2.0, 5.0);
+    let rates = warrior.combat_rates;
+    world
+        .resource_mut::<ClassCatalog>()
+        .by_id
+        .insert(WARRIOR, warrior);
+    // Level 10 with the XP of level 12 banked (a kill just paid out).
+    let (e, _rx) = spawn(&mut world, "Climber", 10, 11_000, WARRIOR);
+    with_pools(&mut world, e, 10, 200, 100, &rates);
+    level_sweep_tick(&mut world);
+    assert_eq!(profile(&world, e).level, 12);
+
+    // What the save writes.
+    let snap = crate::login::snapshot_player(&mut world, e, 1).expect("snapshot");
+    let saved = snap.progression_payload.expect("progression is saved");
+    let live_hp = *world.get::<mud_world::Health>(e).unwrap();
+    assert_eq!(saved.level, 12);
+    assert_eq!(saved.hit_points_max, live_hp.max);
+    assert!(live_hp.max > 200, "two level-ups raised the maximum");
+    assert_eq!(saved.stamina_max, 102, "100 + 2 * stamina_gain");
+    let want = rates.baseline(12, 80);
+    assert_eq!(
+        (
+            saved.accuracy,
+            saved.evasion,
+            saved.attack_power,
+            saved.crit_chance
+        ),
+        (
+            want.accuracy,
+            want.evasion,
+            want.attack_power,
+            want.crit_chance
+        )
+    );
+
+    // Relog: a fresh world loads those columns and the same XP. Nothing is
+    // left to replay, so no second HP roll and no second practice grant.
+    let mut next = self::world();
+    next.resource_mut::<ClassCatalog>()
+        .by_id
+        .insert(WARRIOR, rates_class(WARRIOR, 2.7, 2.0, 5.0));
+    let (r, _rx2) = spawn(&mut next, "Climber", saved.level, 11_000, WARRIOR);
+    with_pools(
+        &mut next,
+        r,
+        saved.level,
+        saved.hit_points_max,
+        saved.stamina_max,
+        &rates,
+    );
+    level_sweep_tick(&mut next);
+    assert_eq!(profile(&next, r).level, 12);
+    assert_eq!(
+        next.get::<mud_world::Health>(r).unwrap().max,
+        saved.hit_points_max
+    );
+    assert_eq!(
+        next.get::<mud_world::SkillPoints>(r).unwrap().0,
+        0,
+        "no replayed grant"
+    );
+}
+
+#[test]
+fn without_a_saved_level_a_relog_replays_the_level_ups() {
+    // The bug being fixed, pinned from the loading side: a row still at the
+    // old level re-levels from XP, granting practice points again.
+    const WARRIOR: i32 = 4;
+    let mut world = world();
+    let warrior = rates_class(WARRIOR, 2.7, 2.0, 5.0);
+    let rates = warrior.combat_rates;
+    world
+        .resource_mut::<ClassCatalog>()
+        .by_id
+        .insert(WARRIOR, warrior);
+    let (e, _rx) = spawn(&mut world, "Stale", 10, 11_000, WARRIOR);
+    with_pools(&mut world, e, 10, 200, 100, &rates);
+    level_sweep_tick(&mut world);
+    assert_eq!(profile(&world, e).level, 12);
+    assert!(world.get::<mud_world::SkillPoints>(e).unwrap().0 > 0);
+}
+
+/// Full chain against a live database: level-up in memory, `snapshot_player`
+/// + `write_snapshot`, re-read the row the way login does.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires live fierydev DB; run with: cargo test -p mud-server -- --ignored --test-threads=1"]
+async fn level_up_survives_a_real_save_and_reload() {
+    const WARRIOR: i32 = 4;
+    let _ = dotenvy::from_path("../../.env");
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let pool = mud_db::connect(&url).await.expect("connect");
+    let user_id: String = mud_db::sqlx::query_scalar(r#"SELECT id FROM "Users" LIMIT 1"#)
+        .fetch_one(&pool)
+        .await
+        .expect("a Users row");
+    let name = format!(
+        "Lvl{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let char_id = mud_db::characters::create(
+        &pool,
+        &mud_db::characters::NewCharacter {
+            user_id: &user_id,
+            name: &name,
+            race: "HUMAN",
+            gender: "neutral",
+            class_id: 1,
+            strength: 13,
+            intelligence: 13,
+            wisdom: 13,
+            dexterity: 13,
+            constitution: 13,
+            charisma: 13,
+            name_approved: true,
+            password_hash: "",
+        },
+    )
+    .await
+    .expect("create");
+
+    let mut world = world();
+    let warrior = rates_class(WARRIOR, 2.7, 2.0, 5.0);
+    let rates = warrior.combat_rates;
+    world
+        .resource_mut::<ClassCatalog>()
+        .by_id
+        .insert(WARRIOR, warrior);
+    let (e, _rx) = spawn(&mut world, &name, 10, 11_000, WARRIOR);
+    world.get_mut::<Account>(e).unwrap().character_id = char_id.clone();
+    with_pools(&mut world, e, 10, 200, 100, &rates);
+    level_sweep_tick(&mut world);
+    let live = *world.get::<mud_world::Health>(e).unwrap();
+    assert_eq!(profile(&world, e).level, 12);
+
+    let snap = crate::login::snapshot_player(&mut world, e, 1).expect("snapshot");
+    crate::login::write_snapshot(&pool, &snap)
+        .await
+        .expect("write_snapshot");
+
+    let row = mud_db::characters::find_by_name(&pool, &name)
+        .await
+        .expect("find")
+        .expect("present");
+    let want = rates.baseline(12, 80);
+    assert_eq!(row.level, 12);
+    assert_eq!((row.hit_points_max, row.stamina_max), (live.max, 102));
+    assert!(row.hit_points <= row.hit_points_max);
+    assert_eq!(
+        (row.accuracy, row.evasion, row.attack_power, row.crit_chance),
+        (
+            want.accuracy,
+            want.evasion,
+            want.attack_power,
+            want.crit_chance
+        )
+    );
+    assert_eq!(row.experience, 11_000);
+
+    mud_db::sqlx::query(r#"DELETE FROM "Characters" WHERE id = $1"#)
+        .bind(&char_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}

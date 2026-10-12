@@ -462,6 +462,59 @@ pub async fn save_core_stats<'e, E: PgExecutor<'e>>(
     Ok(())
 }
 
+/// Level-driven columns of a character, as the BASE values: without worn
+/// gear and without buff / debuff effects. Both are re-applied at login on
+/// top of what the row holds, so writing the live (gear- and effect-
+/// inclusive) value back would stack the bonus again on every relog.
+///
+/// Level-ups happen in memory (`combat::level_up_to`) and change all of
+/// these; before they were saved a relog restarted from the creation-time
+/// row and replayed the level-ups from experience, re-rolling the HP dice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProgressionPayload {
+    pub level: i32,
+    pub hit_points_max: i32,
+    pub stamina_max: i32,
+    pub accuracy: i32,
+    pub evasion: i32,
+    pub attack_power: i32,
+    pub crit_chance: i32,
+}
+
+/// Persist a character's level and the combat columns that grow with it.
+/// Runs in the same transaction as [`save_state`] so `hit_points` (capped
+/// at the base maximum) and `hit_points_max` always land together.
+pub async fn save_progression<'e, E: PgExecutor<'e>>(
+    executor: E,
+    character_id: &str,
+    p: &ProgressionPayload,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        r#"
+        UPDATE "Characters"
+        SET level = $1,
+            hit_points_max = $2,
+            stamina_max = $3,
+            accuracy = $4,
+            evasion = $5,
+            attack_power = $6,
+            crit_chance = $7
+        WHERE id = $8
+        "#,
+        p.level,
+        p.hit_points_max,
+        p.stamina_max,
+        p.accuracy,
+        p.evasion,
+        p.attack_power,
+        p.crit_chance,
+        character_id,
+    )
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
 /// Rename a character row by id. Returns the row count touched
 /// (0 = id not found; 1 = success). Uniqueness on the `name`
 /// column surfaces as a `sqlx::Error::Database` from the
