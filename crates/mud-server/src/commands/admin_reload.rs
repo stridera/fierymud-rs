@@ -1450,6 +1450,7 @@ mod tests {
             passive: false,
             short_cast: false,
             requires_rigid: false,
+            tags: Vec::new(),
             quest_only: false,
         }
     }
@@ -1639,6 +1640,96 @@ mod tests {
         assert_eq!(core.pick_lock, Some(272));
         assert_eq!(core.dodge, Some(7));
         assert_eq!(core.parry, None);
+    }
+
+    fn tagged_def(id: i32, name: &str, tags: &[&str]) -> AbilityDef {
+        let mut def = crate::commands::test_support::ability_def(
+            id,
+            name,
+            mud_db::abilities::AbilityKind::Skill,
+        );
+        def.tags = tags.iter().map(|t| (*t).to_string()).collect();
+        def
+    }
+
+    fn catalog_of(defs: Vec<AbilityDef>) -> AbilityCatalog {
+        let mut cat = AbilityCatalog::default();
+        for d in defs {
+            cat.by_name.insert(d.plain_name.to_ascii_lowercase(), d);
+        }
+        cat
+    }
+
+    #[test]
+    fn core_abilities_bind_by_tag_after_a_rename() {
+        // "Dodge" was renamed in Muditor; the tag keeps it bound. A decoy
+        // row still named "Dodge" without the tag must not steal the role.
+        let cat = catalog_of(vec![
+            tagged_def(7, "Evade", &["core:dodge"]),
+            tagged_def(8, "Dodge", &[]),
+            tagged_def(9, "Parry Renamed", &["CORE:PARRY", "other"]),
+        ]);
+        let (core, report) = mud_world::CoreAbilities::resolve_with_report(&cat);
+        assert_eq!(core.dodge, Some(7));
+        assert_eq!(core.parry, Some(9));
+        assert!(report.duplicate_tags.is_empty());
+        assert!(!report.name_fallbacks.contains(&"Dodge"));
+        assert!(!report.name_fallbacks.contains(&"Parry"));
+        assert_eq!(core.safefall, None);
+    }
+
+    #[test]
+    fn core_abilities_fall_back_to_name_and_warn_when_untagged() {
+        let buf = LogBuf::default();
+        let sink = buf.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || sink.clone())
+            .with_ansi(false)
+            .finish();
+        let cat = catalog_of(vec![
+            tagged_def(7, "Evade", &["core:dodge"]),
+            tagged_def(260, "Parry", &[]),
+        ]);
+        let (core, report) = mud_world::CoreAbilities::resolve_with_report(&cat);
+        assert_eq!(core.dodge, Some(7));
+        assert_eq!(core.parry, Some(260));
+        assert_eq!(report.name_fallbacks, vec!["Parry"]);
+        let core2 = tracing::subscriber::with_default(subscriber, || {
+            mud_world::CoreAbilities::resolve(&cat)
+        });
+        assert_eq!(core2, core);
+        let log = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(log.contains("WARN"), "{log}");
+        assert!(log.contains("bound by name"), "{log}");
+        assert!(log.contains("ability=\"Parry\""), "{log}");
+        assert!(!log.contains("ability=\"Dodge\""), "{log}");
+    }
+
+    #[test]
+    fn core_abilities_duplicate_tag_logs_error_and_lowest_id_wins() {
+        let buf = LogBuf::default();
+        let sink = buf.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || sink.clone())
+            .with_ansi(false)
+            .finish();
+        let cat = catalog_of(vec![
+            tagged_def(30, "Dodge B", &["core:dodge"]),
+            tagged_def(12, "Dodge A", &["core:dodge"]),
+            tagged_def(21, "Dodge C", &["core:dodge"]),
+        ]);
+        let (core, report) = mud_world::CoreAbilities::resolve_with_report(&cat);
+        assert_eq!(core.dodge, Some(12));
+        assert_eq!(
+            report.duplicate_tags,
+            vec![("core:dodge", vec![12, 21, 30])]
+        );
+        let _ = tracing::subscriber::with_default(subscriber, || {
+            mud_world::CoreAbilities::resolve(&cat)
+        });
+        let log = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(log.contains("ERROR"), "{log}");
+        assert!(log.contains("core:dodge"), "{log}");
     }
 
     /// Writer that appends into a shared buffer for log assertions.

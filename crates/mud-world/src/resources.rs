@@ -2582,13 +2582,18 @@ impl AbilityCatalog {
 }
 
 /// Well-known abilities the runtime reaches by role (evasion rolls, fall
-/// damage, lock picking, fight switching), resolved by canonical name from
-/// the [`AbilityCatalog`] at boot (and again on `areload`). Ability ids are
-/// per-database serial values and differ between dev and prod, so none is
-/// ever hard-coded. A role whose name is missing from the catalog is `None`:
-/// a warning is logged once at resolve time and the feature stays off.
-/// `Default` is all-`None`, so a world that never resolves the resource just
-/// has these features disabled.
+/// damage, lock picking, fight switching), resolved from the
+/// [`AbilityCatalog`] at boot (and again on `areload`). Each role is bound
+/// to the row carrying its stable `core:<role>` tag in `Ability.tags`
+/// ([`Self::TAGS`]), so a builder can rename the ability in Muditor without
+/// silently disabling the feature. A database that has not been tagged yet
+/// still works: a role with no tagged row falls back to its canonical name
+/// ([`Self::NAMES`]) and a warning says so. Ability ids are per-database
+/// serial values and differ between dev and prod, so none is ever
+/// hard-coded. A role found by neither tag nor name is `None`: a warning is
+/// logged once at resolve time and the feature stays off. `Default` is
+/// all-`None`, so a world that never resolves the resource just has these
+/// features disabled.
 #[derive(Resource, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CoreAbilities {
     pub dodge: Option<i32>,
@@ -2602,9 +2607,41 @@ pub struct CoreAbilities {
     pub summon_mount: Option<i32>,
 }
 
+/// What [`CoreAbilities::resolve_with_report`] had to improvise, for the
+/// logging in [`CoreAbilities::resolve`] and for tests.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CoreAbilityReport {
+    /// Roles (canonical names) bound by their name because no row carries
+    /// the role's tag yet.
+    pub name_fallbacks: Vec<&'static str>,
+    /// Roles whose tag is on several abilities: `(tag, ids ascending)`.
+    /// The lowest id wins.
+    pub duplicate_tags: Vec<(&'static str, Vec<i32>)>,
+    /// Roles resolved by name that still matched several abilities after
+    /// preferring exact names: `(canonical name, ids ascending)`.
+    pub ambiguous_names: Vec<(&'static str, Vec<i32>)>,
+}
+
 impl CoreAbilities {
+    /// Stable role tag (`Ability.tags`, matched case-insensitively) for each
+    /// role, in the order of the fields. This is the binding; renaming the
+    /// ability does not move it.
+    pub const TAGS: [&'static str; 9] = [
+        "core:dodge",
+        "core:parry",
+        "core:safefall",
+        "core:pick_lock",
+        "core:switch",
+        "core:steal",
+        "core:claw",
+        "core:electrify",
+        "core:summon_mount",
+    ];
+
     /// Canonical `Ability.plain_name` (matched case-insensitively, `_` and
     /// space interchangeable) for each role, in the order of the fields.
+    /// Only the fallback for a database whose abilities carry no
+    /// [`Self::TAGS`] yet.
     pub const NAMES: [&'static str; 9] = [
         "Dodge",
         "Parry",
@@ -2617,14 +2654,29 @@ impl CoreAbilities {
         "Summon Mount",
     ];
 
-    /// Resolve every role against `catalog`, warning on each missing name
-    /// and once per role whose name matches more than one ability.
+    /// Resolve every role against `catalog`, warning on each name
+    /// fallback, erroring on each duplicated tag, and warning on each role
+    /// that resolves to nothing.
     #[must_use]
     pub fn resolve(catalog: &AbilityCatalog) -> Self {
-        let (found, ambiguous) = Self::resolve_inner(catalog);
-        for (name, ids) in ambiguous {
+        let (found, report) = Self::resolve_with_report(catalog);
+        for (tag, ids) in &report.duplicate_tags {
+            tracing::error!(
+                tag = *tag,
+                candidates = ?ids,
+                chosen = ids[0],
+                "core ability tag is on several abilities; using the lowest id"
+            );
+        }
+        for name in &report.name_fallbacks {
             tracing::warn!(
-                ability = name,
+                ability = *name,
+                "no ability carries the core tag for this role; bound by name (run the core-ability-tags SQL patch)"
+            );
+        }
+        for (name, ids) in &report.ambiguous_names {
+            tracing::warn!(
+                ability = *name,
                 candidates = ?ids,
                 chosen = ids[0],
                 "core ability name matches several abilities; using the lowest id"
@@ -2641,21 +2693,38 @@ impl CoreAbilities {
 
     /// [`Self::resolve`] without the logging.
     ///
-    /// Deterministic regardless of `HashMap` iteration order: an exact
-    /// `plain_name` match (case-insensitive, no `_`/space folding) beats a
-    /// folded one (`PICK_LOCK` for `Pick Lock`), and any remaining tie goes
-    /// to the lowest id.
+    /// Deterministic regardless of `HashMap` iteration order: a tagged row
+    /// beats any name match; with no tagged row, an exact `plain_name` match
+    /// (case-insensitive, no `_`/space folding) beats a folded one
+    /// (`PICK_LOCK` for `Pick Lock`); any remaining tie goes to the lowest id.
     #[must_use]
     pub fn resolve_quiet(catalog: &AbilityCatalog) -> Self {
-        Self::resolve_inner(catalog).0
+        Self::resolve_with_report(catalog).0
     }
 
-    /// Resolve all roles; also return, per role whose candidates were still
-    /// ambiguous after preferring exact names, the candidate ids ascending
-    /// (the first is the one chosen).
-    fn resolve_inner(catalog: &AbilityCatalog) -> (Self, Vec<(&'static str, Vec<i32>)>) {
-        let mut ambiguous = Vec::new();
-        let mut find = |canonical: &'static str| -> Option<i32> {
+    /// Resolve all roles and report which of them needed the name fallback
+    /// or hit duplicate tags / ambiguous names.
+    #[must_use]
+    pub fn resolve_with_report(catalog: &AbilityCatalog) -> (Self, CoreAbilityReport) {
+        let mut report = CoreAbilityReport::default();
+        let mut find = |role: usize| -> Option<i32> {
+            let tag = Self::TAGS[role];
+            let canonical = Self::NAMES[role];
+            let mut tagged: Vec<i32> = catalog
+                .by_name
+                .values()
+                .filter(|d| d.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)))
+                .map(|d| d.id)
+                .collect();
+            tagged.sort_unstable();
+            tagged.dedup();
+            if tagged.len() > 1 {
+                report.duplicate_tags.push((tag, tagged.clone()));
+            }
+            if let Some(&id) = tagged.first() {
+                return Some(id);
+            }
+
             let want = canonical.to_ascii_lowercase();
             let mut folded: Vec<&AbilityDef> = catalog
                 .by_name
@@ -2674,22 +2743,26 @@ impl CoreAbilities {
             ids.sort_unstable();
             ids.dedup();
             if ids.len() > 1 {
-                ambiguous.push((canonical, ids.clone()));
+                report.ambiguous_names.push((canonical, ids.clone()));
             }
-            ids.first().copied()
+            let id = ids.first().copied();
+            if id.is_some() {
+                report.name_fallbacks.push(canonical);
+            }
+            id
         };
         let found = Self {
-            dodge: find(Self::NAMES[0]),
-            parry: find(Self::NAMES[1]),
-            safefall: find(Self::NAMES[2]),
-            pick_lock: find(Self::NAMES[3]),
-            switch: find(Self::NAMES[4]),
-            steal: find(Self::NAMES[5]),
-            claw: find(Self::NAMES[6]),
-            electrify: find(Self::NAMES[7]),
-            summon_mount: find(Self::NAMES[8]),
+            dodge: find(0),
+            parry: find(1),
+            safefall: find(2),
+            pick_lock: find(3),
+            switch: find(4),
+            steal: find(5),
+            claw: find(6),
+            electrify: find(7),
+            summon_mount: find(8),
         };
-        (found, ambiguous)
+        (found, report)
     }
 
     /// Canonical names of the roles that did not resolve.
@@ -2914,6 +2987,9 @@ pub struct AbilityDef {
     /// in a body that is not solid, and is stripped from one that turns
     /// fluid (Stone Skin, Barkskin, ...).
     pub requires_rigid: bool,
+    /// Every `Ability.tags` entry, verbatim. The `core:<role>` tags bind
+    /// the ability to an engine feature (see [`CoreAbilities::TAGS`]).
+    pub tags: Vec<String>,
     /// `Ability.quest_only`: the ability is only ever granted by a quest
     /// reward, never by class level (see `grant_class_skills`).
     pub quest_only: bool,

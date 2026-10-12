@@ -1158,6 +1158,7 @@ mod tests {
             passive: false,
             short_cast: false,
             requires_rigid: false,
+            tags: Vec::new(),
             quest_only: false,
         }
     }

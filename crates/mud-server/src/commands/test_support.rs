@@ -196,6 +196,7 @@ pub(crate) fn ability_def(id: i32, name: &str, kind: AbilityKind) -> AbilityDef 
         passive: false,
         short_cast: false,
         requires_rigid: false,
+        tags: Vec::new(),
         quest_only: false,
     }
 }

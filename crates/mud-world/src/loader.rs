@@ -2039,6 +2039,7 @@ pub async fn load_ability_catalog(pool: &PgPool) -> sqlx::Result<AbilityCatalog>
                     .tags
                     .iter()
                     .any(|t| t.eq_ignore_ascii_case("requires_rigid")),
+                tags: row.tags.clone(),
                 quest_only: row.quest_only,
             },
         );
