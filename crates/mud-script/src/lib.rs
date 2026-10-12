@@ -4187,6 +4187,17 @@ impl UserData for LuaActor {
                         })?;
                         Ok(Value::String(lua.create_string(&s)?))
                     }
+                    // A room-attached trigger's `self` is the room's actor
+                    // handle (the DG `%self.people%` shape): it reads the
+                    // same occupant accessors as `self.room`. Mobs, players
+                    // and items fall through, so `people` stays nil there.
+                    other @ ("actors" | "people" | "actor_count")
+                        if world_from_lua(lua, |w| {
+                            w.get::<mud_world::Room>(this.entity).is_some()
+                        })? =>
+                    {
+                        Ok(room_occupant_field(lua, this.entity, other)?.unwrap_or(Value::Nil))
+                    }
                     other => api_extra::actor_field(lua, this.entity, other),
                 }
             },
@@ -4661,33 +4672,9 @@ impl UserData for LuaRoom {
                         })?;
                         Ok(Value::String(lua.create_string(&s)?))
                     }
-                    // `room.actors` / `room.people` — 1-indexed table
-                    // of LuaActor wrappers for every actor (mob or
-                    // player) located in this room. Heavily used by
-                    // randomized "pick a random target here"
-                    // patterns: `room.actors[random(1, #room.actors)]`.
-                    "actors" | "people" => {
-                        let occupants: Vec<Entity> =
-                            world_from_lua(lua, |w| characters_in(w, this.entity))?;
-                        let tbl = lua.create_table()?;
-                        for (i, e) in occupants.iter().enumerate() {
-                            let actor = LuaActor { entity: *e };
-                            let idx = i64::try_from(i + 1).unwrap_or(i64::MAX);
-                            tbl.set(idx, lua.create_userdata(actor)?)?;
-                        }
-                        Ok(Value::Table(tbl))
-                    }
-                    // `room.actor_count` — count of actors located in
-                    // this room. 10+ corpus refs in environmental-
-                    // damage scripts that scale a hazard by number of
-                    // occupants (`local pop = self.actor_count / 2`).
-                    // Cheaper than building the actors table just for
-                    // its length when callers only need the count.
-                    "actor_count" => {
-                        let count = world_from_lua(lua, |w| {
-                            i64::try_from(characters_in(w, this.entity).len()).unwrap_or(i64::MAX)
-                        })?;
-                        Ok(Value::Integer(count))
+                    "actors" | "people" | "actor_count" => {
+                        Ok(room_occupant_field(lua, this.entity, key.as_str())?
+                            .unwrap_or(Value::Nil))
                     }
                     _ => Ok(Value::Nil),
                 }
@@ -4734,6 +4721,39 @@ impl UserData for LuaRoom {
                 })?))
             },
         );
+    }
+}
+
+/// `room.actors` / `room.people` (1-indexed table of `LuaActor` wrappers for
+/// every actor, mob or player, located in the room) and `room.actor_count`
+/// (their number). One implementation for the `LuaRoom` handle and for a
+/// room-attached trigger's `self`, which is a `LuaActor` on the room entity.
+/// `None` for any other key.
+fn room_occupant_field(lua: &Lua, room: Entity, key: &str) -> mlua::Result<Option<Value>> {
+    match key {
+        // Heavily used by randomized "pick a random target here" patterns:
+        // `room.actors[random(1, #room.actors)]`.
+        "actors" | "people" => {
+            let occupants: Vec<Entity> = world_from_lua(lua, |w| characters_in(w, room))?;
+            let tbl = lua.create_table()?;
+            for (i, e) in occupants.iter().enumerate() {
+                let actor = LuaActor { entity: *e };
+                let idx = i64::try_from(i + 1).unwrap_or(i64::MAX);
+                tbl.set(idx, lua.create_userdata(actor)?)?;
+            }
+            Ok(Some(Value::Table(tbl)))
+        }
+        // 10+ corpus refs in environmental-damage scripts that scale a
+        // hazard by number of occupants (`local pop = self.actor_count / 2`).
+        // Cheaper than building the actors table when callers only need the
+        // count.
+        "actor_count" => {
+            let count = world_from_lua(lua, |w| {
+                i64::try_from(characters_in(w, room).len()).unwrap_or(i64::MAX)
+            })?;
+            Ok(Some(Value::Integer(count)))
+        }
+        _ => Ok(None),
     }
 }
 

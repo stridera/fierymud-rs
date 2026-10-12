@@ -149,3 +149,100 @@ fn room_accessor_bench() {
         println!("BENCH {label}: {us:.2} us/call");
     }
 }
+
+/// A tiny world: a room (with the `Room` marker) holding a player, a mob and
+/// an item.
+fn small_world() -> (World, Entity, Entity, Entity) {
+    let mut world = World::new();
+    let room = world
+        .spawn((
+            mud_world::Room,
+            Named {
+                name: "Lava".into(),
+            },
+            WorldKey { zone: 52, id: 78 },
+        ))
+        .id();
+    let player = world
+        .spawn((Player, Named { name: "Pat".into() }, Located(room)))
+        .id();
+    let mob = world
+        .spawn((
+            Mob,
+            Named { name: "imp".into() },
+            WorldKey { zone: 52, id: 1 },
+            Health { hp: 10, max: 10 },
+            Located(room),
+        ))
+        .id();
+    world.spawn((
+        Item,
+        Named {
+            name: "rock".into(),
+        },
+        Located(room),
+    ));
+    (world, room, player, mob)
+}
+
+/// A room trigger's `self` is the room's actor handle; it reads the same
+/// occupant accessors as `self.room`, the way the imported lava / fireplace
+/// scripts do (`self.actor_count`, `ipairs(self.actors)`).
+#[test]
+fn room_trigger_self_exposes_occupants() {
+    let (mut world, room, _player, _mob) = small_world();
+    let mut host = LuaHost::new();
+    let out = host
+        .exec_for_actor(
+            &mut world,
+            room,
+            "local names = {}\n\
+             for _, a in ipairs(self.actors) do names[#names + 1] = a.name end\n\
+             table.sort(names)\n\
+             print(self.actor_count, #self.people, #self.room.actors, self.room.actor_count)\n\
+             print(table.concat(names, ','))",
+        )
+        .unwrap();
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines[0], "2\t2\t2\t2", "{out}");
+    assert_eq!(lines[1], "Pat,imp", "{out}");
+}
+
+/// A mob's `self` is unchanged: `people` / `actors` / `actor_count` stay nil,
+/// and `self.room` still carries the occupants.
+#[test]
+fn mob_trigger_self_is_unchanged() {
+    let (mut world, _room, _player, mob) = small_world();
+    let mut host = LuaHost::new();
+    let out = host
+        .exec_for_actor(
+            &mut world,
+            mob,
+            "print(tostring(self.people), tostring(self.actors), tostring(self.actor_count))\n\
+             print(self.room.actor_count, #self.room.actors)",
+        )
+        .unwrap();
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines[0], "nil\tnil\tnil", "{out}");
+    assert_eq!(lines[1], "2\t2", "{out}");
+}
+
+/// The 14 imported room scripts that read `self.actor_count` / `self.actors`
+/// / `self.people`, in the lava-death and random-target shapes.
+#[test]
+fn imported_room_script_shapes_run() {
+    let (mut world, room, _player, _mob) = small_world();
+    let mut host = LuaHost::new();
+    let out = host
+        .exec_for_actor(
+            &mut world,
+            room,
+            "local n = 0\n\
+             while self.actor_count > 0 and n < 3 do n = n + 1; break end\n\
+             local pick = self.actors[random(1, self.actor_count)]\n\
+             local pop = self.actor_count / 2\n\
+             print(n, pick ~= nil, pop, self.people ~= nil)",
+        )
+        .unwrap();
+    assert_eq!(out.trim(), "1\ttrue\t1\ttrue", "{out:?}");
+}
