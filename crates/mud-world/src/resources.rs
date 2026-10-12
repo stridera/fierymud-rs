@@ -1656,6 +1656,51 @@ pub enum TriggerEvent {
     Postentry,
 }
 
+impl TriggerEvent {
+    /// The DG type name (`SPEECH`, `GREET_ALL`, ...): what admin tools print
+    /// and what a trigger body sees in its `event` global.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Global => "GLOBAL",
+            Self::Random => "RANDOM",
+            Self::Command => "COMMAND",
+            Self::Load => "LOAD",
+            Self::Cast => "CAST",
+            Self::Leave => "LEAVE",
+            Self::Time => "TIME",
+            Self::Speech => "SPEECH",
+            Self::Act => "ACT",
+            Self::Death => "DEATH",
+            Self::Greet => "GREET",
+            Self::GreetAll => "GREET_ALL",
+            Self::Entry => "ENTRY",
+            Self::Receive => "RECEIVE",
+            Self::Fight => "FIGHT",
+            Self::HitPercent => "HIT_PERCENT",
+            Self::Bribe => "BRIBE",
+            Self::Memory => "MEMORY",
+            Self::Door => "DOOR",
+            Self::SpeechTo => "SPEECH_TO",
+            Self::Look => "LOOK",
+            Self::Auto => "AUTO",
+            Self::Attack => "ATTACK",
+            Self::Defend => "DEFEND",
+            Self::Timer => "TIMER",
+            Self::Get => "GET",
+            Self::Drop => "DROP",
+            Self::Give => "GIVE",
+            Self::Wear => "WEAR",
+            Self::Remove => "REMOVE",
+            Self::Use => "USE",
+            Self::Consume => "CONSUME",
+            Self::Reset => "RESET",
+            Self::Preentry => "PREENTRY",
+            Self::Postentry => "POSTENTRY",
+        }
+    }
+}
+
 /// Catalog of every Lua trigger, plus the per-prototype mob/object
 /// and per-room (zone, id) → list of trigger keys. Spawn paths copy
 /// the per-proto list onto fresh entities as `AttachedTriggers`;

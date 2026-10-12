@@ -134,6 +134,9 @@ pub struct LuaHost {
     /// Extra typed globals for the next exec call only; see
     /// [`LuaHost::set_bindings`].
     bindings: Vec<(&'static str, Binding)>,
+    /// Name of the event the next exec call is firing for (`"SPEECH"`,
+    /// `"RANDOM"`, ...); see [`LuaHost::set_event`].
+    event: &'static str,
     /// Shared metatables used to build each trigger's private
     /// environment; see [`EnvKit`].
     env_kit: EnvKit,
@@ -677,6 +680,7 @@ impl LuaHost {
             yielded: Vec::new(),
             gate: ScriptGate::Off,
             bindings: Vec::new(),
+            event: "",
             env_kit,
         }
     }
@@ -709,6 +713,14 @@ impl LuaHost {
     /// `extras` argument of the exec methods.
     pub fn set_bindings(&mut self, bindings: Vec<(&'static str, Binding)>) {
         self.bindings = bindings;
+    }
+
+    /// Name the event the NEXT exec call fires for. The body sees it as the
+    /// `event` global (`"SPEECH"`, `"RANDOM"`, `"FIGHT"`, ...), so a trigger
+    /// flagged for several types can branch on what actually fired it.
+    /// Consumed by that call; an exec with none set sees `event == ""`.
+    pub fn set_event(&mut self, event: &'static str) {
+        self.event = event;
     }
 
     /// Select the sleep / casting gate for subsequent exec calls.
@@ -1018,6 +1030,8 @@ impl LuaHost {
         let span = tracing::info_span!("lua_exec");
         let _g = span.enter();
 
+        // Consumed up front so an aborted run (asleep mob) cannot leak it.
+        let event = std::mem::take(&mut self.event);
         let gate = self.gate;
         let block = if gate == ScriptGate::Mob {
             mob_block(world, listener)
@@ -1064,6 +1078,9 @@ impl LuaHost {
                 object_entity,
                 extras,
             )?;
+            // The firing event's name. Set once per fire: a parked thread
+            // keeps it in its private environment across `wait(N)`.
+            globals.set("event", event)?;
             for (name, value) in &bindings {
                 match value {
                     Binding::Int(n) => globals.set(*name, *n)?,

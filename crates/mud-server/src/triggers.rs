@@ -148,6 +148,7 @@ fn gated<R>(
     event: TriggerEvent,
     f: impl FnOnce(&mut mud_script::LuaHost) -> R,
 ) -> R {
+    host.set_event(event.name());
     host.set_gate(if event == TriggerEvent::Death {
         mud_script::ScriptGate::Off
     } else {
@@ -1722,6 +1723,62 @@ mod dispatch_tests {
         let speaker = spawn_player(&mut world, room, "Bob");
         fire_speech_in_room(&mut world, speaker, room, "hi");
         assert_eq!(var(&world, 1, "who"), Some("Bob".into()));
+    }
+
+    #[test]
+    fn directed_speech_reaches_only_the_addressed_mob_and_plain_say_reaches_both() {
+        // Legacy `speech_to_mtrigger` (ask / tell / whisper to a mob) and
+        // `speech_mtrigger` (say) each test MTRIG_SPEECH and MTRIG_SPEECHTO,
+        // so SPEECH_TO and SPEECH scripts answer both. Directed speech runs
+        // `fire_speech_at` on the addressed mob alone.
+        let (mut world, room) = base_world();
+        add_trigger(
+            &mut world,
+            1,
+            vec![TriggerEvent::SpeechTo],
+            "self:setvar('heard', speech); self:setvar('ev', event)",
+        );
+        add_trigger(
+            &mut world,
+            2,
+            vec![TriggerEvent::Speech],
+            "self:setvar('heard', speech)",
+        );
+        let first = spawn_mob(&mut world, room, 1, vec![(99, 1)]);
+        spawn_mob(&mut world, room, 2, vec![(99, 2)]);
+        let speaker = spawn_player(&mut world, room, "Bob");
+        fire_speech_at(&mut world, first, speaker, "Status please");
+        assert_eq!(var(&world, 1, "heard"), Some("status please".into()));
+        assert_eq!(var(&world, 1, "ev"), Some("SPEECH".into()));
+        assert!(var(&world, 2, "heard").is_none(), "other mob must not hear");
+        world.insert_resource(EntityVariableCache::default());
+        fire_speech_in_room(&mut world, speaker, room, "hello all");
+        assert_eq!(var(&world, 1, "heard"), Some("hello all".into()));
+        assert_eq!(var(&world, 2, "heard"), Some("hello all".into()));
+    }
+
+    #[test]
+    fn event_global_names_the_firing_event_and_speech_is_empty_off_speech() {
+        let (mut world, room) = base_world();
+        spawn_player(&mut world, room, "Watcher");
+        add_trigger(
+            &mut world,
+            1,
+            vec![TriggerEvent::Random, TriggerEvent::Speech],
+            "self:setvar('ev', event); self:setvar('sp', speech)",
+        );
+        spawn_mob(&mut world, room, 1, vec![(99, 1)]);
+        run_random_pulse(&mut world);
+        assert_eq!(var(&world, 1, "ev"), Some("RANDOM".into()));
+        assert_eq!(var(&world, 1, "sp"), Some("".into()));
+        let speaker = spawn_player(&mut world, room, "Bob");
+        fire_speech_in_room(&mut world, speaker, room, "Hello");
+        assert_eq!(var(&world, 1, "ev"), Some("SPEECH".into()));
+        assert_eq!(var(&world, 1, "sp"), Some("hello".into()));
+        // A later RANDOM fire sees no stale speech.
+        run_random_pulse(&mut world);
+        assert_eq!(var(&world, 1, "ev"), Some("RANDOM".into()));
+        assert_eq!(var(&world, 1, "sp"), Some("".into()));
     }
 
     // ----- command triggers (rooms, carried objects, return value) -----

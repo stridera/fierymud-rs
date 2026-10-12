@@ -4289,6 +4289,7 @@ pub(crate) fn cmd_bribe(world: &mut World, player: Entity, args: &str) {
     if let Some(body) = to_fire {
         let _ = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
             host.set_bindings(bribe_bindings(amount));
+            host.set_event(mud_world::TriggerEvent::Bribe.name());
             host.exec_for_listener_with_extras(world, target, player, &body, &[])
         });
         crate::commands::drain_lua_outbox(world);

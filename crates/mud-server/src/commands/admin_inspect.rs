@@ -559,43 +559,7 @@ pub(crate) fn cmd_triggers(world: &mut World, player: Entity, args: &str) {
         return;
     }
 
-    let render_event = |ev: &TriggerEvent| match ev {
-        TriggerEvent::Global => "GLOBAL",
-        TriggerEvent::Random => "RANDOM",
-        TriggerEvent::Command => "COMMAND",
-        TriggerEvent::Load => "LOAD",
-        TriggerEvent::Cast => "CAST",
-        TriggerEvent::Leave => "LEAVE",
-        TriggerEvent::Time => "TIME",
-        TriggerEvent::Speech => "SPEECH",
-        TriggerEvent::Act => "ACT",
-        TriggerEvent::Death => "DEATH",
-        TriggerEvent::Greet => "GREET",
-        TriggerEvent::GreetAll => "GREET_ALL",
-        TriggerEvent::Entry => "ENTRY",
-        TriggerEvent::Receive => "RECEIVE",
-        TriggerEvent::Fight => "FIGHT",
-        TriggerEvent::HitPercent => "HIT_PERCENT",
-        TriggerEvent::Bribe => "BRIBE",
-        TriggerEvent::Memory => "MEMORY",
-        TriggerEvent::Door => "DOOR",
-        TriggerEvent::SpeechTo => "SPEECH_TO",
-        TriggerEvent::Look => "LOOK",
-        TriggerEvent::Auto => "AUTO",
-        TriggerEvent::Attack => "ATTACK",
-        TriggerEvent::Defend => "DEFEND",
-        TriggerEvent::Timer => "TIMER",
-        TriggerEvent::Get => "GET",
-        TriggerEvent::Drop => "DROP",
-        TriggerEvent::Give => "GIVE",
-        TriggerEvent::Wear => "WEAR",
-        TriggerEvent::Remove => "REMOVE",
-        TriggerEvent::Use => "USE",
-        TriggerEvent::Consume => "CONSUME",
-        TriggerEvent::Reset => "RESET",
-        TriggerEvent::Preentry => "PREENTRY",
-        TriggerEvent::Postentry => "POSTENTRY",
-    };
+    let render_event = |ev: &TriggerEvent| ev.name();
 
     let mut out = String::new();
     let mut total = 0usize;
@@ -2064,43 +2028,7 @@ pub(crate) fn cmd_show(world: &mut World, player: Entity, args: &str) {
                 cat.room_attachments.len()
             ));
             let mut tally: HashMap<&'static str, usize> = HashMap::new();
-            let label = |e: &TriggerEvent| match e {
-                TriggerEvent::Global => "GLOBAL",
-                TriggerEvent::Random => "RANDOM",
-                TriggerEvent::Command => "COMMAND",
-                TriggerEvent::Load => "LOAD",
-                TriggerEvent::Cast => "CAST",
-                TriggerEvent::Leave => "LEAVE",
-                TriggerEvent::Time => "TIME",
-                TriggerEvent::Speech => "SPEECH",
-                TriggerEvent::Act => "ACT",
-                TriggerEvent::Death => "DEATH",
-                TriggerEvent::Greet => "GREET",
-                TriggerEvent::GreetAll => "GREET_ALL",
-                TriggerEvent::Entry => "ENTRY",
-                TriggerEvent::Receive => "RECEIVE",
-                TriggerEvent::Fight => "FIGHT",
-                TriggerEvent::HitPercent => "HIT_PERCENT",
-                TriggerEvent::Bribe => "BRIBE",
-                TriggerEvent::Memory => "MEMORY",
-                TriggerEvent::Door => "DOOR",
-                TriggerEvent::SpeechTo => "SPEECH_TO",
-                TriggerEvent::Look => "LOOK",
-                TriggerEvent::Auto => "AUTO",
-                TriggerEvent::Attack => "ATTACK",
-                TriggerEvent::Defend => "DEFEND",
-                TriggerEvent::Timer => "TIMER",
-                TriggerEvent::Get => "GET",
-                TriggerEvent::Drop => "DROP",
-                TriggerEvent::Give => "GIVE",
-                TriggerEvent::Wear => "WEAR",
-                TriggerEvent::Remove => "REMOVE",
-                TriggerEvent::Use => "USE",
-                TriggerEvent::Consume => "CONSUME",
-                TriggerEvent::Reset => "RESET",
-                TriggerEvent::Preentry => "PREENTRY",
-                TriggerEvent::Postentry => "POSTENTRY",
-            };
+            let label = |e: &TriggerEvent| e.name();
             for def in cat.by_key.values() {
                 for f in &def.flags {
                     *tally.entry(label(f)).or_insert(0) += 1;

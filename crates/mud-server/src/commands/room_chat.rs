@@ -377,6 +377,11 @@ fn cmd_whisper(world: &mut World, player: Entity, args: &str) {
     send_comm_channel_text(world, player, "whisper", &speaker, &gmcp_text);
     let gmcp_to_target = format!("{heard_from} whispers to {target_name}, \"{message}\"");
     send_comm_channel_text(world, target, "whisper", &heard_from, &gmcp_to_target);
+    // Legacy `do_spec_comm` hands a whisper to a mob to `speech_to_mtrigger`,
+    // like `ask` and `tell`: only the addressed mob hears it.
+    if world.get::<Mob>(target).is_some() {
+        crate::triggers::fire_speech_at(world, target, player, message);
+    }
 }
 
 fn cmd_insult(world: &mut World, player: Entity, args: &str) {
