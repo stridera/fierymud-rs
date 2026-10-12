@@ -345,8 +345,7 @@ enum CancelStatus {
     Ok,
     /// Race / worn-item innate, or an effect with no end.
     Permanent,
-    /// A debuff: hostile or violent source ability, or a `debuff`-tagged
-    /// effect definition.
+    /// A debuff: hostile or violent source ability.
     Harmful,
     /// No source ability to vouch that it is beneficial (bleed, fear's
     /// stun, rest's Refreshed, admin effects).
@@ -369,12 +368,13 @@ struct CancelRow {
 
 /// Classify one effect for `cancel`. Beneficial is read from existing
 /// data: an effect is harmful when its source ability is hostile or
-/// violent (the same split the mob AI buff / debuff tally uses) or its
-/// `Effect` row carries the `debuff` tag. There is no explicit
-/// beneficial flag in the schema. A god may drop anything but a race or
+/// violent (the same split the mob AI buff / debuff tally uses). The
+/// `Effect` row's tags are not consulted: the shared catalog rows
+/// (`status`, `modify`) are tagged `buff` and `debuff` both, so a tag test
+/// would refuse every blessing. There is no explicit beneficial flag in
+/// the schema. A god may drop anything but a race or
 /// item innate, whose lifetime belongs to its source.
 fn cancel_status(
-    world: &World,
     inst: &EffectInstance,
     harmful_abilities: &std::collections::HashMap<i32, bool>,
     god: bool,
@@ -391,11 +391,7 @@ fn cancel_status(
     let Some(&ability_harmful) = inst.ability_id.and_then(|id| harmful_abilities.get(&id)) else {
         return CancelStatus::NotASpell;
     };
-    let debuff_tagged = world
-        .get_resource::<mud_world::EffectCatalog>()
-        .and_then(|c| c.by_id.get(&inst.kind))
-        .is_some_and(|def| def.tags.iter().any(|t| t.eq_ignore_ascii_case("debuff")));
-    if ability_harmful || debuff_tagged {
+    if ability_harmful {
         CancelStatus::Harmful
     } else {
         CancelStatus::Ok
@@ -496,7 +492,7 @@ pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
                     CancelStatus::Ok
                 }
             } else {
-                cancel_status(world, inst, &harmful, god)
+                cancel_status(inst, &harmful, god)
             };
             rows.push(CancelRow {
                 entity: e,
@@ -567,56 +563,31 @@ pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
     let label = chosen.label.clone();
     let removed_name = chosen.name.clone();
     let chosen_ability = chosen.ability_id;
+    let is_wall = chosen.name.starts_with("wall-");
     // Every effect the same ability applied goes together (Statue: statue
-    // plus familiarity), so the spell is truly dropped.
+    // plus familiarity), so the spell is truly dropped. A wall is the
+    // exception: another wall of the same spell on another exit is a
+    // separate barrier.
     let doomed: Vec<Entity> = match chosen_ability {
-        Some(id) => cancellable
+        Some(id) if !is_wall => cancellable
             .iter()
             .filter(|r| r.ability_id == Some(id))
             .map(|r| r.entity)
             .collect(),
-        None => vec![chosen.entity],
+        _ => vec![chosen.entity],
     };
     let target_effect = chosen.entity;
-    // If this is a wall, the room carries a RoomBlockedExits map
-    // keyed on Direction that effect-expiry normally cleans up via
-    // `effects_tick`. Despawning the EffectInstance directly skips
-    // that branch and would leave a phantom wall entry in the map
-    // — exits, look, and movement would all keep refusing the
-    // blocked direction even though the backing effect was gone.
-    // Walk the map up front, drop the matching entry inline, and
-    // broadcast the dissolve to other players in the room so they
-    // get the same "wall is gone" signal `effects_tick` would
-    // emit on a natural expiry.
-    let is_wall = removed_name.starts_with("wall-");
+    // A wall's blocked-exit entry is freed with its instance (the shared
+    // teardown behind `remove_effect_instance`); name the exit first so
+    // the others in the room hear it crumble.
     if is_wall {
-        let target_room = world.get::<AppliedTo>(target_effect).map(|a| a.0);
-        let mut dissolved: Option<(mud_db::enums::Direction, String, bevy_ecs::entity::Entity)> =
-            None;
-        if let Some(room) = target_room {
-            // Capture (dir, kind_label) for the broadcast before
-            // the retain mutates the map.
-            let captured = world
-                .get::<mud_world::RoomBlockedExits>(room)
-                .and_then(|b| {
-                    b.by_direction
-                        .iter()
-                        .find(|(_, e)| e.backed_by == target_effect)
-                        .map(|(d, e)| (*d, e.kind_label.clone()))
-                });
-            if let Some(mut blocked) = world.get_mut::<mud_world::RoomBlockedExits>(room) {
-                blocked
-                    .by_direction
-                    .retain(|_, entry| entry.backed_by != target_effect);
-                let empty = blocked.by_direction.is_empty();
-                if empty && let Ok(mut em) = world.get_entity_mut(room) {
-                    em.remove::<mud_world::RoomBlockedExits>();
-                }
-            }
-            if let Some((dir, kind_label)) = captured {
-                dissolved = Some((dir, kind_label, room));
-            }
-        }
+        let dissolved = world
+            .get::<AppliedTo>(target_effect)
+            .map(|a| a.0)
+            .and_then(|room| {
+                crate::effects::wall_exit_backed_by(world, room, target_effect)
+                    .map(|(dir, kind_label)| (dir, kind_label, room))
+            });
         if let Some((dir, kind_label, room)) = dissolved {
             let player_name = crate::commands::name_of(world, player);
             let dir_name = crate::commands::direction_name(dir);

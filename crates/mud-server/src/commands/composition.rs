@@ -197,8 +197,10 @@ pub(crate) fn give_item_fate(
 
 /// `give <coins>`: coins handed to something that is not solid fall
 /// through (legacy `perform_give_money`). Returns whether they did; when
-/// so the giver's purse is debited (unless `debit` is false: staff keep
-/// theirs) and a loose pile lies on the floor. When false nothing happened.
+/// so the giver's purse is debited and the loose pile on the floor is
+/// what was taken. A staff giver (`debit` false) keeps their purse and
+/// so leaves no pile: the fall is only described, no coins are conjured.
+/// When false nothing happened.
 pub(crate) fn coins_fall_through(
     world: &mut World,
     giver: Entity,
@@ -234,7 +236,9 @@ pub(crate) fn coins_fall_through(
         &[giver, receiver],
         &format!("{giver_name} tries to give some coins to {receiver_name}, but they {fate}!\r\n"),
     );
-    crate::item_decay::spawn_loose_coin_pile(world, room, copper);
+    if debit {
+        crate::item_decay::spawn_loose_coin_pile(world, room, copper);
+    }
     true
 }
 
@@ -402,20 +406,36 @@ pub(crate) fn refuse_mount(world: &mut World, rider: Entity, mount: Entity) -> b
 /// go silently through the same teardown a natural expiry uses
 /// ([`crate::effects::remove_effect_instance`]). Returns how many ended.
 pub(crate) fn strip_unsuitable_effects(world: &mut World, target: Entity) -> usize {
-    if actor_is_rigid(world, target) || bypasses_restrictions(world, target) {
-        return 0;
-    }
-    let rigid_only: std::collections::HashSet<i32> =
-        match world.get_resource::<mud_world::AbilityCatalog>() {
-            Some(catalog) => catalog
+    let rigid_only = requires_rigid_abilities(world);
+    strip_effects_of(world, target, &rigid_only)
+}
+
+/// The ids of every ability tagged `requires_rigid`.
+fn requires_rigid_abilities(world: &World) -> std::collections::HashSet<i32> {
+    world
+        .get_resource::<mud_world::AbilityCatalog>()
+        .map(|catalog| {
+            catalog
                 .by_name
                 .values()
                 .filter(|d| d.requires_rigid)
                 .map(|d| d.id)
-                .collect(),
-            None => return 0,
-        };
-    if rigid_only.is_empty() {
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// [`strip_unsuitable_effects`] with the `requires_rigid` set already built,
+/// so a sweep over many bodies builds it once.
+fn strip_effects_of(
+    world: &mut World,
+    target: Entity,
+    rigid_only: &std::collections::HashSet<i32>,
+) -> usize {
+    if rigid_only.is_empty()
+        || actor_is_rigid(world, target)
+        || bypasses_restrictions(world, target)
+    {
         return 0;
     }
     let doomed: Vec<Entity> = {
@@ -446,8 +466,12 @@ pub(crate) fn sweep_fluid_bearers(world: &mut World) {
         let mut q = world.query_filtered::<Entity, With<mud_world::CompositionOverride>>();
         q.iter(world).collect()
     };
+    if bearers.is_empty() {
+        return;
+    }
+    let rigid_only = requires_rigid_abilities(world);
     for e in bearers {
-        strip_unsuitable_effects(world, e);
+        strip_effects_of(world, e, &rigid_only);
     }
 }
 

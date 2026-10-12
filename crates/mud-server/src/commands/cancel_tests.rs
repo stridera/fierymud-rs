@@ -16,7 +16,13 @@ const BLESS: i32 = 1;
 const CURSE: i32 = 2;
 const STONE_SKIN: i32 = 3;
 const FX_MODIFY: i32 = 10;
-const FX_DEBUFF: i32 = 11;
+const FX_STATUS: i32 = 11;
+const WATERFORM: i32 = 20;
+const POISON: i32 = 21;
+const BLINDNESS: i32 = 22;
+const SLEEP: i32 = 23;
+const PARALYSIS: i32 = 24;
+const WALL_OF_STONE: i32 = 25;
 
 fn effect_def(id: i32, name: &str, tags: &[&str]) -> EffectDef {
     EffectDef {
@@ -43,6 +49,13 @@ fn setup() -> (World, Entity, Entity, Rx) {
         (BLESS, "Bless", false),
         (CURSE, "Curse", true),
         (STONE_SKIN, "Stone Skin", false),
+        (WATERFORM, "Waterform", false),
+        (POISON, "Poison", true),
+        (BLINDNESS, "Blindness", true),
+        (SLEEP, "Sleep", true),
+        // Not flagged violent: hostile by its ENEMY target list alone.
+        (PARALYSIS, "Paralysis", false),
+        (WALL_OF_STONE, "Wall of Stone", false),
     ] {
         let mut def = ability_def(id, name, AbilityKind::Spell);
         def.violent = violent;
@@ -58,14 +71,27 @@ fn setup() -> (World, Entity, Entity, Rx) {
             ..Default::default()
         },
     );
+    abilities.targeting.insert(
+        PARALYSIS,
+        mud_world::TargetingRule {
+            valid_targets: vec!["ENEMY_PC".into(), "ENEMY_NPC".into()],
+            scope: "SINGLE".into(),
+            max_targets: 1,
+            require_los: false,
+        },
+    );
     world.insert_resource(abilities);
     let mut effects = EffectCatalog::default();
-    effects
-        .by_id
-        .insert(FX_MODIFY, effect_def(FX_MODIFY, "modify", &["buff"]));
-    effects
-        .by_id
-        .insert(FX_DEBUFF, effect_def(FX_DEBUFF, "weaken", &["debuff"]));
+    // The tag shapes the shared catalog rows really carry: both `buff` and
+    // `debuff`, so the tags cannot tell a blessing from a curse.
+    effects.by_id.insert(
+        FX_MODIFY,
+        effect_def(FX_MODIFY, "modify", &["buff", "debuff", "attribute"]),
+    );
+    effects.by_id.insert(
+        FX_STATUS,
+        effect_def(FX_STATUS, "status", &["status", "buff", "debuff"]),
+    );
     world.insert_resource(effects);
     let room = world.spawn(Room).id();
     let (player, rx) = player_in(&mut world, room);
@@ -239,23 +265,56 @@ fn cancel_refuses_permanent_effects() {
 #[test]
 fn cancel_refuses_harmful_effects() {
     let (mut world, _room, p, mut rx) = setup();
-    // A violent source ability, and a debuff-tagged effect row.
+    // Violent source abilities and an enemy-target one, each on a shared
+    // `status` / `modify` row tagged buff and debuff like the real data.
+    let mut doomed = Vec::new();
+    for (ability, word) in [
+        (CURSE, "curse"),
+        (POISON, "poison"),
+        (BLINDNESS, "blind"),
+        (SLEEP, "sleep"),
+        (PARALYSIS, "paralysis"),
+    ] {
+        let e = spawn_effect(
+            &mut world,
+            p,
+            FX_STATUS,
+            word,
+            300,
+            Some(ability),
+            EffectSource::Spell,
+        );
+        dispatch(&mut world, p, &format!("cancel {word}"));
+        let out = drain(&mut rx);
+        assert!(out.contains("harmful"), "{word}: {out}");
+        doomed.push(e);
+    }
     let curse = buff(&mut world, p, CURSE, 300, -5);
-    let weaken = spawn_effect(
-        &mut world,
-        p,
-        FX_DEBUFF,
-        "weaken",
-        300,
-        Some(BLESS),
-        EffectSource::Spell,
-    );
     dispatch(&mut world, p, "cancel curse");
     assert!(drain(&mut rx).contains("harmful"));
-    dispatch(&mut world, p, "cancel weaken");
-    assert!(drain(&mut rx).contains("harmful"));
-    assert!(alive(&world, curse) && alive(&world, weaken));
+    assert!(doomed.iter().all(|e| alive(&world, *e)) && alive(&world, curse));
     assert_eq!(strength(&world, p), 45);
+}
+
+#[test]
+fn a_mortal_can_cancel_waterform_out_of_combat() {
+    let (mut world, _room, p, mut rx) = setup();
+    let e = spawn_effect(
+        &mut world,
+        p,
+        FX_STATUS,
+        "waterform",
+        300,
+        Some(WATERFORM),
+        EffectSource::Spell,
+    );
+    dispatch(&mut world, p, "cancel");
+    let out = drain(&mut rx);
+    assert!(out.contains("Waterform"), "listed: {out}");
+    dispatch(&mut world, p, "cancel waterform");
+    let out = drain(&mut rx);
+    assert!(out.contains("You cancel"), "{out}");
+    assert!(!alive(&world, e));
 }
 
 #[test]
@@ -363,4 +422,72 @@ fn a_god_may_cancel_a_harmful_permanent_effect_in_combat_but_not_an_innate() {
     dispatch(&mut world, p, "cancel infravision");
     assert!(alive(&world, innate));
     assert!(drain(&mut rx).contains("permanent"));
+}
+
+fn wall(world: &mut World, room: Entity, dir: mud_db::enums::Direction) -> Entity {
+    use mud_world::{RoomBlockedExit, RoomBlockedExits, WallTraversal};
+    let e = spawn_effect(
+        world,
+        room,
+        FX_MODIFY,
+        "wall-stone",
+        300,
+        Some(WALL_OF_STONE),
+        EffectSource::Spell,
+    );
+    let entry = RoomBlockedExit {
+        kind_label: "wall of stone".into(),
+        backed_by: e,
+        hp: 100,
+        traversal: WallTraversal::Block,
+    };
+    if let Some(mut b) = world.get_mut::<RoomBlockedExits>(room) {
+        b.by_direction.insert(dir, entry);
+    } else {
+        let mut b = RoomBlockedExits::default();
+        b.by_direction.insert(dir, entry);
+        world.entity_mut(room).insert(b);
+    }
+    e
+}
+
+fn blocked(world: &World, room: Entity, dir: mud_db::enums::Direction) -> bool {
+    world
+        .get::<mud_world::RoomBlockedExits>(room)
+        .is_some_and(|b| b.by_direction.contains_key(&dir))
+}
+
+#[test]
+fn cancelling_one_of_two_walls_frees_only_that_exit() {
+    use mud_db::enums::Direction::{East, North};
+    let (mut world, room, p, mut rx) = setup();
+    let n = wall(&mut world, room, North);
+    let e = wall(&mut world, room, East);
+    dispatch(&mut world, p, "cancel wall");
+    let _ = drain(&mut rx);
+    let gone = [n, e].into_iter().filter(|w| !alive(&world, *w)).count();
+    assert_eq!(gone, 1, "exactly one wall dropped");
+    // The surviving wall still blocks its own exit and no entry dangles.
+    let by = &world
+        .get::<mud_world::RoomBlockedExits>(room)
+        .expect("one wall left")
+        .by_direction;
+    assert_eq!(by.len(), 1);
+    assert!(by.values().all(|b| alive(&world, b.backed_by)));
+    // Cancelling the other frees the room entirely.
+    dispatch(&mut world, p, "cancel wall");
+    let _ = drain(&mut rx);
+    assert!(!alive(&world, n) && !alive(&world, e));
+    assert!(!blocked(&world, room, North) && !blocked(&world, room, East));
+    assert!(world.get::<mud_world::RoomBlockedExits>(room).is_none());
+}
+
+#[test]
+fn any_removal_path_frees_a_walls_exit() {
+    use mud_db::enums::Direction::North;
+    let (mut world, room, _p, _rx) = setup();
+    let n = wall(&mut world, room, North);
+    crate::effects::remove_effect_instance(&mut world, room, n);
+    assert!(!alive(&world, n));
+    assert!(!blocked(&world, room, North));
 }

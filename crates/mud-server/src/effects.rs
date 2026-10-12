@@ -462,6 +462,37 @@ pub(crate) fn replace_effect_instance(world: &mut World, target: Entity, eff_ent
     reverse_effect_companions(world, target, eff_entity);
 }
 
+/// The (direction, kind label) of the blocked exit `eff_entity` backs in
+/// `room`, if it backs one (a `wall-*` instance applied to the room).
+pub(crate) fn wall_exit_backed_by(
+    world: &World,
+    room: Entity,
+    eff_entity: Entity,
+) -> Option<(mud_db::enums::Direction, String)> {
+    world
+        .get::<mud_world::RoomBlockedExits>(room)
+        .and_then(|b| {
+            b.by_direction
+                .iter()
+                .find(|(_, e)| e.backed_by == eff_entity)
+                .map(|(d, e)| (*d, e.kind_label.clone()))
+        })
+}
+
+/// Drop whichever blocked-exit entry `eff_entity` backs in `room`, and the
+/// (now empty) map with the last wall. No-op for any other effect.
+fn release_wall_exit(world: &mut World, room: Entity, eff_entity: Entity) {
+    let Some(mut blocked) = world.get_mut::<mud_world::RoomBlockedExits>(room) else {
+        return;
+    };
+    blocked
+        .by_direction
+        .retain(|_, entry| entry.backed_by != eff_entity);
+    if blocked.by_direction.is_empty() {
+        try_remove::<mud_world::RoomBlockedExits>(world, room);
+    }
+}
+
 /// Undo everything one `EffectInstance` did to `target` and despawn it:
 /// the `ModifyDelta` stat change, a Refreshed regen bonus, the elemental
 /// `SpellResistanceDelta` bump, the stun marker, then the flag / globe
@@ -472,6 +503,10 @@ pub(crate) fn replace_effect_instance(world: &mut World, target: Entity, eff_ent
 /// drops only when no other tagged instance and no worn `protect_*` item
 /// still backs it.
 fn teardown_effect_instance(world: &mut World, target: Entity, eff_entity: Entity) {
+    // A wall's blocked exit is keyed on its backing instance: any removal
+    // path (expiry, dispel, cancel, strip) must free it, or the exit stays
+    // blocked by a dead entity until reboot.
+    release_wall_exit(world, target, eff_entity);
     // INVISIBLE / MASS_INVIS instances are named for the stat they move
     // ("evasion"), so the name-keyed marker teardown below cannot see
     // them: remember the tag before the despawn.
@@ -816,6 +851,13 @@ pub fn effects_tick(world: &mut World) {
             // Same reversal as a dispel / cleanse (stat delta, resistance,
             // alignment tag, markers); only the wear-off text and the
             // per-kind teardown below are expiry's own.
+            // A wall's exit entry goes with its teardown; name the exit first
+            // so the room can be told what faded.
+            let expiring_wall = if name.starts_with("wall-") {
+                wall_exit_backed_by(world, target, eff_entity)
+            } else {
+                None
+            };
             teardown_effect_instance(world, target, eff_entity);
             expired += 1;
             // Object-decay: an effect named "decay" applied to an
@@ -834,44 +876,15 @@ pub fn effects_tick(world: &mut World) {
             if name.starts_with("summoned-") {
                 despawn_summoned_mob(world, target);
             }
-            // Wall teardown — WALL_OF_STONE / WALL_OF_ICE spawn an
-            // EffectInstance named "wall-{type}" with
-            // AppliedTo(room). The room carries a RoomBlockedExits
-            // map keyed on Direction; on expiry, remove whichever
-            // entry was backed by THIS expiring entity (the cast
-            // arm overwrites stale entries on re-cast, so there's
-            // at most one match). Despawn the (now-empty) map when
-            // it's the last wall.
+            // Wall teardown: the blocked-exit entry was released with the
+            // instance (see `release_wall_exit`). Tell the room.
             if name.starts_with("wall-") {
-                // Capture the (direction, kind_label) of the entry
-                // about to drop so the post-cleanup broadcast can
-                // name what just faded. Done before the retain so
-                // the map still has the entry.
-                let expiring: Option<(mud_db::enums::Direction, String)> = world
-                    .get::<mud_world::RoomBlockedExits>(target)
-                    .and_then(|b| {
-                        b.by_direction
-                            .iter()
-                            .find(|(_, e)| e.backed_by == eff_entity)
-                            .map(|(d, e)| (*d, e.kind_label.clone()))
-                    });
-                if let Some(mut blocked) = world.get_mut::<mud_world::RoomBlockedExits>(target) {
-                    blocked
-                        .by_direction
-                        .retain(|_, entry| entry.backed_by != eff_entity);
-                }
-                let empty = world
-                    .get::<mud_world::RoomBlockedExits>(target)
-                    .is_some_and(|b| b.by_direction.is_empty());
-                if empty {
-                    try_remove::<mud_world::RoomBlockedExits>(world, target);
-                }
                 // Broadcast the fade to everyone in the affected
                 // room. Otherwise a wall just silently vanishes —
                 // a player who was waiting for it to expire (or who
                 // got cornered behind one) would have no signal it's
                 // safe to move now. Mirrors the bash-crumble UX.
-                if let Some((dir, kind_label)) = expiring {
+                if let Some((dir, kind_label)) = expiring_wall {
                     let players: Vec<bevy_ecs::entity::Entity> = {
                         let mut q = world.query_filtered::<(bevy_ecs::entity::Entity, &mud_world::Located), bevy_ecs::prelude::With<mud_world::Player>>();
                         q.iter(world)

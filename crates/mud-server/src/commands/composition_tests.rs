@@ -451,6 +451,27 @@ fn staff_can_receive_a_gift_in_any_shape() {
 }
 
 #[test]
+fn a_staff_giver_keeps_their_purse_and_conjures_no_pile() {
+    let mut s = scene();
+    let (bob, _bob_rx) = s.fx.person("Bob", 30, s.room);
+    s.fx.world
+        .entity_mut(bob)
+        .insert(Keywords(vec!["bob".into()]));
+    s.fluid(bob);
+    // Staff (Builder and up) keep their purse when they give.
+    let (god, mut god_rx) = s.fx.person("Laoris", 101, s.room);
+    s.fx.world.entity_mut(god).insert(Wealth(500));
+    dispatch(&mut s.fx.world, god, "give 100 copper bob");
+    assert!(
+        said(&mut god_rx).contains("fall right through Bob's hands"),
+        "described"
+    );
+    assert_eq!(s.fx.world.get::<Wealth>(god).unwrap().0, 500);
+    let piles = s.fx.world.query::<&CoinPile>().iter(&s.fx.world).count();
+    assert_eq!(piles, 0, "no coins from nowhere");
+}
+
+#[test]
 fn coins_given_to_a_fluid_body_fall_through_its_hands() {
     let mut s = scene();
     let (bob, mut bob_rx) = s.fx.person("Bob", 30, s.room);
