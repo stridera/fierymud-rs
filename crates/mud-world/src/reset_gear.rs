@@ -159,7 +159,7 @@ pub fn build_content_entries(rows: &[ObjectResetContent]) -> HashMap<i32, Vec<Co
 /// current across a batch of [`outfit_mob`] calls instead of
 /// re-scanning per mob.
 ///
-/// Items held by staff (Immortal+, see [`crate::bypasses_restrictions`]),
+/// Items held by staff (a character at a staff level, see [`held_by_staff`]),
 /// directly or through any chain of containers, do not count: an imm
 /// hoarding a limited key or quest item must not block it from spawning.
 pub fn object_world_counts(world: &mut World) -> HashMap<(i32, i32), i32> {
@@ -176,7 +176,11 @@ pub fn object_world_counts(world: &mut World) -> HashMap<(i32, i32), i32> {
 }
 
 /// Whether the top-level holder of `item` (following `Located` up through
-/// containers until a non-item) is a staff character.
+/// containers until a non-item) is a staff character: a character whose own
+/// level is a staff level ([`mud_db::enums::is_staff_level`]). The account
+/// role does not count here: a level-10 alt on an Immortal website account
+/// would otherwise release the reset slot, then hand the stripped copy to a
+/// mortal and repeat to duplicate a limited item.
 #[must_use]
 pub fn held_by_staff(world: &World, item: Entity) -> bool {
     let mut cur = item;
@@ -189,7 +193,10 @@ pub fn held_by_staff(world: &World, item: Entity) -> bool {
             cur = parent;
             continue;
         }
-        return crate::bypasses_restrictions(world, parent);
+        return crate::bypasses_restrictions(world, parent)
+            && world
+                .get::<crate::components::Profile>(parent)
+                .is_some_and(|p| mud_db::enums::is_staff_level(p.level));
     }
     false
 }

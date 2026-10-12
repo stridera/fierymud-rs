@@ -937,6 +937,16 @@ mod tests {
         assert_eq!(keys, 1);
     }
 
+    fn level_profile(level: i32) -> mud_world::Profile {
+        mud_world::Profile {
+            level,
+            class_id: None,
+            race: String::new(),
+            experience: 0,
+            gender: String::new(),
+        }
+    }
+
     /// Issue #121: a limited item held by staff (directly or inside their
     /// containers) does not use up the world cap; one held by a mortal does.
     #[test]
@@ -967,7 +977,12 @@ mod tests {
         // Staff holds the only key, inside a sack in their inventory.
         let (mut world, room) = base_world();
         let imm = world
-            .spawn((Player, holder(UserRole::Immortal), Located(room)))
+            .spawn((
+                Player,
+                holder(UserRole::Immortal),
+                level_profile(100),
+                Located(room),
+            ))
             .id();
         let sack = world
             .spawn((Item, WorldKey { zone: 1, id: 900 }, Located(imm)))
@@ -983,7 +998,12 @@ mod tests {
         // A mortal holding it still blocks the spawn.
         let (mut world, room) = base_world();
         let mortal = world
-            .spawn((Player, holder(UserRole::Player), Located(room)))
+            .spawn((
+                Player,
+                holder(UserRole::Player),
+                level_profile(10),
+                Located(room),
+            ))
             .id();
         world.spawn((Item, WorldKey { zone: 1, id: KEY }, Located(mortal)));
         world
@@ -1013,7 +1033,7 @@ mod tests {
                 .filter(|(k, l)| k.id == KEY && l.0 == room)
                 .count()
         };
-        let setup = |role: UserRole| {
+        let setup = |role: UserRole, level: i32| {
             let (mut world, room) = base_world();
             world
                 .resource_mut::<ObjectResetCatalog>()
@@ -1028,7 +1048,9 @@ mod tests {
             // The reset fills its slot, then someone picks the key up.
             run_respawn(&mut world, 6000);
             assert_eq!(keys_on_floor(&mut world, room), 1, "reset spawned it");
-            let who = world.spawn((Player, holder(role), Located(room))).id();
+            let who = world
+                .spawn((Player, holder(role), level_profile(level), Located(room)))
+                .id();
             let key = {
                 let mut q = world.query_filtered::<(Entity, &WorldKey), With<Item>>();
                 q.iter(&world).find(|(_, k)| k.id == KEY).unwrap().0
@@ -1037,7 +1059,7 @@ mod tests {
             (world, room, key)
         };
 
-        let (mut world, room, key) = setup(UserRole::Immortal);
+        let (mut world, room, key) = setup(UserRole::Immortal, 100);
         run_respawn(&mut world, 12000);
         assert_eq!(keys_on_floor(&mut world, room), 1, "the row refilled");
         assert!(
@@ -1050,10 +1072,26 @@ mod tests {
         run_respawn(&mut world, 18000);
         assert_eq!(keys_on_floor(&mut world, room), 2);
 
-        let (mut world, room, key) = setup(UserRole::Player);
+        let (mut world, room, key) = setup(UserRole::Player, 10);
         run_respawn(&mut world, 12000);
         assert_eq!(keys_on_floor(&mut world, room), 0, "mortal keeps the slot");
         assert!(world.get::<FromObjectReset>(key).is_some());
+
+        // A low-level alt on a staff website account is not staff: it keeps
+        // the slot, so the row does not refill (no duplicate to hand on).
+        let (mut world, room, key) = setup(UserRole::Immortal, 10);
+        run_respawn(&mut world, 12000);
+        assert_eq!(
+            keys_on_floor(&mut world, room),
+            0,
+            "staff-account alt keeps the slot"
+        );
+        assert!(world.get::<FromObjectReset>(key).is_some());
+        assert_eq!(
+            *object_world_counts(&mut world).get(&(1, KEY)).unwrap_or(&0),
+            1,
+            "the alt's copy still counts toward the cap"
+        );
     }
 
     #[test]

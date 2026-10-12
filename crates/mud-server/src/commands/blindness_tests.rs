@@ -533,6 +533,30 @@ fn noblind_mobs_shrug_off_blindness_and_others_do_not() {
     assert!(fx.world.get::<Blinded>(rat).is_some());
 }
 
+#[test]
+fn a_resisted_or_immune_recast_does_not_say_it_refreshed() {
+    let (mut fx, p, mut rx) = caster_with_blind_spells();
+    let a = fx.a;
+    let mut protos = mud_world::MobPrototypes::default();
+    let mut proto = super::test_support::mob_proto(30, 1, mud_db::enums::MobProfession::Banker);
+    proto.resistances = serde_json::json!({"blind": 0});
+    protos.by_key.insert((30, 1), proto);
+    fx.world.insert_resource(protos);
+    let orc = mob_in(&mut fx.world, a, "an orc", 0);
+    cast(&mut fx, p, "cast 'flagspell' orc");
+    assert!(fx.world.get::<Blinded>(orc).is_some(), "first cast lands");
+    // The orc turns out to be immune now (stands in for a save that holds):
+    // the recast applies nothing, so it must not claim a refresh.
+    fx.world
+        .entity_mut(orc)
+        .insert(WorldKey { zone: 30, id: 1 });
+    let _ = drain(&mut rx);
+    cast(&mut fx, p, "cast 'flagspell' orc");
+    let said = drain(&mut rx);
+    assert!(!said.contains("refresh"), "{said}");
+    assert!(said.contains("immune to blindness"), "{said}");
+}
+
 pub(super) fn exit_to(to: Entity) -> mud_world::ExitData {
     mud_world::ExitData {
         to: Some(to),

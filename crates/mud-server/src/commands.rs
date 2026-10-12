@@ -20875,7 +20875,9 @@ pub(crate) fn invoke_ability_core(
     // applied_msg with no real effect. To distinguish, we check
     // whether ANY entry in applied_msgs lacks the "(refused)" /
     // "(no ...)"/"(unknown ...)" parenthetical signature. If
-    // every entry is a refusal, suppress the header.
+    // every entry is a refusal, suppress the header. A resisted save or an
+    // immune target ("(resisted)", "(immune to blindness)") re-applied
+    // nothing, so it is a refusal too and never reads as a refresh.
     let any_non_refusal = applied_msgs.iter().any(|m| {
         // A genuine effect's applied_msg is typically the pretty
         // name alone or with a positive parenthetical
@@ -20891,6 +20893,8 @@ pub(crate) fn invoke_ability_core(
             || lower.contains("(no ")
             || lower.contains("(unknown")
             || lower.contains("(absorbed")
+            || lower.contains("(resisted")
+            || lower.contains("(immune to")
             || lower.contains("(already there")
             || lower.contains("(no direction")
             || lower.contains("(target busy")
