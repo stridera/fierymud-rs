@@ -103,7 +103,7 @@ fn is_water(world: &World, room: Entity) -> bool {
 }
 
 /// Legacy `IS_SPLASHY`.
-fn is_splashy(world: &World, room: Entity) -> bool {
+pub(crate) fn is_splashy(world: &World, room: Entity) -> bool {
     matches!(
         sector_of(world, room),
         Some(Sector::Shallows | Sector::Water | Sector::Swamp)

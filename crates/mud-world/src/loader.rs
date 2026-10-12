@@ -1956,6 +1956,10 @@ pub async fn load_ability_catalog(pool: &PgPool) -> sqlx::Result<AbilityCatalog>
                     .tags
                     .iter()
                     .any(|t| t.eq_ignore_ascii_case("short_cast")),
+                requires_rigid: row
+                    .tags
+                    .iter()
+                    .any(|t| t.eq_ignore_ascii_case("requires_rigid")),
                 quest_only: row.quest_only,
             },
         );

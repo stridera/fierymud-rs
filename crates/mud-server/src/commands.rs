@@ -578,6 +578,11 @@ mod combat_commands;
 #[cfg(test)]
 #[path = "commands/combat_hunt_tests.rs"]
 mod combat_hunt_tests;
+#[path = "commands/composition.rs"]
+pub(crate) mod composition;
+#[cfg(test)]
+#[path = "commands/composition_tests.rs"]
+mod composition_tests;
 #[path = "commands/conjuration.rs"]
 mod conjuration;
 #[cfg(test)]
@@ -4668,6 +4673,7 @@ mod tests {
             memorization_time: 0,
             passive: false,
             short_cast: false,
+            requires_rigid: false,
             quest_only: false,
         };
         let _ = AbilityCatalog::default();
@@ -4857,6 +4863,7 @@ mod tests {
                 memorization_time: 0,
                 passive: false,
                 short_cast: false,
+                requires_rigid: false,
                 quest_only: false,
             },
         );
@@ -17636,6 +17643,13 @@ pub(crate) fn invoke_ability_core(
     // Captured up front: the target can despawn mid-cast.
     let actor_p_pre = Pronouns::of(world, player);
     let target_p_pre = Pronouns::of(world, target_entity);
+    // Legacy `check_fluid_spell_ok`: Stone Skin and its kin (the
+    // `requires_rigid` ability tag) cannot take hold in a body that is not
+    // solid. The cast is still charged.
+    if crate::commands::composition::refuse_fluid_spell(world, player, target_entity, &def) {
+        settle_slot(world, player, slot_hold, true);
+        return;
+    }
     // Legacy `mag_affect`: a spell that does not refresh (`refresh = false`:
     // Stone Skin, Fireshield, Sleep, ...) fails on a victim who already
     // has it, "Nothing seems to happen.", and the cast is still charged.
@@ -20829,6 +20843,11 @@ pub(crate) fn invoke_ability_core(
                 // shared with `MobDefaultEffects`.
                 mud_world::mob_effects::install_flag_marker(world, target_entity, &flag);
                 mud_world::mob_effects::tag_flag_instance(world, status_effect, &flag);
+                // Legacy `composition_check`: a body that just turned fluid
+                // sheds the spells that need a solid one, silently.
+                if matches!(flag.as_str(), "waterform" | "vaporform") {
+                    crate::commands::composition::strip_unsuitable_effects(world, target_entity);
+                }
                 if flag == "invisible"
                     && let Some(room) = world.get::<Located>(target_entity).map(|l| l.0)
                 {

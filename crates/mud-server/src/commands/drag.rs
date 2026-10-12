@@ -204,6 +204,21 @@ pub(crate) fn cmd_drag(world: &mut World, player: Entity, args: &str) {
         return;
     };
 
+    // A fluid body cannot take hold of a solid object; across the solid /
+    // fluid divide, nobody can take hold of anybody.
+    match dragged {
+        Dragged::Object(_) => {
+            if crate::commands::composition::refuse_drag_object(world, player) {
+                return;
+            }
+        }
+        Dragged::Body(body) => {
+            if crate::commands::composition::refuse_drag_body(world, player, body) {
+                return;
+            }
+        }
+    }
+
     let Some((subject, weight)) = check_draggable(world, player, dragged, staff) else {
         return;
     };

@@ -1263,7 +1263,89 @@ pub enum Composition {
     Plant,
 }
 
+/// Legacy `PHASE_*`: the state of matter a [`Composition`] is in. It decides
+/// whether a body can handle solid objects (see [`Composition::is_rigid`]).
+/// Fixed per composition (legacy `composition.cpp:43-57`), so it is code,
+/// not data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    Ether,
+    Plasma,
+    Gas,
+    Liquid,
+    Solid,
+}
+
 impl Composition {
+    /// Legacy `compositions[].phase`. LAVA is deliberately `Solid`, as in
+    /// the legacy table.
+    #[must_use]
+    pub const fn phase(self) -> Phase {
+        match self {
+            Self::Flesh
+            | Self::Earth
+            | Self::Ice
+            | Self::Metal
+            | Self::Stone
+            | Self::Bone
+            | Self::Lava
+            | Self::Plant => Phase::Solid,
+            Self::Air | Self::Mist => Phase::Gas,
+            Self::Fire => Phase::Plasma,
+            Self::Water => Phase::Liquid,
+            Self::Ether => Phase::Ether,
+        }
+    }
+
+    /// Legacy `RIGID(ch)`: the body is in the solid phase. (The character
+    /// macro `SOLIDCHAR` also excludes illusory mobs; that needs the actor,
+    /// see `mud_world::actor_is_solid_char`.)
+    #[must_use]
+    pub const fn is_rigid(self) -> bool {
+        matches!(self.phase(), Phase::Solid)
+    }
+
+    /// Legacy `compositions[].adjective`: how the body reads in "in your
+    /// watery state".
+    #[must_use]
+    pub const fn adjective(self) -> &'static str {
+        match self {
+            Self::Flesh => "fleshy",
+            Self::Earth => "earthy",
+            Self::Air => "gaseous",
+            Self::Fire => "fiery",
+            Self::Water => "watery",
+            Self::Ice => "icy",
+            Self::Mist => "misty",
+            Self::Ether => "ethereal",
+            Self::Metal => "metallic",
+            Self::Stone => "stony",
+            Self::Bone => "bony",
+            Self::Lava => "fluid",
+            Self::Plant => "woody",
+        }
+    }
+
+    /// Legacy `compositions[].color` as an opening XML-Lite tag (empty for
+    /// STONE, which has none). Close it with `</>`.
+    #[must_use]
+    pub const fn color_open_tag(self) -> &'static str {
+        match self {
+            Self::Flesh | Self::Lava => "<red>",
+            Self::Earth => "<yellow>",
+            Self::Air => "<cyan>",
+            Self::Fire => "<b:red>",
+            Self::Water => "<b:blue>",
+            Self::Ice => "<blue>",
+            Self::Mist => "<b:cyan>",
+            Self::Ether => "<magenta>",
+            Self::Metal => "<b:black>",
+            Self::Stone => "",
+            Self::Bone => "<b:white>",
+            Self::Plant => "<green>",
+        }
+    }
+
     /// Legacy `compositions[].massnoun`: the noun that completes
     /// "is composed of ...". Note ETHER reads "nothing" and PLANT
     /// reads "plant material", exactly as in `composition.cpp`.

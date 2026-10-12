@@ -2888,6 +2888,11 @@ pub struct AbilityDef {
     /// `cast_time_rounds` column stores as 0. The spell still goes
     /// through the casting wind-up instead of landing at once.
     pub short_cast: bool,
+    /// True when the ability row carries the `requires_rigid` tag (legacy
+    /// `spell_suitable_for_fluid_characters`): the spell cannot take hold
+    /// in a body that is not solid, and is stripped from one that turns
+    /// fluid (Stone Skin, Barkskin, ...).
+    pub requires_rigid: bool,
     /// `Ability.quest_only`: the ability is only ever granted by a quest
     /// reward, never by class level (see `grant_class_skills`).
     pub quest_only: bool,

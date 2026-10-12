@@ -2537,15 +2537,20 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
         // `look corpse` works regardless and the leftover-coin path
         // (`award_kill_coin` for non-AutoGold killers) has somewhere
         // to attach a `CoinPile`.
-        broadcast_room_except_rendered(
-            world,
-            room,
-            &[],
-            &format!(
+        // Legacy `fluid_death`: a body that is not solid does not just die.
+        // Liquid loses cohesion; gas, plasma and ether dissipate.
+        let death_line = match mud_world::actor_composition(world, victim).phase() {
+            mud_db::enums::Phase::Solid => format!(
                 "{} dies.\r\n",
                 crate::commands::cap_sentence_start(victim_name),
             ),
-        );
+            mud_db::enums::Phase::Liquid => format!(
+                "{}'s body loses cohesion and falls with a splatter.\r\n",
+                crate::commands::cap_sentence_start(victim_name),
+            ),
+            _ => format!("The remnants of {victim_name} dissipate.\r\n",),
+        };
+        broadcast_room_except_rendered(world, room, &[], &death_line);
         // Resolve the killer once, before any Fighting links are torn
         // down, and hand the same identity to XP, coin and autoloot.
         // A staff slay (`slay`, staff `kill`) is credited to nobody, like
@@ -4084,6 +4089,60 @@ mod tests {
             world.get::<Fighting>(attacker).is_none(),
             "attacker's Fighting cleared after target died"
         );
+    }
+
+    /// #137 (legacy `fluid_death`): a mob that is not solid does not just
+    /// "die". Liquid loses cohesion; gas dissipates; flesh dies as ever.
+    #[test]
+    fn a_fluid_mob_death_reads_by_phase() {
+        use mud_db::enums::Composition;
+        for (comp, want) in [
+            (None, "A target dies."),
+            (
+                Some(Composition::Water),
+                "A target's body loses cohesion and falls with a splatter.",
+            ),
+            (
+                Some(Composition::Mist),
+                "The remnants of a target dissipate.",
+            ),
+        ] {
+            let mut world = World::new();
+            let room = make_room(&mut world);
+            let target = world
+                .spawn((
+                    Mob,
+                    Named {
+                        name: "a target".to_string(),
+                    },
+                    Located(room),
+                    Health { hp: 5, max: 5 },
+                ))
+                .id();
+            if let Some(c) = comp {
+                world
+                    .entity_mut(target)
+                    .insert(mud_world::CompositionOverride(c));
+            }
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+            world.spawn((
+                Player,
+                mud_world::Online,
+                Named {
+                    name: "Watcher".to_string(),
+                },
+                Located(room),
+                crate::commands::Connection(tx),
+            ));
+            let _attacker = make_attacker(&mut world, room, target, 100);
+            run_combat_tick(&mut world);
+            assert!(world.get_entity(target).is_err(), "target died");
+            let mut out = String::new();
+            while let Ok(b) = rx.try_recv() {
+                out.push_str(&String::from_utf8_lossy(&b));
+            }
+            assert!(out.contains(want), "{comp:?}: {out}");
+        }
     }
 
     #[test]

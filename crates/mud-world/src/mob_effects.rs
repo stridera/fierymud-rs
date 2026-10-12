@@ -68,6 +68,36 @@ pub fn actor_composition(world: &World, target: Entity) -> mud_db::enums::Compos
         .map_or(Composition::Flesh, |r| r.default_composition)
 }
 
+/// Legacy `RIGID(ch)`: `target`'s current body is in the solid phase.
+#[must_use]
+pub fn actor_is_rigid(world: &World, target: Entity) -> bool {
+    actor_composition(world, target).is_rigid()
+}
+
+/// Legacy `MOB_FLAGGED(ch, MOB_ILLUSORY)`.
+#[must_use]
+pub fn actor_is_illusory(world: &World, target: Entity) -> bool {
+    world
+        .get::<crate::components::MobTraits>(target)
+        .is_some_and(|t| t.has(mud_db::enums::MobTrait::Illusion))
+}
+
+/// Legacy `SOLIDCHAR(ch)`: rigid and not an illusory mob. An illusion looks
+/// solid but cannot handle, or be handled by, solid things.
+#[must_use]
+pub fn actor_is_solid_char(world: &World, target: Entity) -> bool {
+    actor_is_rigid(world, target) && !actor_is_illusory(world, target)
+}
+
+/// The actor's body in the legacy `{COMPOSITION_COLOR}{COMPOSITION_ADJECTIVE}&0`
+/// form, as XML-Lite markup ("<b:blue>watery</>"), for the "in your watery
+/// state" refusals.
+#[must_use]
+pub fn composition_state_phrase(world: &World, target: Entity) -> String {
+    let comp = actor_composition(world, target);
+    format!("{}{}</>", comp.color_open_tag(), comp.adjective())
+}
+
 fn protect_evil_tag_backed(world: &mut World, target: Entity) -> bool {
     alignment_tag_backed(
         world,

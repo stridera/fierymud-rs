@@ -147,6 +147,10 @@ pub(crate) fn try_container_verb(world: &mut World, player: Entity, verb: Verb, 
     let Some(state) = container_state(world, item) else {
         return false;
     };
+    // A fluid body works only a container it carries.
+    if crate::commands::composition::refuse_object_manipulation(world, player, item) {
+        return true;
+    }
     match verb {
         Verb::Open => open(world, player, item, state),
         Verb::Close => close(world, player, item, state),

@@ -826,3 +826,45 @@ fn give_coins_to_a_player_moves_the_money() {
     assert!(drain(&mut rx).contains("You don't have that many coins!"));
     assert_eq!(world.get::<Wealth>(player).unwrap().0, 500);
 }
+
+// -- #137: a fluid body cannot handle what a shop deals in -------------------
+
+#[test]
+fn a_fluid_body_can_neither_buy_nor_sell() {
+    let mut def = shop_def(sword_offer(0), Vec::new());
+    def.accepts = accepts_weapons();
+    let (mut world, player, mut rx) = world_with_shop(def, 1_000);
+    cmd_buy(&mut world, player, "sword");
+    drain(&mut rx);
+    assert_eq!(carried_swords(&mut world, player), 1);
+
+    world
+        .entity_mut(player)
+        .insert(mud_world::CompositionOverride(
+            mud_db::enums::Composition::Mist,
+        ));
+    cmd_buy(&mut world, player, "sword");
+    let out = drain(&mut rx);
+    assert!(
+        out.contains("You can't handle solid objects in your condition."),
+        "{out}"
+    );
+    assert_eq!(world.get::<Wealth>(player).unwrap().0, 900);
+    assert_eq!(carried_swords(&mut world, player), 1);
+
+    cmd_sell(&mut world, player, "sword");
+    let out = drain(&mut rx);
+    assert!(
+        out.contains("You can't handle solid objects in your condition."),
+        "{out}"
+    );
+    assert_eq!(world.get::<Wealth>(player).unwrap().0, 900);
+    assert_eq!(carried_swords(&mut world, player), 1);
+
+    // Solid again: the same shop deals with them.
+    world
+        .entity_mut(player)
+        .remove::<mud_world::CompositionOverride>();
+    cmd_sell(&mut world, player, "sword");
+    assert!(drain(&mut rx).contains("You sell"));
+}

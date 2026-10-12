@@ -232,6 +232,9 @@ pub(crate) fn cmd_pick(world: &mut World, player: Entity, args: &str) {
     if refuse_hidden_exit(world, player, room, dir) {
         return;
     }
+    if crate::commands::composition::refuse_door_action(world, player) {
+        return;
+    }
     let Some((state, key_req, is_pickproof)) = world
         .get::<Exits>(room)
         .and_then(|e| e.0.get(&dir).map(|ed| (ed.state, ed.key, ed.is_pickproof)))

@@ -4928,6 +4928,9 @@ pub(crate) fn cmd_buy(world: &mut World, player: Entity, args: &str) {
         send_msg(world, player, format!("{keeper_name} is out of those.\r\n"));
         return;
     }
+    if crate::commands::composition::refuse_shop_trade(world, player) {
+        return;
+    }
     let Some(proto) = object_protos
         .get(&(offer.object_zone_id, offer.object_id))
         .cloned()
@@ -5234,6 +5237,9 @@ pub(crate) fn cmd_sell(world: &mut World, player: Entity, args: &str) {
         );
         return;
     };
+    if crate::commands::composition::refuse_shop_trade(world, player) {
+        return;
+    }
     let item_name = name_of(world, item);
     // NO_SELL / SOULBOUND gates — quest items and bound gear can't
     // be liquidated for coin. Done before the shop-catalog lookup
@@ -9562,6 +9568,9 @@ pub(crate) fn cmd_unlock(world: &mut World, player: Entity, args: &str) {
     if refuse_hidden_exit(world, player, room, dir) {
         return;
     }
+    if crate::commands::composition::refuse_door_action(world, player) {
+        return;
+    }
     let Some((state, key_req)) = world
         .get::<Exits>(room)
         .and_then(|e| e.0.get(&dir).map(|ed| (ed.state, ed.key)))
@@ -9639,6 +9648,9 @@ pub(crate) fn cmd_open(world: &mut World, player: Entity, args: &str) {
     if refuse_hidden_exit(world, player, room, dir) {
         return;
     }
+    if crate::commands::composition::refuse_door_action(world, player) {
+        return;
+    }
     let cur_state = world
         .get::<Exits>(room)
         .and_then(|e| e.0.get(&dir).map(|ed| ed.state));
@@ -9698,6 +9710,9 @@ pub(crate) fn cmd_close(world: &mut World, player: Entity, args: &str) {
     if refuse_hidden_exit(world, player, room, dir) {
         return;
     }
+    if crate::commands::composition::refuse_door_action(world, player) {
+        return;
+    }
     let cur_state = world
         .get::<Exits>(room)
         .and_then(|e| e.0.get(&dir).map(|ed| ed.state));
@@ -9751,6 +9766,9 @@ pub(crate) fn cmd_lock(world: &mut World, player: Entity, args: &str) {
     };
     let room = located.0;
     if refuse_hidden_exit(world, player, room, dir) {
+        return;
+    }
+    if crate::commands::composition::refuse_door_action(world, player) {
         return;
     }
     let Some((state, key_req)) = world
@@ -11088,6 +11106,10 @@ fn give_coins(world: &mut World, player: Entity, copper: i64, rest: &str) {
         send_to(world, player, "You don't have that many coins!\r\n");
         return;
     }
+    // Coins slip through a hand that is not solid (legacy `perform_give_money`).
+    if crate::commands::composition::coins_fall_through(world, player, target, copper, !staff) {
+        return;
+    }
     if world.get::<Mob>(target).is_some() {
         cmd_bribe(world, player, &format!("{copper} {target_word}"));
         return;
@@ -11202,6 +11224,11 @@ fn get_plain(world: &mut World, player: Entity, args: &str) {
     // to the plain floor path below, unchanged.
     if let Some((needle, container)) = resolve_implicit_container(world, player, trimmed) {
         get_from_container(world, player, room, needle, container);
+        return;
+    }
+
+    // A fluid body cannot lift anything off the floor.
+    if crate::commands::composition::refuse_get_from_room(world, player) {
         return;
     }
 
@@ -11360,6 +11387,10 @@ fn get_from_container_inner(
 
     // Closed (and locked) containers hold their contents back.
     if crate::commands::containers::refuse_if_closed(world, player, container) {
+        return;
+    }
+    // A fluid body can only reach into a container it carries.
+    if crate::commands::composition::refuse_get_from_container(world, player, container) {
         return;
     }
 
@@ -11897,6 +11928,9 @@ fn put_plain(world: &mut World, player: Entity, args: &str) {
             return;
         }
         let count = items.len();
+        // Legacy `perform_put`: a fluid hand only notices the item turn solid
+        // when the container is not one it carries.
+        let carried_by_player = world.get::<Located>(container).map(|l| l.0) == Some(player);
         for (item, item_name) in &items {
             if world.get::<Located>(*item).is_some() {
                 world.entity_mut(*item).insert(Located(container));
@@ -11906,6 +11940,9 @@ fn put_plain(world: &mut World, player: Entity, args: &str) {
                 player,
                 &format!("You put {item_name} in {container_name}.\r\n"),
             );
+            if !carried_by_player {
+                crate::commands::composition::note_item_turns_solid(world, player, item_name);
+            }
         }
         broadcast_room_except_rendered(
             world,
@@ -11947,6 +11984,9 @@ fn put_plain(world: &mut World, player: Entity, args: &str) {
         &[player],
         &format!("{player_name} puts {item_name} in {container_name}.\r\n"),
     );
+    if world.get::<Located>(container).map(|l| l.0) != Some(player) {
+        crate::commands::composition::note_item_turns_solid(world, player, &item_name);
+    }
 }
 
 /// `junk <item>` / `trash <item>`: destroy a carried item. Equipped
@@ -12032,6 +12072,7 @@ pub(crate) fn cmd_donate(world: &mut World, player: Entity, args: &str) {
         &[player],
         &format!("{player_name} donates {item_name}.\r\n"),
     );
+    crate::commands::composition::note_item_turns_solid(world, player, &item_name);
 }
 
 /// True when `item` carries the given proto-derived attribute flag
@@ -12198,6 +12239,7 @@ fn drop_plain(world: &mut World, player: Entity, args: &str) {
                 e.remove::<mud_world::Identified>();
             }
             send_rendered(world, player, &format!("You drop {item_name}.\r\n"));
+            crate::commands::composition::note_item_turns_solid(world, player, item_name);
             crate::triggers::fire_item_event(world, *item, player, mud_world::TriggerEvent::Drop);
             dropped += 1;
         }
@@ -12269,6 +12311,7 @@ fn drop_plain(world: &mut World, player: Entity, args: &str) {
         &[player],
         &format!("{player_name} drops {item_name}.\r\n"),
     );
+    crate::commands::composition::note_item_turns_solid(world, player, &item_name);
     crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Drop);
     refresh_player_items_gmcp(world, player);
 }
@@ -12362,6 +12405,13 @@ fn give_plain(world: &mut World, player: Entity, args: &str) {
     // changes hands). A script that takes the item away ends the give.
     crate::triggers::fire_give(world, item, player, target);
     if world.get::<Located>(item).map(|l| l.0) != Some(player) {
+        return;
+    }
+    // Fluid giver or receiver (legacy `perform_give`): the item turns solid
+    // as it leaves a fluid hand, and slips from a solid hand into a fluid one.
+    if crate::commands::composition::give_item_fate(world, player, target, item)
+        == crate::commands::composition::GiveFate::Fell
+    {
         return;
     }
     if world.get::<Located>(item).is_some() {
@@ -12682,6 +12732,9 @@ pub(crate) fn cmd_mount(world: &mut World, player: Entity, args: &str) {
     }
     if world.get::<Fighting>(target).is_some() {
         send_to(world, player, "It's struggling too much to mount.\r\n");
+        return;
+    }
+    if crate::commands::composition::refuse_mount(world, player, target) {
         return;
     }
     try_insert(world, player, mud_world::Mounted(target));

@@ -695,6 +695,8 @@ pub fn effects_tick(world: &mut World) {
     crate::fear::sync_markers(world);
     // Same for Stunned, which also catches cleansed / dispelled paralysis.
     sync_stunned_all(world);
+    // A body that went fluid by any route sheds Stone Skin and its kin.
+    crate::commands::composition::sweep_fluid_bearers(world);
 
     // Pre-pass: fire `on_apply` hooks for any EffectInstance that
     // hasn't been seen yet, then record it in `HookedEffects`.

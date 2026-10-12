@@ -1695,6 +1695,9 @@ pub(crate) fn cmd_steal(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "You don't know how to steal.\r\n");
         return;
     }
+    if crate::commands::composition::refuse_steal(world, player) {
+        return;
+    }
 
     let parts: Vec<&str> = args.split_whitespace().collect();
     if parts.len() < 2 {

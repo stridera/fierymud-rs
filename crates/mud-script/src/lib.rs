@@ -5690,6 +5690,7 @@ mod tests {
                 memorization_time: 0,
                 passive: false,
                 short_cast: false,
+                requires_rigid: false,
                 quest_only: false,
             },
         );
