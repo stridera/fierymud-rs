@@ -668,6 +668,8 @@ mod grants;
 #[cfg(test)]
 #[path = "commands/grants_tests.rs"]
 mod grants_tests;
+#[path = "commands/help_dump.rs"]
+mod help_dump;
 #[path = "commands/script_attach.rs"]
 mod script_attach;
 #[cfg(test)]
@@ -809,6 +811,9 @@ mod cast_move_batch_tests;
 #[cfg(test)]
 #[path = "commands/cmd_parity_tests.rs"]
 mod cmd_parity_tests;
+#[cfg(test)]
+#[path = "commands/command_help_tests.rs"]
+mod command_help_tests;
 #[cfg(test)]
 #[path = "commands/data_tables_tests.rs"]
 mod data_tables_tests;

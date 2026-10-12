@@ -3177,11 +3177,20 @@ fn run_help(world: &mut World, player: Entity, args: &str, scope: HelpScope) {
         // default-color so it remains the most legible part of the
         // page; aliases / category gloss are dimmed since they're
         // reference metadata, not the example a player will copy.
+        // Summary and long text: the `Command` row's help columns when a
+        // builder/seed set them, else the registry's built-in strings.
+        let db_help = world.get_resource::<mud_world::CommandHelp>();
+        let summary = db_help
+            .and_then(|h| h.summary(cmd.names[0]))
+            .unwrap_or(cmd.help.summary);
+        let long = db_help
+            .and_then(|h| h.long(cmd.names[0]))
+            .unwrap_or(cmd.help.long);
         let mut out = format!("\r\n<b:cyan>{}</>\r\n", cmd.names[0]);
-        out.push_str(&format!("\r\n  {}\r\n", cmd.help.summary));
+        out.push_str(&format!("\r\n  {summary}\r\n"));
         out.push_str(&format!("\r\n  <cyan>Usage:</> {}\r\n", cmd.help.usage));
-        if !cmd.help.long.is_empty() {
-            out.push_str(&format!("\r\n  {}\r\n", cmd.help.long));
+        if !long.is_empty() {
+            out.push_str(&format!("\r\n  {long}\r\n"));
         }
         if cmd.names.len() > 1 {
             out.push_str(&format!(

@@ -1775,3 +1775,58 @@ async fn zone_and_social_queries_degrade_when_the_flag_columns_are_missing() {
     assert_eq!(rows.len(), 1);
     assert!(!rows[0].staff_only);
 }
+
+/// A database that predates `Command.help_summary` / `help_text` (table present, columns
+/// missing) or the whole `Command` table fails the help query with Postgres 42703 /
+/// 42P01, the codes the loader's fallback (built-in registry text) keys on.
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn command_help_query_fails_with_missing_schema_codes() {
+    let _ = dotenvy::from_path("../../.env");
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    // One connection so the scratch `search_path` sticks to every query.
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .expect("connect");
+    let schema = format!("scratch_cmdhelp_{}", std::process::id());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&pool)
+        .await
+        .expect("create schema");
+    let result: sqlx::Result<_> = async {
+        sqlx::query(&format!("SET search_path = {schema}"))
+            .execute(&pool)
+            .await?;
+        let no_table = mud_db::command_help::list_all(&pool).await;
+        sqlx::query(r#"CREATE TABLE "Command" (name text PRIMARY KEY, description text)"#)
+            .execute(&pool)
+            .await?;
+        let no_columns = mud_db::command_help::list_all(&pool).await;
+        Ok((no_table, no_columns))
+    }
+    .await;
+    sqlx::query("SET search_path = public")
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&pool)
+        .await
+        .ok();
+    let (no_table, no_columns) = result.expect("scratch setup");
+    let code = |e: &sqlx::Error| {
+        e.as_database_error()
+            .and_then(sqlx::error::DatabaseError::code)
+            .map(std::borrow::Cow::into_owned)
+    };
+    assert_eq!(
+        code(&no_table.expect_err("missing table")).as_deref(),
+        Some("42P01")
+    );
+    assert_eq!(
+        code(&no_columns.expect_err("missing columns")).as_deref(),
+        Some("42703")
+    );
+}

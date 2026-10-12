@@ -4,10 +4,11 @@ use bevy_ecs::prelude::*;
 use mud_db::{
     abilities, ability_components, ability_damage_components, ability_effects, ability_messages,
     ability_restrictions, ability_saving_throw, ability_targeting, achievements, boards, classes,
-    content_tables, discord_config, effects, game_config, help, levels, liquids, login_message,
-    mob_ai, mob_reset_equipment, mob_resets, mobs, object_abilities, object_reset_contents,
-    object_resets, objects, races, room_exits, rooms, shops, socials, spell_circles, spell_slots,
-    sphere_styles, sqlx::PgPool, system_text, triggers, weather_text, zones,
+    command_help, content_tables, discord_config, effects, game_config, help, levels, liquids,
+    login_message, mob_ai, mob_reset_equipment, mob_resets, mobs, object_abilities,
+    object_reset_contents, object_resets, objects, races, room_exits, rooms, shops, socials,
+    spell_circles, spell_slots, sphere_styles, sqlx::PgPool, system_text, triggers, weather_text,
+    zones,
 };
 use tracing::{error, info, warn};
 
@@ -239,6 +240,27 @@ async fn load_spell_circle_times(
                  fierylib/data/sql/2026-10-12-spell-circle-recover.sql is applied"
             );
             Ok(std::collections::HashMap::new())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// `"Command".help_summary` / `help_text` for `help <command>`. A database without the table
+/// or the columns (42P01 / 42703) yields an empty catalog and an ERROR log, so every command
+/// keeps its built-in registry text.
+async fn load_command_help(pool: &PgPool) -> sqlx::Result<crate::command_help::CommandHelp> {
+    match command_help::list_all(pool).await {
+        Ok(rows) => Ok(crate::command_help::CommandHelp::from_rows(
+            rows.into_iter()
+                .map(|r| (r.name, r.help_summary, r.help_text)),
+        )),
+        Err(e) if is_missing_schema(&e) => {
+            error!(
+                "\"Command\".help_summary / help_text is missing; `help <command>` uses the \
+                 built-in text until the muditor schema is pushed (prisma db push) and \
+                 fierylib/data/sql/2026-10-12-command-help-text.sql is applied"
+            );
+            Ok(crate::command_help::CommandHelp::default())
         }
         Err(e) => Err(e),
     }
@@ -967,6 +989,13 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         "weather lines loaded (built-in lines fill the rest)"
     );
     world.insert_resource(weather_text);
+
+    let command_help = load_command_help(pool).await?;
+    info!(
+        commands = command_help.len(),
+        "command help text loaded (built-in text fills the rest)"
+    );
+    world.insert_resource(command_help);
 
     // ClassSkills: per-class, per-skill (class_id, ability_id) →
     // (min_level, proficiency_cap). Drives the SKILL invoke gate

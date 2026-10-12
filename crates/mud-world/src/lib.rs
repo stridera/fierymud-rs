@@ -1,4 +1,5 @@
 pub mod class_skills;
+pub mod command_help;
 pub mod components;
 pub mod god;
 pub mod item_spawn;
@@ -17,6 +18,7 @@ pub mod wake_effects;
 pub mod weather_text;
 
 pub use class_skills::{STARTING_SKILL_PROFICIENCY, grant_class_skills};
+pub use command_help::CommandHelp;
 pub use god::{GOD_PROFICIENCY, bypasses_restrictions, known_abilities_of, proficiency_of};
 pub use liquid_legacy::{BUILTIN_CODES as LEGACY_LIQUID_CODES, LegacyLiquidRow, LiquidLegacyIndex};
 pub use sphere_style::SphereStyles;
