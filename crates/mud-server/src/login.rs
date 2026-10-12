@@ -303,6 +303,11 @@ fn plain_telnet_notice_bytes(world: &World) -> Vec<u8> {
             )
         })
         .replace("{tls_port}", &port.to_string());
+    // Nothing is known about the client yet, so wrap to the default width: a
+    // builder-edited row with long sentences must not run off an 80-column
+    // screen (the seeded row's "To log in without sending a password..."
+    // line was 103 columns).
+    let raw = crate::layout::wrap_lines(&raw, crate::layout::DEFAULT_COLS);
     let mut text = crate::commands::render_color_tags(&raw, crate::commands::ColorMode::Ansi);
     // The prompt that follows is written straight after this block, so
     // a row without a trailing line break glued "Password:" onto the
@@ -9200,6 +9205,39 @@ pub(crate) mod tests {
         assert!(is_valid_login_identifier("user@example.com"));
         assert!(!is_valid_login_identifier("us er@example.com"));
         assert!(!is_valid_login_identifier("user@exa\x1bmple.com"));
+    }
+
+    #[test]
+    fn plain_telnet_notice_is_wrapped_to_80_columns() {
+        // Round 4 R5: the seeded row's last sentence is 103 columns wide.
+        let widest = |bytes: Vec<u8>| {
+            String::from_utf8(bytes)
+                .unwrap()
+                .lines()
+                .map(crate::layout::text_width)
+                .max()
+                .unwrap_or(0)
+        };
+        let mut world = World::new();
+        world.insert_resource(messages(&[(
+            "PLAIN_TELNET_NOTICE",
+            "default",
+            "<yellow>This connection is not encrypted.</>\r\n\
+             <yellow>For a secure connection use the TLS port {tls_port}.</>\r\n\
+             <dim>To log in without sending a password, type `code` at the password \
+             prompt and approve it on the website.</>\r\n\r\n",
+        )]));
+        let bytes = plain_telnet_notice_bytes(&world);
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        assert!(widest(bytes) <= 80, "{text:?}");
+        // The wrap loses no words and keeps the sentence break structure.
+        for word in ["approve", "website.", "`code`", "4443."] {
+            assert!(text.contains(word), "{word} missing: {text:?}");
+        }
+        assert!(text.ends_with("\r\n\r\n"), "{text:?}");
+        // The compiled fallback is one long paragraph and wraps too.
+        let fallback = plain_telnet_notice_bytes(&World::new());
+        assert!(widest(fallback) <= 80);
     }
 
     #[test]

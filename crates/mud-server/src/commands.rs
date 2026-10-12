@@ -16131,6 +16131,83 @@ fn travel_to_target_params(
     })
 }
 
+/// Why Relocate / Dimension Door cannot take `caster` to `target` right now.
+struct TravelRefusal {
+    /// The line for the caster.
+    message: &'static str,
+    /// Short reason for the effect log.
+    reason: &'static str,
+    /// Bystanders also see the failed rift (a journey too long for the spell).
+    rift: bool,
+}
+
+/// Every refusal of [`travel_to_target`] that can be known before the spell is
+/// cast, as data: the same checks run when the cast starts (so a wind-up is
+/// not spent on a journey that cannot happen) and again when it lands.
+/// Returns the destination room on success.
+fn travel_refusal(
+    world: &mut World,
+    caster: Entity,
+    target: Entity,
+    def: &mud_world::AbilityDef,
+    zone_only: bool,
+) -> Result<Entity, TravelRefusal> {
+    let relocate = def.plain_name.eq_ignore_ascii_case("RELOCATE");
+    let refuse = |message, reason| TravelRefusal {
+        message,
+        reason,
+        rift: false,
+    };
+    let Some(dest) = world.get::<Located>(target).map(|l| l.0) else {
+        return Err(refuse("You failed.\r\n", "no destination"));
+    };
+    let here = world.get::<Located>(caster).map(|l| l.0);
+    // Only characters can be travelled to: a mob named in the room resolves,
+    // but the magic finds nothing to anchor on.
+    if target != caster && world.get::<Player>(target).is_none() {
+        return Err(refuse("You failed.\r\n", "not a player"));
+    }
+    if target == caster || here == Some(dest) {
+        return Err(refuse("You are already here.\r\n", "already there"));
+    }
+    // Staff are out of reach unless (Relocate only) the caster outranks them.
+    let target_level = mud_world::effective_level(world, target);
+    if target_level >= 100 {
+        if !relocate {
+            return Err(refuse("You failed.\r\n", "staff target"));
+        }
+        if mud_world::effective_level(world, caster) < target_level {
+            return Err(refuse(
+                "Your magics are stamped out by the gods.\r\n",
+                "stamped out",
+            ));
+        }
+    }
+    if crate::room_access::teleport_blocked_here(world, caster) {
+        return Err(refuse(
+            "A strange force in this place smothers the spell.\r\n",
+            "no-teleport room",
+        ));
+    }
+    if zone_only {
+        let zone_of = |w: &World, room: Entity| w.get::<WorldKey>(room).map(|k| k.zone);
+        if here.and_then(|r| zone_of(world, r)) != zone_of(world, dest) {
+            return Err(TravelRefusal {
+                message: "<b:black>Your magics are not strong enough for such a great journey.</>\r\n",
+                reason: "different zone",
+                rift: true,
+            });
+        }
+    }
+    if !crate::room_access::entry_allowed(world, caster, dest) {
+        return Err(refuse(
+            crate::room_access::ENTRY_REFUSED,
+            "entry restricted",
+        ));
+    }
+    Ok(dest)
+}
+
 /// Relocate / Dimension Door (legacy `spell_relocate`, `spell_dimension_door`):
 /// move `caster` to the room of `target`, a player anywhere in the world
 /// (`zone_only`: the same zone as the caster). The refusal text has already
@@ -16144,54 +16221,13 @@ fn travel_to_target(
     zone_only: bool,
 ) -> Result<(), &'static str> {
     let relocate = def.plain_name.eq_ignore_ascii_case("RELOCATE");
-    let Some(dest) = world.get::<Located>(target).map(|l| l.0) else {
-        send_to(world, caster, "You failed.\r\n");
-        return Err("no destination");
-    };
-    let here = world.get::<Located>(caster).map(|l| l.0);
-    // Only characters can be travelled to: a mob named in the room resolves,
-    // but the magic finds nothing to anchor on.
-    if target != caster && world.get::<Player>(target).is_none() {
-        send_to(world, caster, "You failed.\r\n");
-        return Err("not a player");
-    }
-    if target == caster || here == Some(dest) {
-        send_to(world, caster, "You are already here.\r\n");
-        return Err("already there");
-    }
-    // Staff are out of reach unless (Relocate only) the caster outranks them.
-    let target_level = mud_world::effective_level(world, target);
-    if target_level >= 100 {
-        if !relocate {
-            send_to(world, caster, "You failed.\r\n");
-            return Err("staff target");
-        }
-        if mud_world::effective_level(world, caster) < target_level {
-            send_to(
-                world,
-                caster,
-                "Your magics are stamped out by the gods.\r\n",
-            );
-            return Err("stamped out");
-        }
-    }
-    if crate::room_access::teleport_blocked_here(world, caster) {
-        send_to(
-            world,
-            caster,
-            "A strange force in this place smothers the spell.\r\n",
-        );
-        return Err("no-teleport room");
-    }
-    if zone_only {
-        let zone_of = |w: &World, room: Entity| w.get::<WorldKey>(room).map(|k| k.zone);
-        if here.and_then(|r| zone_of(world, r)) != zone_of(world, dest) {
-            send_to(
-                world,
-                caster,
-                "<b:black>Your magics are not strong enough for such a great journey.</>\r\n",
-            );
-            if let Some(room) = here {
+    let dest = match travel_refusal(world, caster, target, def, zone_only) {
+        Ok(dest) => dest,
+        Err(refusal) => {
+            send_to(world, caster, refusal.message);
+            if refusal.rift
+                && let Some(room) = world.get::<Located>(caster).map(|l| l.0)
+            {
                 broadcast_room_visual(
                     world,
                     room,
@@ -16200,13 +16236,10 @@ fn travel_to_target(
                     "<b:black>A rift in space opens up, wavers, then dissipates into thin air.</>\r\n",
                 );
             }
-            return Err("different zone");
+            return Err(refusal.reason);
         }
-    }
-    if !crate::room_access::entry_allowed(world, caster, dest) {
-        send_to(world, caster, crate::room_access::ENTRY_REFUSED);
-        return Err("entry restricted");
-    }
+    };
+    let here = world.get::<Located>(caster).map(|l| l.0);
     let who = cap_sentence_start(&name_of(world, caster));
     let (to_caster, leaving, arriving) = if relocate {
         (
@@ -16239,6 +16272,29 @@ fn travel_to_target(
         try_insert(world, caster, Posture(PostureKind::Resting));
     }
     Ok(())
+}
+
+/// Whether the word after the ability name is content the spell reads itself
+/// (a recipe, a precipitation word, a search keyword, a corpse or a mirrored
+/// name) rather than a target to find (legacy `TAR_STRING` / `TAR_IGNORE`).
+/// Such a word that names nobody still means "cast it on yourself".
+fn ability_word_is_free_text(world: &World, def: &mud_world::AbilityDef) -> bool {
+    let (Some(effects), Some(catalog)) = (
+        world.get_resource::<mud_world::EffectCatalog>(),
+        world.get_resource::<AbilityCatalog>(),
+    ) else {
+        return false;
+    };
+    catalog.effects_for.get(&def.id).is_some_and(|rows| {
+        rows.iter().any(|(id, _)| {
+            effects.by_id.get(id).is_some_and(|e| {
+                matches!(
+                    e.effect_type.as_str(),
+                    "create" | "reveal" | "room" | "summon" | "teleport" | "portal"
+                )
+            })
+        })
+    })
 }
 
 /// Resolve the single target of a cast and run the target-dependent
@@ -16421,14 +16477,35 @@ fn resolve_and_gate_target(
                 );
                 return None;
             }
-            None if !def.violent => {
-                // Non-violent / utility spell with an unresolved arg
-                // (e.g. `cast 'minor creation' bread` — the arg is
-                // recipe content, not a room target). Fall through
-                // to self-cast rather than refusing. Hostile spells
-                // still error so a misspelled enemy keyword can't
-                // silently hit the caster.
+            None if !def.violent
+                && (matches!(def.kind, mud_db::abilities::AbilityKind::Skill)
+                    || ability_word_is_free_text(world, def)) =>
+            {
+                // Non-violent / utility spell whose arg is content, not a
+                // target (`cast 'minor creation' bread`, `cast 'control
+                // weather' rain`, `cast 'locate object' sword`). Fall through
+                // to self-cast rather than refusing. Skills keep the quiet
+                // self fallback too.
                 player
+            }
+            None if !def.violent => {
+                // Legacy `do_cast` / `find_spell_target`: a named target that
+                // resolves to nothing ends the cast right here, before the
+                // wind-up or the slot (`cast 'identify' pigxyz`), not after
+                // the whole chant.
+                send_to(
+                    world,
+                    player,
+                    format!(
+                        "Cannot find the target of your {}!\r\n",
+                        match def.kind {
+                            mud_db::abilities::AbilityKind::Chant => "chant",
+                            mud_db::abilities::AbilityKind::Song => "music",
+                            _ => "spell",
+                        }
+                    ),
+                );
+                return None;
             }
             None => {
                 send_to(
@@ -16449,6 +16526,22 @@ fn resolve_and_gate_target(
     } else {
         player
     };
+    // A journey to a named character (Relocate, Dimension Door) that the
+    // spell would refuse anyway -- a mob, a staff member, a no-teleport room,
+    // another zone for a zone-bound spell -- is refused now, not after the
+    // wind-up (the same checks run again when the cast lands).
+    if forced_target.is_none()
+        && let Some(params) = travel_to_target_params(world, def)
+    {
+        let zone_only = params
+            .get("range")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|r| r.eq_ignore_ascii_case("zone"));
+        if let Err(refusal) = travel_refusal(world, player, target_entity, def, zone_only) {
+            send_to(world, player, refusal.message);
+            return None;
+        }
+    }
     // (The "target: X" line was part of the removed descriptor box —
     // the success message already names the target.)
     // Dispel magic stays violent here (legacy), even aimed at oneself.
@@ -17494,6 +17587,24 @@ pub(crate) fn invoke_ability_core(
     let has_damage_effect = effect_specs
         .iter()
         .any(|s| s.effect_type.as_str() == "damage");
+    // Legacy `mag_affect`: casting a spell the target already has refreshes
+    // it and says so ("You refresh X for Y.") in place of the success lines.
+    // Enhance Ability, Elemental Warding and Hymn of Saint Augustine swap
+    // their effect instead and keep the success lines.
+    let recast_refresh = !matches!(kind, mud_db::abilities::AbilityKind::Skill)
+        && !has_damage_effect
+        && ![
+            "ENHANCE_ABILITY",
+            "ELEMENTAL_WARDING",
+            "HYMN_OF_SAINT_AUGUSTINE",
+        ]
+        .iter()
+        .any(|n| def.plain_name.eq_ignore_ascii_case(n))
+        && {
+            let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+            q.iter(world)
+                .any(|(e, at)| at.0 == target_entity && e.ability_id == Some(def.id))
+        };
     let render_header = || {
         let caster_template = messages_pre.as_ref().and_then(|m| {
             if target_entity == player {
@@ -20791,7 +20902,26 @@ pub(crate) fn invoke_ability_core(
             || lower.contains("(arena asymmetry")
             || lower.contains("(target not dead"))
     });
-    if let Some(h) = pending_header
+    let refreshed = recast_refresh && !custom_messaging && any_non_refusal;
+    if refreshed {
+        let spell = def.name.to_lowercase();
+        if target_entity == player {
+            out.insert_str(
+                0,
+                &format!("You refresh <b:yellow>{spell}</> for yourself.\r\n"),
+            );
+        } else {
+            out.insert_str(
+                0,
+                &format!("You refresh <b:yellow>{spell}</> for {target_name_raw}.\r\n"),
+            );
+            send_msg(
+                world,
+                target_entity,
+                format!("{actor_name} refreshes <b:yellow>{spell}</> for you.\r\n"),
+            );
+        }
+    } else if let Some(h) = pending_header
         && !header_sent_with_damage
         && !custom_messaging
         && (any_non_refusal || applied_msgs.is_empty())
@@ -20830,6 +20960,7 @@ pub(crate) fn invoke_ability_core(
         && !applied_msgs.is_empty()
         && !custom_messaging
         && !per_hit_messaging
+        && !refreshed
     {
         let target_template = messages
             .as_ref()
@@ -20869,6 +21000,7 @@ pub(crate) fn invoke_ability_core(
     if !applied_msgs.is_empty()
         && !custom_messaging
         && !per_hit_messaging
+        && !refreshed
         && let Some(t) = room_template
         && let Some(located) = world.get::<Located>(player).copied()
     {

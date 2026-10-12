@@ -8489,10 +8489,10 @@ const TOGGLES: &[(PlayerFlag, &str)] = &[
 ];
 
 /// Lowercase with the `_` / `-` separators removed, so `show_dice_rolls`,
-/// `Show-Dice-Rolls` and `ShowDiceRolls` all compare equal.
+/// `Show-Dice-Rolls`, `show dice rolls` and `ShowDiceRolls` all compare equal.
 fn toggle_key(s: &str) -> String {
     s.chars()
-        .filter(|c| !matches!(c, '_' | '-'))
+        .filter(|c| !matches!(c, '_' | '-') && !c.is_whitespace())
         .map(|c| c.to_ascii_lowercase())
         .collect()
 }
@@ -14634,6 +14634,10 @@ pub(crate) fn cmd_spells(world: &mut World, player: Entity, args: &str) {
         let circle = class_id
             .and_then(|cid| slot_data.ability_circle.get(&(cid, def.id)).copied())
             .unwrap_or(0);
+        // A racial innate the class has no circle for is listed by `innate`.
+        if circle == 0 && super::innate::is_racial_grant(world, player, def.id) {
+            continue;
+        }
         if let Some((lo, hi)) = circle_range
             && (circle < lo || circle > hi)
         {

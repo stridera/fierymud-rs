@@ -641,3 +641,225 @@ fn mount_movement_points_regenerate() {
     crate::regen::regen_tick(&mut world);
     assert_eq!(world.get::<MovementPoints>(mount).unwrap().current, 11);
 }
+
+// -- playtest round 4: recast feedback, targets refused at the start -----------
+
+#[test]
+fn recasting_a_refreshing_spell_on_yourself_says_it_was_refreshed() {
+    let (mut fx, p, mut rx) = stone_skin_fx(None);
+    dispatch(&mut fx.world, p, "cast 'stone skin'");
+    let first = plain(&drain(&mut rx));
+    assert!(!first.contains("refresh"), "{first}");
+    dispatch(&mut fx.world, p, "cast 'stone skin'");
+    let out = plain(&drain(&mut rx));
+    assert!(
+        out.contains("You refresh stone skin for yourself."),
+        "a recast is never silent: {out}"
+    );
+    assert!(
+        !out.contains("You cast"),
+        "refresh replaces the success line: {out}"
+    );
+    assert_eq!(effect_count(&mut fx.world, p), 1, "refreshed in place");
+}
+
+#[test]
+fn recasting_on_someone_else_tells_both_of_them() {
+    let (mut fx, p, mut rx) = stone_skin_fx(None);
+    let b = fx.b;
+    let (other, mut orx) = player(&mut fx.world, b, "Other");
+    fx.world.entity_mut(p).insert(mud_world::Located(b));
+    dispatch(&mut fx.world, p, "cast 'stone skin' other");
+    drain(&mut rx);
+    drain(&mut orx);
+    dispatch(&mut fx.world, p, "cast 'stone skin' other");
+    let caster = plain(&drain(&mut rx));
+    assert!(
+        caster.contains("You refresh stone skin for Other."),
+        "{caster}"
+    );
+    let target = plain(&drain(&mut orx));
+    assert!(
+        target.contains("Caster refreshes stone skin for you."),
+        "{target}"
+    );
+    assert_eq!(effect_count(&mut fx.world, other), 1);
+}
+
+#[test]
+fn enhance_ability_recast_swaps_the_enhancement_and_keeps_its_success_line() {
+    // Legacy `mag_affect`: Enhance Ability removes the old effect and applies
+    // the new one with the normal messages, not the generic refresh line.
+    let (mut fx, p, mut rx) = spell_fx(
+        "Enhance Ability",
+        "ENHANCE_ABILITY",
+        0,
+        false,
+        "modify",
+        serde_json::json!({"amount": 2, "duration": 60, "target": "cha"}),
+    );
+    fx.world
+        .resource_mut::<SpellSlotData>()
+        .progression
+        .insert((20, 1), 2);
+    fx.world.entity_mut(p).insert(mud_world::CoreStats {
+        strength: 50,
+        dexterity: 50,
+        constitution: 50,
+        intelligence: 50,
+        wisdom: 50,
+        charisma: 50,
+    });
+    dispatch(&mut fx.world, p, "cast 'enhance ability' dex");
+    drain(&mut rx);
+    dispatch(&mut fx.world, p, "cast 'enhance ability' dex");
+    let out = plain(&drain(&mut rx));
+    assert!(!out.contains("You refresh"), "{out}");
+    assert!(
+        out.contains("Enhance Ability"),
+        "still announces the cast: {out}"
+    );
+    assert_eq!(
+        effect_count(&mut fx.world, p),
+        1,
+        "one enhancement, not two"
+    );
+    assert_eq!(
+        fx.world.get::<mud_world::CoreStats>(p).unwrap().dexterity,
+        52
+    );
+}
+
+#[test]
+fn a_named_target_that_is_not_here_is_refused_at_the_start_of_a_wind_up() {
+    let (mut fx, p, mut rx) = spell_fx(
+        "Identify",
+        "IDENTIFY",
+        5,
+        false,
+        "inspect",
+        serde_json::json!({}),
+    );
+    dispatch(&mut fx.world, p, "cast 'identify' pigxyz");
+    let out = plain(&drain(&mut rx));
+    assert!(
+        out.contains("Cannot find the target of your spell!"),
+        "{out}"
+    );
+    assert!(
+        fx.world.get::<mud_world::Casting>(p).is_none(),
+        "no wind-up"
+    );
+    assert_eq!(slots_used(&fx.world, p), 0, "slot untouched");
+}
+
+#[test]
+fn any_non_violent_spell_refuses_a_missing_target_before_the_wind_up() {
+    // Not special to Identify: a buff aimed at a name nobody answers to.
+    let (mut fx, p, mut rx) = spell_fx(
+        "Bless",
+        "BLESS",
+        3,
+        false,
+        "status",
+        serde_json::json!({"flag": "bless", "duration": 60}),
+    );
+    dispatch(&mut fx.world, p, "cast 'bless' nobody");
+    let out = plain(&drain(&mut rx));
+    assert!(
+        out.contains("Cannot find the target of your spell!"),
+        "{out}"
+    );
+    assert!(fx.world.get::<mud_world::Casting>(p).is_none());
+    assert_eq!(slots_used(&fx.world, p), 0);
+    assert_eq!(effect_count(&mut fx.world, p), 0, "not cast on yourself");
+}
+
+#[test]
+fn an_instant_spell_with_a_missing_target_keeps_its_slot_too() {
+    let (mut fx, p, mut rx) = stone_skin_fx(None);
+    dispatch(&mut fx.world, p, "cast 'stone skin' nobody");
+    let out = plain(&drain(&mut rx));
+    assert!(
+        out.contains("Cannot find the target of your spell!"),
+        "{out}"
+    );
+    assert_eq!(slots_used(&fx.world, p), 0);
+}
+
+#[test]
+fn a_spell_whose_word_is_content_still_falls_back_to_the_caster() {
+    // `cast 'locate object' sword`: the word is a search keyword, not a target.
+    let (mut fx, p, mut rx) = spell_fx(
+        "Locate Object",
+        "LOCATE_OBJECT",
+        0,
+        false,
+        "reveal",
+        serde_json::json!({"type": "object", "depth": "world"}),
+    );
+    dispatch(&mut fx.world, p, "cast 'locate object' sword");
+    let out = plain(&drain(&mut rx));
+    assert!(!out.contains("Cannot find the target"), "{out}");
+}
+
+fn dimension_door_fx() -> (Fx, Entity, Entity, Rx) {
+    let (mut fx, p, rx) = spell_fx(
+        "Dimension Door",
+        "DIMENSION_DOOR",
+        4,
+        false,
+        "teleport",
+        serde_json::json!({"destination": "target", "range": "zone"}),
+    );
+    // A room in another zone, with a friend in it.
+    let far = fx
+        .world
+        .spawn((
+            Room,
+            mud_world::WorldKey { zone: 551, id: 1 },
+            Named {
+                name: "Far Room".into(),
+            },
+            mud_world::Description("far".into()),
+            Exits::default(),
+        ))
+        .id();
+    let (friend, _frx) = player(&mut fx.world, far, "Friend");
+    (fx, p, friend, rx)
+}
+
+#[test]
+fn a_cross_zone_dimension_door_is_refused_before_the_wind_up() {
+    let (mut fx, p, _friend, mut rx) = dimension_door_fx();
+    dispatch(&mut fx.world, p, "cast 'dimension door' friend");
+    let out = plain(&drain(&mut rx));
+    assert!(
+        out.contains("Your magics are not strong enough for such a great journey."),
+        "{out}"
+    );
+    assert!(
+        fx.world.get::<mud_world::Casting>(p).is_none(),
+        "no wind-up"
+    );
+    assert_eq!(slots_used(&fx.world, p), 0, "slot untouched");
+}
+
+#[test]
+fn a_dimension_door_to_a_mob_is_refused_before_the_wind_up() {
+    let (mut fx, p, _friend, mut rx) = dimension_door_fx();
+    let a = fx.a;
+    fx.world.spawn((
+        Mob,
+        Named {
+            name: "a goblin".into(),
+        },
+        mud_world::Keywords(vec!["goblin".into()]),
+        mud_world::Located(a),
+    ));
+    dispatch(&mut fx.world, p, "cast 'dimension door' goblin");
+    let out = plain(&drain(&mut rx));
+    assert!(out.contains("You failed."), "{out}");
+    assert!(fx.world.get::<mud_world::Casting>(p).is_none());
+    assert_eq!(slots_used(&fx.world, p), 0);
+}

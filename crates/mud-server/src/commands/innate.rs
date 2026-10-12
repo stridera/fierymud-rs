@@ -17,7 +17,40 @@ use mud_world::{
     innate_cooldown_key,
 };
 
-use crate::commands::{invoke_ability_innate, send_to};
+use crate::commands::{Category, Command, Help, invoke_ability_innate, send_to};
+use mud_db::enums::UserRole;
+
+inventory::submit! {
+    Command {
+        names: &["create"],
+        min_role: UserRole::Player,
+        required_perm: None,
+        category: Category::Magic,
+        help: Help {
+            usage: "create <item>",
+            summary: "Gnomes: tinker an item together without a spell.",
+            long: "The gnomish racial Minor Creation, as its own command: \
+                   'create <item>' is 'innate minor creation <item>'. The \
+                   same one-hour racial cooldown applies. Only races whose \
+                   innate abilities include Minor Creation can use it.",
+        },
+        run: cmd_create,
+    }
+}
+
+/// `create <item>` (legacy `do_create`): the racial Minor Creation. Every
+/// other race is told that only gnomes can create without spells.
+pub(crate) fn cmd_create(world: &mut World, player: Entity, args: &str) {
+    let racial = racial_actives(world, player)
+        .into_iter()
+        .any(|d| d.plain_name.eq_ignore_ascii_case("MINOR_CREATION"));
+    if !racial {
+        send_to(world, player, "Only Gnomes can create without spells!\r\n");
+        return;
+    }
+    let args = args.trim();
+    use_innate(world, player, &format!("'minor_creation' {args}"));
+}
 
 /// The abilities the caller's race grants that are (`passive`) or are not
 /// passive, sorted by name. Empty without a race or without loaded race data.
@@ -49,6 +82,20 @@ fn racial_grants(world: &World, player: Entity, passive: bool) -> Vec<AbilityDef
         .collect();
     out.sort_by_key(|d| d.plain_name.to_ascii_lowercase());
     out
+}
+
+/// Whether the caller's race grants `ability_id` as an innate (a god has the
+/// innates of every race). Such abilities are listed by `innate`, not `spells`.
+pub(crate) fn is_racial_grant(world: &World, player: Entity, ability_id: i32) -> bool {
+    let Some(data) = world.get_resource::<RaceAbilitiesData>() else {
+        return false;
+    };
+    if mud_world::bypasses_restrictions(world, player) {
+        return data.granted_by_any(ability_id);
+    }
+    world
+        .get::<Profile>(player)
+        .is_some_and(|p| data.grants(&p.race, ability_id))
 }
 
 /// The active (non-passive) abilities the caller's race grants, sorted by
@@ -490,6 +537,125 @@ mod tests {
         });
         use_innate(&mut world, human, "syll");
         assert!(world.get::<mud_world::Casting>(human).is_none());
+    }
+
+    #[test]
+    fn spells_leaves_out_racial_innates_the_class_has_no_circle_for() {
+        // Round 4: an innate spell sat under "(no circle for your class)" in
+        // `spells`; it is listed by `innate`.
+        let (mut world, elf, _human, mut rx) = world_with_races();
+        world.insert_resource(mud_world::SpellSlotData::default());
+        world.entity_mut(elf).insert(mud_world::KnownAbilities {
+            entries: vec![
+                (SYLL, 1000, true),
+                (MISSILE, 1000, true),
+                (DOOR, 1000, true),
+            ],
+        });
+        crate::commands::info::cmd_spells(&mut world, elf, "");
+        let out = drain(&mut rx);
+        // Elves are granted SYLL and MISSILE; DOOR is a cross-class scroll
+        // spell that no race row of theirs grants, so it still shows.
+        assert!(!out.contains("Innate Sylvan"), "{out}");
+        assert!(!out.contains("Magic Missile"), "{out}");
+        assert!(out.contains("Dimension Door"), "{out}");
+        assert!(out.contains("no circle for your class"), "{out}");
+        // `innate` itself still lists it.
+        assert!(
+            racial_actives(&world, elf)
+                .iter()
+                .any(|d| d.plain_name == "INN_SYLL")
+        );
+    }
+
+    #[test]
+    fn a_racial_spell_the_class_has_a_circle_for_stays_in_spells() {
+        let (mut world, elf, _human, mut rx) = world_with_races();
+        let mut slots = mud_world::SpellSlotData::default();
+        slots.ability_circle.insert((3, MISSILE), 1);
+        world.insert_resource(slots);
+        world.get_mut::<Profile>(elf).unwrap().class_id = Some(3);
+        world.entity_mut(elf).insert(mud_world::KnownAbilities {
+            entries: vec![(MISSILE, 1000, true)],
+        });
+        crate::commands::info::cmd_spells(&mut world, elf, "");
+        let out = drain(&mut rx);
+        assert!(out.contains("Magic Missile"), "{out}");
+        assert!(out.contains("Circle 1"), "{out}");
+    }
+
+    #[test]
+    fn create_is_the_gnomish_minor_creation_and_nobody_elses() {
+        let (mut world, elf, _human, mut rx) = world_with_races();
+        // Elves have no racial Minor Creation.
+        cmd_create(&mut world, elf, "bread");
+        assert!(
+            drain(&mut rx).contains("Only Gnomes can create without spells!"),
+            "legacy refusal"
+        );
+        // Grant it to gnomes as data, the way the RaceAbilities rows do.
+        let mut creation = ability_def(8, "Minor Creation", AbilityKind::Spell);
+        creation.plain_name = "MINOR_CREATION".into();
+        creation.cast_time_rounds = 1;
+        world
+            .resource_mut::<AbilityCatalog>()
+            .by_name
+            .insert("minor_creation".into(), creation);
+        world
+            .resource_mut::<RaceAbilitiesData>()
+            .insert("GNOME", 8, 100);
+        // As in the data, Minor Creation is a `create` effect: its word is a
+        // recipe, not a target.
+        world
+            .resource_mut::<mud_world::EffectCatalog>()
+            .by_id
+            .insert(
+                80,
+                mud_world::EffectDef {
+                    id: 80,
+                    name: "create".into(),
+                    description: None,
+                    effect_type: "create".into(),
+                    tags: Vec::new(),
+                    presence_override: None,
+                    default_params: serde_json::json!({}),
+                    prevents_speaking: false,
+                    prevents_casting: false,
+                    prevents_movement: false,
+                    on_apply: None,
+                    on_tick: None,
+                    on_remove: None,
+                },
+            );
+        world
+            .resource_mut::<AbilityCatalog>()
+            .effects_for
+            .insert(8, vec![(80, None)]);
+        world.insert_resource(mud_world::SpellSlotData::default());
+        world.insert_resource(mud_world::ClassSkillsData::default());
+        world.entity_mut(elf).insert((
+            profile("GNOME"),
+            mud_world::Health { hp: 50, max: 50 },
+            mud_world::KnownAbilities {
+                entries: vec![(8, 1000, true)],
+            },
+        ));
+        cmd_create(&mut world, elf, "bread");
+        let out = drain(&mut rx);
+        assert!(!out.contains("Only Gnomes"), "{out}");
+        assert!(!out.contains("no innate ability"), "{out}");
+        assert!(
+            world.get::<mud_world::Casting>(elf).is_some(),
+            "`create` starts the Minor Creation cast: {out}"
+        );
+    }
+
+    #[test]
+    fn create_is_a_registered_command() {
+        assert!(
+            inventory::iter::<Command>().any(|c| c.names.contains(&"create")),
+            "`create` must be in the command table"
+        );
     }
 
     #[test]

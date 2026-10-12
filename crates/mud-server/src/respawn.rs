@@ -311,9 +311,17 @@ pub fn respawn_tick(world: &mut World) {
     let mut object_world_counts = object_world_counts(world);
     let mut reset_id_alive: std::collections::HashSet<i32> = std::collections::HashSet::new();
     {
-        let mut q = world.query_filtered::<&FromObjectReset, With<Item>>();
-        for fr in q.iter(world) {
-            reset_id_alive.insert(fr.0);
+        let mut q = world.query_filtered::<(Entity, &FromObjectReset), With<Item>>();
+        let owned: Vec<(Entity, i32)> = q.iter(world).map(|(e, fr)| (e, fr.0)).collect();
+        for (item, reset_id) in owned {
+            // An item a staff member holds gives its reset slot back for good
+            // (it is theirs now, not the world's): the row refills, and the
+            // item does not claim the slot again if it is later dropped.
+            if mud_world::reset_gear::held_by_staff(world, item) {
+                world.entity_mut(item).remove::<FromObjectReset>();
+                continue;
+            }
+            reset_id_alive.insert(reset_id);
         }
     }
     let object_entries: Vec<mud_world::ObjectResetEntry> =
@@ -984,6 +992,68 @@ mod tests {
             .push(entry(room));
         run_respawn(&mut world, 6000);
         assert_eq!(keys_on_floor(&mut world, room), 0, "mortal copy counts");
+    }
+
+    /// Issue #121 (round 4): a reset-spawned copy that staff pick up off the
+    /// floor gives its reset slot back; a mortal holding it still keeps it.
+    #[test]
+    fn a_reset_item_staff_picked_up_releases_its_reset_slot() {
+        use mud_db::enums::UserRole;
+        use mud_world::Account;
+        let holder = |role: UserRole| Account {
+            user_id: String::new(),
+            character_id: "c".into(),
+            role,
+            account_role: role,
+            perms: vec![],
+        };
+        let keys_on_floor = |world: &mut World, room: Entity| {
+            let mut q = world.query_filtered::<(&WorldKey, &Located), With<Item>>();
+            q.iter(world)
+                .filter(|(k, l)| k.id == KEY && l.0 == room)
+                .count()
+        };
+        let setup = |role: UserRole| {
+            let (mut world, room) = base_world();
+            world
+                .resource_mut::<ObjectResetCatalog>()
+                .entries
+                .push(ObjectResetEntry {
+                    reset_id: 9,
+                    object_zone_id: 1,
+                    object_id: KEY,
+                    room_entity: room,
+                    max_instances: 1,
+                });
+            // The reset fills its slot, then someone picks the key up.
+            run_respawn(&mut world, 6000);
+            assert_eq!(keys_on_floor(&mut world, room), 1, "reset spawned it");
+            let who = world.spawn((Player, holder(role), Located(room))).id();
+            let key = {
+                let mut q = world.query_filtered::<(Entity, &WorldKey), With<Item>>();
+                q.iter(&world).find(|(_, k)| k.id == KEY).unwrap().0
+            };
+            world.entity_mut(key).insert(Located(who));
+            (world, room, key)
+        };
+
+        let (mut world, room, key) = setup(UserRole::Immortal);
+        run_respawn(&mut world, 12000);
+        assert_eq!(keys_on_floor(&mut world, room), 1, "the row refilled");
+        assert!(
+            world.get::<FromObjectReset>(key).is_none(),
+            "the imm's copy no longer owns the slot"
+        );
+        // Dropping it back does not make the row own two instances: it is a
+        // loose extra and the row stays satisfied.
+        world.entity_mut(key).insert(Located(room));
+        run_respawn(&mut world, 18000);
+        assert_eq!(keys_on_floor(&mut world, room), 2);
+
+        let (mut world, room, key) = setup(UserRole::Player);
+        run_respawn(&mut world, 12000);
+        assert_eq!(keys_on_floor(&mut world, room), 0, "mortal keeps the slot");
+        assert!(world.get::<FromObjectReset>(key).is_some());
     }
 
     #[test]

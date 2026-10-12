@@ -177,7 +177,8 @@ pub fn object_world_counts(world: &mut World) -> HashMap<(i32, i32), i32> {
 
 /// Whether the top-level holder of `item` (following `Located` up through
 /// containers until a non-item) is a staff character.
-fn held_by_staff(world: &World, item: Entity) -> bool {
+#[must_use]
+pub fn held_by_staff(world: &World, item: Entity) -> bool {
     let mut cur = item;
     // Bounded walk: a malformed containment cycle must not hang the tick.
     for _ in 0..64 {

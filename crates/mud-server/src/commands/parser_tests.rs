@@ -201,11 +201,11 @@ fn star_passes_everything_typed_after_the_alias() {
     assert!(has(&world, p, PlayerFlag::Compact));
     // `$*` is the whole tail, multi-word included.
     dispatch(&mut world, p, "tt auto loot");
-    // "autoloot" after normalising separators? No: two words stay two words.
-    assert!(!has(&world, p, PlayerFlag::AutoLoot));
+    // Both words reach `toggle`, which reads a spaced name like `auto_loot`.
+    assert!(has(&world, p, PlayerFlag::AutoLoot));
     set_aliases(&mut world, p, &[("tt", "toggle $*")]);
     dispatch(&mut world, p, "tt auto_loot");
-    assert!(has(&world, p, PlayerFlag::AutoLoot));
+    assert!(!has(&world, p, PlayerFlag::AutoLoot));
 }
 
 #[test]

@@ -300,7 +300,33 @@ pub(crate) fn build_char_effects(world: &mut World, target: Entity) -> String {
             rows.push(inst.clone());
         }
     }
-    let entries: Vec<Value> = rows
+    // One entry per effect, as the `effects` command lists them: instances
+    // of the same ability under the same label (Statue's several parts) fold
+    // into the first, which keeps its place and lasts as long as the longest
+    // part (permanent if any part is).
+    let mut grouped: Vec<EffectInstance> = Vec::with_capacity(rows.len());
+    for inst in rows {
+        let same = inst.ability_id.and_then(|id| {
+            grouped.iter().position(|g| {
+                g.ability_id == Some(id)
+                    && super::info::effect_id(world, g) == super::info::effect_id(world, &inst)
+                    && super::info::effect_label(world, g)
+                        == super::info::effect_label(world, &inst)
+            })
+        });
+        match same {
+            Some(i) => {
+                let into = &mut grouped[i];
+                into.remaining_secs = if into.remaining_secs < 0 || inst.remaining_secs < 0 {
+                    -1
+                } else {
+                    into.remaining_secs.max(inst.remaining_secs)
+                };
+            }
+            None => grouped.push(inst),
+        }
+    }
+    let entries: Vec<Value> = grouped
         .into_iter()
         .map(|inst| {
             let ability = inst

@@ -362,3 +362,85 @@ fn toggle_list_header_is_available_toggles() {
     assert!(out.contains("Available Toggles"), "{out}");
     assert!(!out.contains("TOGGLES!"), "{out}");
 }
+
+#[test]
+fn gmcp_char_effects_lists_an_ability_with_two_effects_once() {
+    // Round 4 R1: `Char.Effects` listed Statue twice (same id, same duration)
+    // while the `effects` command grouped it.
+    let (mut world, player, _rx) = setup();
+    catalog_with(&mut world, &[(9, "Statue"), (10, "Bless")]);
+    for (name, remaining) in [("statue", 750), ("familiarity", 900)] {
+        world.spawn((
+            EffectInstance {
+                kind: 1,
+                name: name.to_string(),
+                strength: 1,
+                remaining_secs: remaining,
+                source: EffectSource::Spell,
+                ability_id: Some(9),
+            },
+            AppliedTo(player),
+        ));
+    }
+    // Another ability stays its own entry.
+    world.spawn((
+        EffectInstance {
+            kind: 2,
+            name: "bless".to_string(),
+            strength: 1,
+            remaining_secs: 300,
+            source: EffectSource::Spell,
+            ability_id: Some(10),
+        },
+        AppliedTo(player),
+    ));
+    let json = super::gmcp::build_char_effects(&mut world, player);
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let arr = v.as_array().unwrap();
+    assert_eq!(arr.len(), 2, "{json}");
+    let statue: Vec<_> = arr.iter().filter(|e| e["name"] == "Statue").collect();
+    assert_eq!(statue.len(), 1, "{json}");
+    assert_eq!(statue[0]["duration"], 900, "the longest part wins: {json}");
+}
+
+#[test]
+fn gmcp_char_effects_keeps_a_permanent_part_permanent() {
+    let (mut world, player, _rx) = setup();
+    catalog_with(&mut world, &[(9, "Statue")]);
+    for remaining in [750, -1] {
+        world.spawn((
+            EffectInstance {
+                kind: 1,
+                name: "statue".to_string(),
+                strength: 1,
+                remaining_secs: remaining,
+                source: EffectSource::Spell,
+                ability_id: Some(9),
+            },
+            AppliedTo(player),
+        ));
+    }
+    let json = super::gmcp::build_char_effects(&mut world, player);
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v.as_array().unwrap().len(), 1, "{json}");
+    assert_eq!(v[0]["duration"], -1, "{json}");
+}
+
+#[test]
+fn toggle_accepts_a_multi_word_name() {
+    // Round 4 R6: `toggle show dice rolls` was "Toggle what!?".
+    let (mut world, player, mut rx) = setup();
+    world
+        .entity_mut(player)
+        .insert(mud_world::PlayerFlags::default());
+    super::info::cmd_toggle(&mut world, player, "show dice rolls");
+    let out = plain(&drain(&mut rx));
+    assert!(out.contains("ShowDiceRolls is now ON."), "{out}");
+    super::info::cmd_toggle(&mut world, player, "Show Dice Rolls");
+    let out = plain(&drain(&mut rx));
+    assert!(out.contains("ShowDiceRolls is now OFF."), "{out}");
+    super::info::cmd_toggle(&mut world, player, "show dice");
+    assert!(plain(&drain(&mut rx)).contains("ShowDiceRolls is now ON."));
+    super::info::cmd_toggle(&mut world, player, "no such thing");
+    assert!(plain(&drain(&mut rx)).contains("Toggle what!?"));
+}
