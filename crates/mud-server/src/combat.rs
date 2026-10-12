@@ -3411,6 +3411,25 @@ pub(crate) fn level_up_to(world: &mut World, entity: Entity, max_level: i32) {
         if let Some(mut s) = world.get_mut::<mud_world::Stamina>(entity) {
             s.current = s.max;
         }
+        // Combat skill grows with level: accuracy, evasion and attack
+        // power rise by the class's per-level rates (`Class.*_per_level`,
+        // the same rates the creation baseline uses), so a character who
+        // levels up in game ends up exactly where one created at that
+        // level would. Without this the baseline is frozen at level 1
+        // while mob evasion grows 2 per level. Classless characters use
+        // the schema-default rates, as at creation.
+        let rates = class_id
+            .and_then(|c| {
+                world
+                    .get_resource::<mud_world::ClassCatalog>()
+                    .and_then(|cat| cat.by_id.get(&c))
+            })
+            .map(|c| c.combat_rates)
+            .unwrap_or_default();
+        let gain = rates.level_gain(level, next);
+        crate::commands::apply_modify_delta(world, entity, "accuracy", gain.accuracy);
+        crate::commands::apply_modify_delta(world, entity, "evasion", gain.evasion);
+        crate::commands::apply_modify_delta(world, entity, "attack_power", gain.attack_power);
         // Practice points per level: base of 1, +1 every 10 caster
         // levels, plus the better of the INT or WIS bonus (capped
         // at +10 by CoreStats::bonus on the 0..100 scale). Floor at
@@ -4549,6 +4568,7 @@ mod tests {
                 exp_gain_factor: 1.0,
                 alignment_bias,
                 campcraft_bonus: false,
+                combat_rates: mud_db::characters::ClassCombatRates::default(),
                 resistances: std::collections::HashMap::new(),
             }
         }
@@ -5433,8 +5453,8 @@ mod tests {
         }
         .baseline(1, 70);
         assert_eq!(hit_chance_pct(0, 90), 5);
-        // Mob evasion as imported today (90) and as it will be once fierylib
-        // scores mob dex on the 0..100 scale (50 + 6 + 2*2 = 60).
+        // Mob evasion as imported before the 2026-10-12 fierylib fix (90) and
+        // after it scores mob dex on the 0..100 scale (50 + 6 + 2*2 = 60).
         assert_eq!(hit_chance_pct(warrior.accuracy, 90), 32);
         assert_eq!(hit_chance_pct(warrior.accuracy, 60), 47);
     }

@@ -325,6 +325,44 @@ impl ClassCombatRates {
     }
 }
 
+impl ClassCombatRates {
+    /// Accuracy / evasion / attack-power gained going from `from_level` up
+    /// to `to_level`: the difference of the two [`baseline`](Self::baseline)
+    /// values, so a character who levels up in game lands on exactly the
+    /// numbers a character created (or imported) at that level would get,
+    /// with no rounding drift however the levels are reached. The dex term
+    /// is level-independent and cancels out.
+    ///
+    /// The rates are the `Class.*_per_level` columns. Legacy mapping for
+    /// accuracy: THAC0 fell from 25 at level 1 toward `classes[c].thac0` at
+    /// level 100 (`fight.cpp::calc_thac0`), one THAC0 point being ~5% hit
+    /// chance, i.e. ~10 accuracy points here, so the rate is
+    /// `(25 - class_thac0) / 10` per level (warrior 2.7, cleric 2.1,
+    /// sorcerer 1.9 in `fierylib/combat_formulas.py`, since retuned in
+    /// `Class`). Attack power and evasion have no legacy THAC0 analogue and
+    /// follow the tuned `Class` rows.
+    #[must_use]
+    pub fn level_gain(&self, from_level: i32, to_level: i32) -> LevelGain {
+        // Dex only enters the baseline through a level-independent term, so
+        // any fixed score gives the same difference.
+        let from = self.baseline(from_level, 50);
+        let to = self.baseline(to_level, 50);
+        LevelGain {
+            accuracy: to.accuracy - from.accuracy,
+            evasion: to.evasion - from.evasion,
+            attack_power: to.attack_power - from.attack_power,
+        }
+    }
+}
+
+/// Per-level growth of the combat columns, see [`ClassCombatRates::level_gain`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelGain {
+    pub accuracy: i32,
+    pub evasion: i32,
+    pub attack_power: i32,
+}
+
 /// Read a class's combat rates. `None` when the class row is gone.
 pub async fn class_combat_rates<'e, E: PgExecutor<'e>>(
     executor: E,
@@ -1262,6 +1300,51 @@ mod combat_baseline_tests {
         let lo = ClassCombatRates::default().baseline(1, 30).evasion;
         assert_eq!(hi, 50 + 10 + 2);
         assert_eq!(lo, 50 - 4 + 2);
+    }
+
+    #[test]
+    fn level_gain_telescopes_to_the_baseline() {
+        // Summing the per-level gains from level 1 reproduces the baseline
+        // at every level, for every rate shape the Class table carries.
+        for (acc, eva, power) in [
+            (2.7, 2.0, 5.0),
+            (1.5, 0.5, 1.0),
+            (3.5, 2.5, 5.0),
+            (2.0, 1.0, 3.0),
+        ] {
+            let rates = ClassCombatRates {
+                accuracy_per_level: acc,
+                evasion_per_level: eva,
+                dex_evasion_mult: 1.5,
+                attack_power_per_level: power,
+                base_crit_chance: 5,
+            };
+            let base = rates.baseline(1, 80);
+            let mut got = LevelGain {
+                accuracy: base.accuracy,
+                evasion: base.evasion,
+                attack_power: base.attack_power,
+            };
+            for level in 1..100 {
+                let gain = rates.level_gain(level, level + 1);
+                got.accuracy += gain.accuracy;
+                got.evasion += gain.evasion;
+                got.attack_power += gain.attack_power;
+                let want = rates.baseline(level + 1, 80);
+                assert_eq!(got.accuracy, want.accuracy);
+                assert_eq!(got.evasion, want.evasion);
+                assert_eq!(got.attack_power, want.attack_power);
+            }
+        }
+    }
+
+    #[test]
+    fn warrior_gains_accuracy_and_power_every_level() {
+        // 2.7 acc/level and 5 ap/level: 10 levels = +27 accuracy, +50 power.
+        let g = warrior().level_gain(1, 11);
+        assert_eq!(g.accuracy, 27);
+        assert_eq!(g.attack_power, 50);
+        assert_eq!(g.evasion, 20);
     }
 
     #[test]

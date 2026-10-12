@@ -42,6 +42,7 @@ fn class(id: i32, plain_name: &str) -> ClassDef {
         exp_gain_factor: 1.0,
         alignment_bias: 0,
         campcraft_bonus: false,
+        combat_rates: mud_db::characters::ClassCombatRates::default(),
         resistances: std::collections::HashMap::new(),
     }
 }

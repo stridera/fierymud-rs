@@ -43,6 +43,14 @@ pub struct ClassRow {
     /// `Class.campcraft_bonus`: classes whose holders (or whose group
     /// members) grant the camp "fieldcraft" rest-tier bonus.
     pub campcraft_bonus: bool,
+    /// Per-level combat growth (`Class.accuracy_per_level` etc.): the
+    /// rates a character's starting combat columns are derived from and
+    /// that each level-up adds on top of.
+    pub accuracy_per_level: f64,
+    pub evasion_per_level: f64,
+    pub dex_evasion_mult: f64,
+    pub attack_power_per_level: f64,
+    pub base_crit_chance: i32,
     /// JSON map of element name → mitigation percent. Folds into
     /// the wearer's `Resistances` at spawn time alongside race
     /// resistances and gear bookkeeping.
@@ -66,6 +74,11 @@ pub async fn list_all(pool: &PgPool) -> sqlx::Result<Vec<ClassRow>> {
             exp_gain_factor,
             alignment_bias,
             campcraft_bonus,
+            accuracy_per_level,
+            evasion_per_level,
+            dex_evasion_mult,
+            attack_power_per_level,
+            base_crit_chance,
             COALESCE(resistances, '{}'::jsonb) AS "resistances!: serde_json::Value"
         FROM "Class"
         ORDER BY id

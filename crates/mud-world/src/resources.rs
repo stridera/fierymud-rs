@@ -2256,6 +2256,9 @@ pub struct ClassDef {
     /// +1 rest tier when the camper or a group member has a class with
     /// this set (Ranger and Druid in the seeded data).
     pub campcraft_bonus: bool,
+    /// Per-level combat growth from the `Class` row. New characters start
+    /// from `baseline`, and each level-up adds `level_gain`.
+    pub combat_rates: mud_db::characters::ClassCombatRates,
     /// Per-element resistance map distilled from the schema's
     /// `Class.resistances` JSON: keys are `ElementType` variants
     /// the runtime models, unrecognized strings are dropped at

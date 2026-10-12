@@ -637,6 +637,13 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
                 exp_gain_factor: row.exp_gain_factor,
                 alignment_bias: row.alignment_bias,
                 campcraft_bonus: row.campcraft_bonus,
+                combat_rates: mud_db::characters::ClassCombatRates {
+                    accuracy_per_level: row.accuracy_per_level,
+                    evasion_per_level: row.evasion_per_level,
+                    dex_evasion_mult: row.dex_evasion_mult,
+                    attack_power_per_level: row.attack_power_per_level,
+                    base_crit_chance: row.base_crit_chance,
+                },
                 resistances,
             },
         );

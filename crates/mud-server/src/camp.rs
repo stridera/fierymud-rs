@@ -229,6 +229,7 @@ mod tests {
             exp_gain_factor: 1.0,
             alignment_bias: 0,
             campcraft_bonus,
+            combat_rates: mud_db::characters::ClassCombatRates::default(),
             resistances: std::collections::HashMap::new(),
         }
     }

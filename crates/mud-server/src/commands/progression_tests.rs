@@ -55,6 +55,7 @@ fn class(id: i32, name: &str, factor: f64) -> ClassDef {
         exp_gain_factor: factor,
         alignment_bias: 0,
         campcraft_bonus: false,
+        combat_rates: mud_db::characters::ClassCombatRates::default(),
         resistances: HashMap::new(),
     }
 }
@@ -360,4 +361,118 @@ fn level_and_experience_agree_on_xp_to_go() {
     let exp = strip_ansi(&drain(&mut rx));
     assert!(level.contains("(5000 XP to level 6)"), "{level}");
     assert!(exp.contains("(5000 to go)"), "{exp}");
+}
+
+// --- Combat growth on level-up -------------------------------------------
+
+fn rates_class(id: i32, acc: f64, eva: f64, ap: f64) -> ClassDef {
+    ClassDef {
+        combat_rates: mud_db::characters::ClassCombatRates {
+            accuracy_per_level: acc,
+            evasion_per_level: eva,
+            dex_evasion_mult: 1.5,
+            attack_power_per_level: ap,
+            base_crit_chance: 5,
+        },
+        ..class(id, "Fighter", 1.0)
+    }
+}
+
+/// Spawn a level-1 character whose combat columns are the creation baseline
+/// for `rates` (dex 80), exactly as `login.rs` seeds them.
+fn spawn_with_baseline(
+    world: &mut World,
+    name: &str,
+    xp: i32,
+    class_id: i32,
+    rates: &mud_db::characters::ClassCombatRates,
+) -> Entity {
+    let (e, _rx) = spawn(world, name, 1, xp, class_id);
+    let b = rates.baseline(1, 80);
+    world.entity_mut(e).insert(mud_world::CombatStats {
+        accuracy: b.accuracy,
+        evasion: b.evasion,
+        attack_power: b.attack_power,
+        ..Default::default()
+    });
+    e
+}
+
+#[test]
+fn level_up_raises_accuracy_evasion_and_power_by_the_class_rates() {
+    const WARRIOR: i32 = 4;
+    const SORCERER: i32 = 1;
+    let mut world = world();
+    let warrior = rates_class(WARRIOR, 2.7, 2.0, 5.0);
+    let sorcerer = rates_class(SORCERER, 1.5, 0.5, 1.0);
+    let (w_rates, s_rates) = (warrior.combat_rates, sorcerer.combat_rates);
+    {
+        let mut catalog = world.resource_mut::<ClassCatalog>();
+        catalog.by_id.insert(WARRIOR, warrior);
+        catalog.by_id.insert(SORCERER, sorcerer);
+    }
+    // 10_000 xp clears level 11 on the (L-1)*1000 table at class factor 1.0.
+    let w = spawn_with_baseline(&mut world, "Warrior", 10_000, WARRIOR, &w_rates);
+    let s = spawn_with_baseline(&mut world, "Sorcerer", 10_000, SORCERER, &s_rates);
+    level_sweep_tick(&mut world);
+    assert_eq!(profile(&world, w).level, 11);
+    assert_eq!(profile(&world, s).level, 11);
+
+    // Same numbers a character created at level 11 would have.
+    for (e, rates) in [(w, &w_rates), (s, &s_rates)] {
+        let want = rates.baseline(11, 80);
+        let got = world.get::<mud_world::CombatStats>(e).unwrap();
+        assert_eq!(
+            (got.accuracy, got.evasion, got.attack_power),
+            (want.accuracy, want.evasion, want.attack_power)
+        );
+    }
+    // Spot-check the absolute warrior numbers: 50 + 2.7*11, 5*11.
+    let cs = world.get::<mud_world::CombatStats>(w).unwrap();
+    assert_eq!(cs.accuracy, 80);
+    assert_eq!(cs.attack_power, 55);
+}
+
+#[test]
+fn level_up_growth_leaves_gear_and_buff_bonuses_in_place() {
+    const WARRIOR: i32 = 4;
+    let mut world = world();
+    let warrior = rates_class(WARRIOR, 2.7, 2.0, 5.0);
+    let rates = warrior.combat_rates;
+    world
+        .resource_mut::<ClassCatalog>()
+        .by_id
+        .insert(WARRIOR, warrior);
+    let w = spawn_with_baseline(&mut world, "Geared", 1_000, WARRIOR, &rates);
+    // A +10 hitroll item worn before the level-up.
+    world.get_mut::<mud_world::CombatStats>(w).unwrap().accuracy += 20;
+    let before = world.get::<mud_world::CombatStats>(w).unwrap().accuracy;
+    level_sweep_tick(&mut world);
+    assert_eq!(profile(&world, w).level, 2);
+    let after = world.get::<mud_world::CombatStats>(w).unwrap().accuracy;
+    // L1 -> L2 warrior: round(2.7*2) - round(2.7) = 5 - 3 = 2.
+    assert_eq!(after - before, 2);
+}
+
+#[test]
+fn classless_level_up_uses_the_default_rates() {
+    let mut world = world();
+    let rates = mud_db::characters::ClassCombatRates::default();
+    let (e, _rx) = spawn(&mut world, "Classless", 1, 2_000, CLERIC);
+    world.get_mut::<Profile>(e).unwrap().class_id = None;
+    let b = rates.baseline(1, 80);
+    world.entity_mut(e).insert(mud_world::CombatStats {
+        accuracy: b.accuracy,
+        evasion: b.evasion,
+        attack_power: b.attack_power,
+        ..Default::default()
+    });
+    level_sweep_tick(&mut world);
+    assert_eq!(profile(&world, e).level, 3);
+    let want = rates.baseline(3, 80);
+    let got = world.get::<mud_world::CombatStats>(e).unwrap();
+    assert_eq!(
+        (got.accuracy, got.evasion, got.attack_power),
+        (want.accuracy, want.evasion, want.attack_power)
+    );
 }
