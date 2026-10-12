@@ -217,18 +217,35 @@ pub fn fire_event(world: &mut World, entity: Entity, event: TriggerEvent) {
 /// script also answers plain `say`. The keyword filter lives in the
 /// converted body, so every matching trigger is fired and the body
 /// decides whether to react.
+///
+/// This is the directed entry point (`ask`, `tell`, `whisper`); plain
+/// `say` goes through [`fire_speech_in_room`] with `directed = false`.
+/// The `event` global each script sees is the flag that matched it:
+/// `SPEECH_TO` for a SPEECH_TO-only trigger, `SPEECH` for a SPEECH-only
+/// one, and for a trigger carrying both, `SPEECH_TO` when the speech is
+/// directed and `SPEECH` otherwise.
 pub fn fire_speech_at(world: &mut World, listener: Entity, speaker: Entity, text: &str) {
+    fire_speech_listener(world, listener, speaker, text, true);
+}
+
+fn fire_speech_listener(
+    world: &mut World,
+    listener: Entity,
+    speaker: Entity,
+    text: &str,
+    directed: bool,
+) {
     if crate::deferred_triggers::lua_busy(world) {
         let text = text.to_string();
         crate::deferred_triggers::defer(world, move |w| {
-            fire_speech_at(w, listener, speaker, &text);
+            fire_speech_listener(w, listener, speaker, &text, directed);
         });
         return;
     }
     if listener == speaker {
         return;
     }
-    let to_fire: Vec<(i32, i32, String, String)> = {
+    let to_fire: Vec<(i32, i32, String, String, TriggerEvent)> = {
         let Some(at) = world.get::<AttachedTriggers>(listener) else {
             return;
         };
@@ -237,13 +254,15 @@ pub fn fire_speech_at(world: &mut World, listener: Entity, speaker: Entity, text
         keys.into_iter()
             .filter_map(|(zone, id)| {
                 let def = catalog.by_key.get(&(zone, id))?;
-                if def.flags.contains(&TriggerEvent::Speech)
-                    || def.flags.contains(&TriggerEvent::SpeechTo)
-                {
-                    Some((zone, id, def.name.clone(), def.commands.clone()))
-                } else {
-                    None
-                }
+                let speech = def.flags.contains(&TriggerEvent::Speech);
+                let speech_to = def.flags.contains(&TriggerEvent::SpeechTo);
+                let matched = match (speech, speech_to) {
+                    (false, false) => return None,
+                    (false, true) => TriggerEvent::SpeechTo,
+                    (true, true) if directed => TriggerEvent::SpeechTo,
+                    (true, false | true) => TriggerEvent::Speech,
+                };
+                Some((zone, id, def.name.clone(), def.commands.clone(), matched))
             })
             .collect()
     };
@@ -251,9 +270,9 @@ pub fn fire_speech_at(world: &mut World, listener: Entity, speaker: Entity, text
         return;
     }
     let lowered = text.to_ascii_lowercase();
-    for (zone, id, name, body) in to_fire {
+    for (zone, id, name, body, matched) in to_fire {
         let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
-            gated(&mut host, TriggerEvent::Speech, |h| {
+            gated(&mut host, matched, |h| {
                 h.exec_for_listener_with_extras(
                     world,
                     listener,
@@ -264,16 +283,9 @@ pub fn fire_speech_at(world: &mut World, listener: Entity, speaker: Entity, text
             })
         });
         drain_lua_outbox(world);
-        record_fire(
-            world,
-            listener,
-            zone,
-            id,
-            TriggerEvent::Speech,
-            result.is_ok(),
-        );
+        record_fire(world, listener, zone, id, matched, result.is_ok());
         if let Err(e) = result {
-            record_failure(world, zone, id, &name, "SPEECH", &e);
+            record_failure(world, zone, id, &name, matched.name(), &e);
         }
     }
 }
@@ -294,13 +306,13 @@ pub fn fire_speech_in_room(world: &mut World, speaker: Entity, room: Entity, tex
         .filter(|&e| e != speaker && world.get::<AttachedTriggers>(e).is_some())
         .collect();
     for listener in listeners {
-        fire_speech_at(world, listener, speaker, text);
+        fire_speech_listener(world, listener, speaker, text, false);
     }
     // Legacy `do_say` calls `speech_wtrigger` right after
     // `speech_mtrigger`: the room's own SPEECH triggers (`self` = the
     // room) hear it too.
     if world.get::<AttachedTriggers>(room).is_some() {
-        fire_speech_at(world, room, speaker, text);
+        fire_speech_listener(world, room, speaker, text, false);
     }
 }
 
@@ -1726,6 +1738,25 @@ mod dispatch_tests {
     }
 
     #[test]
+    fn speech_event_names_the_flag_that_matched() {
+        let (mut world, room) = base_world();
+        add_trigger(
+            &mut world,
+            1,
+            vec![TriggerEvent::Speech, TriggerEvent::SpeechTo],
+            "self:setvar('ev', event)",
+        );
+        let mob = spawn_mob(&mut world, room, 1, vec![(99, 1)]);
+        let speaker = spawn_player(&mut world, room, "Bob");
+        // Both flags: plain say reports SPEECH, directed speech SPEECH_TO.
+        fire_speech_in_room(&mut world, speaker, room, "hi");
+        assert_eq!(var(&world, 1, "ev"), Some("SPEECH".into()));
+        world.insert_resource(EntityVariableCache::default());
+        fire_speech_at(&mut world, mob, speaker, "hi");
+        assert_eq!(var(&world, 1, "ev"), Some("SPEECH_TO".into()));
+    }
+
+    #[test]
     fn directed_speech_reaches_only_the_addressed_mob_and_plain_say_reaches_both() {
         // Legacy `speech_to_mtrigger` (ask / tell / whisper to a mob) and
         // `speech_mtrigger` (say) each test MTRIG_SPEECH and MTRIG_SPEECHTO,
@@ -1749,7 +1780,7 @@ mod dispatch_tests {
         let speaker = spawn_player(&mut world, room, "Bob");
         fire_speech_at(&mut world, first, speaker, "Status please");
         assert_eq!(var(&world, 1, "heard"), Some("status please".into()));
-        assert_eq!(var(&world, 1, "ev"), Some("SPEECH".into()));
+        assert_eq!(var(&world, 1, "ev"), Some("SPEECH_TO".into()));
         assert!(var(&world, 2, "heard").is_none(), "other mob must not hear");
         world.insert_resource(EntityVariableCache::default());
         fire_speech_in_room(&mut world, speaker, room, "hello all");

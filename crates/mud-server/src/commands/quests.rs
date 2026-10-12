@@ -322,7 +322,10 @@ async fn qstat_other(
                     qstat_listing(&pool, &row.name, &row.id, viewer_role).await
                 }
                 Ok(_) => "No such player around.\r\n".to_string(),
-                Err(e) => format!("DB error: {e}\r\n"),
+                Err(e) => {
+                    tracing::warn!(error = %e, target = %target_name, "qstat player lookup failed");
+                    "Something went wrong looking that player up.\r\n".to_string()
+                }
             }
         },
         |world, player, text| send_to(world, player, text),
@@ -2444,6 +2447,7 @@ mod qstat_other_tests {
         let (imm, mut rx) = person(&mut world, room, "Daedela", UserRole::Immortal, 100);
         run(&mut world, imm, "qstat Nobody").await;
         let out = drain(&mut rx);
-        assert!(out.contains("DB error"), "{out}");
+        assert!(out.contains("Something went wrong"), "{out}");
+        assert!(!out.contains("DB error"), "{out}");
     }
 }
