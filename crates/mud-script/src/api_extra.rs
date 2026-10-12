@@ -1157,6 +1157,7 @@ mod tests {
             memorization_time: 0,
             passive: false,
             short_cast: false,
+            quest_only: false,
         }
     }
 

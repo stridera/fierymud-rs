@@ -108,6 +108,9 @@ pub struct AbilityRow {
     /// proficiency that fires automatically (dual wield, weapon
     /// skills, sphere masteries) and has no command to click.
     pub tags: Vec<String>,
+    /// `Ability.quest_only`: granted only by a quest reward, never by
+    /// class level.
+    pub quest_only: bool,
 }
 
 pub async fn list_all(pool: &PgPool) -> sqlx::Result<Vec<AbilityRow>> {
@@ -132,7 +135,8 @@ pub async fn list_all(pool: &PgPool) -> sqlx::Result<Vec<AbilityRow>> {
             LOWER(sphere::text) AS "sphere?: String",
             LOWER(damage_type::text) AS "damage_type?: String",
             memorization_time,
-            tags AS "tags!: Vec<String>"
+            tags AS "tags!: Vec<String>",
+            quest_only
         FROM "Ability"
         ORDER BY id
         "#

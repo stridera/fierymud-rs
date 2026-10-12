@@ -20,7 +20,8 @@ pub const STARTING_SKILL_PROFICIENCY: i32 = 50;
 /// that `known` does not have yet, at [`STARTING_SKILL_PROFICIENCY`]. Existing
 /// entries (trained, learning or not) are never touched. Spells, chants and
 /// songs are learned through `study`, not granted. Keeps `entries` sorted by
-/// ability id. Returns the ids added.
+/// ability id. Skills flagged `quest_only` are never granted here (a quest
+/// reward hands them out). Returns the ids added.
 pub fn grant_class_skills(
     known: &mut KnownAbilities,
     class_id: i32,
@@ -31,7 +32,7 @@ pub fn grant_class_skills(
     let skill_ids: HashSet<i32> = catalog
         .by_name
         .values()
-        .filter(|d| d.kind == mud_db::abilities::AbilityKind::Skill)
+        .filter(|d| d.kind == mud_db::abilities::AbilityKind::Skill && !d.quest_only)
         .map(|d| d.id)
         .collect();
     let mut due: Vec<i32> = class_skills

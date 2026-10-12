@@ -88,6 +88,22 @@ fn a_new_warrior_knows_the_level_one_class_skills_at_legacy_proficiency() {
 }
 
 #[test]
+fn quest_only_skills_are_never_granted_by_class_level() {
+    let (mut world, _player, _rx) = warrior_world();
+    // Make Dodge a quest-only skill; the class table still lists it at level 1.
+    world
+        .resource_mut::<AbilityCatalog>()
+        .by_name
+        .get_mut("dodge")
+        .unwrap()
+        .quest_only = true;
+    let mut known = KnownAbilities::default();
+    let granted = crate::login::grant_class_skills_for(&world, Some(WARRIOR), 99, &mut known);
+    assert_eq!(granted, vec![KICK, BASH, PARRY]);
+    assert!(!known.has_any(DODGE));
+}
+
+#[test]
 fn granting_is_idempotent_and_never_resets_trained_skills() {
     let (world, _player, _rx) = warrior_world();
     let mut known = KnownAbilities {
@@ -313,6 +329,80 @@ fn quest_vars_read_the_way_the_corpus_writes_them() {
     crate::triggers::fire_speech_in_room(&mut world, player, room, "go");
     let out = drain(&mut rx);
     assert!(out.contains("Nil,true,3,false"), "{out}");
+}
+
+/// Two rooms whose GREET triggers walk the player into each other used to
+/// recurse arrivals -> GREET -> `actor:move` -> arrivals until the stack
+/// overflowed. The depth cap ends the loop after a bounded number of runs.
+#[test]
+fn greet_triggers_that_walk_the_player_back_and_forth_terminate() {
+    let (mut world, player, mut rx) = warrior_world();
+    let gate = world.get::<Located>(player).unwrap().0;
+    let hall = world
+        .spawn((
+            Room,
+            Named {
+                name: "Welcome Hall".into(),
+            },
+            Exits::default(),
+        ))
+        .id();
+    let open_exit = |to: Entity| mud_world::ExitData {
+        to: Some(to),
+        state: mud_db::enums::ExitState::Open,
+        key: None,
+        description: None,
+        keywords: Vec::new(),
+        is_hidden: false,
+        is_pickproof: false,
+        is_bashable: false,
+        hit_points: None,
+    };
+    world
+        .get_mut::<Exits>(gate)
+        .unwrap()
+        .0
+        .insert(Direction::East, open_exit(hall));
+    world
+        .get_mut::<Exits>(hall)
+        .unwrap()
+        .0
+        .insert(Direction::West, open_exit(gate));
+    let mut catalog = TriggerCatalog::default();
+    catalog.by_key.insert(
+        (99, 1),
+        lua_trigger(
+            99,
+            1,
+            TriggerEvent::GreetAll,
+            r#"actor:send("pong"); actor:move("east")"#,
+        ),
+    );
+    catalog.by_key.insert(
+        (99, 2),
+        lua_trigger(
+            99,
+            2,
+            TriggerEvent::GreetAll,
+            r#"actor:send("pong"); actor:move("west")"#,
+        ),
+    );
+    world.insert_resource(catalog);
+    world.insert_resource(mud_script::LuaHost::new());
+    mob_with_trigger(&mut world, gate, "east walker", (99, 1));
+    mob_with_trigger(&mut world, hall, "west walker", (99, 2));
+
+    crate::triggers::fire_greet_in_room(&mut world, player, gate);
+
+    let out = drain(&mut rx);
+    let pings = out.to_lowercase().matches("pong").count();
+    assert!(
+        (2..=12).contains(&pings),
+        "the move loop must stop at the depth cap, ran {pings} times"
+    );
+    // The depth unwinds, so the next greet starts fresh and also terminates.
+    crate::triggers::fire_greet_in_room(&mut world, player, gate);
+    assert!(drain(&mut rx).to_lowercase().contains("pong"));
 }
 
 #[test]

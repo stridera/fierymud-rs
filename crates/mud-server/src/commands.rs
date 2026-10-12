@@ -2892,6 +2892,12 @@ fn flush_lua_outbox(world: &mut World) {
     // exactly as after a typed move. Runs after the script's own lines so the
     // escort text comes first, and before its queued commands (which may
     // close the gate behind the mover).
+    //
+    // The chain arrivals -> GREET trigger -> `actor:move` -> outbox ->
+    // arrivals has no end of its own when two rooms' triggers walk the
+    // player into each other, so each arrival's trigger run is counted in
+    // the same depth as queued commands and dropped past the cap.
+    let mut arrivals_skipped = 0usize;
     for mover in arrivals {
         if world.get_entity(mover).is_err() {
             continue;
@@ -2900,8 +2906,22 @@ fn flush_lua_outbox(world: &mut World) {
             continue;
         };
         info::look_after_move(world, mover);
+        let depth = SCRIPT_COMMAND_DEPTH.with(std::cell::Cell::get);
+        if depth >= MAX_SCRIPT_DEPTH {
+            arrivals_skipped += 1;
+            continue;
+        }
+        SCRIPT_COMMAND_DEPTH.with(|d| d.set(depth + 1));
+        let _unwind = ScriptDepthRestore(depth);
         crate::triggers::fire_greet_in_room(world, mover, room);
         crate::triggers::fire_room_entry(world, room, mover, mud_world::TriggerEvent::Postentry);
+    }
+    if arrivals_skipped > 0 {
+        warn!(
+            skipped = arrivals_skipped,
+            max_depth = MAX_SCRIPT_DEPTH,
+            "scripted arrivals skipped GREET/POSTENTRY: triggers moved the player in a loop beyond the maximum depth"
+        );
     }
 
     // Queued `actor:command(text)` invocations. Re-enters dispatch as
@@ -4638,6 +4658,7 @@ mod tests {
             memorization_time: 0,
             passive: false,
             short_cast: false,
+            quest_only: false,
         };
         let _ = AbilityCatalog::default();
         // The property under test is a one-line conditional; the
@@ -4826,6 +4847,7 @@ mod tests {
                 memorization_time: 0,
                 passive: false,
                 short_cast: false,
+                quest_only: false,
             },
         );
         world.insert_resource(catalog);

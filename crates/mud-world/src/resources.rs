@@ -2868,6 +2868,9 @@ pub struct AbilityDef {
     /// `cast_time_rounds` column stores as 0. The spell still goes
     /// through the casting wind-up instead of landing at once.
     pub short_cast: bool,
+    /// `Ability.quest_only`: the ability is only ever granted by a quest
+    /// reward, never by class level (see `grant_class_skills`).
+    pub quest_only: bool,
 }
 
 /// Cached `MobResets` rows the loader ran, keyed by `reset_id`. The
