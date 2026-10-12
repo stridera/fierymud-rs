@@ -294,6 +294,18 @@ const FLAG_MARKERS: &[FlagMarker] = &[
         }),
         tag_backed: None,
     },
+    // Legacy `EFF_GLORY`: aggressive mobs that see the bearer hold back, with
+    // a small chance to attack it (`mud-server` `glory`).
+    FlagMarker {
+        flags: &["glory"],
+        insert: |e| {
+            e.insert(crate::components::Glory);
+        },
+        remove: Some(|e| {
+            e.remove::<crate::components::Glory>();
+        }),
+        tag_backed: None,
+    },
     FlagMarker {
         flags: &["familiarity"],
         insert: |e| {
@@ -798,6 +810,7 @@ mod tests {
             ("detect_align", |w, e| w.get::<DetectAlign>(e).is_some()),
             ("blur", |w, e| w.get::<Blur>(e).is_some()),
             ("familiarity", |w, e| w.get::<Familiar>(e).is_some()),
+            ("glory", |w, e| w.get::<Glory>(e).is_some()),
             ("waterwalk", |w, e| w.get::<WaterWalk>(e).is_some()),
             ("farsee", |w, e| w.get::<Farsee>(e).is_some()),
             ("waterform", |w, e| {

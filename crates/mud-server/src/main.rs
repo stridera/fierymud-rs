@@ -27,6 +27,7 @@ mod equip_apply;
 mod events;
 mod fear;
 mod flight;
+mod glory;
 mod hiding;
 mod house_items;
 mod idle;
@@ -306,6 +307,7 @@ async fn main() {
     let mut world = World::new();
     world.insert_resource(mud_world::GearReleaseHook(equip_apply::release_gear));
     world.insert_resource(TickCount::default());
+    world.insert_resource(mud_world::movement::GloryWitnessQueue::default());
     world.insert_resource(commands::PromptState::default());
     world.insert_resource(tick_stats::TickStats::default());
     world.insert_resource(autosave::SaveCoordinator::default());
@@ -660,6 +662,7 @@ async fn main() {
                 // Mob AI pulse: pick fights first, then helpers join them; mobs
                 // left at peace buff, cure and meditate (behind `mob_ai.enabled`).
                 (
+                    timed!(glory::glory_tick),
                     timed!(wander::aggro_tick),
                     timed!(wander::assist_tick),
                     timed!(wander::mob_idle_ai_tick),

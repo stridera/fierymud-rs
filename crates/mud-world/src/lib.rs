@@ -37,7 +37,7 @@ pub use components::{
     DecaysUnheld, Decomposing, Description, DetectAlign, DetectInvis, Drunkenness, EffectInstance,
     EffectSource, Empowered, EntryRestriction, EquippedSlot, ExamineText, ExitData, ExitDefaults,
     Exits, Falling, Familiar, Farsee, Feared, Fighting, Flying, Focus, Follower, FromMobReset,
-    FromObjectReset, Frozen, Ghost, GodZone, GrantEntry, GrantUsability, GrantedByItem,
+    FromObjectReset, Frozen, Ghost, Glory, GodZone, GrantEntry, GrantUsability, GrantedByItem,
     GroupInvite, GroupMember, Guarding, GuildhallRoom, Haste, Health, Hiddenness, HouseExitEntry,
     HouseGuestEntry, HouseItem, HouseItemEntry, HousePlacement, HouseRoom, HouseRoomEntry,
     HouseSummary, Hunger, INTERNAL_ZONE_IDS, Identified, IgnoreList, IndoorRoom, Infravision,

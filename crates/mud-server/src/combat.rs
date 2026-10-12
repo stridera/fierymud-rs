@@ -371,6 +371,53 @@ fn roll_evasion(world: &World, defender: Entity) -> Option<&'static str> {
     None
 }
 
+/// How a skill's attack roll came out ([`skill_attack_roll`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SkillAttack {
+    /// The skill connects.
+    Hit,
+    /// The roll fell short of the defender's evasion.
+    Miss,
+    /// The roll connected but the defender turned it aside (`"dodge"` /
+    /// `"parry"`).
+    Evaded(&'static str),
+}
+
+/// The attack roll of a skill that needs to hit (data: `"attackRoll": true`
+/// on one of its effect rows), after legacy `do_eye_gouge`: the same d100
+/// accuracy/evasion contest as a melee swing instead of a flat roll against
+/// the skill percentage, then the defender's chance to dodge or parry.
+///
+/// Legacy folded the skill into its THAC0 (`thac0 -= skill / 2`, in tenths
+/// of a THAC0 point). One THAC0 point is worth about 5% to hit
+/// (`CharacterRow::accuracy`) and one accuracy point 0.5% ([`hit_chance_pct`]),
+/// so the skill adds `skill_pct / 2` accuracy. Class and level (THAC0 base),
+/// Dex and hitroll are already inside `CombatStats::accuracy`. A sleeping
+/// defender is always hit and cannot evade, as in a melee swing.
+pub(crate) fn skill_attack_roll(
+    world: &World,
+    attacker: Entity,
+    target: Entity,
+    skill_pct: i32,
+) -> SkillAttack {
+    let sleeping = world.get::<Posture>(target).map(|p| p.0) == Some(PostureKind::Sleeping);
+    if sleeping {
+        return SkillAttack::Hit;
+    }
+    let accuracy = world
+        .get::<CombatStats>(attacker)
+        .map_or(50, |cs| cs.accuracy)
+        + skill_pct.clamp(0, 100) / 2;
+    let evasion = world.get::<CombatStats>(target).map_or(50, |cs| cs.evasion)
+        - world
+            .get::<Posture>(target)
+            .map_or(0, |p| posture_evasion_penalty(p.0));
+    if resolve_swing_acc_ev(accuracy, evasion, 0).outcome == SwingOutcome::Miss {
+        return SkillAttack::Miss;
+    }
+    roll_evasion(world, target).map_or(SkillAttack::Hit, SkillAttack::Evaded)
+}
+
 /// Weapon-skill family a weapon damage-type label belongs to, matching
 /// the `weapon_type` param of the weapon-proficiency passives (legacy
 /// `weapon_proficiency`: slash/whip/claw, bludgeon/crush/pound/maul,
@@ -668,6 +715,14 @@ fn hit_roll() -> i32 {
         return r;
     }
     rand::random_range(1..=100)
+}
+
+/// Pin (or release, with `None`) the d100 hit roll for the rest of this test
+/// thread. For tests outside this module that need a swing or a skill attack
+/// roll to land, or not, deterministically.
+#[cfg(test)]
+pub(crate) fn force_hit_roll(roll: Option<i32>) {
+    FORCED_HIT_ROLL.with(|c| c.set(roll));
 }
 
 /// The signed per-swing damage variance in `-band..=band`. Tests can pin

@@ -5,8 +5,30 @@
 use bevy_ecs::prelude::*;
 
 use crate::components::{
-    Falling, Fighting, Flying, Ghost, Item, Located, Mob, MovementModeTag, Player, RoomSector,
+    Falling, Fighting, Flying, Ghost, Glory, Item, Located, Mob, MovementModeTag, Player,
+    RoomSector,
 };
+
+/// Movers waiting for their glory check (`mud-server`'s `glory` module):
+/// the glorion-or-mob that just entered a room, with the ticks since it
+/// did. Legacy `queue_glory_event` re-arms a one-second timer per actor,
+/// so queueing an actor already waiting restarts its wait.
+#[derive(Resource, Default, Debug)]
+pub struct GloryWitnessQueue {
+    /// `(mover, ticks waited)`.
+    pub entries: Vec<(Entity, u32)>,
+}
+
+impl GloryWitnessQueue {
+    /// Queue `who`, or restart its wait when it is already queued.
+    pub fn queue(&mut self, who: Entity) {
+        if let Some(entry) = self.entries.iter_mut().find(|(e, _)| *e == who) {
+            entry.1 = 0;
+        } else {
+            self.entries.push((who, 0));
+        }
+    }
+}
 
 /// Cached scan for "who is fighting X". Building a `QueryState` walks every
 /// archetype in the world, which cost milliseconds per move at 5k mobs when
@@ -59,6 +81,15 @@ pub fn move_to_room(world: &mut World, who: Entity, dest: Entity) {
     world.entity_mut(who).insert(Located(dest));
     if world.get::<Item>(who).is_none() {
         begin_fall_if_unsupported(world, who);
+    }
+    // Entering a room is the moment glory is checked: a glorion arriving
+    // among mobs, or a mob arriving where a glorion stands. Players without
+    // glory have nothing to check (only mobs are distracted).
+    if here != Some(dest)
+        && (world.get::<Mob>(who).is_some() || world.get::<Glory>(who).is_some())
+        && let Some(mut queue) = world.get_resource_mut::<GloryWitnessQueue>()
+    {
+        queue.queue(who);
     }
 }
 

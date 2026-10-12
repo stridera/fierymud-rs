@@ -2092,6 +2092,13 @@ pub struct Blur;
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Familiar;
 
+/// Marker: the bearer shines with divine magnificence (`glory`; legacy
+/// `EFF_GLORY`). Aggressive mobs that can see it hold back from picking
+/// fights, with a small chance to attack the bearer instead (see
+/// `mud-server`'s `glory` module).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Glory;
+
 /// Tag component on an `EffectInstance` entity: this effect is
 /// what's keeping its target `Invisible`. Used by `effects_tick`
 /// to decide whether the `Invisible` marker on the target should

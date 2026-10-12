@@ -699,7 +699,7 @@ pub(crate) mod senses;
 pub(crate) use magic_focus::Concentrating;
 #[cfg(test)]
 #[path = "commands/blindness_tests.rs"]
-mod blindness_tests;
+pub(crate) mod blindness_tests;
 #[cfg(test)]
 #[path = "commands/capitalise_tests.rs"]
 mod capitalise_tests;
@@ -789,6 +789,9 @@ mod norepeat_tests;
 #[cfg(test)]
 #[path = "commands/queued_fixes_tests.rs"]
 mod queued_fixes_tests;
+#[cfg(test)]
+#[path = "commands/skill_attack_roll_tests.rs"]
+mod skill_attack_roll_tests;
 #[cfg(test)]
 #[path = "commands/skill_target_tests.rs"]
 mod skill_target_tests;
@@ -12805,6 +12808,8 @@ pub(crate) fn refresh_room_players(world: &mut World, room: Entity) {
 /// effect instances (reversing their stat deltas), removes the
 /// `Invisible` marker and tells the room. No-op when not invisible.
 pub(crate) fn break_invisibility(world: &mut World, entity: Entity) {
+    // Legacy `aggro_lose_spells` drops glory in the same breath.
+    crate::glory::drop_on_aggression(world, entity);
     if world.get::<mud_world::Invisible>(entity).is_none() {
         return;
     }
@@ -17937,6 +17942,49 @@ pub(crate) fn invoke_ability_core(
         settle_slot(world, player, slot_hold, true);
         return;
     }
+    // A skill whose rows carry `"attackRoll": true` (Eye Gouge) must first
+    // connect, by the melee accuracy/evasion contest, and then get past the
+    // target's dodge and parry. A miss lands none of its effects but still
+    // costs the use and starts the fight (legacy: `damage(ch, vict, 0, ...)`).
+    let needs_attack_roll = target_entity != player
+        && effect_specs.iter().any(|s| {
+            s.override_params
+                .as_ref()
+                .and_then(|p| p.get("attackRoll"))
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        });
+    if needs_attack_roll
+        && crate::combat::skill_attack_roll(world, player, target_entity, caster_skill)
+            != crate::combat::SkillAttack::Hit
+    {
+        let actor_p = Pronouns::of(world, player);
+        let target_p = Pronouns::of(world, target_entity);
+        if let Some(set) = &messages_pre {
+            if let Some(t) = set.fail_to_caster.as_deref() {
+                let line = render_ability_template(
+                    t,
+                    (&actor_name_pre, actor_p),
+                    (&target_name_pre, target_p),
+                    false,
+                    Viewer::Actor,
+                );
+                send_msg(world, player, format!("{line}\r\n"));
+            }
+            send_hit_templates(
+                world,
+                player,
+                target_entity,
+                set.fail_to_victim.as_deref(),
+                set.fail_to_room.as_deref(),
+                (&actor_name_pre, actor_p),
+                (&target_name_pre, target_p),
+            );
+        }
+        engage_after_violent_cast(world, player, &def, target_entity);
+        settle_slot(world, player, slot_hold, true);
+        return;
+    }
     let halve_duration = matches!(save_action, SaveOutcome::HalfDuration);
     let halve_damage = matches!(save_action, SaveOutcome::HalfDamage);
     let negate_status = matches!(save_action, SaveOutcome::NegateStatus);
@@ -21080,6 +21128,11 @@ pub(crate) fn invoke_ability_core(
                 }
                 if flag == "fly" {
                     crate::flight::refuse_heavy_flier(world, player, target_entity);
+                }
+                // Legacy `mag_affect` SPELL_GLORY: the mobs in the room get
+                // their one look at the new glorion a second from now.
+                if flag == "glory" {
+                    crate::glory::queue_witness(world, target_entity);
                 }
                 // Paralysis holds its bearer like a stun: no swinging, no
                 // fleeing (legacy `perform_violence` / `attack_ok`).
@@ -27009,6 +27062,9 @@ pub(crate) fn try_engage_aggressive_mob(world: &mut World, player: Entity, room:
                 crate::mob_ai::mob_can_act(world, e)
                     && can_see_player(world, e, player)
                     && mob_will_start_fight(world, e, player)
+                    // Glory in the room cancels the aggro check (legacy
+                    // `find_aggr_target`).
+                    && !crate::glory::blocks_aggro(world, e)
             })
             .map(|(e, cs)| {
                 let wk = world.get::<WorldKey>(e).map(|k| (k.zone, k.id));
