@@ -28,6 +28,7 @@ fn social(name: &str) -> SocialDef {
     SocialDef {
         name: name.into(),
         hide: false,
+        staff_only: false,
         char_no_arg: Some(format!("You {name}.")),
         others_no_arg: None,
         char_found: None,
@@ -245,11 +246,31 @@ fn achievements_list_skips_internal_and_god_zones() {
 
 #[test]
 fn internal_zone_ids_are_zero_one_two() {
-    assert!(mud_world::zone_is_internal(0));
-    assert!(mud_world::zone_is_internal(1));
-    assert!(mud_world::zone_is_internal(2));
-    assert!(!mud_world::zone_is_internal(3));
-    assert!(!mud_world::zone_is_internal(30));
+    // No zone entities loaded: the built-in ids answer.
+    let world = World::new();
+    assert!(mud_world::zone_is_internal(&world, 0));
+    assert!(mud_world::zone_is_internal(&world, 1));
+    assert!(mud_world::zone_is_internal(&world, 2));
+    assert!(!mud_world::zone_is_internal(&world, 3));
+    assert!(!mud_world::zone_is_internal(&world, 30));
+}
+
+/// A loaded zone answers from its `InternalZone` marker (`Zones.is_internal`), not from
+/// the built-in ids: a builder can flag another zone or clear zone 0.
+#[test]
+fn internal_zone_follows_the_marker_for_loaded_zones() {
+    let mut world = World::new();
+    let mut index = mud_world::WorldKeyIndex::default();
+    let void = world.spawn(mud_world::Zone).id();
+    let plumbing = world.spawn((mud_world::Zone, mud_world::InternalZone)).id();
+    index.zones.insert(0, void);
+    index.zones.insert(77, plumbing);
+    world.insert_resource(index);
+    assert!(!mud_world::zone_is_internal(&world, 0));
+    assert!(mud_world::zone_is_internal(&world, 77));
+    assert!(mud_world::zone_is_internal(&world, 1));
+    assert!(!mud_world::zone_grants_exploration(&world, 77));
+    assert!(mud_world::zone_grants_exploration(&world, 0));
 }
 
 #[test]

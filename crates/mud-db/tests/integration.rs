@@ -1667,3 +1667,111 @@ async fn weather_and_circle_queries_degrade_when_the_tables_are_missing() {
         Some("42P01")
     );
 }
+
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn internal_zones_are_the_seeded_plumbing_zones() {
+    let pool = pool().await;
+    let ids = mud_db::zones::list_internal_zones(&pool)
+        .await
+        .expect("internal zones");
+    assert_eq!(ids, [0, 1, 2]);
+    // The flag is not the same thing as the god flag.
+    let zones = list_zones(&pool).await.expect("list zones");
+    for z in zones.iter().filter(|z| ids.contains(&z.id)) {
+        assert!(!z.is_god_zone, "zone {} is internal and god", z.id);
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn social_staff_only_is_seeded_for_snowball_only() {
+    let pool = pool().await;
+    let full = mud_db::socials::list_all(&pool).await.expect("socials");
+    let fallback = mud_db::socials::list_all_without_staff_only(&pool)
+        .await
+        .expect("fallback");
+    let flagged: Vec<&str> = full
+        .iter()
+        .filter(|r| r.staff_only)
+        .map(|r| r.name.as_str())
+        .collect();
+    assert_eq!(flagged, ["snowball"]);
+    assert_eq!(full.len(), fallback.len());
+    assert!(fallback.iter().all(|r| !r.staff_only));
+}
+
+/// Tables that predate `Zones.is_internal` / `Social.staff_only` fail the full queries with
+/// Postgres 42703 (`undefined_column`, what the loader's fallbacks key on); the social
+/// fallback query still reads the rows.
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn zone_and_social_queries_degrade_when_the_flag_columns_are_missing() {
+    let _ = dotenvy::from_path("../../.env");
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    // One connection so the scratch `search_path` sticks to every query.
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .expect("connect");
+    let schema = format!("scratch_flags_{}", std::process::id());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&pool)
+        .await
+        .expect("create schema");
+    let result: sqlx::Result<_> = async {
+        sqlx::query(&format!(
+            r#"CREATE TABLE {schema}."Zones" (
+                id integer PRIMARY KEY, name text NOT NULL, deleted_at timestamp)"#
+        ))
+        .execute(&pool)
+        .await?;
+        sqlx::query(&format!(
+            r#"CREATE TABLE {schema}."Social" (
+                id integer PRIMARY KEY, name text NOT NULL, hide boolean NOT NULL DEFAULT false,
+                char_no_arg text, others_no_arg text, char_found text, others_found text,
+                vict_found text, not_found text, char_auto text, others_auto text)"#
+        ))
+        .execute(&pool)
+        .await?;
+        sqlx::query(&format!(
+            r#"INSERT INTO {schema}."Social" (id, name) VALUES (1, 'snowball')"#
+        ))
+        .execute(&pool)
+        .await?;
+        sqlx::query(&format!("SET search_path = {schema}"))
+            .execute(&pool)
+            .await?;
+        let zones = mud_db::zones::list_internal_zones(&pool).await;
+        let full = mud_db::socials::list_all(&pool).await;
+        let fallback = mud_db::socials::list_all_without_staff_only(&pool).await;
+        Ok((zones, full, fallback))
+    }
+    .await;
+    sqlx::query("SET search_path = public")
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&pool)
+        .await
+        .ok();
+    let (zones, full, fallback) = result.expect("scratch setup");
+    let code = |e: &sqlx::Error| {
+        e.as_database_error()
+            .and_then(sqlx::error::DatabaseError::code)
+            .map(std::borrow::Cow::into_owned)
+    };
+    assert_eq!(
+        code(&zones.expect_err("zones query must fail")).as_deref(),
+        Some("42703")
+    );
+    assert_eq!(
+        code(&full.expect_err("socials query must fail")).as_deref(),
+        Some("42703")
+    );
+    let rows = fallback.expect("fallback query");
+    assert_eq!(rows.len(), 1);
+    assert!(!rows[0].staff_only);
+}

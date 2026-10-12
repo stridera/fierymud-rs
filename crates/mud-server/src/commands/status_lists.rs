@@ -139,6 +139,7 @@ mod socials_width_tests {
                 mud_world::SocialDef {
                     name,
                     hide: false,
+                    staff_only: false,
                     char_no_arg: None,
                     others_no_arg: None,
                     char_found: None,

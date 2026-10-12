@@ -88,3 +88,20 @@ pub async fn list_night_sleep_zones(pool: &PgPool) -> sqlx::Result<Vec<i32>> {
     .fetch_all(pool)
     .await
 }
+
+/// Ids of the zones flagged `Zones.is_internal` (plumbing zones such as the Void:
+/// no exploration credit, left out of zone listings). The column is created by the
+/// muditor schema / `fierylib/data/sql/2026-10-12-zone-internal-flag.sql`, so the
+/// loader falls back to the built-in ids when it is missing.
+pub async fn list_internal_zones(pool: &PgPool) -> sqlx::Result<Vec<i32>> {
+    sqlx::query_scalar!(
+        r#"
+        SELECT id
+        FROM "Zones"
+        WHERE "deleted_at" IS NULL AND is_internal
+        ORDER BY id
+        "#
+    )
+    .fetch_all(pool)
+    .await
+}

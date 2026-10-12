@@ -285,6 +285,9 @@ fn add_zone(world: &mut World, id: i32, name: &str, rooms: usize, god: bool) {
 fn areas_world() -> World {
     let mut world = world();
     add_zone(&mut world, 1, "Reserved - create food items", 1, false);
+    // The loader flags the plumbing zones from `Zones.is_internal`.
+    let reserved = world.resource::<WorldKeyIndex>().zones[&1];
+    world.entity_mut(reserved).insert(mud_world::InternalZone);
     add_zone(&mut world, 4, "imm quest items zone", 3, true);
     add_zone(&mut world, 5, "Legacy Zone 5 (Quest Only)", 0, false);
     add_zone(&mut world, 30, "Mielikki", 4, false);

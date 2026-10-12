@@ -368,6 +368,58 @@ async fn load_night_sleep_zones(pool: &PgPool) -> sqlx::Result<std::collections:
     }
 }
 
+/// Ids of the internal plumbing zones. `Zones.is_internal` is created by the muditor schema /
+/// `fierylib/data/sql/2026-10-12-zone-internal-flag.sql` (possibly after the deploy), so when the
+/// column is missing this logs an ERROR naming the fix and uses the built-in ids
+/// ([`crate::INTERNAL_ZONE_IDS`]), which the column is seeded with. Any other error still fails
+/// the load.
+async fn load_internal_zones(pool: &PgPool) -> sqlx::Result<std::collections::HashSet<i32>> {
+    match zones::list_internal_zones(pool).await {
+        Ok(ids) => Ok(ids.into_iter().collect()),
+        Err(e) if is_missing_schema(&e) => {
+            let e = schema_gap(
+                e,
+                "column \"Zones\".is_internal",
+                "deploy the muditor schema (prisma db push) and apply \
+                 fierylib/data/sql/2026-10-12-zone-internal-flag.sql",
+            );
+            error!("{e}; using the built-in internal zone ids (0, 1, 2)");
+            Ok(crate::INTERNAL_ZONE_IDS.into_iter().collect())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Flags the built-in staff-only socials on rows loaded without the `staff_only` column.
+fn apply_builtin_staff_only(rows: &mut [socials::SocialRow]) {
+    for row in rows {
+        row.staff_only = crate::resources::BUILTIN_STAFF_ONLY_SOCIALS
+            .contains(&row.name.to_ascii_lowercase().as_str());
+    }
+}
+
+/// `Social` rows. `Social.staff_only` is created by the muditor schema /
+/// `fierylib/data/sql/2026-10-12-social-staff-only.sql` (possibly after the deploy), so when the
+/// column is missing this logs an ERROR naming the fix, loads the rows without it and flags the
+/// built-in staff-only socials ([`crate::resources::BUILTIN_STAFF_ONLY_SOCIALS`]) instead.
+async fn load_social_rows(pool: &PgPool) -> sqlx::Result<Vec<socials::SocialRow>> {
+    match socials::list_all(pool).await {
+        Err(e) if is_missing_column(&e) => {
+            let e = schema_gap(
+                e,
+                "column \"Social\".staff_only",
+                "deploy the muditor schema (prisma db push) and apply \
+                 fierylib/data/sql/2026-10-12-social-staff-only.sql",
+            );
+            error!("{e}; using the built-in staff-only socials (snowball)");
+            let mut rows = socials::list_all_without_staff_only(pool).await?;
+            apply_builtin_staff_only(&mut rows);
+            Ok(rows)
+        }
+        other => other,
+    }
+}
+
 /// `MobResetEquipmentContents` rows (items inside containers mobs carry or
 /// wear). The table is created by the muditor schema / the prod SQL, possibly
 /// after the deploy, so a missing one boots with no rows and an ERROR naming
@@ -640,6 +692,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     // Pass 1: zones.
     let zone_rows = load_zone_rows(pool).await?;
     let night_sleep_zones = load_night_sleep_zones(pool).await?;
+    let internal_zones = load_internal_zones(pool).await?;
     let mut zone_index: HashMap<i32, Entity> = HashMap::with_capacity(zone_rows.len());
     let mut weather = crate::resources::WeatherCatalog::default();
     for z in &zone_rows {
@@ -659,6 +712,9 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         }
         if night_sleep_zones.contains(&z.id) {
             world.entity_mut(entity).insert(crate::MobsSleepAtNight);
+        }
+        if internal_zones.contains(&z.id) {
+            world.entity_mut(entity).insert(crate::InternalZone);
         }
         zone_index.insert(z.id, entity);
         weather
@@ -786,7 +842,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     );
     world.insert_resource(achievement_catalog);
 
-    let social_rows = socials::list_all(pool).await?;
+    let social_rows = load_social_rows(pool).await?;
     let mut social_registry = SocialRegistry::default();
     for row in social_rows {
         social_registry.by_name.insert(
@@ -794,6 +850,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             SocialDef {
                 name: row.name,
                 hide: row.hide,
+                staff_only: row.staff_only,
                 char_no_arg: row.char_no_arg,
                 others_no_arg: row.others_no_arg,
                 char_found: row.char_found,
@@ -3066,6 +3123,7 @@ pub async fn reload_zones(
     let fresh_objects = load_object_prototypes(pool).await?;
     let zone_rows = load_zone_rows(pool).await?;
     let night_sleep_zones = load_night_sleep_zones(pool).await?;
+    let internal_zones = load_internal_zones(pool).await?;
     let room_rows = rooms::list_rooms(pool).await?;
     let exit_rows = room_exits::list_exits(pool).await?;
     let extra_rows = mud_db::room_extra_descriptions::list_extras(pool).await?;
@@ -3173,6 +3231,11 @@ pub async fn reload_zones(
             } else {
                 em.remove::<crate::MobsSleepAtNight>();
             }
+            if internal_zones.contains(&z.id) {
+                em.insert(crate::InternalZone);
+            } else {
+                em.remove::<crate::InternalZone>();
+            }
             stats.zones_updated += 1;
         } else {
             let entity = world
@@ -3191,6 +3254,9 @@ pub async fn reload_zones(
             }
             if night_sleep_zones.contains(&z.id) {
                 world.entity_mut(entity).insert(crate::MobsSleepAtNight);
+            }
+            if internal_zones.contains(&z.id) {
+                world.entity_mut(entity).insert(crate::InternalZone);
             }
             world
                 .resource_mut::<WorldKeyIndex>()
@@ -3681,5 +3747,40 @@ mod spell_circle_time_tests {
     #[test]
     fn no_rows_means_no_overrides() {
         assert!(spell_circle_times([]).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod social_staff_only_fallback_tests {
+    use super::apply_builtin_staff_only;
+    use mud_db::socials::SocialRow;
+
+    fn row(name: &str) -> SocialRow {
+        SocialRow {
+            id: 1,
+            name: name.into(),
+            hide: false,
+            staff_only: false,
+            char_no_arg: None,
+            others_no_arg: None,
+            char_found: None,
+            others_found: None,
+            vict_found: None,
+            not_found: None,
+            char_auto: None,
+            others_auto: None,
+        }
+    }
+
+    #[test]
+    fn missing_column_fallback_flags_only_snowball() {
+        let mut rows = vec![row("smile"), row("snowball"), row("Snowball"), row("bow")];
+        apply_builtin_staff_only(&mut rows);
+        let flagged: Vec<&str> = rows
+            .iter()
+            .filter(|r| r.staff_only)
+            .map(|r| r.name.as_str())
+            .collect();
+        assert_eq!(flagged, ["snowball", "Snowball"]);
     }
 }

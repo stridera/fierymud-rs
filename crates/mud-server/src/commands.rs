@@ -2435,10 +2435,6 @@ fn prefix_rank(name: &str, is_social: bool) -> PrefixKey<'_> {
     )
 }
 
-/// Socials only a staff account may reach by abbreviation (legacy gave the
-/// `do_action` row a staff level). Typed in full they behave as before.
-const STAFF_ONLY_SOCIALS: &[&str] = &["snowball"];
-
 /// What a typed abbreviation resolved to.
 pub(crate) enum Abbrev<'a> {
     Command(&'static Command),
@@ -2516,10 +2512,11 @@ pub(crate) fn resolve_abbrev<'a>(
     }
     let mut best_social: Option<(PrefixKey<'_>, &'a str)> = None;
     if let Some(reg) = socials {
-        for name in reg.by_name.keys() {
-            if !name.starts_with(needle)
-                || (role == UserRole::Player && STAFF_ONLY_SOCIALS.contains(&name.as_str()))
-            {
+        // `Social.staff_only` socials: only a staff account may reach them by
+        // abbreviation (legacy gave the `do_action` row a staff level). Typed
+        // in full they behave as before.
+        for (name, def) in &reg.by_name {
+            if !name.starts_with(needle) || (role == UserRole::Player && def.staff_only) {
                 continue;
             }
             let key = prefix_rank(name, true);
@@ -9734,7 +9731,7 @@ pub(crate) fn mark_room_visited(world: &mut World, player: Entity, room: Entity)
     }
     // God zones and internal zones (Void, reserved) grant no exploration
     // credit: nothing is persisted and no `zone_<N>_cleared` can fire.
-    if mud_world::room_in_god_zone(world, room) || mud_world::zone_is_internal(key.zone) {
+    if mud_world::room_in_god_zone(world, room) || mud_world::zone_is_internal(world, key.zone) {
         return;
     }
     let total_in_zone = world

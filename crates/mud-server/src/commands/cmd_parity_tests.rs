@@ -42,6 +42,7 @@ fn say_social(name: &str) -> SocialDef {
     SocialDef {
         name: name.into(),
         hide: false,
+        staff_only: false,
         char_no_arg: Some(format!("You {name}.")),
         others_no_arg: Some(format!("{{actor.name}} {name}s.")),
         char_found: None,
@@ -391,8 +392,9 @@ fn denylisted_commands_still_refuse_abbreviation_with_socials_loaded() {
 #[test]
 fn staff_only_snowball_abbreviates_for_staff_only() {
     let mut reg = legacy_socials();
-    reg.by_name
-        .insert("snowball".into(), say_social("snowball"));
+    let mut snowball = say_social("snowball");
+    snowball.staff_only = true;
+    reg.by_name.insert("snowball".into(), snowball);
     assert_ne!(
         abbrev_name("snowb", UserRole::Player, &reg).as_deref(),
         Some("snowball")
@@ -400,6 +402,41 @@ fn staff_only_snowball_abbreviates_for_staff_only() {
     assert_eq!(
         abbrev_name("snowb", UserRole::Implementor, &reg).as_deref(),
         Some("snowball")
+    );
+    // Typed in full it still works for a player.
+    assert_eq!(
+        abbrev_name("snowball", UserRole::Player, &reg).as_deref(),
+        Some("snowball")
+    );
+}
+
+/// The gate follows `Social.staff_only`, not the name: another flagged social is
+/// closed to players by abbreviation, an unflagged `snowball` is not.
+#[test]
+fn staff_only_follows_the_flag_not_the_name() {
+    let mut reg = SocialRegistry::default();
+    let mut flagged = say_social("zzzwave");
+    flagged.staff_only = true;
+    reg.by_name.insert("zzzwave".into(), flagged);
+    reg.by_name
+        .insert("snowball".into(), say_social("snowball"));
+    assert_eq!(abbrev_name("zzzw", UserRole::Player, &reg), None);
+    assert_eq!(
+        abbrev_name("zzzw", UserRole::Implementor, &reg).as_deref(),
+        Some("zzzwave")
+    );
+    assert_eq!(
+        abbrev_name("snowb", UserRole::Player, &reg).as_deref(),
+        Some("snowball")
+    );
+}
+
+/// The built-in list the loader applies when `Social.staff_only` is missing.
+#[test]
+fn builtin_staff_only_socials_are_snowball() {
+    assert_eq!(
+        mud_world::resources::BUILTIN_STAFF_ONLY_SOCIALS,
+        ["snowball"]
     );
 }
 

@@ -133,6 +133,7 @@ fn hug_a_player_reads_with_their_real_pronoun_and_you() {
     let social = mud_world::SocialDef {
         name: "hug".into(),
         hide: false,
+        staff_only: false,
         char_no_arg: None,
         others_no_arg: None,
         char_found: Some("You give {target.pronoun.objective} a hug.".into()),

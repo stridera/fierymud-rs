@@ -3397,10 +3397,18 @@ impl SocialRegistry {
     }
 }
 
+/// Socials that were staff-only before the flag lived in `Social.staff_only`
+/// (legacy gave the `do_action` row a staff level). The loader applies these
+/// when the column is missing.
+pub const BUILTIN_STAFF_ONLY_SOCIALS: &[&str] = &["snowball"];
+
 #[derive(Debug, Clone)]
 pub struct SocialDef {
     pub name: String,
     pub hide: bool,
+    /// `Social.staff_only`: players cannot reach it by abbreviation (typed in
+    /// full it behaves as any other social).
+    pub staff_only: bool,
     pub char_no_arg: Option<String>,
     pub others_no_arg: Option<String>,
     pub char_found: Option<String>,

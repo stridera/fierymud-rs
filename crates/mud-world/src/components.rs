@@ -70,24 +70,38 @@ pub fn zone_is_god(world: &World, zone_id: i32) -> bool {
         .is_some_and(|zone| world.get::<GodZone>(zone).is_some())
 }
 
-/// Zones that exist only as plumbing and carry no explorable content: 0 is
-/// the Void (the fallback room), 1 is "Reserved - create food items" and 2
-/// is "non-loading items zone". They are not flagged `is_god_zone`, so the
-/// exploration achievements skip them by id.
+/// Marker on zone entities with `Zones.is_internal = true`: plumbing zones
+/// with no explorable content. They grant no exploration credit and stay out
+/// of the zone listings. Unlike [`GodZone`] they are not hidden from staff.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct InternalZone;
+
+/// Built-in internal zones: 0 is the Void (the fallback room), 1 is
+/// "Reserved - create food items" and 2 is "non-loading items zone". The
+/// `Zones.is_internal` column carries the same flags (seeded by fierylib);
+/// these ids are what the loader flags when the column is missing, and what
+/// [`zone_is_internal`] answers for a zone with no zone entity.
 pub const INTERNAL_ZONE_IDS: [i32; 3] = [0, 1, 2];
 
-/// True when the zone with schema id `zone_id` is an internal plumbing zone
-/// ([`INTERNAL_ZONE_IDS`]).
+/// True when the zone with schema id `zone_id` is an internal plumbing zone:
+/// its entity carries [`InternalZone`]. A zone id with no loaded zone entity
+/// answers from [`INTERNAL_ZONE_IDS`].
 #[must_use]
-pub fn zone_is_internal(zone_id: i32) -> bool {
-    INTERNAL_ZONE_IDS.contains(&zone_id)
+pub fn zone_is_internal(world: &World, zone_id: i32) -> bool {
+    match world
+        .get_resource::<crate::resources::WorldKeyIndex>()
+        .and_then(|idx| idx.zones.get(&zone_id).copied())
+    {
+        Some(zone) => world.get::<InternalZone>(zone).is_some(),
+        None => INTERNAL_ZONE_IDS.contains(&zone_id),
+    }
 }
 
 /// True when walking zone `zone_id` earns exploration credit: neither a
 /// god zone nor an internal one.
 #[must_use]
 pub fn zone_grants_exploration(world: &World, zone_id: i32) -> bool {
-    !zone_is_internal(zone_id) && !zone_is_god(world, zone_id)
+    !zone_is_internal(world, zone_id) && !zone_is_god(world, zone_id)
 }
 
 /// `Room.entry_restriction`: Lua body that must return `true` for a

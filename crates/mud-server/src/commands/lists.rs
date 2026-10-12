@@ -173,7 +173,7 @@ fn area_rows(world: &mut World, viewer: Entity) -> Vec<(i32, String)> {
     let mut rows: Vec<(i32, String)> = zones
         .into_iter()
         .filter(|(id, e)| {
-            !zone_is_internal(*id)
+            !zone_is_internal(world, *id)
                 && (sees_god_zones || world.get::<GodZone>(*e).is_none())
                 && rooms_per_zone.get(e).copied().unwrap_or(0) > 0
         })
