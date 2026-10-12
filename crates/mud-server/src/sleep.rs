@@ -14,14 +14,27 @@ use crate::commands::{
 };
 use mud_world::Player;
 
-/// Hour the village shutters and bandits curl up — also when the
-/// dark-room gate kicks in (`commands::room_is_dark`). Keep these
-/// two windows aligned so "it just got dark" and "the wildlife
-/// settled in" land on the same tick.
+/// Hour night falls — also when the dark-room gate kicks in
+/// (`commands::room_is_dark`). Keep these two windows aligned so "it just
+/// got dark" and "the wildlife settled in" land on the same tick.
 const NIGHT_START_HOUR: i32 = 22;
 /// Hour mobs rouse for the day. The dark-room gate flips back at
 /// hour 5; mobs wake the same tick to keep the world consistent.
 const MORNING_HOUR: i32 = 5;
+
+/// Chance, per eligible mob per night-hour sleep check, that it lies down.
+/// Spread over the seven night hours this staggers bedtime so a whole
+/// field does not drop at the same instant (#132).
+const FALL_ASLEEP_PERCENT: u32 = 35;
+
+/// Overrides [`FALL_ASLEEP_PERCENT`] (tests pin it to 100 for determinism).
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct NightSleepChance(pub u32);
+
+/// True for the game hours between nightfall and the morning wake-up.
+const fn is_night(hour: i32) -> bool {
+    hour >= NIGHT_START_HOUR || hour < MORNING_HOUR
+}
 
 /// Mobs put to sleep by the day/night cycle. Lets the morning sweep
 /// distinguish "I tucked this mob in last night" from "this mob is
@@ -42,11 +55,17 @@ impl NightSleepers {
     }
 }
 
-/// At hour 22 outdoor mobs lie down, at hour 5 they get up. Runs only
-/// on game-hour boundaries (every 750 ticks, same cadence as the
-/// clock). Skipped mobs: anything Fighting, anything currently being
-/// ridden, and at sleep time anything already asleep (so spell-sleep
-/// stays load-bearing for the marker check at morning).
+/// Night sleep is opt-in (#132): only mobs of a zone with
+/// `Zones.mobs_sleep_at_night`, or carrying the `SleepsAtNight` behavior
+/// (`AwakeAtNight` opts out of an on zone), take part
+/// ([`mud_world::mob_sleeps_at_night`]). Runs only on game-hour boundaries
+/// (every 750 ticks, same cadence as the clock). Every night hour (22-04)
+/// is a sleep check: each eligible standing mob in an outdoor, non-settlement
+/// room rolls [`FALL_ASLEEP_PERCENT`] to lie down where it stands, so bedtime
+/// is staggered and a mob that was busy at one check gets another a game hour
+/// later if it is still night. A mob never lies down while fighting, being
+/// ridden, hunting (hate list), or with a hostile in the room; spell-sleepers
+/// are left alone, and only the mobs tucked in here wake at hour 5.
 pub fn mob_sleep_tick(world: &mut World) {
     let tick = world.resource::<TickCount>().0;
     if !tick.is_multiple_of(750) {
@@ -54,19 +73,17 @@ pub fn mob_sleep_tick(world: &mut World) {
     }
     let hour = world.resource::<MudClock>().hour;
     world.init_resource::<NightSleepers>();
-    match hour {
-        NIGHT_START_HOUR => {
-            sleep_outdoor_mobs(world);
+    if hour == MORNING_HOUR {
+        wake_night_sleepers(world);
+        announce_to_outdoor_players(world, "The sky pales and the sun begins to rise.\r\n");
+    } else if is_night(hour) {
+        sleep_outdoor_mobs(world);
+        if hour == NIGHT_START_HOUR {
             announce_to_outdoor_players(
                 world,
                 "The sun dips below the horizon, and darkness gathers.\r\n",
             );
         }
-        MORNING_HOUR => {
-            wake_night_sleepers(world);
-            announce_to_outdoor_players(world, "The sky pales and the sun begins to rise.\r\n");
-        }
-        _ => {}
     }
 }
 
@@ -107,7 +124,46 @@ fn listener_rooms(world: &mut World) -> HashSet<Entity> {
     q.iter(world).map(|l| l.0).collect()
 }
 
+/// True when `mob` has a reason to stay on its feet: it is hunting (a
+/// non-empty hate list), it is a servant, a fight is going on in its room, or
+/// a player it would attack is standing there (one it remembers, or any
+/// player when the mob is aggressive by alignment or aggression formula).
+fn has_hostile_nearby(world: &World, mob: Entity, room: Entity) -> bool {
+    if world
+        .get::<crate::combat::HateList>(mob)
+        .is_some_and(|h| !h.0.is_empty())
+        || crate::commands::is_servant(world, mob)
+    {
+        return true;
+    }
+    if crate::room_index::contents_of(world, room).any(|e| world.get::<Fighting>(e).is_some()) {
+        return true;
+    }
+    let players = crate::room_index::players_in(world, room);
+    if players.is_empty() {
+        return false;
+    }
+    if let Some(mem) = world.get::<crate::combat::MobMemory>(mob)
+        && players.iter().any(|p| mem.0.contains(p))
+    {
+        return true;
+    }
+    let aggressive_by_alignment = world
+        .get::<mud_world::CombatStats>(mob)
+        .is_some_and(|c| c.alignment <= crate::commands::aggro_alignment(world));
+    let aggressive_by_formula = world.get::<mud_world::WorldKey>(mob).is_some_and(|k| {
+        world
+            .get_resource::<mud_world::MobPrototypes>()
+            .and_then(|p| p.by_key.get(&(k.zone, k.id)))
+            .is_some_and(|p| p.aggression_formula.is_some())
+    });
+    aggressive_by_alignment || aggressive_by_formula
+}
+
 fn sleep_outdoor_mobs(world: &mut World) {
+    let percent = world
+        .get_resource::<NightSleepChance>()
+        .map_or(FALL_ASLEEP_PERCENT, |c| c.0);
     let candidates: Vec<(Entity, Entity)> = {
         let mut q = world.query_filtered::<
             (Entity, &Located, &Posture),
@@ -118,6 +174,13 @@ fn sleep_outdoor_mobs(world: &mut World) {
             .map(|(e, l, _)| (e, l.0))
             .collect()
     };
+    let candidates: Vec<(Entity, Entity)> = candidates
+        .into_iter()
+        .filter(|&(mob, _)| mud_world::mob_sleeps_at_night(world, mob))
+        .collect();
+    if candidates.is_empty() {
+        return;
+    }
     let listeners = listener_rooms(world);
     let mut tucked_in = Vec::new();
     for (mob, room) in candidates {
@@ -129,7 +192,10 @@ fn sleep_outdoor_mobs(world: &mut World) {
         let sector = world.get::<RoomSector>(room).map(|s| s.0);
         let eligible =
             sector.is_some_and(|s| sector_is_outdoor_for_weather(s) && !is_settlement(s));
-        if !eligible {
+        if !eligible || rand::random_range(0..100u32) >= percent {
+            continue;
+        }
+        if has_hostile_nearby(world, mob, room) {
             continue;
         }
         if let Ok(mut em) = world.get_entity_mut(mob) {
@@ -204,10 +270,42 @@ fn is_settlement(sector: Sector) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mud_world::{Item, Located, Mob, Named, Posture, PostureKind, Room, RoomSector};
+    use mud_db::enums::MobBehavior;
+    use mud_world::{
+        Item, Located, Mob, MobBehaviors, MobsSleepAtNight, Named, Posture, PostureKind, Room,
+        RoomSector, WorldKey, WorldKeyIndex, Zone,
+    };
 
+    /// A zone entity (schema id 7) registered in the key index; `sleeps` is its
+    /// `mobs_sleep_at_night` flag.
+    fn add_zone(world: &mut World, sleeps: bool) {
+        let zone = world.spawn((Zone, WorldKey { zone: 7, id: 0 })).id();
+        if sleeps {
+            world.entity_mut(zone).insert(MobsSleepAtNight);
+        }
+        world
+            .get_resource_or_insert_with(WorldKeyIndex::default)
+            .zones
+            .insert(7, zone);
+    }
+
+    /// Standing mob "a wolf" from zone 7 in a Field room, in a zone whose night
+    /// sleep flag is `zone_sleeps`. Every sleep check lands (chance 100%).
+    fn make_world_with(zone_sleeps: bool) -> (World, Entity, Entity) {
+        let (mut world, room, mob) = make_world_bare();
+        add_zone(&mut world, zone_sleeps);
+        world.entity_mut(mob).insert(WorldKey { zone: 7, id: 1 });
+        (world, room, mob)
+    }
+
+    /// Night-sleep zone on: the wolf lies down at night.
     fn make_world() -> (World, Entity, Entity) {
+        make_world_with(true)
+    }
+
+    fn make_world_bare() -> (World, Entity, Entity) {
         let mut world = World::new();
+        world.insert_resource(NightSleepChance(100));
         world.insert_resource(TickCount(0));
         world.insert_resource(MudClock {
             year: 1,
@@ -260,6 +358,8 @@ mod tests {
     #[test]
     fn cave_mob_stays_awake_at_night() {
         let mut world = World::new();
+        add_zone(&mut world, true);
+        world.insert_resource(NightSleepChance(100));
         world.insert_resource(TickCount(750));
         world.insert_resource(MudClock {
             year: 1,
@@ -276,6 +376,7 @@ mod tests {
                 Named {
                     name: "a goblin".into(),
                 },
+                WorldKey { zone: 7, id: 2 },
                 Located(room),
                 Posture(PostureKind::Standing),
             ))
@@ -287,6 +388,172 @@ mod tests {
             "cave mobs are not subject to day/night sleeping"
         );
         assert!(!world.resource::<NightSleepers>().contains(mob));
+    }
+
+    fn night_tick(world: &mut World, hour: i32, tick: u64) {
+        world.resource_mut::<MudClock>().hour = hour;
+        world.resource_mut::<TickCount>().0 = tick;
+        mob_sleep_tick(world);
+    }
+
+    fn posture(world: &World, mob: Entity) -> Option<PostureKind> {
+        world.get::<Posture>(mob).map(|p| p.0)
+    }
+
+    #[test]
+    fn default_off_no_mob_sleeps_at_night() {
+        let (mut world, _room, mob) = make_world_with(false);
+        for (i, hour) in [22, 23, 0, 1, 2, 3, 4].into_iter().enumerate() {
+            night_tick(&mut world, hour, 750 * (i as u64 + 1));
+            assert_eq!(
+                posture(&world, mob),
+                Some(PostureKind::Standing),
+                "zone flag off: nothing sleeps (hour {hour})"
+            );
+        }
+        assert!(!world.resource::<NightSleepers>().contains(mob));
+    }
+
+    #[test]
+    fn mob_with_no_zone_row_does_not_sleep() {
+        let (mut world, _room, mob) = make_world_bare();
+        night_tick(&mut world, NIGHT_START_HOUR, 750);
+        assert_eq!(posture(&world, mob), Some(PostureKind::Standing));
+    }
+
+    #[test]
+    fn only_the_zone_that_is_on_sleeps() {
+        let (mut world, room, wolf) = make_world_with(true);
+        // A second zone (id 8), flag off, with its own mob in the same field.
+        let off_zone = world.spawn((Zone, WorldKey { zone: 8, id: 0 })).id();
+        world
+            .resource_mut::<WorldKeyIndex>()
+            .zones
+            .insert(8, off_zone);
+        let bear = world
+            .spawn((
+                Mob,
+                Named {
+                    name: "a bear".into(),
+                },
+                WorldKey { zone: 8, id: 1 },
+                Located(room),
+                Posture(PostureKind::Standing),
+            ))
+            .id();
+        night_tick(&mut world, NIGHT_START_HOUR, 750);
+        assert_eq!(posture(&world, wolf), Some(PostureKind::Sleeping));
+        assert_eq!(posture(&world, bear), Some(PostureKind::Standing));
+    }
+
+    #[test]
+    fn sleeps_at_night_behavior_overrides_an_off_zone() {
+        let (mut world, _room, mob) = make_world_with(false);
+        world
+            .entity_mut(mob)
+            .insert(MobBehaviors(vec![MobBehavior::SleepsAtNight]));
+        night_tick(&mut world, NIGHT_START_HOUR, 750);
+        assert_eq!(posture(&world, mob), Some(PostureKind::Sleeping));
+    }
+
+    #[test]
+    fn awake_at_night_behavior_overrides_an_on_zone() {
+        let (mut world, _room, mob) = make_world_with(true);
+        world
+            .entity_mut(mob)
+            .insert(MobBehaviors(vec![MobBehavior::AwakeAtNight]));
+        night_tick(&mut world, NIGHT_START_HOUR, 750);
+        assert_eq!(posture(&world, mob), Some(PostureKind::Standing));
+    }
+
+    #[test]
+    fn mob_that_was_fighting_sleeps_at_the_next_check_if_still_night() {
+        let (mut world, _room, mob) = make_world();
+        world.get_entity_mut(mob).unwrap().insert(Fighting(mob));
+        night_tick(&mut world, 23, 750);
+        assert_eq!(posture(&world, mob), Some(PostureKind::Standing));
+        // The fight ends; the next hourly check puts it down.
+        world.get_entity_mut(mob).unwrap().remove::<Fighting>();
+        night_tick(&mut world, 0, 1500);
+        assert_eq!(posture(&world, mob), Some(PostureKind::Sleeping));
+    }
+
+    #[test]
+    fn no_sleep_in_the_daytime() {
+        let (mut world, _room, mob) = make_world();
+        for (i, hour) in [5, 8, 12, 18, 21].into_iter().enumerate() {
+            night_tick(&mut world, hour, 750 * (i as u64 + 1));
+            assert_eq!(
+                posture(&world, mob),
+                Some(PostureKind::Standing),
+                "hour {hour}"
+            );
+        }
+    }
+
+    #[test]
+    fn bedtime_is_staggered_by_the_sleep_chance() {
+        let (mut world, _room, mob) = make_world();
+        world.insert_resource(NightSleepChance(0));
+        night_tick(&mut world, NIGHT_START_HOUR, 750);
+        assert_eq!(posture(&world, mob), Some(PostureKind::Standing));
+    }
+
+    #[test]
+    fn hunting_mob_does_not_sleep() {
+        let (mut world, room, mob) = make_world();
+        let prey = world.spawn((Located(room),)).id();
+        world
+            .entity_mut(mob)
+            .insert(crate::combat::HateList(vec![prey]));
+        night_tick(&mut world, NIGHT_START_HOUR, 750);
+        assert_eq!(posture(&world, mob), Some(PostureKind::Standing));
+    }
+
+    #[test]
+    fn mob_does_not_sleep_through_a_fight_in_its_room() {
+        let (mut world, room, mob) = make_world();
+        let a = world.spawn((Located(room),)).id();
+        world.entity_mut(a).insert(Fighting(a));
+        night_tick(&mut world, NIGHT_START_HOUR, 750);
+        assert_eq!(posture(&world, mob), Some(PostureKind::Standing));
+    }
+
+    #[test]
+    fn aggressive_mob_does_not_sleep_with_a_player_in_the_room() {
+        let (mut world, room, mob) = make_world();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+        world.spawn((Player, Located(room), crate::commands::Connection(tx)));
+        let stats = mud_world::CombatStats {
+            alignment: -1000,
+            ..Default::default()
+        };
+        world.entity_mut(mob).insert(stats);
+        night_tick(&mut world, NIGHT_START_HOUR, 750);
+        assert_eq!(posture(&world, mob), Some(PostureKind::Standing));
+    }
+
+    #[test]
+    fn peaceful_mob_sleeps_with_a_player_watching() {
+        let (mut world, room, mob) = make_world();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+        world.spawn((Player, Located(room), crate::commands::Connection(tx)));
+        night_tick(&mut world, NIGHT_START_HOUR, 750);
+        assert_eq!(posture(&world, mob), Some(PostureKind::Sleeping));
+    }
+
+    #[test]
+    fn remembered_player_in_the_room_keeps_the_mob_up() {
+        let (mut world, room, mob) = make_world();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+        let player = world
+            .spawn((Player, Located(room), crate::commands::Connection(tx)))
+            .id();
+        world
+            .entity_mut(mob)
+            .insert(crate::combat::MobMemory([player].into_iter().collect()));
+        night_tick(&mut world, NIGHT_START_HOUR, 750);
+        assert_eq!(posture(&world, mob), Some(PostureKind::Standing));
     }
 
     #[test]
@@ -411,6 +678,8 @@ mod tests {
         const MOBS: usize = 5500;
         const ITEMS: usize = 4000;
         let mut world = World::new();
+        add_zone(&mut world, true);
+        world.insert_resource(NightSleepChance(100));
         world.insert_resource(TickCount(750));
         world.insert_resource(MudClock {
             year: 1,
@@ -439,6 +708,7 @@ mod tests {
                     Named {
                         name: format!("mob {i}"),
                     },
+                    WorldKey { zone: 7, id: 1 },
                     Located(rooms[(i * 7) % ROOMS]),
                     Posture(if i % 11 == 0 {
                         PostureKind::Sleeping
@@ -504,6 +774,8 @@ mod tests {
         const ROOMS: usize = 10_000;
         const MOBS: usize = 5500;
         let mut world = World::new();
+        add_zone(&mut world, true);
+        world.insert_resource(NightSleepChance(100));
         world.insert_resource(TickCount(750));
         world.insert_resource(MudClock {
             year: 1,
@@ -534,6 +806,7 @@ mod tests {
                     Named {
                         name: format!("mob {i}"),
                     },
+                    WorldKey { zone: 7, id: 1 },
                     Located(rooms[(i * 7) % ROOMS]),
                     Posture(PostureKind::Standing),
                 ))

@@ -514,6 +514,8 @@ pub enum MobBehavior {
     NoClassAi,
     Peaceful,
     NoKill,
+    SleepsAtNight,
+    AwakeAtNight,
 }
 
 impl MobBehavior {
@@ -543,6 +545,8 @@ impl MobBehavior {
             Self::NoClassAi => "No-ClassAI",
             Self::Peaceful => "Peaceful",
             Self::NoKill => "No-Kill",
+            Self::SleepsAtNight => "Sleeps-At-Night",
+            Self::AwakeAtNight => "Awake-At-Night",
         }
     }
 
@@ -573,6 +577,8 @@ impl MobBehavior {
             Self::NoClassAi => "Won't run the class-driven combat AI.",
             Self::Peaceful => "Refuses to engage in combat at all.",
             Self::NoKill => "Cannot be killed — damage is clamped above zero.",
+            Self::SleepsAtNight => "Lies down to sleep at night, even if its zone does not.",
+            Self::AwakeAtNight => "Stays up at night, even if its zone sleeps.",
         }
     }
 }

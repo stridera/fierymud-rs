@@ -71,3 +71,20 @@ pub async fn list_zones_without_god_flag(pool: &PgPool) -> sqlx::Result<Vec<Zone
     .fetch_all(pool)
     .await
 }
+
+/// Ids of the zones whose mobs sleep at night (`Zones.mobs_sleep_at_night`,
+/// default false: no zone is seeded on). The column is created by the muditor
+/// schema / `muditor/deploy/prod/sql/100-zones-mobs-sleep-at-night.sql`, so the
+/// loader falls back to "no zone" when it is missing.
+pub async fn list_night_sleep_zones(pool: &PgPool) -> sqlx::Result<Vec<i32>> {
+    sqlx::query_scalar!(
+        r#"
+        SELECT id
+        FROM "Zones"
+        WHERE "deleted_at" IS NULL AND mobs_sleep_at_night
+        ORDER BY id
+        "#
+    )
+    .fetch_all(pool)
+    .await
+}

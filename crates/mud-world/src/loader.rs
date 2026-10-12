@@ -142,6 +142,27 @@ async fn load_zone_rows(pool: &PgPool) -> sqlx::Result<Vec<zones::Zone>> {
     }
 }
 
+/// Ids of the zones whose mobs sleep at night. `Zones.mobs_sleep_at_night` is
+/// created by the muditor schema / the prod SQL (possibly after the deploy),
+/// so when the column is missing this logs an ERROR naming the fix and no zone
+/// sleeps (the default for every zone anyway). Any other error still fails the
+/// load.
+async fn load_night_sleep_zones(pool: &PgPool) -> sqlx::Result<std::collections::HashSet<i32>> {
+    match zones::list_night_sleep_zones(pool).await {
+        Ok(ids) => Ok(ids.into_iter().collect()),
+        Err(e) if is_missing_schema(&e) => {
+            let e = schema_gap(
+                e,
+                "column \"Zones\".mobs_sleep_at_night",
+                "deploy the muditor schema (prisma db push, or muditor/deploy/prod/sql/100-zones-mobs-sleep-at-night.sql)",
+            );
+            error!("{e}; no zone's mobs sleep at night (zone flag read as false everywhere)");
+            Ok(std::collections::HashSet::new())
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// `MobResetEquipmentContents` rows (items inside containers mobs carry or
 /// wear). The table is created by the muditor schema / the prod SQL, possibly
 /// after the deploy, so a missing one boots with no rows and an ERROR naming
@@ -413,6 +434,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
 
     // Pass 1: zones.
     let zone_rows = load_zone_rows(pool).await?;
+    let night_sleep_zones = load_night_sleep_zones(pool).await?;
     let mut zone_index: HashMap<i32, Entity> = HashMap::with_capacity(zone_rows.len());
     let mut weather = crate::resources::WeatherCatalog::default();
     for z in &zone_rows {
@@ -429,6 +451,9 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             .id();
         if z.is_god_zone {
             world.entity_mut(entity).insert(crate::GodZone);
+        }
+        if night_sleep_zones.contains(&z.id) {
+            world.entity_mut(entity).insert(crate::MobsSleepAtNight);
         }
         zone_index.insert(z.id, entity);
         weather
@@ -2736,6 +2761,7 @@ pub async fn reload_zones(
     let fresh_mobs = load_mob_prototypes(pool).await?;
     let fresh_objects = load_object_prototypes(pool).await?;
     let zone_rows = load_zone_rows(pool).await?;
+    let night_sleep_zones = load_night_sleep_zones(pool).await?;
     let room_rows = rooms::list_rooms(pool).await?;
     let exit_rows = room_exits::list_exits(pool).await?;
     let extra_rows = mud_db::room_extra_descriptions::list_extras(pool).await?;
@@ -2838,6 +2864,11 @@ pub async fn reload_zones(
             } else {
                 em.remove::<crate::GodZone>();
             }
+            if night_sleep_zones.contains(&z.id) {
+                em.insert(crate::MobsSleepAtNight);
+            } else {
+                em.remove::<crate::MobsSleepAtNight>();
+            }
             stats.zones_updated += 1;
         } else {
             let entity = world
@@ -2853,6 +2884,9 @@ pub async fn reload_zones(
                 .id();
             if z.is_god_zone {
                 world.entity_mut(entity).insert(crate::GodZone);
+            }
+            if night_sleep_zones.contains(&z.id) {
+                world.entity_mut(entity).insert(crate::MobsSleepAtNight);
             }
             world
                 .resource_mut::<WorldKeyIndex>()

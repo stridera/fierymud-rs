@@ -13,6 +13,37 @@ pub struct Zone;
 #[derive(Component, Debug, Clone, Copy)]
 pub struct GodZone;
 
+/// Marker on zone entities with `Zones.mobs_sleep_at_night = true`: the
+/// zone's mobs lie down at night (see `mud-server::sleep`). Off by default;
+/// the `SleepsAtNight` / `AwakeAtNight` mob behaviors override it per mob.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct MobsSleepAtNight;
+
+/// Whether the mob whose proto lives in zone `zone_id` takes part in the
+/// night sleep cycle: `AwakeAtNight` always opts out, `SleepsAtNight` always
+/// opts in, otherwise its zone's `mobs_sleep_at_night` flag decides (a mob
+/// with no zone entity is off).
+#[must_use]
+pub fn mob_sleeps_at_night(world: &World, mob: Entity) -> bool {
+    use mud_db::enums::MobBehavior;
+    if let Some(b) = world.get::<MobBehaviors>(mob) {
+        if b.has(MobBehavior::AwakeAtNight) {
+            return false;
+        }
+        if b.has(MobBehavior::SleepsAtNight) {
+            return true;
+        }
+    }
+    world
+        .get::<WorldKey>(mob)
+        .and_then(|k| {
+            world
+                .get_resource::<crate::resources::WorldKeyIndex>()
+                .and_then(|idx| idx.zones.get(&k.zone).copied())
+        })
+        .is_some_and(|zone| world.get::<MobsSleepAtNight>(zone).is_some())
+}
+
 /// `Room.capacity` (maximum occupants). The importer maps legacy PRIVATE to
 /// 2 and TUNNEL to 1, so a small capacity marks a private room. Today only
 /// random-teleport destination picking reads it (walking does not enforce
