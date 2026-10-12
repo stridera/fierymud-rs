@@ -3,7 +3,7 @@
 
 use bevy_ecs::prelude::*;
 use mud_db::enums::UserRole;
-use mud_world::{Health, Located, Player, SocialRegistry, Stamina};
+use mud_world::{Health, Located, MovementPoints, Player, SocialRegistry, Stamina};
 
 use crate::commands::{
     Category, Command, Help, group_members, group_root, name_of, send_rendered, send_to,
@@ -45,19 +45,34 @@ inventory::submit! {
     }
 }
 
+/// Legacy `do_report` wording: "I have 80 (100) hit and 40 (50) movement
+/// points." A mob's movement is its [`MovementPoints`] pool (mounts carry
+/// one); players report their stamina.
+pub(crate) fn report_body(world: &World, who: Entity) -> String {
+    let hp = world.get::<Health>(who).copied();
+    let mv = world
+        .get::<MovementPoints>(who)
+        .map(|m| (m.current, m.max))
+        .or_else(|| world.get::<Stamina>(who).map(|s| (s.current, s.max)));
+    match (hp, mv) {
+        (Some(h), Some((c, m))) => {
+            format!(
+                "I have {} ({}) hit and {c} ({m}) movement points",
+                h.hp, h.max
+            )
+        }
+        (Some(h), None) => format!("I have {} ({}) hit points", h.hp, h.max),
+        (None, Some((c, m))) => format!("I have {c} ({m}) movement points"),
+        (None, None) => "(no vital stats)".to_string(),
+    }
+}
+
 fn cmd_report(world: &mut World, player: Entity, _args: &str) {
-    let hp = world.get::<Health>(player).copied();
-    let stamina = world.get::<Stamina>(player).copied();
     let Some(located) = world.get::<Located>(player).copied() else {
         return;
     };
     let speaker = name_of(world, player);
-    let body = match (hp, stamina) {
-        (Some(h), Some(s)) => format!("hp {}/{}, stamina {}/{}", h.hp, h.max, s.current, s.max),
-        (Some(h), None) => format!("hp {}/{}", h.hp, h.max),
-        (None, Some(s)) => format!("stamina {}/{}", s.current, s.max),
-        (None, None) => "(no vital stats)".to_string(),
-    };
+    let body = report_body(world, player);
     let root = group_root(world, player);
     let group = group_members(world, root);
     let (targets, self_label, third_label) = if group.len() > 1 {

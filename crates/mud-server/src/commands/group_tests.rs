@@ -270,3 +270,74 @@ fn a_member_with_no_follow_link_can_still_leave() {
     say(&mut t.fx, t.friend, &mut t.frx, "follow self");
     assert!(t.fx.world.get::<GroupMember>(t.friend).is_none());
 }
+
+// ---- charmed pets and mounts (legacy `do_group` skipped consent for them) ----
+
+fn add_pet(t: &mut Trio, name: &str) -> Entity {
+    let room = t.fx.a;
+    t.fx.world
+        .spawn((
+            mud_world::Mob,
+            mud_world::Named { name: name.into() },
+            mud_world::Keywords(vec!["pet".into(), "wolf".into()]),
+            mud_world::Located(room),
+            mud_world::Follower(t.leader),
+            mud_world::Health { hp: 20, max: 20 },
+        ))
+        .id()
+}
+
+#[test]
+fn a_leader_can_add_and_remove_a_charmed_pet_without_consent() {
+    let mut t = trio();
+    let pet = add_pet(&mut t, "a loyal wolf");
+    let out = say(&mut t.fx, t.leader, &mut t.lrx, "group wolf");
+    assert!(out.contains("You add a loyal wolf to your group."), "{out}");
+    assert_eq!(
+        t.fx.world.get::<GroupMember>(pet).map(|g| g.0),
+        Some(t.leader)
+    );
+    assert_eq!(mud_world::group_pets(&mut t.fx.world, t.leader), vec![pet]);
+    // Players-only rosters (XP, coin, spells) are untouched.
+    assert_eq!(group_members(&mut t.fx.world, t.leader), vec![t.leader]);
+    let list = say(&mut t.fx, t.leader, &mut t.lrx, "group");
+    assert!(list.contains("a loyal wolf"), "{list}");
+    let out = say(&mut t.fx, t.leader, &mut t.lrx, "group wolf");
+    assert!(
+        out.contains("You remove a loyal wolf from the group."),
+        "{out}"
+    );
+    assert!(t.fx.world.get::<GroupMember>(pet).is_none());
+}
+
+#[test]
+fn invite_also_enrols_your_own_pet_but_not_a_stranger_mob() {
+    let mut t = trio();
+    let pet = add_pet(&mut t, "a loyal wolf");
+    let out = say(&mut t.fx, t.leader, &mut t.lrx, "invite wolf");
+    assert!(out.contains("You add a loyal wolf to your group."), "{out}");
+    assert!(t.fx.world.get::<GroupMember>(pet).is_some());
+    // Someone else's pet is not yours to group.
+    let other = add_pet(&mut t, "a feral dog");
+    t.fx.world
+        .entity_mut(other)
+        .insert(mud_world::Follower(t.friend));
+    let out = say(&mut t.fx, t.leader, &mut t.lrx, "group dog");
+    assert!(out.contains("Usage"), "{out}");
+    assert!(t.fx.world.get::<GroupMember>(other).is_none());
+}
+
+#[test]
+fn only_the_head_of_a_group_can_enrol_a_pet() {
+    let mut t = trio();
+    grouped(
+        &mut t.fx, t.leader, &mut t.lrx, t.friend, &mut t.frx, "friend",
+    );
+    let pet = add_pet(&mut t, "a loyal wolf");
+    t.fx.world
+        .entity_mut(pet)
+        .insert(mud_world::Follower(t.friend));
+    let out = say(&mut t.fx, t.friend, &mut t.frx, "group wolf");
+    assert!(out.contains("without being head of a group"), "{out}");
+    assert!(t.fx.world.get::<GroupMember>(pet).is_none());
+}

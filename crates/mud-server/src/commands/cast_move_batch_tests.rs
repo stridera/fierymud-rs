@@ -621,6 +621,29 @@ fn riding_reads_as_one_rider_on_a_mount() {
 }
 
 #[test]
+fn a_following_mount_adds_no_lines_of_its_own() {
+    // The mount is also the rider's pet (`Follower`), so it travels as a
+    // follower mover. Observers who can see the rider read one line each way.
+    let (mut world, rider, mount, _r, mut brx, mut crx) = mounted_fx(40);
+    world.entity_mut(mount).insert(mud_world::Follower(rider));
+    cmd_move(&mut world, rider, Direction::North);
+    let left = plain(&drain(&mut brx));
+    assert!(
+        left.contains("Tester rides north on a stout mare.\r\n"),
+        "{left:?}"
+    );
+    assert!(!left.contains("stout mare leaves"), "{left:?}");
+    assert_eq!(left.matches("\r\n").count(), 1, "{left:?}");
+    let came = plain(&drain(&mut crx));
+    assert!(
+        came.contains("Tester arrives from the south, riding a stout mare.\r\n"),
+        "{came:?}"
+    );
+    assert!(!came.contains("A stout mare arrives"), "{came:?}");
+    assert_eq!(came.matches("arrives").count(), 1, "{came:?}");
+}
+
+#[test]
 fn an_unmounted_walker_keeps_the_plain_wording() {
     let (mut world, rider, mount, _r, mut brx, mut crx) = mounted_fx(40);
     world.entity_mut(rider).remove::<mud_world::Mounted>();

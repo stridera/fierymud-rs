@@ -2159,6 +2159,18 @@ pub fn group_members(world: &mut World, root: Entity) -> Vec<Entity> {
     group
 }
 
+/// Charmed pets (and mounts) the leader `root` has enrolled in the group
+/// (legacy let a charmed follower join with `group <pet>`). Kept apart from
+/// [`group_members`] so XP, coin and spell rosters stay player-only; a pet
+/// that has stopped following `root` no longer counts.
+pub fn group_pets(world: &mut World, root: Entity) -> Vec<Entity> {
+    let mut q = world.query_filtered::<(Entity, &GroupMember, &Follower), With<Mob>>();
+    q.iter(world)
+        .filter(|(_, g, f)| g.0 == root && f.0 == root)
+        .map(|(e, _, _)| e)
+        .collect()
+}
+
 /// Per-room map of magical walls blocking specific exits. Installed
 /// by `WALL_OF_STONE` / `WALL_OF_ICE` (and any future opaque barriers);
 /// consulted by `cmd_move` before a player can leave the room

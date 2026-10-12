@@ -662,6 +662,34 @@ fn combat_and_room_mobs_resend_when_they_change() {
 }
 
 #[test]
+fn combat_panel_clears_when_the_fight_ends_without_a_prompt() {
+    let (mut fx, p, mut rx) = world_with_skills();
+    let a = fx.a;
+    let wolf = mob(&mut fx.world, a, "a wolf");
+    fx.world
+        .entity_mut(wolf)
+        .insert(mud_world::Health { hp: 10, max: 10 });
+    fx.world.entity_mut(p).insert(mud_world::Fighting(wolf));
+    fx.world.entity_mut(wolf).insert(mud_world::Fighting(p));
+    super::send_prompt(&mut fx.world, p);
+    let fr = frames(&drain_bytes(&mut rx));
+    assert_eq!(of(&fr, "Char.Combat").len(), 1, "{fr:?}");
+    // Still fighting: the sweep stays quiet.
+    super::push_combat_ends(&mut fx.world);
+    assert!(frames(&drain_bytes(&mut rx)).is_empty());
+    // Paralysis on the mob ends every fight against it, silently.
+    super::stop_all_combat_with(&mut fx.world, wolf);
+    super::push_combat_ends(&mut fx.world);
+    let fr = frames(&drain_bytes(&mut rx));
+    let cleared = of(&fr, "Char.Combat");
+    assert_eq!(cleared.len(), 1, "{fr:?}");
+    assert_eq!(parse(&cleared[0], "Char.Combat"), serde_json::json!({}));
+    // And only once.
+    super::push_combat_ends(&mut fx.world);
+    assert!(frames(&drain_bytes(&mut rx)).is_empty());
+}
+
+#[test]
 fn char_effects_pushed_when_the_effect_set_changes_without_a_prompt() {
     let (mut fx, p, mut rx) = world_with_armor();
     // Establish the baseline: first prompt sends an empty list.

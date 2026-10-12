@@ -220,7 +220,10 @@ fn report_says_hp_and_stamina() {
     ));
     dispatch(&mut world, p, "report");
     let out = plain(&drain(&mut rx));
-    assert!(out.contains("hp 80/100, stamina 40/50"), "{out}");
+    assert!(
+        out.contains("I have 80 (100) hit and 40 (50) movement points"),
+        "{out}"
+    );
 }
 
 // ----------------------------------------------------------- who legend
@@ -532,5 +535,36 @@ async fn wizlist_query_runs_and_returns_only_staff() {
         rows.iter()
             .all(|r| r.role.rank() >= UserRole::from_level(r.level).rank()),
         "{rows:?}"
+    );
+}
+
+#[test]
+fn a_pet_ordered_to_report_includes_its_movement_pool() {
+    let mut world = world();
+    let room = world.spawn_empty().id();
+    let (owner, mut rx) = player(&mut world, "Owner", 10, None);
+    world.entity_mut(owner).insert(Located(room));
+    let mare = world
+        .spawn((
+            mud_world::Mob,
+            mud_world::Named {
+                name: "a stout mare".into(),
+            },
+            mud_world::Keywords(vec!["mare".into()]),
+            Located(room),
+            mud_world::Follower(owner),
+            Health { hp: 30, max: 40 },
+            mud_world::MovementPoints {
+                current: 90,
+                max: 120,
+            },
+        ))
+        .id();
+    let _ = mare;
+    dispatch(&mut world, owner, "order mare report");
+    let out = plain(&drain(&mut rx));
+    assert!(
+        out.contains("I have 30 (40) hit and 90 (120) movement points"),
+        "{out}"
     );
 }

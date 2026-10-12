@@ -12,8 +12,8 @@ use std::hash::{Hash, Hasher};
 
 use bevy_ecs::prelude::*;
 use mud_world::{
-    AccountWealth, AppliedTo, BankWealth, EffectInstance, EffectSource, Exits, Located, Named,
-    Profile, RoomSector, SpellSlotData, SpellSlots, Wealth, WorldKey, WorldKeyIndex,
+    AccountWealth, AppliedTo, BankWealth, EffectInstance, EffectSource, Exits, Fighting, Located,
+    Named, Profile, RoomSector, SpellSlotData, SpellSlots, Wealth, WorldKey, WorldKeyIndex,
 };
 use serde_json::{Value, json};
 
@@ -404,6 +404,26 @@ pub(crate) fn push_effect_changes(world: &mut World) {
     for p in todo {
         let payload = build_char_effects(world, p);
         send_if_changed(world, p, "Char.Effects", &payload, false);
+    }
+}
+
+/// Clear the client's `Char.Combat` panel the moment a connected player stops
+/// fighting, whatever ended the fight (paralysis or mesmerize on the target, a
+/// groupmate's spell, the opponent fleeing or being called away). Many of
+/// those paths remove `Fighting` silently and the player may receive no
+/// output, hence no prompt, so without this sweep the panel would linger.
+/// Players still fighting are left to the prompt path; the frame is
+/// change-gated, so an already-cleared panel costs nothing.
+pub(crate) fn push_combat_ends(world: &mut World) {
+    let mut q =
+        world.query_filtered::<(Entity, &GmcpSent), (With<Connection>, Without<Fighting>)>();
+    let todo: Vec<Entity> = q
+        .iter(world)
+        .filter(|(_, sent)| sent.0.contains_key("Char.Combat"))
+        .map(|(e, _)| e)
+        .collect();
+    for p in todo {
+        super::send_char_combat(world, p);
     }
 }
 

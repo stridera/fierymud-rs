@@ -240,6 +240,40 @@ fn removing_the_ring_keeps_a_flag_a_race_innate_still_backs() {
 }
 
 #[test]
+fn a_fly_item_announces_the_float_on_wear_and_the_drop_on_removal() {
+    let (mut world, p, mut rx) = setup();
+    let room = world.get::<Located>(p).unwrap().0;
+    let (bystander, mut brx) = player_in(&mut world, room);
+    world
+        .entity_mut(bystander)
+        .insert(Named { name: "Bob".into() });
+    let _ = drain(&mut brx);
+    ring(&mut world, p, 6, "slipper", vec![status(&["fly"])]);
+    let _ = drain(&mut rx);
+    dispatch(&mut world, p, "wear slipper");
+    let out = drain(&mut rx);
+    assert!(out.contains("You float up into the air."), "{out}");
+    assert!(world.get::<Flying>(p).is_some());
+    let seen = drain(&mut brx);
+    assert!(seen.contains("floats up into the air."), "{seen}");
+    dispatch(&mut world, p, "remove slipper");
+    let out = drain(&mut rx);
+    assert!(out.contains("You fall to the ground."), "{out}");
+    assert!(world.get::<Flying>(p).is_none());
+}
+
+#[test]
+fn a_fly_item_worn_while_already_flying_says_nothing_extra() {
+    let (mut world, p, mut rx) = setup();
+    world.entity_mut(p).insert(Flying);
+    ring(&mut world, p, 7, "slipper", vec![status(&["fly"])]);
+    let _ = drain(&mut rx);
+    dispatch(&mut world, p, "wear slipper");
+    let out = drain(&mut rx);
+    assert!(!out.contains("float up"), "{out}");
+}
+
+#[test]
 fn removing_the_ring_keeps_a_flag_a_spell_still_backs() {
     let (mut world, p, mut rx) = setup();
     world.spawn((

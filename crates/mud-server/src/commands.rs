@@ -671,7 +671,7 @@ mod staff_tell;
 #[path = "commands/staff_tell_tests.rs"]
 mod staff_tell_tests;
 pub(crate) use gmcp::clear_gmcp_sent;
-pub(crate) use gmcp::push_effect_changes;
+pub(crate) use gmcp::{push_combat_ends, push_effect_changes};
 #[cfg(test)]
 #[path = "commands/gmcp_tests.rs"]
 pub(crate) mod gmcp_tests;
@@ -8394,7 +8394,9 @@ fn build_char_skills(world: &World, viewer: Entity) -> String {
 /// member-count check.
 pub(crate) fn send_group_state(world: &mut World, viewer: Entity) {
     let root = group_root(world, viewer);
-    let members = group_members(world, root);
+    let mut members = group_members(world, root);
+    // Enrolled pets and mounts show on the panel after the players.
+    members.extend(mud_world::group_pets(world, root));
     if world.get::<Connection>(viewer).is_none() {
         return;
     }
@@ -8435,9 +8437,14 @@ pub(crate) fn send_group_state(world: &mut World, viewer: Entity) {
             _ => false,
         };
         let (hp, max_hp) = world.get::<Health>(m).map_or((0, 0), |h| (h.hp, h.max));
-        let (mv, max_mv) = world
-            .get::<Stamina>(m)
-            .map_or((0, 0), |s| (s.current, s.max));
+        let (mv, max_mv) = world.get::<Stamina>(m).map_or_else(
+            || {
+                world
+                    .get::<mud_world::MovementPoints>(m)
+                    .map_or((0, 0), |p| (p.current, p.max))
+            },
+            |s| (s.current, s.max),
+        );
         entries.push(serde_json::json!({
             "name": plain,
             "with_leader": with_leader,
@@ -14503,7 +14510,26 @@ pub(crate) fn wear_item(
     // wear-granted effects (ObjectEffects) to the player. Mirrored
     // by `cmd_remove`'s unapply path. After the wear messages above, so
     // "You wear X." precedes whatever the effects announce (issue #87).
+    let was_flying = world.get::<mud_world::Flying>(player).is_some();
     crate::equip_apply::apply_object_to_wearer(world, item, player);
+    // An item that grants flight lifts its wearer: say so (legacy fly
+    // wording, `magic.cpp`), unless they were already airborne or the gear
+    // was too heavy to take off with.
+    if !was_flying && world.get::<mud_world::Flying>(player).is_some() {
+        send_rendered(world, player, "<cyan>You float up into the air.</>\r\n");
+        if let Some(located) = world.get::<Located>(player).copied() {
+            let actor_name = name_of(world, player);
+            broadcast_room_visual(
+                world,
+                located.0,
+                player,
+                &[player],
+                &cap_sentence_start(&format!(
+                    "<cyan>{actor_name} floats up into the air.</>\r\n"
+                )),
+            );
+        }
+    }
     crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Wear);
     true
 }
@@ -26218,7 +26244,8 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
             ),
             None => format!("{} {verb} {dir_name}.\r\n", cap_sentence_start(&mover_name)),
         };
-        broadcast_room_visual(world, from_room, mover, &hush, &line);
+        let hush_here = hush_for_steed(world, from_room, mover, &steeds, &hush);
+        broadcast_room_visual(world, from_room, mover, &hush_here, &line);
         // Observers who missed it but sense life feel it go.
         senses::sense_departure(world, from_room, mover, &movers);
     }
@@ -26302,7 +26329,8 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
                 race_arrival_phrase(world, mover),
             ),
         };
-        broadcast_room_visual(world, target, mover, &hush, &line);
+        let hush_here = hush_for_steed(world, target, mover, &steeds, &hush);
+        broadcast_room_visual(world, target, mover, &hush_here, &line);
     }
 
     // DeathTrap gate — `Room.is_death_trap = true` kills every
@@ -26786,6 +26814,29 @@ pub(crate) fn direction_name(d: Direction) -> &'static str {
         Portal => "portal",
         Direction::None => "(none)",
     }
+}
+
+/// Who must not hear a mover's own departure/arrival line: `base` (the
+/// movers and their steeds), plus, when `mover` is a mount carrying one of
+/// the `steeds` riders, every listener in `room` who can see that rider (they
+/// already got the rider's "rides ... on" / "arrives ..., riding" line, so
+/// the mount's own line would be a duplicate).
+fn hush_for_steed(
+    world: &mut World,
+    room: Entity,
+    mover: Entity,
+    steeds: &[(Entity, Entity)],
+    base: &[Entity],
+) -> Vec<Entity> {
+    let mut hush = base.to_vec();
+    if let Some(&(rider, _)) = steeds.iter().find(|&&(_, mount)| mount == mover) {
+        for viewer in crate::room_index::player_listeners_in(world, room) {
+            if can_see_player(world, viewer, rider) {
+                hush.push(viewer);
+            }
+        }
+    }
+    hush
 }
 
 /// The mount `rider` is sitting on, when it stands in `room` with them

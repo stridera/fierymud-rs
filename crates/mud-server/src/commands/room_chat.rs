@@ -459,18 +459,12 @@ fn cmd_greport(world: &mut World, player: Entity, _args: &str) {
         return;
     }
     let speaker = name_of(world, player);
-    let hp = world.get::<mud_world::Health>(player).copied();
-    let stamina = world.get::<mud_world::Stamina>(player).copied();
-    let hp_str = hp.map_or_else(|| String::from("?/?"), |h| format!("{}/{}", h.hp, h.max));
-    let st_str = stamina.map_or_else(
-        || String::from("?/?"),
-        |s| format!("{}/{}", s.current, s.max),
-    );
+    let body = crate::commands::status_lists::report_body(world, player);
     for m in members {
         let line = if m == player {
-            format!("You report: {hp_str} hp, {st_str} stamina.\r\n")
+            format!("You report: {body}.\r\n")
         } else {
-            format!("({speaker} reports: {hp_str} hp, {st_str} stamina.)\r\n")
+            format!("({speaker} reports: {body}.)\r\n")
         };
         send_rendered(world, m, &line);
     }

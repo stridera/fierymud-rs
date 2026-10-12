@@ -847,6 +847,7 @@ async fn main() {
                 // prompts for anyone who received output (combat hits,
                 // effect fades, broadcasts, etc.).
                 commands::push_effect_changes(&mut world);
+                commands::push_combat_ends(&mut world);
                 commands::flush_prompts(&mut world);
                 tick_stats::lap(&mut world, "flush_prompts");
                 note_tick_finished(&mut world, tick_start);

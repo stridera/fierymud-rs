@@ -14788,6 +14788,57 @@ fn group_join_refusal(world: &mut World, leader: Entity, joiner: Entity) -> Opti
     None
 }
 
+/// Legacy `do_group <name>` for a charmed follower: no consent needed, the
+/// pet (or mount) is enrolled straight into the caller's group, and naming it
+/// again removes it. `false` when `target` isn't a pet of `player`'s.
+fn group_pet_toggle(world: &mut World, player: Entity, target: Entity) -> bool {
+    if world.get::<Mob>(target).is_none()
+        || world.get::<Follower>(target).is_none_or(|f| f.0 != player)
+    {
+        return false;
+    }
+    let name = name_of(world, target);
+    if world
+        .get::<mud_world::GroupMember>(target)
+        .is_some_and(|g| g.0 == player)
+    {
+        try_remove::<mud_world::GroupMember>(world, target);
+        send_to(
+            world,
+            player,
+            format!("You remove {name} from the group.\r\n"),
+        );
+    } else if group_root(world, player) != player {
+        send_to(
+            world,
+            player,
+            "You cannot enroll group members without being head of a group.\r\n",
+        );
+        return true;
+    } else {
+        try_insert(world, target, mud_world::GroupMember(player));
+        send_to(world, player, format!("You add {name} to your group.\r\n"));
+    }
+    send_group_state(world, player);
+    true
+}
+
+/// `group <name>` / `invite <name>` aimed at one of the caller's pets.
+fn group_toggle_pet(world: &mut World, player: Entity, name: &str) {
+    let Some(here) = world.get::<Located>(player).map(|l| l.0) else {
+        return;
+    };
+    let target = find_actor_in_room(world, name, here, player);
+    if !target.is_some_and(|t| group_pet_toggle(world, player, t)) {
+        send_to(
+            world,
+            player,
+            "Usage: 'group' (list), 'group <pet>' or 'group dismiss <player>'. \
+             Players join with 'invite'.\r\n",
+        );
+    }
+}
+
 /// `invite <player>`: send a group invite. Recipient gets a
 /// `GroupInvite` component carrying the inviter's entity; their
 /// `accept` will make them a member of the sender's group.
@@ -14809,6 +14860,9 @@ pub(crate) fn cmd_invite(world: &mut World, player: Entity, args: &str) {
     };
     if target == player {
         send_to(world, player, "You can't invite yourself.\r\n");
+        return;
+    }
+    if group_pet_toggle(world, player, target) {
         return;
     }
     if world.get::<Player>(target).is_none() {
@@ -15084,15 +15138,12 @@ pub(crate) fn cmd_group(world: &mut World, player: Entity, args: &str) {
         return;
     }
     if !arg.is_empty() {
-        send_to(
-            world,
-            player,
-            "Usage: 'group' (list) or 'group dismiss <player>'.\r\n",
-        );
+        group_toggle_pet(world, player, arg);
         return;
     }
     let root = group_root(world, player);
-    let members = group_members(world, root);
+    let mut members = group_members(world, root);
+    members.extend(mud_world::group_pets(world, root));
     if members.len() <= 1 {
         send_to(world, player, "You're not in a group.\r\n");
         return;
@@ -15333,6 +15384,9 @@ pub(crate) fn cmd_disband(world: &mut World, player: Entity, _args: &str) {
             .map(|(e, _, _)| e)
             .collect()
     };
+    for pet in mud_world::group_pets(world, player) {
+        try_remove::<mud_world::GroupMember>(world, pet);
+    }
     if to_release.is_empty() {
         send_to(world, player, "Nobody is following you.\r\n");
         return;
