@@ -197,6 +197,14 @@ pub async fn load_content_tables(world: &mut World, pool: &PgPool) -> sqlx::Resu
     )?;
     let mut flag_values = crate::resources::StatusFlagValues::default();
     for r in flag_rows {
+        flag_values.prevents.insert(
+            r.flag.to_ascii_lowercase(),
+            crate::resources::FlagPrevents {
+                movement: r.prevents_movement,
+                casting: r.prevents_casting,
+                speaking: r.prevents_speaking,
+            },
+        );
         flag_values.by_flag.insert(r.flag, r.ai_value);
     }
     info!(rows = flag_values.by_flag.len(), "StatusFlagValue loaded");

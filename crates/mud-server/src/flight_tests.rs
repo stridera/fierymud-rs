@@ -476,6 +476,8 @@ fn old_hardcoded_safefall_id_does_not_count() {
 /// faller in the west one.
 fn yell_fx() -> (World, Entity, Entity, Rx) {
     let mut fx = fx();
+    fx.world
+        .insert_resource(crate::commands::test_support::seeded_status_flag_values());
     let west = room(&mut fx.world, "West", Sector::Field);
     let east = room(&mut fx.world, "East", Sector::Field);
     connect(&mut fx.world, west, Direction::East, east);

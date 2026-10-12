@@ -6978,6 +6978,7 @@ mod tests {
     fn restriction_not_immobilized_detects_stun_and_effects() {
         use mud_world::Stunned;
         let mut world = World::new();
+        world.insert_resource(crate::commands::test_support::seeded_status_flag_values());
         let caster_a = world.spawn(()).id();
         let caster_b = world.spawn(()).id();
         let target = world.spawn(()).id();
@@ -22927,12 +22928,12 @@ pub(crate) enum Prevent {
 
 /// True iff any active `EffectInstance` on `target` was sourced
 /// from an `EffectDef` whose corresponding `prevents_*` flag is
-/// set, OR if any active status flag is in the hard-coded
-/// immobilizing-flag table. The schema only carries `prevents_*`
-/// on the EFFECT TYPE (status/damage/heal/…), not on the per-flag
-/// row (webbed/held/sleeping/…) — so the type-level check alone
-/// misses status-flag immobilizers like WEB. Until per-flag rows
-/// exist, the secondary name table below catches them. G2.4.
+/// set, OR if the active effect's name has a `StatusFlagValue` row
+/// whose `prevents_*` column for `kind` is set. The effect TYPE
+/// (status/damage/heal/…) carries `prevents_*` too, but not the
+/// per-flag identity (webbed/held/sleeping/…), so the type-level
+/// check alone misses status-flag immobilizers like WEB; the
+/// per-flag rows catch them. G2.4.
 pub(crate) fn effect_prevents(world: &mut World, target: Entity, kind: Prevent) -> bool {
     let active: Vec<(i32, String)> = {
         let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
@@ -22957,50 +22958,18 @@ pub(crate) fn effect_prevents(world: &mut World, target: Entity, kind: Prevent) 
     if type_blocks {
         return true;
     }
-    active
-        .iter()
-        .any(|(_, name)| flag_prevents(name.as_str(), kind))
-}
-
-/// Per-flag immobilizing / silencing list. Lives next to
-/// `effect_prevents` so the policy is one place. Once the schema
-/// carries `prevents_*` per status flag (and the importer fills
-/// it), this table is the place to delete.
-fn flag_prevents(flag: &str, kind: Prevent) -> bool {
-    let f = flag.to_ascii_lowercase();
-    match kind {
-        Prevent::Movement => matches!(
-            f.as_str(),
-            "webbed"
-                | "held"
-                | "hold_person"
-                | "paralyzed"
-                | "mesmerized"
-                | "asleep"
-                | "sleeping"
-                | "rooted"
-                | "entangled"
-                | "stunned"
-                | "stun"
-        ),
-        Prevent::Casting => matches!(
-            f.as_str(),
-            "silenced"
-                | "silence"
-                | "stunned"
-                | "stun"
-                | "asleep"
-                | "sleeping"
-                | "paralyzed"
-                | "mesmerized"
-                | "held"
-                | "hold_person"
-        ),
-        Prevent::Speaking => matches!(
-            f.as_str(),
-            "silenced" | "silence" | "stunned" | "stun" | "asleep" | "sleeping"
-        ),
-    }
+    world
+        .get_resource::<mud_world::StatusFlagValues>()
+        .is_some_and(|flags| {
+            active.iter().any(|(_, name)| {
+                let p = flags.prevents(name);
+                match kind {
+                    Prevent::Speaking => p.speaking,
+                    Prevent::Casting => p.casting,
+                    Prevent::Movement => p.movement,
+                }
+            })
+        })
 }
 
 /// Remove the given effect entities from `target` through

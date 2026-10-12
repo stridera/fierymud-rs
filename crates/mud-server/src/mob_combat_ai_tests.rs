@@ -105,6 +105,7 @@ pub(crate) struct Fixture {
 /// on, circle 1 holding `slots` slots for Fireball.
 pub(crate) fn fixture_with(rules: Vec<AiRule>, slots: i32) -> Fixture {
     let mut world = World::new();
+    world.insert_resource(crate::commands::test_support::seeded_status_flag_values());
     world.insert_resource(catalog());
     let mut effects = EffectCatalog::default();
     for (id, t) in [

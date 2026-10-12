@@ -5009,6 +5009,7 @@ mod tests {
     #[test]
     fn paralysed_wimpy_player_hit_below_the_threshold_does_not_move() {
         let mut world = World::new();
+        world.insert_resource(crate::commands::test_support::seeded_status_flag_values());
         let (room_a, _b, player) = wimpy_player_under_attack(&mut world, 30);
         world.spawn((
             mud_world::EffectInstance {
@@ -5074,6 +5075,7 @@ mod tests {
     #[test]
     fn paralysed_player_cannot_use_the_flee_command() {
         let mut world = World::new();
+        world.insert_resource(crate::commands::test_support::seeded_status_flag_values());
         let (room_a, _b, player) = wimpy_player_under_attack(&mut world, 30);
         world.spawn((
             mud_world::EffectInstance {

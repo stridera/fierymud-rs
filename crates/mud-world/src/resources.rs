@@ -263,18 +263,39 @@ pub fn month_name(world: &World, month: i32) -> String {
         .to_string()
 }
 
-/// AI worth of each status flag (`StatusFlagValue` table), the legacy
-/// `value_spell_effect` scores mob AI uses to judge gear. Flags without a row
-/// are worth 0.
+/// Which actions an effect carrying a status flag blocks
+/// (`StatusFlagValue.prevents_*`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FlagPrevents {
+    pub movement: bool,
+    pub casting: bool,
+    pub speaking: bool,
+}
+
+/// Per-flag data from the `StatusFlagValue` table: the legacy
+/// `value_spell_effect` scores mob AI uses to judge gear (flags without a row
+/// are worth 0) and the actions each flag blocks (flags without a row block
+/// nothing).
 #[derive(Resource, Debug, Default)]
 pub struct StatusFlagValues {
     pub by_flag: HashMap<String, i32>,
+    /// Keyed by the lowercased flag name.
+    pub prevents: HashMap<String, FlagPrevents>,
 }
 
 impl StatusFlagValues {
     #[must_use]
     pub fn value(&self, flag: &str) -> i32 {
         self.by_flag.get(flag).copied().unwrap_or(0)
+    }
+
+    /// The actions `flag` blocks (name compared case-insensitively).
+    #[must_use]
+    pub fn prevents(&self, flag: &str) -> FlagPrevents {
+        self.prevents
+            .get(&flag.to_ascii_lowercase())
+            .copied()
+            .unwrap_or_default()
     }
 }
 

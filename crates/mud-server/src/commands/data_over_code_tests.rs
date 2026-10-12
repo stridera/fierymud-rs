@@ -379,3 +379,110 @@ fn stunned_marker_still_immobilizes_without_an_effect_catalog() {
     world.entity_mut(p).insert(Stunned);
     assert!(super::is_immobilized(&mut world, p));
 }
+
+/// The hard-coded `flag_prevents` table this data replaced, kept as the
+/// oracle: the seeded `StatusFlagValue.prevents_*` rows must block exactly
+/// what it did, for every flag spelling it knew and for names it did not.
+fn legacy_flag_prevents(flag: &str, kind: Prevent) -> bool {
+    let f = flag.to_ascii_lowercase();
+    match kind {
+        Prevent::Movement => matches!(
+            f.as_str(),
+            "webbed"
+                | "held"
+                | "hold_person"
+                | "paralyzed"
+                | "mesmerized"
+                | "asleep"
+                | "sleeping"
+                | "rooted"
+                | "entangled"
+                | "stunned"
+                | "stun"
+        ),
+        Prevent::Casting => matches!(
+            f.as_str(),
+            "silenced"
+                | "silence"
+                | "stunned"
+                | "stun"
+                | "asleep"
+                | "sleeping"
+                | "paralyzed"
+                | "mesmerized"
+                | "held"
+                | "hold_person"
+        ),
+        Prevent::Speaking => matches!(
+            f.as_str(),
+            "silenced" | "silence" | "stunned" | "stun" | "asleep" | "sleeping"
+        ),
+    }
+}
+
+#[test]
+fn seeded_status_flag_rows_block_exactly_what_the_old_table_did() {
+    let known = [
+        "webbed",
+        "held",
+        "hold_person",
+        "paralyzed",
+        "mesmerized",
+        "asleep",
+        "sleeping",
+        "rooted",
+        "entangled",
+        "stunned",
+        "stun",
+        "silenced",
+        "silence",
+    ];
+    // Spellings the old table did not know, including flags with an AI value
+    // row and a differently-cased known name (the old lookup lowercased).
+    let others = [
+        "blind",
+        "sleep",
+        "major_paralysis",
+        "sanctuary",
+        "frobnicated",
+        "WEBBED",
+        "Silence",
+        "Hold_Person",
+    ];
+    for kind in [Prevent::Movement, Prevent::Casting, Prevent::Speaking] {
+        for flag in known.iter().chain(others.iter()) {
+            let mut world = World::new();
+            world.insert_resource(super::test_support::seeded_status_flag_values());
+            let (p, _rx) = {
+                let room = world.spawn(Room).id();
+                player_in(&mut world, room)
+            };
+            apply(&mut world, p, 9999, flag);
+            assert_eq!(
+                effect_prevents(&mut world, p, kind),
+                legacy_flag_prevents(flag, kind),
+                "{flag} / {kind:?}"
+            );
+        }
+    }
+    // The 13 seeded flags are exactly the ones the old table named.
+    let seeded = super::test_support::seeded_status_flag_values();
+    let mut names: Vec<&str> = seeded.prevents.keys().map(String::as_str).collect();
+    names.sort_unstable();
+    let mut expected = known.to_vec();
+    expected.sort_unstable();
+    assert_eq!(names, expected);
+}
+
+#[test]
+fn without_status_flag_rows_name_alone_blocks_nothing() {
+    // A database without the prevents data (or a world built without one)
+    // falls back to the effect-type flags only.
+    let mut world = World::new();
+    let room = world.spawn(Room).id();
+    let (p, _rx) = player_in(&mut world, room);
+    apply(&mut world, p, 9999, "webbed");
+    for kind in [Prevent::Movement, Prevent::Casting, Prevent::Speaking] {
+        assert!(!effect_prevents(&mut world, p, kind), "{kind:?}");
+    }
+}

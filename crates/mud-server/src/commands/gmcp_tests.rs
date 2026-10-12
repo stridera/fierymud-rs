@@ -61,6 +61,7 @@ pub(crate) struct Fx {
 
 pub(crate) fn fixture() -> Fx {
     let mut world = World::new();
+    world.insert_resource(crate::commands::test_support::seeded_status_flag_values());
     world.insert_resource(mud_script::LuaHost::default());
     world.insert_resource(WorldKeyIndex::default());
     world.insert_resource(mud_world::WeatherCatalog::default());

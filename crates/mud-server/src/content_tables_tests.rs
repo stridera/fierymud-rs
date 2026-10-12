@@ -9,9 +9,13 @@ use std::time::Duration;
 use bevy_ecs::prelude::World;
 use mud_db::PoolSettings;
 use mud_db::sqlx::PgPool;
-use mud_world::{PromptLetters, ReservedNames, SpellSyllables, StatusFlagValues, SystemMessages};
+use mud_world::{
+    FlagPrevents, PromptLetters, ReservedNames, SpellSyllables, StatusFlagValues, SystemMessages,
+};
 
-use crate::commands::test_support::{db_test_lock, db_test_pool_settings};
+use crate::commands::test_support::{
+    db_test_lock, db_test_pool_settings, seeded_status_flag_values,
+};
 
 fn url() -> String {
     std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://strider@localhost/fierydev".into())
@@ -61,6 +65,21 @@ async fn seeded_rows_reach_their_resources() {
     let flags = world.resource::<StatusFlagValues>();
     assert!(!flags.by_flag.is_empty());
     assert_eq!(flags.value("a_flag_nobody_seeded"), 0);
+    // `2026-10-12-status-flag-prevents.sql` fills the prevents_* columns; a
+    // dev database that has the columns but not the rows yet skips this part.
+    if flags.prevents("webbed").movement {
+        let expected = seeded_status_flag_values();
+        for (flag, want) in &expected.prevents {
+            assert_eq!(flags.prevents(flag), *want, "{flag}");
+        }
+        assert_eq!(flags.prevents("blind"), FlagPrevents::default());
+        assert_eq!(
+            flags.prevents("a_flag_nobody_seeded"),
+            FlagPrevents::default()
+        );
+    } else {
+        eprintln!("skipped prevents check: dev database without the status-flag-prevents patch");
+    }
 
     assert!(!world.resource::<SpellSyllables>().rows.is_empty());
 
@@ -119,6 +138,7 @@ async fn missing_tables_degrade_to_empty_resources() {
         .expect("a missing table must not fail the boot");
 
     assert!(world.resource::<StatusFlagValues>().by_flag.is_empty());
+    assert!(world.resource::<StatusFlagValues>().prevents.is_empty());
     assert!(world.resource::<SpellSyllables>().rows.is_empty());
     assert!(world.resource::<ReservedNames>().names.is_empty());
     assert!(world.resource::<SystemMessages>().by_key.is_empty());

@@ -10,6 +10,41 @@ use crate::commands::Connection;
 
 pub(crate) type Rx = tokio::sync::mpsc::Receiver<Vec<u8>>;
 
+/// The `StatusFlagValue.prevents_*` rows as seeded by
+/// `fierylib/data/sql/2026-10-12-status-flag-prevents.sql` (13 flags): what
+/// `effect_prevents` reads for status-flag immobilizers and silencers. Test
+/// worlds without a database install this to get the production behaviour.
+pub(crate) fn seeded_status_flag_values() -> mud_world::StatusFlagValues {
+    // (flag, movement, casting, speaking)
+    const ROWS: [(&str, bool, bool, bool); 13] = [
+        ("asleep", true, true, true),
+        ("entangled", true, false, false),
+        ("held", true, true, false),
+        ("hold_person", true, true, false),
+        ("mesmerized", true, true, false),
+        ("paralyzed", true, true, false),
+        ("rooted", true, false, false),
+        ("silence", false, true, true),
+        ("silenced", false, true, true),
+        ("sleeping", true, true, true),
+        ("stun", true, true, true),
+        ("stunned", true, true, true),
+        ("webbed", true, false, false),
+    ];
+    let mut values = mud_world::StatusFlagValues::default();
+    for (flag, movement, casting, speaking) in ROWS {
+        values.prevents.insert(
+            flag.to_string(),
+            mud_world::FlagPrevents {
+                movement,
+                casting,
+                speaking,
+            },
+        );
+    }
+    values
+}
+
 /// Process-wide gate for every unit test that talks to the live dev
 /// database. The tests share one Postgres (also hit by sibling copies of
 /// the suite), and a burst of parallel tests, each with its own pool, used
