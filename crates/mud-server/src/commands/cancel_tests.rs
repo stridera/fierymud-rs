@@ -425,7 +425,35 @@ fn a_god_may_cancel_a_harmful_permanent_effect_in_combat_but_not_an_innate() {
 }
 
 fn wall(world: &mut World, room: Entity, dir: mud_db::enums::Direction) -> Entity {
-    use mud_world::{RoomBlockedExit, RoomBlockedExits, WallTraversal};
+    wall_with(world, room, dir, None, 100, mud_world::WallTraversal::Block)
+}
+
+/// A wall raised by `caster` (recorded the way the cast site does).
+fn wall_by(
+    world: &mut World,
+    room: Entity,
+    dir: mud_db::enums::Direction,
+    caster: Entity,
+) -> Entity {
+    wall_with(
+        world,
+        room,
+        dir,
+        Some(caster),
+        100,
+        mud_world::WallTraversal::Block,
+    )
+}
+
+fn wall_with(
+    world: &mut World,
+    room: Entity,
+    dir: mud_db::enums::Direction,
+    caster: Option<Entity>,
+    hp: i32,
+    traversal: mud_world::WallTraversal,
+) -> Entity {
+    use mud_world::{RoomBlockedExit, RoomBlockedExits};
     let e = spawn_effect(
         world,
         room,
@@ -438,9 +466,16 @@ fn wall(world: &mut World, room: Entity, dir: mud_db::enums::Direction) -> Entit
     let entry = RoomBlockedExit {
         kind_label: "wall of stone".into(),
         backed_by: e,
-        hp: 100,
-        traversal: WallTraversal::Block,
+        hp,
+        traversal,
     };
+    if let Some(c) = caster {
+        let character_id = world.get::<Account>(c).map(|a| a.character_id.clone());
+        world.entity_mut(e).insert(mud_world::WallCaster {
+            entity: c,
+            character_id,
+        });
+    }
     if let Some(mut b) = world.get_mut::<RoomBlockedExits>(room) {
         b.by_direction.insert(dir, entry);
     } else {
@@ -461,8 +496,8 @@ fn blocked(world: &World, room: Entity, dir: mud_db::enums::Direction) -> bool {
 fn cancelling_one_of_two_walls_frees_only_that_exit() {
     use mud_db::enums::Direction::{East, North};
     let (mut world, room, p, mut rx) = setup();
-    let n = wall(&mut world, room, North);
-    let e = wall(&mut world, room, East);
+    let n = wall_by(&mut world, room, North, p);
+    let e = wall_by(&mut world, room, East, p);
     dispatch(&mut world, p, "cancel wall");
     let _ = drain(&mut rx);
     let gone = [n, e].into_iter().filter(|w| !alive(&world, *w)).count();
@@ -490,4 +525,153 @@ fn any_removal_path_frees_a_walls_exit() {
     crate::effects::remove_effect_instance(&mut world, room, n);
     assert!(!alive(&world, n));
     assert!(!blocked(&world, room, North));
+}
+
+/// A second mortal in the same room as `p`, with their own character id.
+fn bystander(world: &mut World, room: Entity) -> (Entity, Rx) {
+    let (other, rx) = player_in(world, room);
+    world.entity_mut(other).insert((
+        Account {
+            user_id: "u2".into(),
+            character_id: "c2".into(),
+            role: UserRole::Player,
+            account_role: UserRole::Player,
+            perms: vec![],
+        },
+        Health { hp: 100, max: 100 },
+    ));
+    (other, rx)
+}
+
+#[test]
+fn the_caster_can_cancel_their_own_wall() {
+    use mud_db::enums::Direction::North;
+    let (mut world, room, p, mut rx) = setup();
+    let n = wall_by(&mut world, room, North, p);
+    dispatch(&mut world, p, "cancel wall");
+    assert!(drain(&mut rx).contains("You cancel"));
+    assert!(!alive(&world, n));
+    assert!(!blocked(&world, room, North));
+}
+
+#[test]
+fn the_caster_is_matched_by_character_id_across_a_relog() {
+    use mud_db::enums::Direction::North;
+    let (mut world, room, p, _rx) = setup();
+    let n = wall_by(&mut world, room, North, p);
+    // Same character, fresh entity (relog); the old entity is gone.
+    world.despawn(p);
+    let (again, mut rx2) = bystander(&mut world, room);
+    world.get_mut::<Account>(again).unwrap().character_id = "c".into();
+    dispatch(&mut world, again, "cancel wall");
+    assert!(drain(&mut rx2).contains("You cancel"));
+    assert!(!alive(&world, n));
+}
+
+#[test]
+fn another_mortal_cannot_cancel_the_wall() {
+    use mud_db::enums::Direction::North;
+    let (mut world, room, p, _rx) = setup();
+    let n = wall_by(&mut world, room, North, p);
+    let (other, mut orx) = bystander(&mut world, room);
+    dispatch(&mut world, other, "cancel wall");
+    assert!(drain(&mut orx).contains("That wall isn't yours to dispel."));
+    assert!(alive(&world, n));
+    assert!(blocked(&world, room, North), "exit stays blocked");
+    // It does not even list for them.
+    dispatch(&mut world, other, "cancel");
+    assert!(drain(&mut orx).contains("no effects you can cancel"));
+}
+
+#[test]
+fn a_wall_with_no_recorded_caster_is_not_a_mortals_to_cancel() {
+    use mud_db::enums::Direction::North;
+    let (mut world, room, p, mut rx) = setup();
+    let n = wall(&mut world, room, North);
+    dispatch(&mut world, p, "cancel wall");
+    assert!(drain(&mut rx).contains("isn't yours"));
+    assert!(alive(&world, n));
+}
+
+#[test]
+fn a_god_can_cancel_any_wall() {
+    use mud_db::enums::Direction::North;
+    let (mut world, room, p, _rx) = setup();
+    let n = wall_by(&mut world, room, North, p);
+    let (god, mut grx) = bystander(&mut world, room);
+    world.get_mut::<Account>(god).unwrap().role = UserRole::Immortal;
+    world.get_mut::<Account>(god).unwrap().account_role = UserRole::Immortal;
+    dispatch(&mut world, god, "cancel wall");
+    let out = drain(&mut grx);
+    assert!(out.contains("You cancel"), "{out}");
+    assert!(!alive(&world, n));
+    assert!(world.get::<mud_world::RoomBlockedExits>(room).is_none());
+}
+
+/// Two rooms joined by a north exit, `p` in the first with a stamina pool.
+fn walled_pair() -> (World, Entity, Entity, Entity, Rx) {
+    use mud_db::enums::ExitState;
+    use mud_world::{ExitData, Exits, Stamina};
+    let (mut world, a, p, rx) = setup();
+    let b = world.spawn((Room, Exits::default())).id();
+    let open = |to| ExitData {
+        to: Some(to),
+        state: ExitState::Open,
+        key: None,
+        description: None,
+        keywords: Vec::new(),
+        is_hidden: false,
+        is_pickproof: false,
+        is_bashable: false,
+        hit_points: None,
+    };
+    world
+        .entity_mut(a)
+        .insert(Exits([(mud_db::enums::Direction::North, open(b))].into()));
+    world.entity_mut(p).insert(Stamina {
+        current: 500,
+        max: 500,
+    });
+    (world, a, b, p, rx)
+}
+
+#[test]
+fn bashing_a_wall_down_frees_its_exit_and_leaves_no_dangling_entity() {
+    use mud_db::enums::Direction::North;
+    let (mut world, a, _b, p, mut rx) = walled_pair();
+    let w = wall_with(
+        &mut world,
+        a,
+        North,
+        Some(p),
+        1,
+        mud_world::WallTraversal::Block,
+    );
+    dispatch(&mut world, p, "doorbash north");
+    let out = drain(&mut rx);
+    assert_eq!(out.matches("final shattering blow").count(), 1, "{out}");
+    assert!(!alive(&world, w));
+    assert!(!blocked(&world, a, North));
+    assert!(world.get::<mud_world::RoomBlockedExits>(a).is_none());
+}
+
+#[test]
+fn walking_through_an_illusory_wall_frees_its_exit_and_leaves_no_dangling_entity() {
+    use mud_db::enums::Direction::North;
+    let (mut world, a, b, p, mut rx) = walled_pair();
+    world.init_resource::<mud_world::RaceCatalog>();
+    let w = wall_with(
+        &mut world,
+        a,
+        North,
+        Some(p),
+        0,
+        mud_world::WallTraversal::Passable,
+    );
+    dispatch(&mut world, p, "north");
+    let out = drain(&mut rx);
+    assert_eq!(out.matches("ripples and dissolves").count(), 1, "{out}");
+    assert!(!alive(&world, w));
+    assert!(world.get::<mud_world::RoomBlockedExits>(a).is_none());
+    assert_eq!(world.get::<Located>(p).unwrap().0, b, "{out}");
 }

@@ -825,16 +825,11 @@ pub(crate) fn cmd_doorbash(world: &mut World, player: Entity, args: &str) {
         let dir_label = direction_name(dir);
         let kind = wall.kind_label.clone();
         if new_hp <= 0 {
-            // Crumble — despawn the backing instance, drop the
-            // map entry, broadcast the crash. The teardown path
-            // in effects.rs is keyed off the EffectInstance's
-            // expiry; we beat it to the punch here.
-            if let Ok(em) = world.get_entity_mut(wall.backed_by) {
-                em.despawn();
-            }
-            if let Some(mut b) = world.get_mut::<mud_world::RoomBlockedExits>(room) {
-                b.by_direction.remove(&dir);
-            }
+            // Crumble: end the backing instance through the shared
+            // removal path (OnRemove hooks, blocked-exit release), then
+            // broadcast the crash. No wear-off text; these lines are the
+            // only message.
+            crate::effects::remove_effect_instance(world, room, wall.backed_by);
             send_to(
                 world,
                 player,

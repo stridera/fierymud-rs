@@ -2207,6 +2207,16 @@ pub struct RoomBlockedExit {
     pub traversal: WallTraversal,
 }
 
+/// Who raised a magical wall, kept on its backing `EffectInstance`. `cancel`
+/// lets only this caster drop the wall. The persistent `character_id` is the
+/// identity for a player (their entity changes across relogs); `entity`
+/// covers a caster with no account (a mob).
+#[derive(Component, Debug, Clone)]
+pub struct WallCaster {
+    pub entity: bevy_ecs::entity::Entity,
+    pub character_id: Option<String>,
+}
+
 /// Per-wall traversal semantics. See `RoomBlockedExit::traversal`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WallTraversal {

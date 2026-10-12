@@ -350,6 +350,8 @@ enum CancelStatus {
     /// No source ability to vouch that it is beneficial (bleed, fear's
     /// stun, rest's Refreshed, admin effects).
     NotASpell,
+    /// A wall someone else raised.
+    NotYours,
 }
 
 /// One effect `cancel` considers: its listing label and the names it
@@ -465,20 +467,25 @@ pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
         .collect();
     let harmful: std::collections::HashMap<i32, bool> =
         abilities.iter().map(|(id, (_, h))| (*id, *h)).collect();
-    // Also pull effects in the player's current room when the name
-    // starts with "wall-" — that's the caster (or any room
-    // occupant) cleaning up a barrier they no longer want. Other
-    // room-applied effects (magical darkness, room burning) are
-    // intentionally excluded: those are environmental hazards
-    // whose caster expected them to last, and a random passerby
-    // cancelling them would surprise the original caster. Walls
-    // are scoped narrowly enough that "anyone in the room can
-    // drop one" matches the immediate, blocking-the-only-path UX.
+    // Also pull walls ("wall-*" effects) in the player's current room: the
+    // caster cleaning up a barrier they no longer want. Only the caster
+    // (matched by persistent character id, else by entity) or a god may
+    // drop one; anyone else must bash through it, which spends the wall's
+    // HP. Other room-applied effects (magical darkness, room burning) are
+    // excluded: they are environmental hazards.
+    let my_character_id = world
+        .get::<mud_world::Account>(player)
+        .map(|a| a.character_id.clone());
     let player_room = world.get::<mud_world::Located>(player).map(|l| l.0);
     let rows: Vec<CancelRow> = {
-        let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
+        let mut q = world.query::<(
+            Entity,
+            &EffectInstance,
+            &AppliedTo,
+            Option<&mud_world::WallCaster>,
+        )>();
         let mut rows = Vec::new();
-        for (e, inst, a) in q.iter(world) {
+        for (e, inst, a, caster) in q.iter(world) {
             let is_wall = a.0 != player
                 && player_room.is_some_and(|r| a.0 == r)
                 && inst.name.starts_with("wall-");
@@ -486,7 +493,13 @@ pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
                 continue;
             }
             let status = if is_wall {
-                if inst.remaining_secs < 0 {
+                let is_caster = caster.is_some_and(|c| match (&c.character_id, &my_character_id) {
+                    (Some(theirs), Some(mine)) => theirs == mine,
+                    _ => c.entity == player,
+                });
+                if !god && !is_caster {
+                    CancelStatus::NotYours
+                } else if inst.remaining_secs < 0 {
                     CancelStatus::Permanent
                 } else {
                     CancelStatus::Ok
@@ -547,6 +560,9 @@ pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
             .filter(|r| r.status != CancelStatus::Ok)
             .collect();
         let msg = match pick_cancel_row(&needle, &others) {
+            Some(r) if r.status == CancelStatus::NotYours => {
+                "That wall isn't yours to dispel.\r\n".to_string()
+            }
             Some(r) => {
                 let why = match r.status {
                     CancelStatus::Permanent => "it is permanent",

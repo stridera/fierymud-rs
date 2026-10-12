@@ -48,9 +48,9 @@ pub use components::{
     SizeShift, Sized, SkillPoints, Slot, SlotHold, SlotReservation, Sneaking, SnoopedBy, Snooping,
     SoundproofRoom, SpellCooldown, SpellResistanceDelta, SpellSlots, Stamina, StatOverflow,
     Stealth, Stunned, SwitchedFrom, SwitchedInto, SyslogMinLevel, TellLog, Thirst, TimePlayed,
-    Title, Trophy, TrophyEntry, TrophyKind, UiStyle, UnarmedDamage, WallTraversal, WatchingSyslog,
-    WaterWalk, Wealth, WeaponHitroll, WearableIn, WimpyThreshold, WizInvis, WorldKey, Zone,
-    ZoneClimate, ZoneDoorReset, ZoneVisits, group_members, group_pets, group_root,
+    Title, Trophy, TrophyEntry, TrophyKind, UiStyle, UnarmedDamage, WallCaster, WallTraversal,
+    WatchingSyslog, WaterWalk, Wealth, WeaponHitroll, WearableIn, WimpyThreshold, WizInvis,
+    WorldKey, Zone, ZoneClimate, ZoneDoorReset, ZoneVisits, group_members, group_pets, group_root,
     innate_cooldown_key, is_lit, mob_sleeps_at_night, room_in_god_zone, wear_keyword_slot,
     zone_grants_exploration, zone_is_god, zone_is_internal,
 };

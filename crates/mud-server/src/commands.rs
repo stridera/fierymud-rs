@@ -15479,12 +15479,20 @@ struct WallSpec<'a> {
     dur_secs: i32,
     hp: i32,
     traversal: mud_world::WallTraversal,
+    /// Who raised it; only they (or a god) may `cancel` it.
+    caster: Entity,
 }
 
 /// Raise one wall in `room` across `dir`: a duration-tracked backing
 /// `EffectInstance` plus the `RoomBlockedExits` entry. A second wall on the
 /// same direction replaces the older one, so teardown never has to guess.
 fn install_magical_wall(world: &mut World, room: Entity, dir: Direction, wall: &WallSpec<'_>) {
+    let caster = mud_world::WallCaster {
+        entity: wall.caster,
+        character_id: world
+            .get::<mud_world::Account>(wall.caster)
+            .map(|a| a.character_id.clone()),
+    };
     let eff_entity = world
         .spawn((
             EffectInstance {
@@ -15496,6 +15504,7 @@ fn install_magical_wall(world: &mut World, room: Entity, dir: Direction, wall: &
                 ability_id: Some(wall.ability_id),
             },
             AppliedTo(room),
+            caster,
         ))
         .id();
     let mut blocked = world
@@ -19964,6 +19973,7 @@ pub(crate) fn invoke_ability_core(
                             dur_secs,
                             hp: wall_hp,
                             traversal,
+                            caster: player,
                         },
                     );
                     let far_side = world
@@ -19992,6 +20002,7 @@ pub(crate) fn invoke_ability_core(
                                 dur_secs,
                                 hp: wall_hp,
                                 traversal,
+                                caster: player,
                             },
                         );
                     }
@@ -26054,16 +26065,12 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
                 // Fall through to normal movement.
             }
             mud_world::WallTraversal::Passable => {
-                // Illusory: silent pass, dispel the wall in place.
-                // Despawn the backing instance and remove the entry
-                // so subsequent traversals (and the look line) read
-                // clean immediately.
-                if let Ok(em) = world.get_entity_mut(block.backed_by) {
-                    em.despawn();
-                }
-                if let Some(mut b) = world.get_mut::<mud_world::RoomBlockedExits>(from_room) {
-                    b.by_direction.remove(&dir);
-                }
+                // Illusory: silent pass, dispel the wall in place through
+                // the shared removal path (OnRemove hooks, blocked-exit
+                // release) so subsequent traversals and the look line read
+                // clean immediately. No wear-off text: the lines below
+                // are the only message.
+                crate::effects::remove_effect_instance(world, from_room, block.backed_by);
                 send_to(
                     world,
                     player,
