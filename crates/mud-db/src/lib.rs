@@ -66,6 +66,7 @@ pub mod script_errors;
 pub mod shops;
 pub mod socials;
 pub mod spell_slots;
+pub mod sphere_styles;
 pub mod starting_kit;
 pub mod system_text;
 pub mod tell_messages;

@@ -2,6 +2,7 @@ pub mod class_skills;
 pub mod components;
 pub mod god;
 pub mod item_spawn;
+pub mod liquid_legacy;
 pub mod loader;
 pub mod mob_ai_rules;
 pub mod mob_effects;
@@ -9,12 +10,15 @@ pub mod mob_spawn;
 pub mod movement;
 pub mod reset_gear;
 pub mod resources;
+pub mod sphere_style;
 pub mod stat_roll;
 pub mod targeting;
 pub mod wake_effects;
 
 pub use class_skills::{STARTING_SKILL_PROFICIENCY, grant_class_skills};
 pub use god::{GOD_PROFICIENCY, bypasses_restrictions, known_abilities_of, proficiency_of};
+pub use liquid_legacy::{BUILTIN_CODES as LEGACY_LIQUID_CODES, LegacyLiquidRow, LiquidLegacyIndex};
+pub use sphere_style::SphereStyles;
 pub use stat_roll::{STAT_SCALE_MAX, roll_starting_stats};
 pub use wake_effects::{RoomWakeRow, WakeEffectCatalog, WakeRow, load_wake_effect_catalog};
 

@@ -32,6 +32,12 @@ pub struct LiquidRow {
     /// Optional flavor text rendered on examine of an identified
     /// container.
     pub description: Option<String>,
+    /// Position in the `CircleMUD` liquid table (Lua `val2` of a drink
+    /// container). `None` for liquids added in Muditor, or when the
+    /// column predates `2026-10-12-liquid-index.sql`.
+    pub legacy_index: Option<i32>,
+    /// Object-value label ("WHISKY", "DARKALE") drink containers carry.
+    pub legacy_code: Option<String>,
 }
 
 /// Load every Liquid row, ordered by id (stable for tests / display).
@@ -39,7 +45,26 @@ pub async fn list_all(pool: &PgPool) -> sqlx::Result<Vec<LiquidRow>> {
     sqlx::query_as!(
         LiquidRow,
         r#"
-        SELECT id, name, alias, color_desc, drunk_effect, hunger_effect, thirst_effect, description
+        SELECT id, name, alias, color_desc, drunk_effect, hunger_effect, thirst_effect, description,
+               legacy_index, legacy_code
+        FROM "Liquids"
+        ORDER BY id
+        "#
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// [`list_all`] for a database that predates `"Liquids".legacy_index` /
+/// `legacy_code` (`fierylib/data/sql/2026-10-12-liquid-index.sql`): both come
+/// back `None`, so scripts see the built-in legacy liquid order. Only the
+/// loader's missing-column fallback should call this.
+pub async fn list_all_without_legacy(pool: &PgPool) -> sqlx::Result<Vec<LiquidRow>> {
+    sqlx::query_as!(
+        LiquidRow,
+        r#"
+        SELECT id, name, alias, color_desc, drunk_effect, hunger_effect, thirst_effect, description,
+               NULL::int AS "legacy_index?", NULL::text AS "legacy_code?"
         FROM "Liquids"
         ORDER BY id
         "#

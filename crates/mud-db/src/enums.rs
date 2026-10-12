@@ -1406,6 +1406,63 @@ pub enum DamageType {
 }
 
 impl DamageType {
+    /// Every variant in schema (declaration) order.
+    pub const ALL: [Self; 25] = [
+        Self::Hit,
+        Self::Sting,
+        Self::Whip,
+        Self::Slash,
+        Self::Bite,
+        Self::Bludgeon,
+        Self::Crush,
+        Self::Pound,
+        Self::Claw,
+        Self::Maul,
+        Self::Thrash,
+        Self::Pierce,
+        Self::Blast,
+        Self::Punch,
+        Self::Stab,
+        Self::Fire,
+        Self::Cold,
+        Self::Acid,
+        Self::Shock,
+        Self::Poison,
+        Self::Align,
+        Self::Mental,
+        Self::Rot,
+        Self::Energy,
+        Self::Water,
+    ];
+
+    /// How many leading variants are legacy `CircleMUD` damage types
+    /// (`Hit` .. `Align`). Variants added after the import keep schema order
+    /// but have no legacy index.
+    pub const LEGACY_COUNT: usize = 21;
+
+    /// Position in the `CircleMUD` damage-type table (weapon `val3` for Lua),
+    /// derived from the declaration order; `None` for the post-legacy
+    /// variants (`Mental`, `Rot`, `Energy`, `Water`).
+    #[must_use]
+    pub fn legacy_index(self) -> Option<usize> {
+        Self::ALL
+            .iter()
+            .position(|d| *d == self)
+            .filter(|i| *i < Self::LEGACY_COUNT)
+    }
+
+    /// Legacy index of the damage type whose [`label`](Self::label) matches
+    /// `label` (case-insensitive, trimmed); 0 when unknown or not legacy.
+    #[must_use]
+    pub fn legacy_index_of_label(label: &str) -> usize {
+        let label = label.trim();
+        Self::ALL
+            .iter()
+            .find(|d| d.label().eq_ignore_ascii_case(label))
+            .and_then(|d| d.legacy_index())
+            .unwrap_or(0)
+    }
+
     /// Third-person singular verb for the natural-attack swing line.
     /// Used by `attack_message` to render "The bear MAULS you."
     /// without each consumer hard-coding the inflection.
@@ -1635,5 +1692,40 @@ mod rank_tests {
     fn mortal_cap_matches_staff_threshold() {
         assert_eq!(UserRole::from_level(MAX_MORTAL_LEVEL), UserRole::Player);
         assert_eq!(UserRole::from_level(MIN_STAFF_LEVEL), UserRole::Immortal);
+    }
+}
+
+#[cfg(test)]
+mod damage_type_order_tests {
+    use super::DamageType;
+
+    /// The legacy weapon-damage table Lua `val3` used to index (was a literal
+    /// array in `mud-script`).
+    const LEGACY_LABELS: [&str; 21] = [
+        "HIT", "STING", "WHIP", "SLASH", "BITE", "BLUDGEON", "CRUSH", "POUND", "CLAW", "MAUL",
+        "THRASH", "PIERCE", "BLAST", "PUNCH", "STAB", "FIRE", "COLD", "ACID", "SHOCK", "POISON",
+        "ALIGN",
+    ];
+
+    #[test]
+    fn all_is_declaration_order() {
+        for (i, d) in DamageType::ALL.iter().enumerate() {
+            assert_eq!(*d as usize, i, "{d:?} out of order in DamageType::ALL");
+        }
+    }
+
+    #[test]
+    fn legacy_indices_match_the_old_literal_table() {
+        assert_eq!(DamageType::LEGACY_COUNT, LEGACY_LABELS.len());
+        for (i, name) in LEGACY_LABELS.iter().enumerate() {
+            assert_eq!(DamageType::legacy_index_of_label(name), i, "{name}");
+            assert_eq!(DamageType::ALL[i].legacy_index(), Some(i));
+        }
+        // Post-legacy variants and unknown labels read as 0, as before.
+        for d in &DamageType::ALL[DamageType::LEGACY_COUNT..] {
+            assert_eq!(d.legacy_index(), None);
+            assert_eq!(DamageType::legacy_index_of_label(d.label()), 0);
+        }
+        assert_eq!(DamageType::legacy_index_of_label("nonsense"), 0);
     }
 }

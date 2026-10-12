@@ -6,8 +6,8 @@ use mud_db::{
     ability_restrictions, ability_saving_throw, ability_targeting, achievements, boards, classes,
     content_tables, discord_config, effects, game_config, help, levels, liquids, login_message,
     mob_ai, mob_reset_equipment, mob_resets, mobs, object_abilities, object_reset_contents,
-    object_resets, objects, races, room_exits, rooms, shops, socials, spell_slots, sqlx::PgPool,
-    system_text, triggers, zones,
+    object_resets, objects, races, room_exits, rooms, shops, socials, spell_slots, sphere_styles,
+    sqlx::PgPool, system_text, triggers, zones,
 };
 use tracing::{error, info, warn};
 
@@ -172,6 +172,45 @@ async fn load_class_rows(pool: &PgPool) -> sqlx::Result<Vec<classes::ClassRow>> 
             "apply fierylib/data/sql/2026-10-09-campcraft.sql (and deploy the muditor schema)",
         )
     })
+}
+
+/// `Liquids` rows. `legacy_index` / `legacy_code` come from the muditor schema plus
+/// `2026-10-12-liquid-index.sql`; when they are missing (42703) retry without them
+/// (scripts then number the legacy liquids from the built-in table) and log an ERROR,
+/// rather than aborting the whole world load.
+async fn load_liquid_rows(pool: &PgPool) -> sqlx::Result<Vec<liquids::LiquidRow>> {
+    let res = liquids::list_all(pool).await;
+    if res.as_ref().err().is_some_and(is_missing_column) {
+        let rows = liquids::list_all_without_legacy(pool).await?;
+        error!(
+            "columns \"Liquids\".\"legacy_index\" / \"legacy_code\" are missing; Lua val2 of a \
+             drink container uses the built-in legacy liquid order and liquids added in \
+             Muditor get no stable number until the muditor schema is pushed (prisma db push) \
+             and fierylib/data/sql/2026-10-12-liquid-index.sql is applied"
+        );
+        return Ok(rows);
+    }
+    res
+}
+
+/// `SphereStyle` colours, published for the ability listings and tag aliases. A database
+/// without the table (42P01) yields the built-in palette and an ERROR log; rows with a
+/// NULL colour keep the built-in colour for that sphere.
+async fn load_sphere_styles(pool: &PgPool) -> sqlx::Result<crate::sphere_style::SphereStyles> {
+    match sphere_styles::list_all(pool).await {
+        Ok(rows) => Ok(crate::sphere_style::SphereStyles::from_rows(
+            rows.into_iter().map(|r| (r.sphere, r.color)),
+        )),
+        Err(e) if is_missing_schema(&e) => {
+            error!(
+                "table \"SphereStyle\" is missing; ability listings use the built-in sphere \
+                 palette until the muditor schema is pushed (prisma db push) and \
+                 fierylib/data/sql/2026-10-12-sphere-colors.sql is applied"
+            );
+            Ok(crate::sphere_style::SphereStyles::default())
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Build the `StatusFlagValues` resource. Returns `(kept, dropped)` flag-name
@@ -1225,7 +1264,18 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     // expect to find them through `LiquidIndex.by_name`.
     let mut liquid_index = LiquidIndex::default();
     let mut liquid_catalog = LiquidCatalog::default();
-    let liquid_rows = liquids::list_all(pool).await?;
+    let liquid_rows = load_liquid_rows(pool).await?;
+    let legacy_liquid_rows: Vec<crate::liquid_legacy::LegacyLiquidRow> = liquid_rows
+        .iter()
+        .map(|r| crate::liquid_legacy::LegacyLiquidRow {
+            id: r.id,
+            alias: r.alias.clone(),
+            name: r.name.clone(),
+            legacy_index: r.legacy_index,
+            legacy_code: r.legacy_code.clone(),
+        })
+        .collect();
+    let liquid_legacy = crate::liquid_legacy::LiquidLegacyIndex::from_rows(&legacy_liquid_rows);
     for row in liquid_rows {
         let name_lc = row.name.to_ascii_lowercase();
         let alias_lc = row.alias.to_ascii_lowercase();
@@ -1244,7 +1294,18 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
             description: row.description,
         });
     }
-    info!(liquids = liquid_catalog.len(), "liquid catalog loaded");
+    info!(
+        liquids = liquid_catalog.len(),
+        legacy_indexed = liquid_legacy.len(),
+        "liquid catalog loaded"
+    );
+
+    let sphere_styles = load_sphere_styles(pool).await?;
+    info!(
+        spheres = sphere_styles.len(),
+        "sphere colours loaded (built-in palette fills the rest)"
+    );
+    crate::sphere_style::install(sphere_styles);
 
     // RoomEnvironmentalEffect: per-room link to Effect rows. The
     // runtime applies these on arrival (short duration so leaving
@@ -1365,6 +1426,7 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
     world.insert_resource(crate::wake_effects::load_wake_effect_catalog(pool).await?);
     world.insert_resource(liquid_index);
     world.insert_resource(liquid_catalog);
+    world.insert_resource(liquid_legacy);
     world.insert_resource(room_env_effects);
     world.insert_resource(shop_catalog);
 

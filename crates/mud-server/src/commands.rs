@@ -3406,6 +3406,13 @@ pub(crate) fn is_tag_shaped(tag: &str) -> bool {
 }
 
 fn is_known_tag_part(p: &str) -> bool {
+    tag_part_known(p, named_color)
+}
+
+/// [`is_known_tag_part`] with the color-word table injected. Sphere colours
+/// validate against [`basic_color`] so two spheres can't be defined in terms
+/// of each other.
+fn tag_part_known(p: &str, color: fn(&str) -> Option<u8>) -> bool {
     if matches!(
         p,
         "b" | "u" | "i" | "s" | "d" | "dim" | "blink" | "reverse" | "hide"
@@ -3413,7 +3420,7 @@ fn is_known_tag_part(p: &str) -> bool {
         return true;
     }
     if let Some(rest) = p.strip_prefix("bg-") {
-        return named_color(rest).is_some();
+        return color(rest).is_some();
     }
     if let Some(rest) = p.strip_prefix("bg#") {
         return rest.len() == 6 && rest.bytes().all(|b| b.is_ascii_hexdigit());
@@ -3424,7 +3431,7 @@ fn is_known_tag_part(p: &str) -> bool {
     // `bgcN` and `cN` are 256-color forms — accept them only when
     // the suffix actually parses as a 0..=255 index. Otherwise fall
     // through so a named color starting with `bgc` / `c` (today the
-    // critical one is `cyan`) still resolves via the named_color
+    // critical one is `cyan`) still resolves via the color
     // table at the end. A previous regression had this branch
     // returning `false` whenever the suffix wasn't numeric, which
     // ate every `<cyan>` / `<bgcyan>` tag and left them as literal
@@ -3439,7 +3446,7 @@ fn is_known_tag_part(p: &str) -> bool {
     {
         return true;
     }
-    named_color(p).is_some()
+    color(p).is_some()
 }
 
 /// Parse an xterm 256-color index. Accepts `0`-`255` decimal; returns
@@ -3560,6 +3567,32 @@ pub(crate) fn apply_modifier(layer: &mut StyleLayer, m: &str) {
 /// bright yellow) follow the `FieryMUD` `XMLLite` docs.
 #[allow(clippy::match_same_arms)] // semantic aliases stay separate from base colors
 pub(crate) fn named_color(s: &str) -> Option<u8> {
+    if let Some(c) = basic_color(s) {
+        return Some(c);
+    }
+    Some(match s {
+        // Semantic aliases — content authors write `<healing>...</>`
+        // in ability / object descriptions and expect a flavor
+        // color. The sphere words (`fire`, `healing`, `death`, ...) read
+        // the same `SphereStyle` colours `sphere_color_tag` uses for the
+        // `spells` / `skills` listings, so the in-game palette stays
+        // consistent and builders edit it in one place. `named_color`
+        // returns one ANSI code, so a bold sphere colour is its bright
+        // variant (`b:cyan` -> 96), except black and white, which keep
+        // their base code (the long-standing `<death>` / `<protection>`
+        // mapping). Authors who want true bold should use `<b:NAME>`.
+        "divine" => 93,
+        "holy" => 97,   // bright white
+        "unholy" => 90, // bright black
+        "arcane" => 35,
+        _ => return sphere_ansi(s),
+    })
+}
+
+/// The eight base colors plus `orange`: the vocabulary a sphere colour is
+/// written in. No semantic aliases, so a sphere colour can never recurse.
+#[allow(clippy::match_same_arms)] // semantic aliases stay separate from base colors
+fn basic_color(s: &str) -> Option<u8> {
     Some(match s {
         "black" => 30,
         "red" => 31,
@@ -3571,30 +3604,36 @@ pub(crate) fn named_color(s: &str) -> Option<u8> {
         "white" => 37,
         // Bright variants
         "orange" => 93,
-        // Semantic aliases — content authors write `<healing>...</>`
-        // in ability / object descriptions and expect a flavor
-        // color. Map to the same base colors `sphere_color_tag`
-        // uses for the `spells` / `skills` listings so the in-game
-        // palette stays consistent. Bold variants
-        // (`<b:black>death</>`) aren't expressible through
-        // `named_color` since it returns one ANSI code; authors who
-        // want bold should use the explicit `<b:NAME>` form.
-        "healing" => 32,
-        "death" => 30,
-        "protection" => 37,
-        "enchantment" => 35,
-        "summoning" => 95,  // bright magenta
-        "divination" => 93, // bright yellow
-        "divine" => 93,
-        "holy" => 97,   // bright white
-        "unholy" => 90, // bright black
-        "arcane" => 35,
-        "fire" => 31,
-        "water" => 36,
-        "air" => 96, // bright cyan
-        "earth" => 33,
         _ => return None,
     })
+}
+
+/// ANSI code for a sphere word used as a color tag (`<fire>`), derived from
+/// its sphere colour. `None` for words that aren't a sphere with a colour
+/// (`generic`, anything unknown).
+fn sphere_ansi(sphere: &str) -> Option<u8> {
+    let from_tag = |tag: &str| {
+        let mut bold = false;
+        let mut base = None;
+        for part in tag.split(':') {
+            if part == "b" {
+                bold = true;
+            } else {
+                base = basic_color(part);
+            }
+        }
+        let base = base?;
+        // Bold black / white keep their base code (see `named_color`).
+        Some(if bold && base != 30 && base != 37 {
+            base + 60
+        } else {
+            base
+        })
+    };
+    // A colour the alias can't express as one ANSI code (`#ff8800`, `c196`) falls
+    // back to the sphere's built-in colour.
+    from_tag(&sphere_color_body(sphere)?)
+        .or_else(|| from_tag(mud_world::sphere_style::default_color(sphere)?))
 }
 
 /// Emit `\x1b[0m` plus the cumulative codes for the merged stack
@@ -4878,27 +4917,59 @@ mod tests {
     #[test]
     fn sphere_color_tag_covers_palette() {
         use super::sphere_color_tag;
+        let tag = |s: &str| sphere_color_tag(s);
         // Elemental + healing / death — the schema's most common
         // spheres. Fire/water are the load-bearing ones for player
         // intuition (red/cyan); the rest follow.
-        assert_eq!(sphere_color_tag("fire"), Some("<red>"));
-        assert_eq!(sphere_color_tag("water"), Some("<cyan>"));
-        assert_eq!(sphere_color_tag("air"), Some("<b:cyan>"));
-        assert_eq!(sphere_color_tag("earth"), Some("<yellow>"));
-        assert_eq!(sphere_color_tag("healing"), Some("<green>"));
-        assert_eq!(sphere_color_tag("death"), Some("<b:black>"));
-        assert_eq!(sphere_color_tag("protection"), Some("<b:white>"));
-        assert_eq!(sphere_color_tag("enchantment"), Some("<magenta>"));
-        assert_eq!(sphere_color_tag("summoning"), Some("<b:magenta>"));
-        assert_eq!(sphere_color_tag("divination"), Some("<b:yellow>"));
+        assert_eq!(tag("fire").as_deref(), Some("<red>"));
+        assert_eq!(tag("water").as_deref(), Some("<cyan>"));
+        assert_eq!(tag("air").as_deref(), Some("<b:cyan>"));
+        assert_eq!(tag("earth").as_deref(), Some("<yellow>"));
+        assert_eq!(tag("healing").as_deref(), Some("<green>"));
+        assert_eq!(tag("death").as_deref(), Some("<b:black>"));
+        assert_eq!(tag("protection").as_deref(), Some("<b:white>"));
+        assert_eq!(tag("enchantment").as_deref(), Some("<magenta>"));
+        assert_eq!(tag("summoning").as_deref(), Some("<b:magenta>"));
+        assert_eq!(tag("divination").as_deref(), Some("<b:yellow>"));
         // GENERIC + unmapped fall through to None — caller renders
         // dim. Input is lowercase; uppercase variants don't match
         // (matches how the catalog stores them after our
         // LOWER(sphere::text) cast in mud_db).
-        assert_eq!(sphere_color_tag("generic"), None);
-        assert_eq!(sphere_color_tag(""), None);
-        assert_eq!(sphere_color_tag("FIRE"), None);
-        assert_eq!(sphere_color_tag("unrecognized"), None);
+        assert_eq!(tag("generic"), None);
+        assert_eq!(tag(""), None);
+        assert_eq!(tag("FIRE"), None);
+        assert_eq!(tag("unrecognized"), None);
+    }
+
+    /// The `<fire>`-style tag aliases keep the codes the old hard-coded
+    /// `named_color` arms returned, now derived from the sphere colours.
+    #[test]
+    fn sphere_tag_aliases_keep_their_ansi_codes() {
+        let old: [(&str, u8); 10] = [
+            ("healing", 32),
+            ("death", 30),
+            ("protection", 37),
+            ("enchantment", 35),
+            ("summoning", 95),
+            ("divination", 93),
+            ("fire", 31),
+            ("water", 36),
+            ("air", 96),
+            ("earth", 33),
+        ];
+        for (word, code) in old {
+            assert_eq!(super::named_color(word), Some(code), "{word}");
+        }
+        // Non-sphere semantic words and unknowns are unchanged.
+        assert_eq!(super::named_color("divine"), Some(93));
+        assert_eq!(super::named_color("holy"), Some(97));
+        assert_eq!(super::named_color("unholy"), Some(90));
+        assert_eq!(super::named_color("arcane"), Some(35));
+        assert_eq!(super::named_color("generic"), None);
+        assert_eq!(super::named_color("nonsense"), None);
+        // And they still render as tags.
+        assert!(ansi("<fire>x</>").contains("\x1b[31m"));
+        assert!(ansi("<air>x</>").contains("\x1b[96m"));
     }
 
     #[test]
@@ -10426,23 +10497,25 @@ pub(crate) fn vital_color_tag(current: i32, max: i32) -> Option<&'static str> {
 /// elemental hue so a player can spot fire spells at a glance.
 /// Returns `None` for sphere strings that aren't on the palette
 /// (caller renders dim or plain). Input is the lowercase form
-/// loaded from `Ability.sphere`.
+/// loaded from `Ability.sphere`. The colours come from the
+/// `SphereStyle` table (Muditor), with the built-in palette as the
+/// fallback; the `<fire>`-style tag aliases in [`named_color`] read
+/// the same source.
 #[must_use]
-pub(crate) fn sphere_color_tag(sphere: &str) -> Option<&'static str> {
-    match sphere {
-        "fire" => Some("<red>"),
-        "water" => Some("<cyan>"),
-        "air" => Some("<b:cyan>"),
-        "earth" => Some("<yellow>"),
-        "healing" => Some("<green>"),
-        "death" => Some("<b:black>"),
-        "protection" => Some("<b:white>"),
-        "enchantment" => Some("<magenta>"),
-        "summoning" => Some("<b:magenta>"),
-        "divination" => Some("<b:yellow>"),
-        // GENERIC / unmapped: caller's dim fallback wins.
-        _ => None,
+pub(crate) fn sphere_color_tag(sphere: &str) -> Option<String> {
+    sphere_color_body(sphere).map(|c| format!("<{c}>"))
+}
+
+/// Colour tag body (`red`, `b:cyan`) for `sphere`: the `SphereStyle` value
+/// when it is a tag the renderer understands, else the built-in default.
+fn sphere_color_body(sphere: &str) -> Option<String> {
+    let color = mud_world::sphere_style::color(sphere)?;
+    if color.split(':').all(|p| tag_part_known(p, basic_color)) {
+        return Some(color);
     }
+    // A bad database value (e.g. an unknown color word) would render as
+    // literal `<word>` text; use the built-in colour instead.
+    mud_world::sphere_style::default_color(sphere).map(str::to_owned)
 }
 
 /// Direct children of `container` (room / carrier / bag), newest arrival

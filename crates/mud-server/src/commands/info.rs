@@ -14962,7 +14962,7 @@ pub(crate) fn format_ability_with_sphere(def: &mud_world::AbilityDef) -> String 
     let Some(s) = def.sphere.as_deref().filter(|s| !s.is_empty()) else {
         return def.name.clone();
     };
-    let open = sphere_color_tag(s).unwrap_or("<dim>");
+    let open = sphere_color_tag(s).unwrap_or_else(|| "<dim>".to_string());
     format!("{} {open}({s})</>", def.name)
 }
 

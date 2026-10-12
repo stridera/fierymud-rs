@@ -16,12 +16,13 @@ use std::hash::{Hash, Hasher};
 
 use bevy_ecs::prelude::*;
 use mlua::{Lua, MultiValue, Table, UserDataMethods, Value, Variadic};
-use mud_db::enums::{ObjectType, UserRole};
+use mud_db::enums::{DamageType, ObjectType, UserRole};
 use mud_world::components::{
     Account, Charges, EffectInstance, EquippedSlot, Fighting, Item, KnownAbilities, LightFuel,
     LiquidContainer, Located, Mob, MobBehaviors, MobTraits, Named, ObjectFlags, ObjectRestrictions,
     Online, Player, PlayerFlags, Room, WorldKey,
 };
+use mud_world::liquid_legacy::LiquidLegacyIndex;
 use mud_world::resources::{
     AbilityCatalog, LuaOutbox, MudClock, ObjectPrototypes, TriggerCatalog, WorldKeyIndex,
 };
@@ -42,60 +43,6 @@ const MAX_SET_SKILL: i32 = 1000;
 /// Real seconds in one game hour (legacy `SECS_PER_MUD_HOUR`). The DG
 /// `wait N t` unit is "N game hours", and `wait_ticks(N)` sleeps that long.
 const SECS_PER_MUD_HOUR: i64 = 75;
-
-/// Legacy liquid codes, in the order the importer indexes them. `val2` of a
-/// drink container reads the position of its `Liquid`.
-const LIQUIDS: [&str; 42] = [
-    "WATER",
-    "BEER",
-    "WINE",
-    "ALE",
-    "DARKALE",
-    "WHISKY",
-    "LEMONADE",
-    "FIREBRT",
-    "LOCALSPC",
-    "SLIME",
-    "MILK",
-    "TEA",
-    "COFFEE",
-    "BLOOD",
-    "SALTWATER",
-    "RUM",
-    "NECTAR",
-    "SAKE",
-    "CIDER",
-    "TOMATOSOUP",
-    "POTATOSOUP",
-    "CHAI",
-    "APPLEJUICE",
-    "ORNGJUICE",
-    "PNAPLJUICE",
-    "GRAPEJUICE",
-    "POMJUICE",
-    "MELONAE",
-    "COCOA",
-    "ESPRESSO",
-    "CAPPUCCINO",
-    "MANGOLASSI",
-    "ROSEWATER",
-    "GREENTEA",
-    "CHAMOMILE",
-    "GIN",
-    "BRANDY",
-    "MEAD",
-    "CHAMPAGNE",
-    "VODKA",
-    "TEQUILA",
-    "ABSINTHE",
-];
-
-/// Legacy damage-type codes, as the importer indexes them (weapon `val3`).
-const DAMAGE_TYPES: [&str; 21] = [
-    "HIT", "STING", "WHIP", "SLASH", "BITE", "BLUDGEON", "CRUSH", "POUND", "CLAW", "MAUL",
-    "THRASH", "PIERCE", "BLAST", "PUNCH", "STAB", "FIRE", "COLD", "ACID", "SHOCK", "POISON",
-    "ALIGN",
-];
 
 /// Container flag bits (container `val1`).
 const CONTAINER_FLAGS: [&str; 4] = ["Closeable", "PickProof", "Closed", "Locked"];
@@ -741,13 +688,14 @@ fn value_keys(t: ObjectType) -> [&'static str; 4] {
     }
 }
 
-/// Position of `name` in `table`, ignoring case; 0 when absent.
-fn index_in(table: &[&str], name: &str) -> i64 {
-    table
-        .iter()
-        .position(|t| t.eq_ignore_ascii_case(name.trim()))
-        .and_then(|i| i64::try_from(i).ok())
-        .unwrap_or(0)
+/// Legacy number (`val2` of a drink container) of the liquid `name`, from the
+/// `Liquids` table loaded into [`LiquidLegacyIndex`]; the built-in legacy order
+/// when the resource is absent. 0 when unknown.
+fn liquid_index(world: &World, name: &str) -> i64 {
+    match world.get_resource::<LiquidLegacyIndex>() {
+        Some(index) => index.index_of(name),
+        None => LiquidLegacyIndex::default().index_of(name),
+    }
 }
 
 /// Legacy `GET_OBJ_VAL(obj, n)` of item `item`, or `None` when `item` is
@@ -768,12 +716,9 @@ fn object_value(world: &World, item: Entity, n: usize) -> Option<i64> {
         (ObjectType::Weapon, 1) => return Some(i64::from(proto.weapon_dice_num)),
         (ObjectType::Weapon, 2) => return Some(i64::from(proto.weapon_dice_size)),
         (ObjectType::Weapon, 3) => {
-            return Some(
-                proto
-                    .weapon_damage_type
-                    .as_deref()
-                    .map_or(0, |d| index_in(&DAMAGE_TYPES, d)),
-            );
+            return Some(proto.weapon_damage_type.as_deref().map_or(0, |d| {
+                i64::try_from(DamageType::legacy_index_of_label(d)).unwrap_or(0)
+            }));
         }
         _ => {}
     }
@@ -790,7 +735,7 @@ fn object_value(world: &World, item: Entity, n: usize) -> Option<i64> {
                 return Some(match n {
                     0 => i64::from(l.capacity),
                     1 => i64::from(l.remaining),
-                    2 => index_in(&LIQUIDS, &l.liquid),
+                    2 => liquid_index(world, &l.liquid),
                     _ => i64::from(l.poisoned),
                 });
             }
@@ -808,7 +753,7 @@ fn object_value(world: &World, item: Entity, n: usize) -> Option<i64> {
     }
     let v = proto.values.get(key);
     Some(match (key, v) {
-        ("Liquid", Some(serde_json::Value::String(s))) => index_in(&LIQUIDS, s),
+        ("Liquid", Some(serde_json::Value::String(s))) => liquid_index(world, s),
         ("Flags", Some(serde_json::Value::Array(flags))) => flags
             .iter()
             .filter_map(serde_json::Value::as_str)
@@ -1008,6 +953,7 @@ mod tests {
     use super::*;
     use crate::LuaHost;
     use mud_world::components::{AppliedTo, EffectSource, GroupMember, Health};
+    use mud_world::liquid_legacy::LegacyLiquidRow;
     use mud_world::resources::{AbilityDef, ObjectProto, TriggerAttach, TriggerDef};
     use std::sync::{Arc, Mutex};
 
@@ -1965,6 +1911,46 @@ mod tests {
                 Located(f.room),
             ))
             .id()
+    }
+
+    #[test]
+    fn liquid_val2_reads_the_loaded_liquids_table() {
+        let mut f = fixture();
+        let vals = "print(self:get_objects(70, 2).val2)";
+        let cup = item_with(
+            &mut f,
+            2,
+            ObjectType::Fountain,
+            serde_json::json!({"Capacity": 9, "Remaining": 9, "Liquid": "WATER"}),
+        );
+        // Liquids come from the loaded `Liquids` table: a poured alias resolves, and a
+        // liquid added in Muditor numbers after the legacy ones.
+        let row = |id: i32, alias: &str, idx: Option<i32>, code: Option<&str>| LegacyLiquidRow {
+            id,
+            alias: alias.into(),
+            name: alias.replace('-', " "),
+            legacy_index: idx,
+            legacy_code: code.map(str::to_string),
+        };
+        f.world.insert_resource(LiquidLegacyIndex::from_rows(&[
+            row(1, "water", Some(0), Some("WATER")),
+            row(12, "black-tea", Some(11), Some("TEA")),
+            row(43, "root-beer", None, None),
+        ]));
+        f.world.entity_mut(cup).insert(LiquidContainer {
+            liquid: "black-tea".into(),
+            capacity: 9,
+            remaining: 4,
+            poisoned: false,
+        });
+        assert_eq!(f.ok(vals), "11\r\n");
+        f.world.entity_mut(cup).insert(LiquidContainer {
+            liquid: "root-beer".into(),
+            capacity: 9,
+            remaining: 4,
+            poisoned: false,
+        });
+        assert_eq!(f.ok(vals), "42\r\n");
     }
 
     #[test]

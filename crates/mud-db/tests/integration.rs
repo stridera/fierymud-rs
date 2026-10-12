@@ -1449,3 +1449,130 @@ async fn character_progression_round_trips() {
         .await
         .expect("cleanup");
 }
+
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn liquids_carry_the_legacy_index_and_code() {
+    let rows = mud_db::liquids::list_all(&pool().await)
+        .await
+        .expect("liquids");
+    let code_of = |c: &str| {
+        rows.iter()
+            .find(|r| r.legacy_code.as_deref() == Some(c))
+            .and_then(|r| r.legacy_index)
+    };
+    // Scripts compare these numbers (120_03_druid_receive: tea 11, milk 10; whisky 5).
+    assert_eq!(code_of("TEA"), Some(11));
+    assert_eq!(code_of("MILK"), Some(10));
+    assert_eq!(code_of("WHISKY"), Some(5));
+    assert_eq!(code_of("ABSINTHE"), Some(41));
+    let mut seen: Vec<i32> = rows.iter().filter_map(|r| r.legacy_index).collect();
+    seen.sort_unstable();
+    seen.dedup();
+    assert_eq!(
+        seen.len(),
+        rows.iter().filter(|r| r.legacy_index.is_some()).count()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn liquid_list_without_legacy_columns_matches_the_full_list() {
+    let pool = pool().await;
+    let full = mud_db::liquids::list_all(&pool).await.expect("full");
+    let fallback = mud_db::liquids::list_all_without_legacy(&pool)
+        .await
+        .expect("fallback");
+    assert_eq!(
+        full.iter().map(|r| r.id).collect::<Vec<_>>(),
+        fallback.iter().map(|r| r.id).collect::<Vec<_>>()
+    );
+    assert!(
+        fallback
+            .iter()
+            .all(|r| r.legacy_index.is_none() && r.legacy_code.is_none())
+    );
+}
+
+/// A `"Liquids"` table that predates the legacy columns fails the full query with
+/// Postgres 42703 (`undefined_column`, what the loader's fallback keys on) and the
+/// fallback query still reads it.
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn liquid_queries_degrade_when_the_legacy_columns_are_missing() {
+    let _ = dotenvy::from_path("../../.env");
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    // One connection so the scratch `search_path` sticks to every query.
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .expect("connect");
+    let schema = format!("scratch_liquids_{}", std::process::id());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&pool)
+        .await
+        .expect("create schema");
+    let result: sqlx::Result<_> = async {
+        sqlx::query(&format!(
+            r#"CREATE TABLE {schema}."Liquids" (
+                id integer PRIMARY KEY, name text NOT NULL, alias text NOT NULL,
+                color_desc text NOT NULL, drunk_effect integer NOT NULL DEFAULT 0,
+                hunger_effect integer NOT NULL DEFAULT 0, thirst_effect integer NOT NULL DEFAULT 0,
+                description text)"#
+        ))
+        .execute(&pool)
+        .await?;
+        sqlx::query(&format!(
+            r#"INSERT INTO {schema}."Liquids" (id, name, alias, color_desc) VALUES (1, 'water', 'water', 'clear')"#
+        ))
+        .execute(&pool)
+        .await?;
+        sqlx::query(&format!("SET search_path = {schema}"))
+            .execute(&pool)
+            .await?;
+        let full = mud_db::liquids::list_all(&pool).await;
+        let fallback = mud_db::liquids::list_all_without_legacy(&pool).await;
+        Ok((full, fallback))
+    }
+    .await;
+    sqlx::query("SET search_path = public")
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&pool)
+        .await
+        .ok();
+    let (full, fallback) = result.expect("scratch setup");
+    let err = full.expect_err("full query must fail without the columns");
+    assert_eq!(
+        err.as_database_error()
+            .and_then(sqlx::error::DatabaseError::code)
+            .as_deref(),
+        Some("42703")
+    );
+    let rows = fallback.expect("fallback query");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].legacy_index, None);
+}
+
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn sphere_styles_hold_the_default_palette() {
+    let rows = mud_db::sphere_styles::list_all(&pool().await)
+        .await
+        .expect("sphere styles");
+    let color = |s: &str| {
+        rows.iter()
+            .find(|r| r.sphere == s)
+            .and_then(|r| r.color.clone())
+    };
+    assert_eq!(color("fire").as_deref(), Some("red"));
+    assert_eq!(color("air").as_deref(), Some("b:cyan"));
+    assert_eq!(color("divination").as_deref(), Some("b:yellow"));
+    assert!(
+        rows.iter()
+            .any(|r| r.sphere == "generic" && r.color.is_none())
+    );
+}
