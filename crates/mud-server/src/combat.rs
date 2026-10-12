@@ -5420,6 +5420,26 @@ mod tests {
     }
 
     #[test]
+    fn new_character_baseline_lands_a_fair_share_of_swings() {
+        // A fresh level-1 warrior (accuracy from the class baseline, not the
+        // schema default of 0) against a dex-82 level-2 animal: with the
+        // old zero accuracy this was 5%; legacy THAC0 newbies landed ~40%.
+        let warrior = mud_db::characters::ClassCombatRates {
+            accuracy_per_level: 2.7,
+            evasion_per_level: 2.0,
+            dex_evasion_mult: 1.5,
+            attack_power_per_level: 5.0,
+            base_crit_chance: 5,
+        }
+        .baseline(1, 70);
+        assert_eq!(hit_chance_pct(0, 90), 5);
+        // Mob evasion as imported today (90) and as it will be once fierylib
+        // scores mob dex on the 0..100 scale (50 + 6 + 2*2 = 60).
+        assert_eq!(hit_chance_pct(warrior.accuracy, 90), 32);
+        assert_eq!(hit_chance_pct(warrior.accuracy, 60), 47);
+    }
+
+    #[test]
     fn hit_chance_curve() {
         // Acc/Ev d100 contest: chance = 50 + (accuracy - evasion) / 2,
         // clamped to [1, 99]. Each 2 points of margin = +1%.

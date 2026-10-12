@@ -266,6 +266,115 @@ pub async fn create<'e, E: PgExecutor<'e>>(
     Ok(row)
 }
 
+/// Per-class combat rates from the `Class` row, the inputs to a new
+/// character's starting combat stats. Mirrors fierylib's
+/// `derive_hit_roll_baseline` / `derive_attack_power_baseline`, which
+/// seeded and imported characters already go through.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClassCombatRates {
+    pub accuracy_per_level: f64,
+    pub evasion_per_level: f64,
+    pub dex_evasion_mult: f64,
+    pub attack_power_per_level: f64,
+    pub base_crit_chance: i32,
+}
+
+impl Default for ClassCombatRates {
+    /// The schema defaults of the `Class` columns (and the fierylib
+    /// class-agnostic baseline).
+    fn default() -> Self {
+        Self {
+            accuracy_per_level: 2.0,
+            evasion_per_level: 2.0,
+            dex_evasion_mult: 1.0,
+            attack_power_per_level: 2.0,
+            base_crit_chance: 5,
+        }
+    }
+}
+
+/// Starting combat columns for a fresh character.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CombatBaseline {
+    pub accuracy: i32,
+    pub evasion: i32,
+    pub attack_power: i32,
+    pub crit_chance: i32,
+}
+
+impl ClassCombatRates {
+    /// `accuracy = 50 + rate * level`; `evasion = 50 + dex_bonus * mult +
+    /// rate * level`, where `dex_bonus` is `(dexterity - 50) / 5` clamped to
+    /// +-10 (the 0..100 stat scale, same as `CoreStats::bonus` in
+    /// mud-world, which this crate cannot depend on); `attack_power = rate *
+    /// level`. The accuracy/evasion pair is the d100 contest in
+    /// `combat.rs::hit_chance_pct`, where equal values hit 50%.
+    #[must_use]
+    pub fn baseline(&self, level: i32, dexterity: i32) -> CombatBaseline {
+        let lvl = f64::from(level);
+        let dex_bonus = f64::from(((dexterity - 50) / 5).clamp(-10, 10));
+        // Bounded inputs (level <= ~110, small rates), so the casts are exact.
+        #[allow(clippy::cast_possible_truncation)]
+        let r = |v: f64| v.round() as i32;
+        CombatBaseline {
+            accuracy: 50 + r(self.accuracy_per_level * lvl),
+            evasion: 50 + r(dex_bonus * self.dex_evasion_mult) + r(self.evasion_per_level * lvl),
+            attack_power: r(self.attack_power_per_level * lvl),
+            crit_chance: self.base_crit_chance,
+        }
+    }
+}
+
+/// Read a class's combat rates. `None` when the class row is gone.
+pub async fn class_combat_rates<'e, E: PgExecutor<'e>>(
+    executor: E,
+    class_id: i32,
+) -> sqlx::Result<Option<ClassCombatRates>> {
+    let row = sqlx::query_as::<_, (f64, f64, f64, f64, i32)>(
+        r#"
+        SELECT accuracy_per_level, evasion_per_level, dex_evasion_mult,
+               attack_power_per_level, base_crit_chance
+        FROM "Class" WHERE id = $1
+        "#,
+    )
+    .bind(class_id)
+    .fetch_optional(executor)
+    .await?;
+    Ok(row.map(|(a, e, d, ap, cc)| ClassCombatRates {
+        accuracy_per_level: a,
+        evasion_per_level: e,
+        dex_evasion_mult: d,
+        attack_power_per_level: ap,
+        base_crit_chance: cc,
+    }))
+}
+
+/// Write a new character's starting combat columns. Without this a
+/// character created in-game keeps the schema defaults (accuracy 0,
+/// evasion 0, attack power 0) and misses almost every swing against
+/// mobs whose evasion is ~60-90.
+pub async fn seed_combat_baseline<'e, E: PgExecutor<'e>>(
+    executor: E,
+    character_id: &str,
+    b: &CombatBaseline,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE "Characters"
+        SET accuracy = $1, evasion = $2, attack_power = $3, crit_chance = $4
+        WHERE id = $5
+        "#,
+    )
+    .bind(b.accuracy)
+    .bind(b.evasion)
+    .bind(b.attack_power)
+    .bind(b.crit_chance)
+    .bind(character_id)
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
 /// Persist mutable core attribute scores (str/dex/con/int/wis/cha)
 /// back to `Characters`. Split from `save_state` so the latter
 /// doesn't grow another 6 parameters; `train <stat>` is the first
@@ -1119,4 +1228,46 @@ pub async fn set_name_approved(
     .execute(pool)
     .await?;
     Ok(res.rows_affected())
+}
+
+#[cfg(test)]
+mod combat_baseline_tests {
+    use super::*;
+
+    fn warrior() -> ClassCombatRates {
+        ClassCombatRates {
+            accuracy_per_level: 2.7,
+            evasion_per_level: 2.0,
+            dex_evasion_mult: 1.5,
+            attack_power_per_level: 5.0,
+            base_crit_chance: 5,
+        }
+    }
+
+    #[test]
+    fn level_one_warrior_baseline() {
+        // dex 80 -> bonus 6 -> x1.5 = 9
+        let b = warrior().baseline(1, 80);
+        assert_eq!(b.accuracy, 53);
+        assert_eq!(b.evasion, 50 + 9 + 2);
+        assert_eq!(b.attack_power, 5);
+        assert_eq!(b.crit_chance, 5);
+    }
+
+    #[test]
+    fn dex_bonus_uses_the_hundred_point_scale() {
+        // The D&D `(score - 10) / 2` formula gave +35 at dex 80; the
+        // 0..100 scale gives +6, so a top-end dex stays a modest edge.
+        let hi = ClassCombatRates::default().baseline(1, 100).evasion;
+        let lo = ClassCombatRates::default().baseline(1, 30).evasion;
+        assert_eq!(hi, 50 + 10 + 2);
+        assert_eq!(lo, 50 - 4 + 2);
+    }
+
+    #[test]
+    fn baseline_clamps_extreme_dex() {
+        let r = ClassCombatRates::default();
+        assert_eq!(r.baseline(1, 400).evasion, r.baseline(1, 100).evasion);
+        assert_eq!(r.baseline(1, -400).evasion, r.baseline(1, 0).evasion);
+    }
 }

@@ -3003,6 +3003,29 @@ impl ConnRouter {
                 return;
             }
         };
+        // The INSERT leaves accuracy / evasion / attack power at the schema
+        // default of 0, which loses nearly every swing against mobs (evasion
+        // 60-90): derive the class baseline like the seeder and importer do.
+        let seeded = async {
+            let rates = mud_db::characters::class_combat_rates(&mut *tx, class_id)
+                .await?
+                .unwrap_or_default();
+            let baseline = rates.baseline(1, stats.dexterity);
+            mud_db::characters::seed_combat_baseline(&mut *tx, &character_id, &baseline).await
+        }
+        .await;
+        if let Err(e) = seeded {
+            warn!(conn_id, error = %e, "new character combat baseline failed");
+            let _ = ctx.outbound.try_send(
+                b"Couldn't create the character. The account was rolled \
+                  back; please try again.\r\n"
+                    .to_vec(),
+            );
+            drop(tx);
+            ctx.stage = Stage::AwaitingIdentifier;
+            send_login_prompt(&ctx.outbound, world, "EMAIL_PROMPT", IDENT_PROMPT_FALLBACK);
+            return;
+        }
         if let Err(e) = tx.commit().await {
             warn!(conn_id, error = %e, "creation tx commit failed");
             let msg: &[u8] = if is_unique_violation(&e) {
