@@ -121,6 +121,14 @@ pub struct ItemAlter {
     /// Alignments a spell barred from wielding the instance.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alignments_barred: Vec<crate::enums::Alignment>,
+    /// Prototype object flags the instance has lost (Dispel Magic on an
+    /// invisible item).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flags_removed: Vec<crate::enums::ObjectFlag>,
+    /// Poisoned state of a food or drink instance when it differs from the
+    /// prototype's (Poison / Remove Poison).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poisoned: Option<bool>,
 }
 
 /// One per-instance stat apply (see [`ItemAlter::applies`]).
@@ -145,6 +153,8 @@ impl ItemAlter {
             && self.applies.is_empty()
             && self.flags_added.is_empty()
             && self.alignments_barred.is_empty()
+            && self.flags_removed.is_empty()
+            && self.poisoned.is_none()
     }
 }
 

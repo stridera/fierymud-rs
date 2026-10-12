@@ -497,6 +497,17 @@ pub struct ItemApplies(pub Vec<(String, i32)>);
 #[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
 pub struct ItemAddedFlags(pub Vec<mud_db::enums::ObjectFlag>);
 
+/// Prototype object flags a deliberate alteration took off this instance
+/// (Dispel Magic lifting `INVISIBLE`). Persisted as `ItemAlter::flags_removed`.
+#[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
+pub struct ItemRemovedFlags(pub Vec<mud_db::enums::ObjectFlag>);
+
+/// Per-instance poisoned state of a `Food` item (Poison / Remove Poison),
+/// overriding the prototype's `food_poisoned`. Drink containers keep theirs
+/// on [`LiquidContainer::poisoned`].
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FoodPoisoned(pub bool);
+
 /// Alignments barred from wielding this item by a spell (legacy Enchant
 /// Weapon's `ITEM_ANTI_EVIL` / `ITEM_ANTI_GOOD`), on top of the prototype's
 /// own `restricted_alignments`.

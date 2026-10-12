@@ -15,9 +15,10 @@ use bevy_ecs::prelude::*;
 use mud_db::character_items::{ItemAlter, ItemApply};
 use mud_db::enums::{ObjectFlag, ObjectRestriction};
 use mud_world::components::{
-    ItemAddedFlags, ItemAlterDirty, ItemApplies, ItemBarredAlignments, WeaponDiceSizeAdjust,
+    FoodPoisoned, ItemAddedFlags, ItemAlterDirty, ItemApplies, ItemBarredAlignments,
+    ItemRemovedFlags, WeaponDiceSizeAdjust,
 };
-use mud_world::{ObjectFlags, ObjectPrototypes, ObjectRestrictions, WorldKey};
+use mud_world::{LiquidContainer, ObjectFlags, ObjectPrototypes, ObjectRestrictions, WorldKey};
 
 /// DB / JSON spelling of a restriction.
 fn db_name(r: ObjectRestriction) -> &'static str {
@@ -90,6 +91,84 @@ pub(crate) fn add_flag(world: &mut World, item: Entity, flag: ObjectFlag) {
     em.insert(ItemAddedFlags(added));
 }
 
+/// Take `flag` off `item` (a no-op for a flag it does not have). A flag the
+/// prototype carries is recorded as lost so `snapshot` persists it; one a
+/// spell had added is simply forgotten.
+pub(crate) fn remove_flag(world: &mut World, item: Entity, flag: ObjectFlag) {
+    let from_proto = proto_flags(world, item).contains(&flag);
+    let Ok(mut em) = world.get_entity_mut(item) else {
+        return;
+    };
+    let Some(mut flags) = em.get::<ObjectFlags>().map(|f| f.0.clone()) else {
+        return;
+    };
+    if !flags.contains(&flag) {
+        return;
+    }
+    flags.retain(|f| *f != flag);
+    em.insert(ObjectFlags(flags));
+    if let Some(added) = em.get::<ItemAddedFlags>() {
+        let kept: Vec<ObjectFlag> = added.0.iter().copied().filter(|f| *f != flag).collect();
+        em.insert(ItemAddedFlags(kept));
+    }
+    if from_proto {
+        let mut removed = em
+            .get::<ItemRemovedFlags>()
+            .map(|r| r.0.clone())
+            .unwrap_or_default();
+        if !removed.contains(&flag) {
+            removed.push(flag);
+        }
+        em.insert(ItemRemovedFlags(removed));
+    }
+}
+
+/// Whether a food or drink instance is poisoned right now: a drink
+/// container's own state, else the per-instance food override, else the
+/// prototype's.
+pub(crate) fn is_poisoned(world: &World, item: Entity) -> bool {
+    if let Some(l) = world.get::<LiquidContainer>(item) {
+        return l.poisoned;
+    }
+    if let Some(p) = world.get::<FoodPoisoned>(item) {
+        return p.0;
+    }
+    proto_food_poisoned(world, item)
+}
+
+fn proto_food_poisoned(world: &World, item: Entity) -> bool {
+    let Some(key) = world.get::<WorldKey>(item) else {
+        return false;
+    };
+    world
+        .get_resource::<ObjectPrototypes>()
+        .and_then(|p| p.by_key.get(&(key.zone, key.id)))
+        .is_some_and(|p| p.food_poisoned)
+}
+
+fn proto_liquid_poisoned(world: &World, item: Entity) -> bool {
+    let Some(key) = world.get::<WorldKey>(item) else {
+        return false;
+    };
+    world
+        .get_resource::<ObjectPrototypes>()
+        .and_then(|p| p.by_key.get(&(key.zone, key.id)))
+        .and_then(|p| p.liquid.as_ref())
+        .is_some_and(|l| l.poisoned)
+}
+
+/// Set the poisoned state of a food or drink instance.
+pub(crate) fn set_poisoned(world: &mut World, item: Entity, poisoned: bool) {
+    let Ok(mut em) = world.get_entity_mut(item) else {
+        return;
+    };
+    if let Some(mut l) = em.get_mut::<LiquidContainer>() {
+        l.poisoned = poisoned;
+    } else {
+        em.insert(FoodPoisoned(poisoned));
+    }
+}
+
 /// The delta of `item` against its prototype.
 pub(crate) fn snapshot(world: &World, item: Entity) -> ItemAlter {
     let proto = proto_restrictions(world, item);
@@ -125,7 +204,28 @@ pub(crate) fn snapshot(world: &World, item: Entity) -> ItemAlter {
             flags_added.push(*f);
         }
     }
+    // Poison state only when it differs from the prototype's.
+    let proto_poisoned = if world.get::<LiquidContainer>(item).is_some() {
+        proto_liquid_poisoned(world, item)
+    } else {
+        proto_food_poisoned(world, item)
+    };
+    let poisoned = (world.get::<LiquidContainer>(item).is_some()
+        || world.get::<FoodPoisoned>(item).is_some())
+    .then(|| is_poisoned(world, item))
+    .filter(|now| *now != proto_poisoned);
+    let flags_removed: Vec<ObjectFlag> = world
+        .get::<ItemRemovedFlags>(item)
+        .map(|r| {
+            r.0.iter()
+                .copied()
+                .filter(|f| proto_flags.contains(f))
+                .collect()
+        })
+        .unwrap_or_default();
     ItemAlter {
+        flags_removed,
+        poisoned,
         restrictions_added,
         restrictions_removed,
         weapon_dice_size: world.get::<WeaponDiceSizeAdjust>(item).map_or(0, |a| a.0),
@@ -200,7 +300,19 @@ pub(crate) fn restore(world: &mut World, item: Entity, alter: &ItemAlter, dirty:
         em.insert(ObjectFlags(flags));
         em.insert(ItemAddedFlags(alter.flags_added.clone()));
     }
-    if dirty {
+    if !alter.flags_removed.is_empty() {
+        let mut flags = em
+            .get::<ObjectFlags>()
+            .map(|f| f.0.clone())
+            .unwrap_or_default();
+        flags.retain(|f| !alter.flags_removed.contains(f));
+        em.insert(ObjectFlags(flags));
+        em.insert(ItemRemovedFlags(alter.flags_removed.clone()));
+    }
+    if let Some(p) = alter.poisoned {
+        set_poisoned(world, item, p);
+    }
+    if dirty && let Ok(mut em) = world.get_entity_mut(item) {
         em.insert(ItemAlterDirty);
     }
 }
@@ -288,6 +400,85 @@ mod tests {
                 .has(ObjectFlag::Magic)
         );
         assert_eq!(snapshot(&fresh, other), delta);
+    }
+
+    #[test]
+    fn a_proto_flag_taken_off_is_stored_and_stays_off_after_a_reload() {
+        let (mut world, item) = world_with_proto(Vec::new());
+        world
+            .resource_mut::<ObjectPrototypes>()
+            .by_key
+            .get_mut(&(1, 1))
+            .unwrap()
+            .flags = vec![ObjectFlag::Invisible];
+        world
+            .entity_mut(item)
+            .insert(ObjectFlags(vec![ObjectFlag::Invisible]));
+        remove_flag(&mut world, item, ObjectFlag::Invisible);
+        let delta = snapshot(&world, item);
+        assert_eq!(delta.flags_removed, vec![ObjectFlag::Invisible]);
+        assert!(
+            !world
+                .get::<ObjectFlags>(item)
+                .unwrap()
+                .has(ObjectFlag::Invisible)
+        );
+
+        let (mut fresh, other) = world_with_proto(Vec::new());
+        fresh
+            .resource_mut::<ObjectPrototypes>()
+            .by_key
+            .get_mut(&(1, 1))
+            .unwrap()
+            .flags = vec![ObjectFlag::Invisible];
+        fresh
+            .entity_mut(other)
+            .insert(ObjectFlags(vec![ObjectFlag::Invisible]));
+        restore(&mut fresh, other, &delta, false);
+        assert!(
+            !fresh
+                .get::<ObjectFlags>(other)
+                .unwrap()
+                .has(ObjectFlag::Invisible)
+        );
+        assert_eq!(snapshot(&fresh, other), delta);
+    }
+
+    #[test]
+    fn a_flag_a_spell_added_then_removed_leaves_no_trace() {
+        let (mut world, item) = world_with_proto(Vec::new());
+        add_flag(&mut world, item, ObjectFlag::Invisible);
+        remove_flag(&mut world, item, ObjectFlag::Invisible);
+        assert!(snapshot(&world, item).is_empty());
+    }
+
+    #[test]
+    fn poison_state_is_stored_only_when_it_differs_from_the_prototype() {
+        let (mut world, item) = world_with_proto(Vec::new());
+        assert_eq!(snapshot(&world, item).poisoned, None);
+        set_poisoned(&mut world, item, true);
+        let delta = snapshot(&world, item);
+        assert_eq!(delta.poisoned, Some(true));
+        assert!(is_poisoned(&world, item));
+
+        let (mut fresh, other) = world_with_proto(Vec::new());
+        restore(&mut fresh, other, &delta, true);
+        assert!(is_poisoned(&fresh, other));
+        assert_eq!(snapshot(&fresh, other), delta);
+        set_poisoned(&mut fresh, other, false);
+        assert_eq!(snapshot(&fresh, other).poisoned, None);
+
+        // A drink container carries it on the liquid state instead.
+        let (mut w, it) = world_with_proto(Vec::new());
+        w.entity_mut(it).insert(LiquidContainer {
+            liquid: "water".into(),
+            capacity: 5,
+            remaining: 5,
+            poisoned: false,
+        });
+        set_poisoned(&mut w, it, true);
+        assert_eq!(snapshot(&w, it).poisoned, Some(true));
+        assert!(w.get::<LiquidContainer>(it).unwrap().poisoned);
     }
 
     #[test]

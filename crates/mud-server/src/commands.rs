@@ -538,6 +538,11 @@ mod admin_management;
 mod admin_reload;
 #[path = "commands/lists.rs"]
 mod lists;
+#[path = "commands/object_spell_modes.rs"]
+mod object_spell_modes;
+#[cfg(test)]
+#[path = "commands/object_spell_modes_tests.rs"]
+mod object_spell_modes_tests;
 #[path = "commands/object_spells.rs"]
 mod object_spells;
 #[path = "commands/object_stat.rs"]

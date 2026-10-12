@@ -13,6 +13,10 @@
 //! `{target, amount}`, `amount` a number or formula in `skill` / `level`),
 //! `goodCasterBars` / `evilCasterBars` (alignment the enchanted item then
 //! refuses) and `messageToCasterGood` / `Evil` / `Neutral`.
+//!
+//! Bless, Invisibility, Dispel Magic, Poison, Remove Poison, Create Water,
+//! Preserve, Dark Feast, Illumination and Darkness are further `mode`s of the
+//! same effect; they live in [`super::object_spell_modes`].
 
 use bevy_ecs::prelude::*;
 use mud_db::enums::{Alignment, ObjectFlag, ObjectRestriction};
@@ -48,14 +52,14 @@ pub(super) fn alter_object_specs(world: &World, def: &AbilityDef) -> Vec<EffectS
         .collect()
 }
 
-fn param<'a>(spec: &'a EffectSpec, key: &str) -> Option<&'a serde_json::Value> {
+pub(super) fn param<'a>(spec: &'a EffectSpec, key: &str) -> Option<&'a serde_json::Value> {
     spec.override_params
         .as_ref()
         .and_then(|p| p.get(key))
         .or_else(|| spec.default_params.get(key))
 }
 
-fn param_str<'a>(spec: &'a EffectSpec, key: &str) -> Option<&'a str> {
+pub(super) fn param_str<'a>(spec: &'a EffectSpec, key: &str) -> Option<&'a str> {
     param(spec, key).and_then(serde_json::Value::as_str)
 }
 
@@ -76,6 +80,9 @@ pub(super) fn apply_alter_object(
 ) -> bool {
     if param_str(spec, "mode").is_some_and(|m| m.eq_ignore_ascii_case("enchant")) {
         return apply_enchant(world, caster, item, spec, ctx);
+    }
+    if let Some(changed) = super::object_spell_modes::apply(world, caster, item, spec, ctx) {
+        return changed;
     }
     let Some(restriction) = param_str(spec, "restriction").and_then(ObjectRestriction::from_db_str)
     else {
@@ -127,7 +134,7 @@ pub(super) fn apply_alter_object(
 }
 
 /// Parse an alignment bucket spelled `GOOD` / `NEUTRAL` / `EVIL`.
-fn parse_alignment(s: &str) -> Option<Alignment> {
+pub(super) fn parse_alignment(s: &str) -> Option<Alignment> {
     match s.trim().to_ascii_uppercase().as_str() {
         "GOOD" => Some(Alignment::Good),
         "NEUTRAL" => Some(Alignment::Neutral),
@@ -136,7 +143,7 @@ fn parse_alignment(s: &str) -> Option<Alignment> {
     }
 }
 
-fn parse_object_flag(s: &str) -> Option<ObjectFlag> {
+pub(super) fn parse_object_flag(s: &str) -> Option<ObjectFlag> {
     match s.trim().to_ascii_uppercase().as_str() {
         "GLOW" => Some(ObjectFlag::Glow),
         "HUM" => Some(ObjectFlag::Hum),
@@ -146,7 +153,7 @@ fn parse_object_flag(s: &str) -> Option<ObjectFlag> {
     }
 }
 
-fn param_strs(spec: &EffectSpec, key: &str) -> Vec<String> {
+pub(super) fn param_strs(spec: &EffectSpec, key: &str) -> Vec<String> {
     param(spec, key)
         .and_then(serde_json::Value::as_array)
         .map(|a| {

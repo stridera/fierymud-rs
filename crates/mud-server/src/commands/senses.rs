@@ -196,10 +196,13 @@ pub(crate) fn item_visible_to(world: &World, viewer: Entity, item: Entity) -> bo
         && !item_hidden_from(world, viewer, item)
 }
 
-/// Legacy `IS_POISONED` for a `Food` item: the prototype's `Poisoned`
-/// value (drink containers and fountains keep theirs on the
+/// Legacy `IS_POISONED` for a `Food` item: a spell's per-instance override
+/// (Poison / Remove Poison), else the prototype's `Poisoned` value (drink containers and fountains keep theirs on the
 /// [`LiquidContainer`]).
 fn food_is_poisoned(world: &World, item: Entity) -> bool {
+    if let Some(p) = world.get::<mud_world::components::FoodPoisoned>(item) {
+        return p.0;
+    }
     let Some(key) = world.get::<WorldKey>(item) else {
         return false;
     };
