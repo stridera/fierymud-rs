@@ -50,7 +50,7 @@ pub(crate) fn force_scavenge_roll(roll: Option<bool>) {
 }
 
 /// Legacy `mobile_activity` entry gate: asleep, casting, stunned
-/// (paralysed) and frozen mobs do nothing.
+/// (paralysed), frozen and waiting (`GET_MOB_WAIT`) mobs do nothing.
 pub(crate) fn mob_can_act(world: &World, mob: Entity) -> bool {
     world
         .get::<mud_world::Posture>(mob)
@@ -59,6 +59,7 @@ pub(crate) fn mob_can_act(world: &World, mob: Entity) -> bool {
         && world.get::<mud_world::Stunned>(mob).is_none()
         && world.get::<mud_world::Frozen>(mob).is_none()
         && world.get::<mud_world::Ghost>(mob).is_none()
+        && !crate::commands::input_queue::wait_active(world, mob)
 }
 
 /// Whether a mob may walk about under its own power: [`mob_can_act`] and on

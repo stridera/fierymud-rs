@@ -15,6 +15,7 @@ use super::{
     sync_markers,
 };
 use crate::combat::MobMemory;
+use crate::commands::input_queue::wait_active;
 use crate::commands::test_support::{Rx, drain, mob_proto};
 use crate::commands::{Connection, try_insert, try_remove};
 
@@ -844,6 +845,23 @@ impl Fx {
     }
 }
 
+/// `victim` is in a wait state (not a stun) for exactly `ticks` ticks.
+fn assert_wait(f: &mut Fx, victim: Entity, ticks: u64, what: &str) {
+    assert!(
+        !f.world.entity(victim).contains::<Stunned>(),
+        "{what}: stun"
+    );
+    assert!(f.effect_secs(victim, "stun").is_none(), "{what}: effect");
+    f.world.insert_resource(crate::TickCount(ticks - 1));
+    assert!(wait_active(&f.world, victim), "{what}");
+    f.world.insert_resource(crate::TickCount(ticks));
+    assert!(
+        !wait_active(&f.world, victim),
+        "{what}: lasts {ticks} ticks"
+    );
+    f.world.insert_resource(crate::TickCount(0));
+}
+
 fn caster_rx(f: &mut Fx) -> String {
     drain(&mut f.rx)
 }
@@ -948,8 +966,7 @@ fn drop_weapon_puts_the_wielded_item_in_the_room_and_lags_the_victim() {
     assert!(f.world.get::<EquippedSlot>(sword).is_none());
     assert_eq!(f.at(mob), Some(f.here), "dropping is not fleeing");
     assert!(!is_feared(&f.world, mob));
-    assert!(f.world.get::<Stunned>(mob).is_some(), "one round of lag");
-    assert_eq!(f.effect_secs(mob, "stun"), Some(4));
+    assert_wait(&mut f, mob, 40, "one round of lag");
     assert_eq!(
         f.world.get::<Fighting>(mob).map(|x| x.0),
         Some(f.caster),
@@ -1016,10 +1033,7 @@ fn flee_branch_stops_the_fight_runs_remembers_and_keeps_the_fear() {
             .get::<MobMemory>(mob)
             .is_some_and(|m| m.0.contains(&f.caster))
     );
-    assert!(
-        f.world.get::<Stunned>(mob).is_some(),
-        "lagged after running"
-    );
+    assert_wait(&mut f, mob, 40, "lagged after running");
     let out = caster_rx(&mut f);
     assert!(
         out.contains("A jackal shrieks madly at your vision of terror!"),
@@ -1043,6 +1057,7 @@ fn flee_clears_fears_own_lag_first() {
     let mut f = fx();
     let mob = f.feared_mob(10);
     super::lag_for(&mut f.world, mob, 4);
+    assert!(wait_active(&f.world, mob));
     assert_eq!(
         f.fear(
             mob,
@@ -1088,7 +1103,7 @@ fn falter_prints_its_message_stops_the_fight_and_the_victim_fights_back() {
     assert_eq!(f.fear(mob, 20, rolls), FearOutcome::Faltered);
     assert_eq!(f.at(mob), Some(f.here));
     assert!(!is_feared(&f.world, mob));
-    assert_eq!(f.effect_secs(mob, "stun"), Some(2), "half a round of lag");
+    assert_wait(&mut f, mob, 20, "half a round of lag");
     assert_eq!(f.world.get::<Fighting>(mob).map(|x| x.0), Some(f.caster));
     let out = caster_rx(&mut f);
     assert!(
@@ -1104,7 +1119,7 @@ fn nothing_happens_when_every_roll_misses() {
     assert_eq!(f.fear(mob, 20, all(100)), FearOutcome::Shrugged);
     assert_eq!(f.at(mob), Some(f.here));
     assert!(!is_feared(&f.world, mob));
-    assert!(f.world.get::<Stunned>(mob).is_none(), "no lag on a shrug");
+    assert!(!wait_active(&f.world, mob), "no lag on a shrug");
     assert_eq!(f.world.get::<Fighting>(mob).map(|x| x.0), Some(f.caster));
     let out = caster_rx(&mut f);
     assert!(
@@ -1300,7 +1315,7 @@ fn stunned_follows_the_union_of_stun_and_paralysis() {
     tick_effects(&mut f, 10);
     assert!(f.world.get::<Stunned>(mob).is_some());
     // A short stun overlapping it ends first: still held.
-    super::lag_for(&mut f.world, mob, 1);
+    super::stun_for(&mut f.world, mob, "stun", 1, "test");
     expire_one(&mut f, mob, "stun");
     tick_effects(&mut f, 20);
     assert!(f.effect_secs(mob, "stun").is_none());
@@ -1319,7 +1334,7 @@ fn breaking_a_freeze_leaves_an_overlapping_stun_in_force() {
     let mut f = fx();
     let mob = f.feared_mob(10);
     f.fear(mob, 100, all(0));
-    super::lag_for(&mut f.world, mob, 4);
+    super::stun_for(&mut f.world, mob, "stun", 4, "test");
     hit(&mut f, mob, 5);
     assert!(f.effect_secs(mob, "paralyzed").is_none());
     assert!(f.world.get::<Stunned>(mob).is_some(), "the lag still holds");

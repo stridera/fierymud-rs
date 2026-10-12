@@ -62,6 +62,43 @@ pub(crate) struct InputQueue {
     overflow_told: bool,
 }
 
+/// A legacy `WAIT_STATE`: until tick `until` the character's typed input is
+/// held (not refused), then runs in order. 10 Hz ticks, like every lag here.
+/// Mobs carry it too; it keeps them from acting (`mob_can_act`).
+#[derive(Component, Debug, Clone, Copy)]
+pub(crate) struct WaitState {
+    until: u64,
+}
+
+fn now_tick(world: &World) -> u64 {
+    world.get_resource::<crate::TickCount>().map_or(0, |t| t.0)
+}
+
+/// Whether `entity` is still in a wait state.
+#[must_use]
+pub(crate) fn wait_active(world: &World, entity: Entity) -> bool {
+    let now = now_tick(world);
+    world
+        .get::<WaitState>(entity)
+        .is_some_and(|w| w.until > now)
+}
+
+/// Legacy `WAIT_STATE(ch, ticks)`: hold `entity`'s input for `ticks`. Staff
+/// get none (legacy zeroes theirs); a longer wait already running is kept.
+pub(crate) fn impose_wait(world: &mut World, entity: Entity, ticks: u64) {
+    if mud_world::bypasses_restrictions(world, entity) {
+        return;
+    }
+    let until =
+        (now_tick(world) + ticks).max(world.get::<WaitState>(entity).map_or(0, |w| w.until));
+    super::try_insert(world, entity, WaitState { until });
+}
+
+/// Legacy `desc->wait = 0` / `GET_MOB_WAIT = 0`: end any wait state.
+pub(crate) fn clear_wait(world: &mut World, entity: Entity) {
+    super::try_remove::<WaitState>(world, entity);
+}
+
 /// What a typed line resolves to, as far as the cast lock cares.
 enum Resolved {
     Command(&'static Command),
@@ -99,6 +136,10 @@ fn resolve(world: &World, player: Entity, line: &str) -> Resolved {
 /// True when `line` would be refused right now only because the player is
 /// winding up a cast (or recovering from one that broke off).
 pub(crate) fn must_wait(world: &World, player: Entity, line: &str) -> bool {
+    // A wait state holds everything, as legacy's descriptor wait does.
+    if wait_active(world, player) {
+        return true;
+    }
     let casting = world.get::<Casting>(player).is_some();
     let lagging = crate::casting::cast_lag_active(world, player);
     if !casting && !lagging {
@@ -196,7 +237,15 @@ pub(super) fn defer_if_needed(
                 format!("Your {dropped} queued command(s) were cleared.\r\n"),
             );
         }
-        return false;
+        // The flush itself still waits out a wait state.
+        if !wait_active(world, player) {
+            return false;
+        }
+    }
+    if wait_active(world, player) {
+        push(world, player, line);
+        run.deferred = true;
+        return true;
     }
     // A command's database work is still running off the tick: this line
     // waits its turn behind it, whatever it is (see `off_tick`).
@@ -404,6 +453,68 @@ mod tests {
             .map(String::as_str)
             .collect();
         assert_eq!(q, vec!["cast 'bless'", "north"]);
+    }
+
+    /// Fear's "faltered" branch (half a round of `WAIT_STATE`) on `victim`.
+    fn falter(world: &mut World, caster: Entity, victim: Entity) {
+        let rolls = crate::fear::FearRolls {
+            freeze: 100,
+            drop: 100,
+            flee: 100,
+            falter: 0,
+        };
+        let out = crate::fear::inflict_fear(world, caster, victim, 100, rolls);
+        assert_eq!(out, crate::fear::FearOutcome::Faltered);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn commands_typed_during_fear_lag_are_held_and_run_after_it() {
+        let (mut world, victim, mut rx) = buffer();
+        world.insert_resource(crate::TickCount(0));
+        let pool = lazy_pool();
+        let room = world.get::<mud_world::Located>(victim).unwrap().0;
+        let (scarer, _srx) = player_in(&mut world, room);
+        falter(&mut world, scarer, victim);
+        assert!(!world.entity(victim).contains::<mud_world::Stunned>());
+        let _ = drain(&mut rx);
+
+        // Typed during the lag: held in order, not refused or dropped.
+        dispatch_with_async(&mut world, victim, &pool, "look").await;
+        dispatch_with_async(&mut world, victim, &pool, "say hi").await;
+        let out = drain(&mut rx);
+        assert!(!out.contains("stars"), "refused as a stun: {out}");
+        assert_eq!(queued_len(&world, victim), 2);
+        assert!(!run_queued_input(&mut world, victim, &pool).await);
+
+        // Half a round later the lines run, oldest first, one per tick.
+        world.insert_resource(crate::TickCount(20));
+        assert!(run_queued_input(&mut world, victim, &pool).await);
+        let first = drain(&mut rx);
+        assert!(!first.is_empty(), "look produced output");
+        assert!(run_queued_input(&mut world, victim, &pool).await);
+        let second = drain(&mut rx);
+        assert!(second.contains("You say"), "{second}");
+        assert!(!has_queued_input(&world, victim));
+
+        // With the lag over, a typed line runs at once again.
+        dispatch_with_async(&mut world, victim, &pool, "look").await;
+        assert!(!drain(&mut rx).is_empty());
+        assert!(!has_queued_input(&world, victim));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_flush_command_waits_out_the_lag_and_clears_the_queue() {
+        let (mut world, victim, mut rx) = buffer();
+        world.insert_resource(crate::TickCount(0));
+        let pool = lazy_pool();
+        impose_wait(&mut world, victim, 40);
+        dispatch_with_async(&mut world, victim, &pool, "look").await;
+        dispatch_with_async(&mut world, victim, &pool, "disengage").await;
+        let out = drain(&mut rx);
+        assert!(out.contains("queued command"), "{out}");
+        assert_eq!(queued_len(&world, victim), 1, "only the flush itself waits");
+        clear_wait(&mut world, victim);
+        assert!(run_queued_input(&mut world, victim, &pool).await);
     }
 
     #[tokio::test(flavor = "current_thread")]

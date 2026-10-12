@@ -1976,7 +1976,11 @@ pub async fn load_mob_default_effect_catalog(
 pub async fn load_effect_catalog(pool: &PgPool) -> sqlx::Result<EffectCatalog> {
     let effect_rows = effects::list_effects(pool).await?;
     let mut effect_catalog = EffectCatalog::default();
+    let mut unitless: Vec<String> = Vec::new();
     for row in effect_rows {
+        if default_duration_lacks_unit(&row.default_params) {
+            unitless.push(row.name.clone());
+        }
         effect_catalog.by_id.insert(
             row.id,
             EffectDef {
@@ -1996,7 +2000,38 @@ pub async fn load_effect_catalog(pool: &PgPool) -> sqlx::Result<EffectCatalog> {
             },
         );
     }
+    if !unitless.is_empty() {
+        warn!(
+            effects = %unitless.join(", "),
+            "Effect default_params carry a duration but no durationUnit; the engine reads \
+             that as MUD hours (75 s each), which is rarely what a short rounds/seconds \
+             value means. Set durationUnit explicitly."
+        );
+    }
     Ok(effect_catalog)
+}
+
+/// An `Effect` default that sets a `duration` without a `durationUnit`
+/// (the engine then assumes MUD hours).
+fn default_duration_lacks_unit(params: &serde_json::Value) -> bool {
+    params.get("duration").is_some() && params.get("durationUnit").is_none()
+}
+
+#[cfg(test)]
+mod duration_unit_tests {
+    use super::default_duration_lacks_unit;
+    use serde_json::json;
+
+    #[test]
+    fn flags_only_a_duration_with_no_unit() {
+        assert!(default_duration_lacks_unit(&json!({"duration": 2})));
+        assert!(default_duration_lacks_unit(&json!({"duration": "level"})));
+        assert!(!default_duration_lacks_unit(
+            &json!({"duration": 2, "durationUnit": "rounds"})
+        ));
+        assert!(!default_duration_lacks_unit(&json!({"amount": 3})));
+        assert!(!default_duration_lacks_unit(&json!({})));
+    }
 }
 
 /// Load the full ability catalog (abilities plus restrictions, effects,

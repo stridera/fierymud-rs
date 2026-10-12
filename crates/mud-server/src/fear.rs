@@ -306,10 +306,6 @@ pub(crate) fn chant_gates_pass(
 const SECS_PER_MUD_HOUR: i32 = 75;
 /// Legacy `PULSE_VIOLENCE`: one combat round of wait state, in seconds.
 const ROUND_SECS: i32 = 4;
-/// Marks a [`stun_for`] lag so a panicking victim can have it cleared
-/// (legacy zeroes the wait state before `flee`) without touching real
-/// stuns.
-const LAG_SOURCE: &str = "fear-lag";
 
 /// The dice of legacy `inflict_fear`, each `random_number(0, 100)`, one per
 /// branch of the cascade.
@@ -369,7 +365,7 @@ fn clear_fear(world: &mut World, victim: Entity) {
 }
 
 /// Hold `victim` for `secs` under an effect called `name` (`"paralyzed"`
-/// for terror, `"stun"` for a wait state): the [`Stunned`] marker keeps it
+/// for terror): the [`Stunned`] marker keeps it
 /// from swinging or fleeing, the instance blocks movement and casting. A
 /// longer effect already running is not shortened.
 fn stun_for(world: &mut World, victim: Entity, name: &str, secs: i32, source: &str) {
@@ -405,29 +401,17 @@ fn stun_for(world: &mut World, victim: Entity, name: &str, secs: i32, source: &s
     sync_stunned(world, victim);
 }
 
-/// Legacy `WAIT_STATE(victim, secs)`: a short stun that fear itself put on.
+/// Legacy `WAIT_STATE(victim, secs)`: the victim's typed commands are held
+/// and run after the lag (a mob just stands there). It is not a stun, so it
+/// never refuses input, and the victim can still be hit or hit back.
 fn lag_for(world: &mut World, victim: Entity, secs: i32) {
-    stun_for(world, victim, "stun", secs, LAG_SOURCE);
+    let ticks = u64::try_from(secs).unwrap_or(0) * crate::TICK_HZ;
+    crate::commands::input_queue::impose_wait(world, victim, ticks);
 }
 
-/// Legacy "turn off wait states so they can flee": strip fear's own lag.
+/// Legacy "turn off wait states so they can flee".
 fn clear_lag(world: &mut World, victim: Entity) {
-    let lags: Vec<Entity> = {
-        let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
-        q.iter(world)
-            .filter(|(_, inst, applied)| {
-                applied.0 == victim
-                    && matches!(&inst.source, EffectSource::Other(s) if s == LAG_SOURCE)
-            })
-            .map(|(e, _, _)| e)
-            .collect()
-    };
-    for e in lags {
-        if let Ok(em) = world.get_entity_mut(e) {
-            em.despawn();
-        }
-    }
-    sync_stunned(world, victim);
+    crate::commands::input_queue::clear_wait(world, victim);
 }
 
 /// The victim's wielded weapon, if any (the one slot disarm also reads).
