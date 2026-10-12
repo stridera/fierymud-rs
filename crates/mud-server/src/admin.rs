@@ -2253,7 +2253,47 @@ async fn start_command(
             own_line_queued: commands::input_queue::queued_len(world, entity) > queued_before,
         });
     }
-    CommandRun::Done(Ok(command_response(command_line, &pending_output, &output)))
+    // Lines this command left waiting (a wait state such as fear's lag, a
+    // cast lock, an alias chain): they run on later ticks, one per tick
+    // (`drain_virtual_input_queues`), and what they print is handed back as
+    // `pending_output` of the session's next command.
+    let queued = commands::input_queue::queued_len(world, entity).saturating_sub(queued_before);
+    CommandRun::Done(Ok(command_response(
+        command_line,
+        &pending_output,
+        &output,
+        queued,
+    )))
+}
+
+/// Release one waiting input line per virtual session whose hold (wait
+/// state, cast lock, off-tick work) has lifted. The telnet sessions get the
+/// same service from `Router::drain_input_queues`; virtual sessions are not
+/// connections, so without this a line queued behind a wait state (or an
+/// alias chain) would never run. Driven once per tick, after the schedule.
+/// Output lands in the session's buffer for its next command to collect.
+pub async fn drain_virtual_input_queues(world: &mut World, pool: &PgPool) {
+    let waiting: Vec<Entity> = {
+        let Some(sessions) = world.get_resource::<VirtualSessions>() else {
+            return;
+        };
+        let by_name = sessions.by_name.lock().expect("sessions poisoned");
+        by_name
+            .values()
+            .map(|s| s.entity)
+            .filter(|e| commands::has_queued_input(world, *e))
+            .collect()
+    };
+    for entity in waiting {
+        let ran = tokio::time::timeout(
+            COMMAND_TIMEOUT,
+            commands::run_queued_input(world, entity, pool),
+        )
+        .await;
+        if ran.is_err() {
+            warn!(?entity, "queued virtual-session line timed out");
+        }
+    }
 }
 
 fn command_timed_out(command_line: &str, output: &str) -> (StatusCode, String) {
@@ -2266,13 +2306,27 @@ fn command_timed_out(command_line: &str, output: &str) -> (StatusCode, String) {
     )
 }
 
-fn command_response(command_line: &str, pending_output: &str, output: &str) -> Value {
-    json!({
+fn command_response(
+    command_line: &str,
+    pending_output: &str,
+    output: &str,
+    queued_lines: usize,
+) -> Value {
+    let mut resp = json!({
         "success": true,
         "command": command_line,
         "pending_output": pending_output,
         "output": output,
-    })
+    });
+    if queued_lines > 0 {
+        resp["queued_lines"] = json!(queued_lines);
+        resp["note"] = json!(
+            "the session is held (wait state, cast, or earlier work), so the line was queued, \
+             not run; it executes on a later tick and its output arrives as pending_output \
+             of the next command"
+        );
+    }
+    resp
 }
 
 /// Answer the parked commands whose work has landed, or whose
@@ -2318,10 +2372,16 @@ fn answer_parked(world: &mut World) {
         let resp = if busy && !settled {
             Err(command_timed_out(&waiting.command, &output))
         } else {
+            let queued = if line_pending {
+                commands::input_queue::queued_len(world, waiting.entity)
+            } else {
+                0
+            };
             Ok(command_response(
                 &waiting.command,
                 &waiting.pending_output,
                 &output,
+                queued,
             ))
         };
         let _ = reply.send(resp);
@@ -3069,6 +3129,65 @@ mod command_dispatch_tests {
             out.contains("A quiet hall") && !out.contains("Save failed"),
             "{out}"
         );
+    }
+
+    fn set_tick(world: &mut World, tick: u64) {
+        world.insert_resource(crate::TickCount(tick));
+    }
+
+    /// A line sent during a wait state (fear's lag) is queued, the response
+    /// says so, and the tick system runs it once the wait lifts.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_line_sent_during_a_wait_state_runs_when_the_wait_ends() {
+        let (mut world, player) = world_with_session();
+        set_tick(&mut world, 100);
+        commands::input_queue::impose_wait(&mut world, player, 30);
+        let resp = run_command(&mut world, &pool(), "Tester", "look")
+            .await
+            .expect("command ok");
+        assert_eq!(resp["output"], "");
+        assert_eq!(resp["queued_lines"], 1);
+        assert!(resp["note"].as_str().unwrap().contains("queued"));
+        // Still waiting: nothing is released.
+        set_tick(&mut world, 120);
+        drain_virtual_input_queues(&mut world, &pool()).await;
+        assert!(commands::has_queued_input(&world, player));
+        assert_eq!(drain_session_output(&world, "Tester"), "");
+        // The wait is over: one line per tick runs, output is buffered.
+        set_tick(&mut world, 130);
+        drain_virtual_input_queues(&mut world, &pool()).await;
+        assert!(!commands::has_queued_input(&world, player));
+        // The next command collects it as pending_output.
+        let next = run_command(&mut world, &pool(), "Tester", "look")
+            .await
+            .expect("command ok");
+        let pending = next["pending_output"].as_str().unwrap();
+        assert!(pending.contains("A quiet hall"), "{pending}");
+        assert!(next.get("queued_lines").is_none());
+    }
+
+    /// An alias chain typed during a wait drains one line per tick, in order.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_alias_chain_on_a_virtual_session_drains_one_line_per_tick() {
+        let (mut world, player) = world_with_session();
+        world.entity_mut(player).insert(mud_world::Aliases {
+            entries: vec![("both".into(), "look;say hello".into())],
+        });
+        set_tick(&mut world, 100);
+        commands::input_queue::impose_wait(&mut world, player, 5);
+        let resp = run_command(&mut world, &pool(), "Tester", "both")
+            .await
+            .expect("command ok");
+        assert_eq!(resp["queued_lines"], 2);
+        set_tick(&mut world, 105);
+        drain_virtual_input_queues(&mut world, &pool()).await;
+        let first = drain_session_output(&world, "Tester");
+        assert!(first.contains("A quiet hall"), "{first}");
+        assert!(!first.contains("hello"), "{first}");
+        drain_virtual_input_queues(&mut world, &pool()).await;
+        let second = drain_session_output(&world, "Tester");
+        assert!(second.contains("hello"), "{second}");
+        assert!(!commands::has_queued_input(&world, player));
     }
 
     #[tokio::test(flavor = "current_thread")]
