@@ -10227,6 +10227,24 @@ pub(crate) fn cmd_read(world: &mut World, player: Entity, args: &str) {
 /// of whitespace; multi-word keywords aren't supported (a quoted-
 /// arg parser would be more general but no other command needs
 /// one yet).
+/// Damage-type label for a weapon prototype: its physical type, then its
+/// element when it deals one ("Pierce, Cold" for a dagger of ice). An elemental
+/// `weapon_damage_type` with no separate element column shows once ("Cold").
+fn weapon_type_label(p: &mud_world::ObjectProto) -> Option<String> {
+    let physical = p
+        .weapon_damage_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty());
+    let element = crate::combat::proto_weapon_element(p).map(mud_db::enums::DamageType::label);
+    match (physical, element) {
+        (Some(t), Some(e)) if !t.eq_ignore_ascii_case(e) => Some(format!("{t}, {e}")),
+        (Some(t), _) => Some(t.to_string()),
+        (None, Some(e)) => Some(e.to_string()),
+        (None, None) => None,
+    }
+}
+
 pub(crate) fn cmd_compare(world: &mut World, player: Entity, args: &str) {
     let mut parts = args.trim().splitn(2, char::is_whitespace);
     let Some(a_word) = parts.next().filter(|s| !s.is_empty()) else {
@@ -10386,9 +10404,9 @@ pub(crate) fn cmd_compare(world: &mut World, player: Entity, args: &str) {
             // when present. The outer format string wraps this whole
             // result in <yellow>...</> so we don't add color here —
             // the parenthetical inherits the yellow.
-            match p.weapon_damage_type.as_deref() {
-                Some(t) if !t.is_empty() => format!("{dice} ({t})"),
-                _ => dice,
+            match weapon_type_label(p) {
+                Some(t) => format!("{dice} ({t})"),
+                None => dice,
             }
         };
         let damage_delta = a_avg - b_avg;
@@ -10416,11 +10434,8 @@ pub(crate) fn cmd_compare(world: &mut World, player: Entity, args: &str) {
         // both are populated, surface the delta as its own line so
         // a player picking between two roughly-equal weapons can
         // spot the tactical fork without parsing the dice line.
-        match (
-            ap.weapon_damage_type.as_deref(),
-            bp.weapon_damage_type.as_deref(),
-        ) {
-            (Some(a), Some(b)) if a != b && !a.is_empty() && !b.is_empty() => {
+        match (weapon_type_label(&ap), weapon_type_label(&bp)) {
+            (Some(a), Some(b)) if a != b => {
                 out.push_str(&format!(
                     "  <dim>Different damage types — A: <yellow>{a}</>, \
                      B: <yellow>{b}</></>\r\n"
@@ -16284,9 +16299,7 @@ pub(crate) fn render_identify_block(
             std::cmp::Ordering::Greater => format!("+{}", p.weapon_dice_bonus),
             std::cmp::Ordering::Less => format!("{}", p.weapon_dice_bonus),
         };
-        let dtype_suffix = p
-            .weapon_damage_type
-            .as_deref()
+        let dtype_suffix = weapon_type_label(&p)
             .map(|t| format!("  <yellow>({t})</>"))
             .unwrap_or_default();
         out.push_str(&format!(
@@ -18887,5 +18900,107 @@ mod summon_mount_plan_tests {
         assert!(summon_mount_is_anti("<b:red>Anti-</><b:black>Paladin</>"));
         assert!(summon_mount_is_anti("Anti-Paladin"));
         assert!(!summon_mount_is_anti("Paladin"));
+    }
+}
+
+#[cfg(test)]
+mod weapon_type_label_tests {
+    use super::{cmd_compare, render_identify_block, weapon_type_label};
+    use crate::commands::test_support::{self, drain};
+    use bevy_ecs::prelude::*;
+    use mud_db::enums::ObjectType;
+    use mud_world::{
+        Identified, Item, Keywords, Located, Named, ObjectProto, ObjectPrototypes, WorldKey,
+    };
+
+    fn weapon(id: i32, physical: Option<&str>, element: Option<&str>) -> ObjectProto {
+        let mut p = test_support::object_proto(1, id, ObjectType::Weapon);
+        p.weapon_dice_num = 1;
+        p.weapon_dice_size = 4;
+        p.weapon_damage_type = physical.map(str::to_string);
+        p.weapon_element = element.map(str::to_string);
+        p
+    }
+
+    #[test]
+    fn label_shows_physical_then_element() {
+        assert_eq!(
+            weapon_type_label(&weapon(1, Some("Pierce"), Some("Cold"))).as_deref(),
+            Some("Pierce, Cold")
+        );
+        assert_eq!(
+            weapon_type_label(&weapon(1, Some("Pierce"), None)).as_deref(),
+            Some("Pierce")
+        );
+        assert_eq!(weapon_type_label(&weapon(1, None, None)), None);
+        // Element-only typing is not repeated.
+        assert_eq!(
+            weapon_type_label(&weapon(1, Some("Cold"), None)).as_deref(),
+            Some("Cold")
+        );
+        assert_eq!(
+            weapon_type_label(&weapon(1, Some("Cold"), Some("COLD"))).as_deref(),
+            Some("Cold")
+        );
+    }
+
+    fn setup() -> (World, Entity, test_support::Rx) {
+        let mut world = World::new();
+        let mut protos = ObjectPrototypes::default();
+        protos
+            .by_key
+            .insert((1, 1), weapon(1, Some("Pierce"), Some("Cold")));
+        protos
+            .by_key
+            .insert((1, 2), weapon(2, Some("Pierce"), None));
+        world.insert_resource(protos);
+        world.init_resource::<mud_world::ObjectAbilityCatalog>();
+        world.init_resource::<mud_world::AbilityCatalog>();
+        world.init_resource::<mud_world::ClassCatalog>();
+        let room = world.spawn_empty().id();
+        let (player, rx) = test_support::player_in(&mut world, room);
+        (world, player, rx)
+    }
+
+    fn item(world: &mut World, id: i32, kw: &str, parent: Entity) -> Entity {
+        world
+            .spawn((
+                Item,
+                Named { name: kw.into() },
+                Keywords(vec![kw.into()]),
+                WorldKey { zone: 1, id },
+                Located(parent),
+            ))
+            .id()
+    }
+
+    #[test]
+    fn identify_shows_the_element() {
+        let (mut world, player, _rx) = setup();
+        let dagger = item(&mut world, 1, "dagger", player);
+        world.entity_mut(dagger).insert(Identified);
+        let out = render_identify_block(&mut world, player, dagger).expect("block");
+        assert!(out.contains("(Pierce, Cold)"), "{out}");
+    }
+
+    #[test]
+    fn identify_physical_weapon_has_no_element() {
+        let (mut world, player, _rx) = setup();
+        let sword = item(&mut world, 2, "sword", player);
+        world.entity_mut(sword).insert(Identified);
+        let out = render_identify_block(&mut world, player, sword).expect("block");
+        assert!(out.contains("(Pierce)"), "{out}");
+        assert!(!out.contains("Cold"), "{out}");
+    }
+
+    #[test]
+    fn compare_shows_the_element() {
+        let (mut world, player, mut rx) = setup();
+        item(&mut world, 1, "dagger", player);
+        item(&mut world, 2, "sword", player);
+        cmd_compare(&mut world, player, "dagger sword");
+        let out = drain(&mut rx);
+        assert!(out.contains("(Pierce, Cold)"), "{out}");
+        assert!(out.contains("Different damage types"), "{out}");
     }
 }
