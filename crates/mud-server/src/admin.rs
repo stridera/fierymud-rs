@@ -1668,6 +1668,10 @@ fn world_status(world: &mut World) -> Value {
         .count();
     let mobs = world.query_filtered::<(), With<Mob>>().iter(world).count();
     let items = world.query_filtered::<(), With<Item>>().iter(world).count();
+    // Bevy never frees an archetype, and fresh queries walk them: a count
+    // that keeps climbing under steady play means some component is being
+    // added late or toggled (see `bookkeeping`).
+    let archetypes = world.archetypes().len();
     // Tick duration percentiles over the last minute (issue #29: lag was
     // invisible). Absent resource (unit-test worlds) reads as all zeros.
     let timing = world.get_resource::<crate::tick_stats::TickStats>().map_or(
@@ -1686,6 +1690,7 @@ fn world_status(world: &mut World) -> Value {
         "online_players": players,
         "mobs": mobs,
         "items": items,
+        "archetypes": archetypes,
         "tick_window_secs": 60,
         "tick_samples": timing.samples,
         "tick_p50_ms": timing.p50_ms,

@@ -1072,6 +1072,10 @@ pub fn combat_tick(world: &mut World) {
             )>();
         q.iter(world)
             .filter_map(|(mob, loc, hate)| {
+                // Every mob carries a (usually empty) list.
+                if hate.0.is_empty() {
+                    return None;
+                }
                 // Legacy `hit`: a blind attacker can't start a new fight, so
                 // a blind mob does not act on its hate list.
                 if crate::commands::senses::is_blind(world, mob) {
@@ -2222,8 +2226,14 @@ const DAMAGER_CREDIT_WINDOW: std::time::Duration = std::time::Duration::from_sec
 /// `apply_damage_from`. Lets `handle_death` credit a kill to the
 /// actual damage source instead of inferring it from a `Fighting`
 /// link, which a spell / skill kill from outside combat never has.
-#[derive(Component, Debug, Clone, Copy)]
-pub(crate) struct DamagedBy {
+/// Exists from spawn on players and mobs (see [`crate::bookkeeping`]);
+/// `None` until a player hits them.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub(crate) struct DamagedBy(pub(crate) Option<Damager>);
+
+/// One recorded damage source: who, and when.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Damager {
     pub attacker: Entity,
     pub at: std::time::Instant,
 }
@@ -2237,14 +2247,15 @@ pub(crate) fn record_damager(world: &mut World, victim: Entity, attacker: Entity
     if world.get::<Player>(attacker).is_none() {
         return;
     }
-    try_insert(
-        world,
-        victim,
-        DamagedBy {
-            attacker,
-            at: std::time::Instant::now(),
-        },
-    );
+    let damager = Damager {
+        attacker,
+        at: std::time::Instant::now(),
+    };
+    if let Some(mut d) = world.get_mut::<DamagedBy>(victim) {
+        d.0 = Some(damager);
+    } else {
+        try_insert(world, victim, DamagedBy(Some(damager)));
+    }
 }
 
 /// Legacy `MIN_ALIGNMENT` / `MAX_ALIGNMENT` (`chars.hpp`), the bounds
@@ -2425,7 +2436,7 @@ fn apply_kill_alignment(world: &mut World, killer: Entity, victim: Entity) {
 pub(crate) struct StaffSlain;
 
 fn resolve_killer(world: &mut World, victim: Entity, room: Entity) -> Option<Entity> {
-    if let Some(d) = world.get::<DamagedBy>(victim).copied()
+    if let Some(d) = world.get::<DamagedBy>(victim).and_then(|d| d.0)
         && d.attacker != victim
         && d.at.elapsed() <= DAMAGER_CREDIT_WINDOW
         && world.get::<Player>(d.attacker).is_some()
@@ -2596,7 +2607,7 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
         // PvP alignment shift: legacy `change_alignment` applied to a
         // player victim, for the killer and their group. Killing an evil
         // character nudges them toward good, a good one toward evil.
-        try_remove::<DamagedBy>(world, victim);
+        crate::bookkeeping::reset::<DamagedBy>(world, victim);
         if let Some(killer) = pvp_killer {
             apply_kill_alignment(world, killer, victim);
         }
@@ -6454,7 +6465,10 @@ mod tests {
         let npc = plain_mob(&mut world, room, false);
         crate::commands::lua_damage(&mut world, Some(player), npc, 5);
         assert_eq!(
-            world.get::<DamagedBy>(npc).map(|d| d.attacker),
+            world
+                .get::<DamagedBy>(npc)
+                .and_then(|d| d.0)
+                .map(|d| d.attacker),
             Some(player),
             "damager recorded for kill credit"
         );
@@ -7285,14 +7299,21 @@ end
 
         record_damager(&mut world, goblin, pet);
         assert!(
-            world.get::<DamagedBy>(goblin).is_none(),
+            world.get::<DamagedBy>(goblin).and_then(|d| d.0).is_none(),
             "pet earns no credit"
         );
 
         record_damager(&mut world, goblin, b);
         // The pet's last hit lands after B did the damage.
         record_damager(&mut world, goblin, pet);
-        assert_eq!(world.get::<DamagedBy>(goblin).unwrap().attacker, b);
+        assert_eq!(
+            world
+                .get::<DamagedBy>(goblin)
+                .and_then(|d| d.0)
+                .unwrap()
+                .attacker,
+            b
+        );
         assert_eq!(resolve_killer(&mut world, goblin, room), Some(b));
     }
 

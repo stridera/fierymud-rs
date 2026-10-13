@@ -586,6 +586,7 @@ mod channels;
 mod clan_chat;
 #[path = "commands/combat.rs"]
 mod combat_commands;
+pub(crate) use combat_commands::ReengageLag;
 #[cfg(test)]
 #[path = "commands/combat_hunt_tests.rs"]
 mod combat_hunt_tests;
@@ -1125,7 +1126,7 @@ async fn try_dispatch_async_gated(
     // `false` paths the caller falls through to the sync `dispatch`,
     // which re-marks idempotently.
     mark_for_prompt(player);
-    try_insert(world, player, LastInputAt(std::time::Instant::now()));
+    stamp_input(world, player);
 
     // Composition mode: when the player has a `MailDraft` or
     // `BoardDraft` component, every line is routed to the matching
@@ -1708,7 +1709,7 @@ fn dispatch_line(world: &mut World, player: Entity, line: &str, run: &mut AliasR
     let triggers_done = std::mem::take(&mut run.pre_gated);
     // Stamp activity even for empty input — pressing return to "wake up" a
     // session counts as activity for idle-timer purposes.
-    try_insert(world, player, LastInputAt(std::time::Instant::now()));
+    stamp_input(world, player);
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return;
@@ -21372,8 +21373,8 @@ pub(crate) fn invoke_ability_core(
                     crate::combat::stop_fighting_both_ways(world, target_entity);
                     // ...and forgets its grudges, or the re-engage pass would
                     // put the master straight back into the fight.
-                    try_remove::<crate::combat::HateList>(world, target_entity);
-                    try_remove::<crate::combat::MobMemory>(world, target_entity);
+                    crate::bookkeeping::reset::<crate::combat::HateList>(world, target_entity);
+                    crate::bookkeeping::reset::<crate::combat::MobMemory>(world, target_entity);
                     // Spell-effort spent → tag as durable so the
                     // disconnect-save snapshots it for ≤1h restore.
                     try_insert(world, target_entity, mud_world::PersistentPet);
@@ -24960,6 +24961,16 @@ pub(crate) fn refuse_hidden_exit(
 /// the entity has been despawned. Mid-tick mutations frequently target
 /// an entity that may have been removed earlier in the same tick — this
 /// is the safe-by-default version of `world.entity_mut(e).insert(c)`.
+/// Record keyboard activity for the idle clock. Only players have one: a
+/// mob running a scripted command must not grow a `LastInputAt` (each
+/// late-added component moves the mob into a new archetype, and bevy keeps
+/// every archetype forever; see [`crate::bookkeeping`]).
+fn stamp_input(world: &mut World, actor: Entity) {
+    if world.get::<Player>(actor).is_some() {
+        try_insert(world, actor, LastInputAt(std::time::Instant::now()));
+    }
+}
+
 pub(crate) fn try_insert<C: bevy_ecs::component::Component>(world: &mut World, e: Entity, c: C) {
     if let Ok(mut em) = world.get_entity_mut(e) {
         em.insert(c);
@@ -25436,7 +25447,7 @@ pub(crate) fn disengage_attackers_of(world: &mut World, target: Entity) {
     };
     for a in attackers {
         try_remove::<Fighting>(world, a);
-        try_remove::<combat_commands::ReengageLag>(world, a);
+        crate::bookkeeping::reset::<ReengageLag>(world, a);
     }
 }
 
@@ -25454,7 +25465,7 @@ pub(crate) fn stop_all_combat_with(world: &mut World, victim: Entity) {
     };
     for a in attackers.into_iter().chain([victim]) {
         try_remove::<Fighting>(world, a);
-        try_remove::<combat_commands::ReengageLag>(world, a);
+        crate::bookkeeping::reset::<ReengageLag>(world, a);
     }
 }
 

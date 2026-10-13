@@ -516,27 +516,69 @@ pub(crate) fn send_char_worth_and_slots(world: &mut World, target: Entity) {
 /// `GmcpSent` key holding the hash of the effect *set* (not durations).
 const EFFECT_SET_KEY: &str = "Char.Effects.set";
 
+/// Cached scan over every mob's grudge lists for [`build_char_aggro`], which
+/// runs per prompt: building a fresh `QueryState` each time would walk every
+/// mob archetype.
+#[derive(Resource)]
+#[allow(clippy::type_complexity)]
+struct GrudgeScan(
+    QueryState<
+        (
+            Entity,
+            Option<&'static crate::combat::HateList>,
+            Option<&'static crate::combat::MobMemory>,
+        ),
+        Or<(
+            With<crate::combat::HateList>,
+            With<crate::combat::MobMemory>,
+        )>,
+    >,
+);
+
 /// The `Char.Aggro` payload: mobs that have `target` on their hate list
 /// (`hating`) or in their memory (`remembering`), anywhere in the world.
-/// Only mobs that carry a `HateList` / `MobMemory` are visited, so the
-/// cost tracks the number of mobs that ever fought someone, not the
-/// size of the world.
+/// Every mob carries both lists (see [`crate::bookkeeping`]), almost all of
+/// them empty, so the membership test comes first and only the few matches
+/// pay for the visibility check.
 pub(crate) fn build_char_aggro(world: &mut World, target: Entity) -> String {
-    use crate::combat::{HateList, MobMemory};
+    if !world.contains_resource::<GrudgeScan>() {
+        let state = world.query_filtered::<(
+            Entity,
+            Option<&crate::combat::HateList>,
+            Option<&crate::combat::MobMemory>,
+        ), Or<(
+            With<crate::combat::HateList>,
+            With<crate::combat::MobMemory>,
+        )>>();
+        world.insert_resource(GrudgeScan(state));
+    }
+    let matches: Vec<(Entity, bool)> = world.resource_scope(|world, mut scan: Mut<GrudgeScan>| {
+        scan.0
+            .iter(world)
+            .filter_map(|(e, hate, mem)| {
+                if hate.is_some_and(|h| h.0.contains(&target)) {
+                    Some((e, true))
+                } else if mem.is_some_and(|m| m.0.contains(&target)) {
+                    Some((e, false))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    });
     let mut hating: Vec<String> = Vec::new();
     let mut remembering: Vec<String> = Vec::new();
-    let mut q = world.query_filtered::<
-        (Entity, &Named, Option<&HateList>, Option<&MobMemory>),
-        (With<mud_world::Mob>, Or<(With<HateList>, With<MobMemory>)>),
-    >();
-    for (e, n, hate, mem) in q.iter(world) {
+    for (e, hates) in matches {
         // An invisible (or wizinvis) mob stays nameless to the viewer.
-        if !super::can_see_player(world, target, e) {
+        if world.get::<mud_world::Mob>(e).is_none() || !super::can_see_player(world, target, e) {
             continue;
         }
-        if hate.is_some_and(|h| h.0.contains(&target)) {
+        let Some(n) = world.get::<Named>(e) else {
+            continue;
+        };
+        if hates {
             hating.push(strip(&n.name));
-        } else if mem.is_some_and(|m| m.0.contains(&target)) {
+        } else {
             remembering.push(strip(&n.name));
         }
     }

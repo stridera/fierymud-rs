@@ -13233,8 +13233,8 @@ pub(crate) fn cmd_walk(world: &mut World, player: Entity, _args: &str) {
 
 /// Tick before which the hider may not hide again (legacy `WAIT_STATE`
 /// after `do_hide`; only `hide` itself honours it).
-#[derive(Component, Debug, Clone, Copy)]
-pub(super) struct HideLag {
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub(crate) struct HideLag {
     until: u64,
 }
 

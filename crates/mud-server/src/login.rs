@@ -4219,14 +4219,14 @@ impl ConnRouter {
         // Reconnecting is activity: restart the idle clock and drop any
         // pending kick / warning left over from before the drop, or the
         // very next idle scan would kick the player again.
-        world.entity_mut(entity).remove::<(
-            crate::idle::IdleKickPending,
-            crate::idle::IdleWarned,
-            crate::idle::IdleCombatSeen,
-        )>();
         world
             .entity_mut(entity)
-            .insert(mud_world::LastInputAt(std::time::Instant::now()));
+            .remove::<(crate::idle::IdleKickPending, crate::idle::IdleWarned)>();
+        let now = std::time::Instant::now();
+        world.entity_mut(entity).insert((
+            mud_world::LastInputAt(now),
+            crate::idle::IdleCombatSeen(now),
+        ));
         let _ = outbound.try_send(if was_linkdead {
             b"Reconnecting.\r\n".to_vec()
         } else {

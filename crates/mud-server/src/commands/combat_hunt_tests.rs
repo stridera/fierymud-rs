@@ -490,8 +490,17 @@ fn a_charmed_pet_does_not_turn_on_its_new_master_next_round() {
 
     let (mut world, _room, caster, goblin, _rx) = charm_arena();
     cast_charm(&mut world, caster);
-    assert!(world.get::<crate::combat::HateList>(goblin).is_none());
-    assert!(world.get::<crate::combat::MobMemory>(goblin).is_none());
+    // Charm clears the grudge lists in place (they exist from spawn).
+    assert!(
+        world
+            .get::<crate::combat::HateList>(goblin)
+            .is_some_and(|h| h.0.is_empty())
+    );
+    assert!(
+        world
+            .get::<crate::combat::MobMemory>(goblin)
+            .is_some_and(|m| m.0.is_empty())
+    );
     combat_round(&mut world);
     assert!(
         world.get::<Fighting>(goblin).is_none(),

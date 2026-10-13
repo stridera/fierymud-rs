@@ -2582,8 +2582,8 @@ pub(crate) fn cmd_peace(world: &mut World, player: Entity, args: &str) {
         // doesn't pick right back up on the next tick. Players
         // don't carry those components so the call is a no-op
         // for them.
-        try_remove::<crate::combat::MobMemory>(world, *entity);
-        try_remove::<crate::combat::HateList>(world, *entity);
+        crate::bookkeeping::reset::<crate::combat::MobMemory>(world, *entity);
+        crate::bookkeeping::reset::<crate::combat::HateList>(world, *entity);
     }
     let suffix = if count == 1 { "" } else { "s" };
     let admin_name = name_of(world, player);

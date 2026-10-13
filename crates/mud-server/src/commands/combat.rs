@@ -969,7 +969,7 @@ pub(crate) fn cmd_doorbash(world: &mut World, player: Entity, args: &str) {
 /// trigger, so `disengage` + `kill` cannot be looped for free rounds.
 /// `last_opponent` makes `disengage` + `kill <other>` count as a
 /// switch attempt. Cleared when the target dies (`disengage_attackers_of`).
-#[derive(Component, Debug, Clone, Copy)]
+#[derive(Component, Debug, Clone, Copy, Default)]
 pub(crate) struct ReengageLag {
     until: u64,
     last_opponent: Option<Entity>,

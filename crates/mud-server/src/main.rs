@@ -10,6 +10,7 @@ mod archetype_churn_tests;
 #[cfg(test)]
 mod archetype_noise;
 mod autosave;
+mod bookkeeping;
 mod camp;
 mod casting;
 mod combat;
@@ -347,6 +348,8 @@ async fn main() {
     )));
     world.insert_resource(commands::lua_script_hooks());
 
+    // Before anything spawns a player or a mob (world load spawns mobs).
+    bookkeeping::register(&mut world);
     if let Err(e) = mud_world::load_from_db(&mut world, &pool).await {
         error!(error = %e, "world load failed");
         return;

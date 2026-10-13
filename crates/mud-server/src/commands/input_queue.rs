@@ -80,7 +80,7 @@ pub(crate) struct InputQueue {
 /// A legacy `WAIT_STATE`: until tick `until` the character's typed input is
 /// held (not refused), then runs in order. 10 Hz ticks, like every lag here.
 /// Mobs carry it too; it keeps them from acting (`mob_can_act`).
-#[derive(Component, Debug, Clone, Copy)]
+#[derive(Component, Debug, Clone, Copy, Default)]
 pub(crate) struct WaitState {
     until: u64,
 }
@@ -111,7 +111,7 @@ pub(crate) fn impose_wait(world: &mut World, entity: Entity, ticks: u64) {
 
 /// Legacy `desc->wait = 0` / `GET_MOB_WAIT = 0`: end any wait state.
 pub(crate) fn clear_wait(world: &mut World, entity: Entity) {
-    super::try_remove::<WaitState>(world, entity);
+    crate::bookkeeping::reset::<WaitState>(world, entity);
 }
 
 /// What a typed line resolves to, as far as the cast lock cares.
