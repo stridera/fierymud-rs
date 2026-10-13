@@ -1608,6 +1608,7 @@ fn trigger_stats(world: &World) -> Value {
             "total_fired": 0,
             "total_succeeded": 0,
             "total_failed": 0,
+            "skipped_busy": 0,
             "by_event": {},
         });
     };
@@ -1621,6 +1622,7 @@ fn trigger_stats(world: &World) -> Value {
                     "fired": c.fired,
                     "succeeded": c.succeeded,
                     "failed": c.failed,
+                    "skipped_busy": c.skipped_busy,
                 }),
             )
         })
@@ -1629,6 +1631,7 @@ fn trigger_stats(world: &World) -> Value {
         "total_fired": stats.total_fired,
         "total_succeeded": stats.total_succeeded,
         "total_failed": stats.total_failed,
+        "skipped_busy": stats.skipped_busy,
         "by_event": by_event,
     })
 }

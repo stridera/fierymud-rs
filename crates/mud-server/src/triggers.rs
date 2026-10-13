@@ -37,6 +37,10 @@ pub struct TriggerStats {
     pub total_fired: u64,
     pub total_succeeded: u64,
     pub total_failed: u64,
+    /// Fires refused because the same trigger on the same entity was still
+    /// parked on `wait()` (legacy `TRIGGER_CHECK` depth guard). Not counted
+    /// in `total_fired`.
+    pub skipped_busy: u64,
     pub by_event: HashMap<String, EventCounters>,
 }
 
@@ -45,6 +49,39 @@ pub struct EventCounters {
     pub fired: u64,
     pub succeeded: u64,
     pub failed: u64,
+    pub skipped_busy: u64,
+}
+
+/// Legacy `TRIGGER_CHECK`: a trigger cannot start while its previous run on
+/// the same entity is still waiting (`GET_TRIG_DEPTH` stays non-zero across
+/// a `wait`). Returns true, and counts a `skipped_busy`, when trigger
+/// `(zone, id)` on `listener` is parked; the caller then skips the fire
+/// (no `record_fire`, no history row). Applies to every trigger type
+/// dispatched through the event paths; legacy `run_room_trigger` / `wrun`
+/// call `script_driver` directly and are not guarded.
+fn skip_if_busy(
+    world: &mut World,
+    listener: Entity,
+    zone: i32,
+    id: i32,
+    event: TriggerEvent,
+) -> bool {
+    let busy = world
+        .get_resource::<mud_script::LuaHost>()
+        .is_some_and(|h| h.is_trigger_parked(world, listener, zone, id));
+    if busy {
+        if !world.contains_resource::<TriggerStats>() {
+            world.insert_resource(TriggerStats::default());
+        }
+        let mut stats = world.resource_mut::<TriggerStats>();
+        stats.skipped_busy += 1;
+        stats
+            .by_event
+            .entry(format!("{event:?}"))
+            .or_default()
+            .skipped_busy += 1;
+    }
+    busy
 }
 
 /// Increment the per-event counters for one trigger fire and
@@ -357,6 +394,9 @@ pub fn fire_event(world: &mut World, entity: Entity, event: TriggerEvent) {
     }
 
     for (zone, id, name, body) in to_fire {
+        if skip_if_busy(world, entity, zone, id, event) {
+            continue;
+        }
         let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
             gated(&mut host, event, (zone, id, &name), |h| {
                 h.exec_for_actor(world, entity, &body)
@@ -436,6 +476,9 @@ fn fire_speech_listener(
     }
     let lowered = text.to_ascii_lowercase();
     for (zone, id, name, body, matched) in to_fire {
+        if skip_if_busy(world, listener, zone, id, matched) {
+            continue;
+        }
         let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
             gated(&mut host, matched, (zone, id, &name), |h| {
                 h.exec_for_listener_with_extras(
@@ -511,8 +554,13 @@ pub fn fire_room_entry(world: &mut World, room: Entity, entering: Entity, event:
         return;
     }
     for (zone, id, name, body) in to_fire {
+        if skip_if_busy(world, room, zone, id, event) {
+            continue;
+        }
         let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
-            host.exec_for_listener_with_extras(world, room, entering, &body, &[])
+            gated(&mut host, event, (zone, id, &name), |h| {
+                h.exec_for_listener_with_extras(world, room, entering, &body, &[])
+            })
         });
         drain_lua_outbox(world);
         record_fire(world, room, zone, id, event, result.is_ok());
@@ -559,6 +607,9 @@ pub fn fire_greet_in_room(world: &mut World, entering: Entity, room: Entity) {
                 .collect()
         };
         for (zone, id, name, body) in to_fire {
+            if skip_if_busy(world, listener, zone, id, TriggerEvent::Greet) {
+                continue;
+            }
             let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
                 gated(&mut host, TriggerEvent::Greet, (zone, id, &name), |h| {
                     h.exec_for_listener_with_extras(world, listener, entering, &body, &[])
@@ -611,8 +662,13 @@ pub fn fire_item_event(world: &mut World, item: Entity, actor: Entity, event: Tr
         return;
     }
     for (zone, id, name, body) in to_fire {
+        if skip_if_busy(world, item, zone, id, event) {
+            continue;
+        }
         let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
-            host.exec_for_listener_with_extras(world, item, actor, &body, &[])
+            gated(&mut host, event, (zone, id, &name), |h| {
+                h.exec_for_listener_with_extras(world, item, actor, &body, &[])
+            })
         });
         drain_lua_outbox(world);
         record_fire(world, item, zone, id, event, result.is_ok());
@@ -658,6 +714,9 @@ pub fn fire_event_with_actor(
         return;
     }
     for (zone, id, name, body) in to_fire {
+        if skip_if_busy(world, listener, zone, id, event) {
+            continue;
+        }
         let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
             gated(&mut host, event, (zone, id, &name), |h| {
                 h.exec_for_listener_with_extras(world, listener, acting, &body, &[])
@@ -701,6 +760,9 @@ pub fn fire_receive(world: &mut World, recipient: Entity, giver: Entity, item: E
         return;
     }
     for (zone, id, name, body) in to_fire {
+        if skip_if_busy(world, recipient, zone, id, TriggerEvent::Receive) {
+            continue;
+        }
         let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
             gated(&mut host, TriggerEvent::Receive, (zone, id, &name), |h| {
                 h.exec_for_event(world, recipient, giver, Some(item), &body, &[])
@@ -815,6 +877,9 @@ pub fn fire_command_in_room(
             if let Some(loc) = location {
                 extras.push(("location", loc));
             }
+            if skip_if_busy(world, listener, zone, id, TriggerEvent::Command) {
+                continue;
+            }
             let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
                 gated(&mut host, TriggerEvent::Command, (zone, id, &name), |h| {
                     h.exec_for_event_with_value(world, listener, player, None, &body, &extras)
@@ -880,6 +945,9 @@ fn run_flagged(
     extras: &[(&str, &str)],
 ) {
     for (zone, id, name, body) in pending {
+        if skip_if_busy(world, listener, zone, id, event) {
+            continue;
+        }
         let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
             gated(&mut host, event, (zone, id, &name), |h| {
                 h.set_bindings(bindings.to_vec());
@@ -1093,6 +1161,9 @@ pub fn fire_hit_percent(world: &mut World, victim: Entity, opponent: Entity) {
     }
     let pct = i64::from(hp.hp) * 100 / i64::from(hp.max);
     for (zone, id, name, body) in triggers_with(world, victim, &[TriggerEvent::HitPercent]) {
+        if skip_if_busy(world, victim, zone, id, TriggerEvent::HitPercent) {
+            continue;
+        }
         let (threshold, rest) = split_leading_gate(&body);
         if pct > threshold.unwrap_or(100) {
             continue;
@@ -1539,6 +1610,9 @@ fn run_random_for(world: &mut World, candidates: Vec<Entity>) {
             }
         }
         for (zone, id, name, body) in defs {
+            if skip_if_busy(world, entity, zone, id, TriggerEvent::Random) {
+                continue;
+            }
             let (gate, rest) = split_leading_gate(&body);
             if let Some(pct) = gate
                 && rand::random_range(1i64..=100) > pct.clamp(0, 100)
@@ -1618,6 +1692,216 @@ pub fn validate_catalog(catalog: &TriggerCatalog, zone: Option<i32>) -> ScriptVa
         }
     }
     out
+}
+
+#[cfg(test)]
+mod busy_guard_tests {
+    //! Legacy `TRIGGER_CHECK`: one trigger instance cannot start again while
+    //! its previous run is parked on `wait()`.
+    use super::*;
+    use mud_world::{
+        Health, Located, Mob, Named, Posture, PostureKind, TriggerAttach, TriggerDef, WorldKey,
+    };
+
+    const KEY: (i32, i32) = (30, 11);
+
+    fn fixture(body: &str) -> (World, Entity, Entity) {
+        let mut world = World::new();
+        let mut catalog = TriggerCatalog::default();
+        catalog.by_key.insert(
+            KEY,
+            TriggerDef {
+                zone_id: KEY.0,
+                id: KEY.1,
+                name: "lets do get help".to_string(),
+                attach_type: TriggerAttach::Mob,
+                commands: body.to_string(),
+                flags: vec![TriggerEvent::Fight],
+                arg_list: vec![],
+                num_args: 0,
+            },
+        );
+        world.insert_resource(catalog);
+        world.insert_resource(mud_script::LuaHost::new());
+        world.insert_resource(crate::TickCount(0));
+        let room = world.spawn_empty().id();
+        let mob = spawn_mob(&mut world, room);
+        let foe = world
+            .spawn((
+                Named {
+                    name: "foe".to_string(),
+                },
+                Located(room),
+            ))
+            .id();
+        (world, mob, foe)
+    }
+
+    fn spawn_mob(world: &mut World, room: Entity) -> Entity {
+        world
+            .spawn((
+                Mob,
+                Named {
+                    name: "Julk".to_string(),
+                },
+                Health { hp: 10, max: 10 },
+                WorldKey { zone: KEY.0, id: 1 },
+                Located(room),
+                Posture(PostureKind::Standing),
+                AttachedTriggers(vec![KEY]),
+            ))
+            .id()
+    }
+
+    fn fight(world: &mut World, mob: Entity, foe: Entity) {
+        fire_event_with_actor(world, mob, foe, TriggerEvent::Fight);
+    }
+
+    fn at_tick(world: &mut World, tick: u64) {
+        world.resource_mut::<crate::TickCount>().0 = tick;
+        lua_coroutine_tick(world);
+    }
+
+    fn fired(world: &World) -> u64 {
+        world
+            .get_resource::<TriggerStats>()
+            .map_or(0, |s| s.total_fired)
+    }
+
+    fn skipped(world: &World) -> u64 {
+        world
+            .get_resource::<TriggerStats>()
+            .map_or(0, |s| s.skipped_busy)
+    }
+
+    fn parked(world: &World, mob: Entity) -> bool {
+        world
+            .resource::<mud_script::LuaHost>()
+            .is_trigger_parked(world, mob, KEY.0, KEY.1)
+    }
+
+    const WAITS: &str = "wait(2)\nself:setvar('done', 1)";
+
+    #[test]
+    fn fight_trigger_fires_once_per_wait_window_then_again_after_completion() {
+        let (mut world, mob, foe) = fixture(WAITS);
+        // Every fight round while the first run waits is skipped.
+        for _ in 0..5 {
+            fight(&mut world, mob, foe);
+        }
+        assert_eq!(fired(&world), 1);
+        assert_eq!(skipped(&world), 4);
+        assert_eq!(
+            world.resource::<TriggerStats>().by_event["Fight"].skipped_busy,
+            4
+        );
+        assert!(parked(&world, mob));
+        // Still waiting at tick 10 (deadline 20): still blocked.
+        at_tick(&mut world, 10);
+        fight(&mut world, mob, foe);
+        assert_eq!(fired(&world), 1);
+        // Finished: the guard is gone and the trigger can start again.
+        at_tick(&mut world, 25);
+        assert!(!parked(&world, mob));
+        fight(&mut world, mob, foe);
+        assert_eq!(fired(&world), 2);
+        assert!(parked(&world, mob));
+    }
+
+    #[test]
+    fn a_trigger_without_a_wait_is_never_blocked() {
+        let (mut world, mob, foe) = fixture("self:setvar('n', 1)");
+        for _ in 0..3 {
+            fight(&mut world, mob, foe);
+        }
+        assert_eq!(fired(&world), 3);
+        assert_eq!(skipped(&world), 0);
+    }
+
+    #[test]
+    fn the_guard_is_per_trigger_instance_not_per_prototype() {
+        let (mut world, mob, foe) = fixture(WAITS);
+        let room = world.get::<Located>(mob).unwrap().0;
+        let other = spawn_mob(&mut world, room);
+        fight(&mut world, mob, foe);
+        // Same prototype on a second mob is a separate instance.
+        fight(&mut world, other, foe);
+        assert_eq!(fired(&world), 2);
+        assert_eq!(skipped(&world), 0);
+        fight(&mut world, mob, foe);
+        fight(&mut world, other, foe);
+        assert_eq!(fired(&world), 2);
+        assert_eq!(skipped(&world), 2);
+    }
+
+    #[test]
+    fn error_after_the_wait_clears_the_guard() {
+        let (mut world, mob, foe) = fixture("wait(1)\nlocal t = nil\nreturn t.field");
+        fight(&mut world, mob, foe);
+        fight(&mut world, mob, foe);
+        assert_eq!((fired(&world), skipped(&world)), (1, 1));
+        at_tick(&mut world, 20);
+        assert_eq!(
+            world.resource::<mud_script::LuaHost>().yielded_count(),
+            0,
+            "the failed thread is gone"
+        );
+        assert!(!parked(&world, mob));
+        fight(&mut world, mob, foe);
+        assert_eq!(fired(&world), 2);
+    }
+
+    #[test]
+    fn a_first_slice_error_never_blocks() {
+        let (mut world, mob, foe) = fixture("local t = nil\nreturn t.field");
+        fight(&mut world, mob, foe);
+        fight(&mut world, mob, foe);
+        assert_eq!((fired(&world), skipped(&world)), (2, 0));
+    }
+
+    #[test]
+    fn despawned_listener_or_actor_clears_the_guard() {
+        // The mob's own trigger: once the mob is gone nothing is parked.
+        let (mut world, mob, foe) = fixture(WAITS);
+        fight(&mut world, mob, foe);
+        assert!(parked(&world, mob));
+        world.despawn(mob);
+        assert!(!parked(&world, mob));
+        at_tick(&mut world, 5);
+        assert_eq!(world.resource::<mud_script::LuaHost>().yielded_count(), 0);
+
+        // The foe that started the run is gone: the run is abandoned, so
+        // the mob is free to fire against someone else immediately.
+        let (mut world, mob, foe) = fixture(WAITS);
+        fight(&mut world, mob, foe);
+        assert!(parked(&world, mob));
+        world.despawn(foe);
+        assert!(!parked(&world, mob));
+        let room = world.get::<Located>(mob).unwrap().0;
+        let foe2 = world
+            .spawn((
+                Named {
+                    name: "foe2".to_string(),
+                },
+                Located(room),
+            ))
+            .id();
+        fight(&mut world, mob, foe2);
+        assert_eq!((fired(&world), skipped(&world)), (2, 0));
+    }
+
+    #[test]
+    fn a_run_cancelled_by_sleep_clears_the_guard() {
+        let (mut world, mob, foe) = fixture(WAITS);
+        fight(&mut world, mob, foe);
+        world.entity_mut(mob).insert(Posture(PostureKind::Sleeping));
+        // Legacy aborts the script of a mob that is asleep when it resumes.
+        at_tick(&mut world, 25);
+        assert!(!parked(&world, mob));
+        world.entity_mut(mob).insert(Posture(PostureKind::Standing));
+        fight(&mut world, mob, foe);
+        assert_eq!(fired(&world), 2);
+    }
 }
 
 #[cfg(test)]
@@ -2159,7 +2443,16 @@ return _return_value"#;
             &mut world, player, room, "deposit", "plain"
         ));
         assert!(!fire_command_in_room(&mut world, player, room, "look", ""));
-        // No `return 0` on the path: the legacy default blocks.
+        // The trigger is still parked on its wait, so legacy `TRIGGER_CHECK`
+        // does not start it again: the typed command is not intercepted.
+        assert!(!fire_command_in_room(
+            &mut world, player, room, "deposit", "x"
+        ));
+        // Once the wait is over the trigger runs again. No `return 0` on the
+        // path: the legacy default blocks.
+        world.insert_resource(crate::TickCount(100));
+        lua_coroutine_tick(&mut world);
+        assert_eq!(var(&world, 1, "after_wait"), Some(1.into()));
         assert!(fire_command_in_room(
             &mut world, player, room, "deposit", "x"
         ));

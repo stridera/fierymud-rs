@@ -781,6 +781,30 @@ impl LuaHost {
         self.yielded.len()
     }
 
+    /// True while a run of trigger `(zone, id)` attached to `listener` is
+    /// parked on `wait()`. Legacy `TRIGGER_CHECK` refuses to start a trigger
+    /// whose `GET_TRIG_DEPTH` is still non-zero, and a `wait` returns from
+    /// `script_driver` without clearing it, so a trigger instance (one
+    /// trigger on one mob / object / room) cannot start again until its
+    /// previous run has finished.
+    ///
+    /// There is no separate flag to keep in step: the parked thread IS the
+    /// busy state, so the guard clears the moment the thread completes,
+    /// errors or is dropped (asleep mob, despawned listener or actor). A
+    /// thread whose listener or actor is already gone counts as free now,
+    /// ahead of the next [`Self::tick_yielded`] discarding it.
+    #[must_use]
+    pub fn is_trigger_parked(&self, world: &World, listener: Entity, zone: i32, id: i32) -> bool {
+        self.yielded.iter().any(|y| {
+            y.listener == listener
+                && y.origin
+                    .as_ref()
+                    .is_some_and(|o| o.zone == zone && o.id == id)
+                && world.get_entity(y.listener).is_ok()
+                && world.get_entity(y.acting).is_ok()
+        })
+    }
+
     /// Resume every parked thread whose `resume_at_tick <= current_tick`.
     /// Threads that yield again get re-parked with a fresh resume time;
     /// threads that finish or error fall off. Returns the number of
