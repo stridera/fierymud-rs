@@ -25043,6 +25043,8 @@ pub(crate) fn refuse_hidden_exit(
 fn stamp_input(world: &mut World, actor: Entity) {
     if world.get::<Player>(actor).is_some() {
         try_insert(world, actor, LastInputAt(std::time::Instant::now()));
+        // Typing pulls an idle character back out of the void.
+        crate::idle::return_from_void(world, actor);
     }
 }
 
