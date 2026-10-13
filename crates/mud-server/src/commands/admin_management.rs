@@ -1203,12 +1203,31 @@ pub(crate) fn cmd_pscan(world: &mut World, player: Entity, args: &str) {
                     .map_or_else(|| String::from("inventory"), |s| format!("worn: {s}"));
                 body.push_str(&format!(
                     "    ({:>3}, {:>4}) {} — {where_str}\r\n",
-                    h.object_zone_id, h.object_id, h.object_name,
+                    h.object_zone_id,
+                    h.object_id,
+                    strip_color_tags(&h.object_name),
                 ));
             }
         }
         let _ = out.try_send(body.into_bytes());
     });
+}
+
+/// `name` without its `<colour>` tags. `viewchar` writes straight to the
+/// connection channel, past the colour renderer, so tagged item names would
+/// show up as literal `<yellow>...</>`.
+fn strip_color_tags(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut in_tag = false;
+    for c in name.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out
 }
 
 pub(crate) fn cmd_viewchar(world: &mut World, player: Entity, args: &str) {
@@ -1229,7 +1248,7 @@ pub(crate) fn cmd_viewchar(world: &mut World, player: Entity, args: &str) {
         .resource::<mud_world::ObjectPrototypes>()
         .by_key
         .iter()
-        .map(|(k, p)| (*k, p.name.clone()))
+        .map(|(k, p)| (*k, strip_color_tags(&p.name)))
         .collect();
     let outbound = world.get::<Connection>(player).map(|c| c.0.clone());
     tokio::spawn(async move {
@@ -1311,4 +1330,26 @@ pub(crate) fn cmd_viewchar(world: &mut World, player: Entity, args: &str) {
         }
         let _ = out.try_send(body.into_bytes());
     });
+}
+
+#[cfg(test)]
+mod strip_color_tags_tests {
+    use super::strip_color_tags;
+
+    #[test]
+    fn colour_tags_are_removed_and_plain_text_kept() {
+        assert_eq!(
+            strip_color_tags("<yellow>a small leather bag</>"),
+            "a small leather bag"
+        );
+        assert_eq!(
+            strip_color_tags("a <b:red>red</> and <cyan>cyan</> pair"),
+            "a red and cyan pair"
+        );
+        assert_eq!(strip_color_tags("a plain dagger"), "a plain dagger");
+        assert_eq!(
+            strip_color_tags("the king's <b:white>crown</>"),
+            "the king's crown"
+        );
+    }
 }

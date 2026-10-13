@@ -146,9 +146,11 @@ fn record_failure(world: &mut World, zone: i32, id: i32, name: &str, event: &str
 fn gated<R>(
     host: &mut mud_script::LuaHost,
     event: TriggerEvent,
+    origin: (i32, i32, &str),
     f: impl FnOnce(&mut mud_script::LuaHost) -> R,
 ) -> R {
     host.set_event(event.name());
+    host.set_origin(Some(origin));
     host.set_gate(if event == TriggerEvent::Death {
         mud_script::ScriptGate::Off
     } else {
@@ -156,6 +158,7 @@ fn gated<R>(
     });
     let out = f(host);
     host.set_gate(mud_script::ScriptGate::Off);
+    host.set_origin(None);
     out
 }
 
@@ -195,7 +198,9 @@ pub fn fire_event(world: &mut World, entity: Entity, event: TriggerEvent) {
 
     for (zone, id, name, body) in to_fire {
         let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
-            gated(&mut host, event, |h| h.exec_for_actor(world, entity, &body))
+            gated(&mut host, event, (zone, id, &name), |h| {
+                h.exec_for_actor(world, entity, &body)
+            })
         });
         drain_lua_outbox(world);
         record_fire(world, entity, zone, id, event, result.is_ok());
@@ -272,7 +277,7 @@ fn fire_speech_listener(
     let lowered = text.to_ascii_lowercase();
     for (zone, id, name, body, matched) in to_fire {
         let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
-            gated(&mut host, matched, |h| {
+            gated(&mut host, matched, (zone, id, &name), |h| {
                 h.exec_for_listener_with_extras(
                     world,
                     listener,
@@ -395,7 +400,7 @@ pub fn fire_greet_in_room(world: &mut World, entering: Entity, room: Entity) {
         };
         for (zone, id, name, body) in to_fire {
             let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
-                gated(&mut host, TriggerEvent::Greet, |h| {
+                gated(&mut host, TriggerEvent::Greet, (zone, id, &name), |h| {
                     h.exec_for_listener_with_extras(world, listener, entering, &body, &[])
                 })
             });
@@ -494,7 +499,7 @@ pub fn fire_event_with_actor(
     }
     for (zone, id, name, body) in to_fire {
         let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
-            gated(&mut host, event, |h| {
+            gated(&mut host, event, (zone, id, &name), |h| {
                 h.exec_for_listener_with_extras(world, listener, acting, &body, &[])
             })
         });
@@ -537,7 +542,7 @@ pub fn fire_receive(world: &mut World, recipient: Entity, giver: Entity, item: E
     }
     for (zone, id, name, body) in to_fire {
         let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
-            gated(&mut host, TriggerEvent::Receive, |h| {
+            gated(&mut host, TriggerEvent::Receive, (zone, id, &name), |h| {
                 h.exec_for_event(world, recipient, giver, Some(item), &body, &[])
             })
         });
@@ -651,7 +656,7 @@ pub fn fire_command_in_room(
                 extras.push(("location", loc));
             }
             let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
-                gated(&mut host, TriggerEvent::Command, |h| {
+                gated(&mut host, TriggerEvent::Command, (zone, id, &name), |h| {
                     h.exec_for_event_with_value(world, listener, player, None, &body, &extras)
                 })
             });
@@ -716,7 +721,7 @@ fn run_flagged(
 ) {
     for (zone, id, name, body) in pending {
         let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
-            gated(&mut host, event, |h| {
+            gated(&mut host, event, (zone, id, &name), |h| {
                 h.set_bindings(bindings.to_vec());
                 let out = h.exec_for_listener_with_extras(world, listener, acting, &body, extras);
                 // An aborted run (asleep mob) never consumed them.
@@ -1160,11 +1165,17 @@ pub fn drain_deferred_room_triggers(world: &mut World) {
 /// during the tick get fired now, outside any Lua frame.
 pub fn lua_coroutine_tick(world: &mut World) {
     let tick = world.resource::<crate::TickCount>().0;
-    let (resumed, parked) = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
-        host.set_current_tick(tick);
-        let n = host.tick_yielded(world);
-        (n, host.yielded_count())
-    });
+    let (resumed, parked, failures) =
+        world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
+            host.set_current_tick(tick);
+            let n = host.tick_yielded(world);
+            (n, host.yielded_count(), host.take_resume_failures())
+        });
+    // A script that errors after a `wait()` goes through the same recording
+    // as one that errors in its first slice.
+    for f in failures {
+        record_failure(world, f.zone, f.id, &f.name, &f.event, &f.message);
+    }
     if resumed > 0 {
         crate::commands::drain_lua_outbox(world);
         tracing::info!(resumed, parked, "lua_coroutine_tick resumed parked threads");
@@ -1374,7 +1385,7 @@ fn run_random_for(world: &mut World, candidates: Vec<Entity>) {
                 continue;
             }
             let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
-                gated(&mut host, TriggerEvent::Random, |h| {
+                gated(&mut host, TriggerEvent::Random, (zone, id, &name), |h| {
                     h.exec_for_actor(world, entity, rest)
                 })
             });
@@ -2687,5 +2698,91 @@ return _return_value"#;
                 whole / N as u32
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod resume_error_tests {
+    use super::*;
+    use mud_world::{
+        Health, Located, Mob, Named, Posture, PostureKind, TriggerAttach, TriggerDef, WorldKey,
+    };
+
+    /// A body that parks on `wait()` and then raises an error.
+    const BODY: &str = "wait(1)\nlocal t = nil\nreturn t.field";
+
+    fn fixture() -> (World, Entity, Entity, Entity) {
+        let mut world = World::new();
+        let mut catalog = TriggerCatalog::default();
+        catalog.by_key.insert(
+            (557, 5),
+            TriggerDef {
+                zone_id: 557,
+                id: 5,
+                name: "Phase Armor - Where".to_string(),
+                attach_type: TriggerAttach::Mob,
+                commands: BODY.to_string(),
+                flags: vec![TriggerEvent::Speech],
+                arg_list: vec![],
+                num_args: 0,
+            },
+        );
+        world.insert_resource(catalog);
+        world.insert_resource(mud_script::LuaHost::new());
+        world.insert_resource(crate::TickCount(0));
+        let room = world.spawn_empty().id();
+        let mob = world
+            .spawn((
+                Mob,
+                Named {
+                    name: "archmage".to_string(),
+                },
+                Health { hp: 10, max: 10 },
+                WorldKey { zone: 557, id: 5 },
+                Located(room),
+                Posture(PostureKind::Standing),
+                AttachedTriggers(vec![(557, 5)]),
+            ))
+            .id();
+        let player = world
+            .spawn((
+                Named {
+                    name: "visitor".to_string(),
+                },
+                Located(room),
+            ))
+            .id();
+        (world, room, mob, player)
+    }
+
+    fn error_count(world: &World) -> usize {
+        world
+            .get_resource::<ScriptErrorLog>()
+            .map_or(0, |l| l.entries.len())
+    }
+
+    #[test]
+    fn error_after_wait_lands_in_the_script_error_log() {
+        let (mut world, room, _mob, player) = fixture();
+        fire_speech_in_room(&mut world, player, room, "guild");
+        assert!(error_count(&world) == 0, "the first slice only parks");
+        // Not due yet: nothing recorded.
+        world.resource_mut::<crate::TickCount>().0 = 5;
+        lua_coroutine_tick(&mut world);
+        assert!(error_count(&world) == 0);
+        // Past the 1 s deadline: the resumed slice fails and is recorded.
+        world.resource_mut::<crate::TickCount>().0 = 20;
+        lua_coroutine_tick(&mut world);
+        let entries: Vec<_> = world.resource::<ScriptErrorLog>().entries.iter().collect();
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        let e = entries[0];
+        assert_eq!((e.trigger_zone, e.trigger_id), (557, 5));
+        assert_eq!(e.trigger_name, "Phase Armor - Where");
+        assert_eq!(e.event, "SPEECH");
+        assert!(e.message.contains("lua resume error"), "{}", e.message);
+        // Only once: the thread is finished.
+        world.resource_mut::<crate::TickCount>().0 = 40;
+        lua_coroutine_tick(&mut world);
+        assert_eq!(error_count(&world), 1);
     }
 }

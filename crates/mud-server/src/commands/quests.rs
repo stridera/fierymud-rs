@@ -293,10 +293,17 @@ async fn qstat_other(
             return;
         };
         let name = name_of(world, online);
+        // The live bag: an online player's script quest state is only saved
+        // on autosave, so the database copy can lag behind.
+        let live_vars = world
+            .get::<mud_world::ScriptVars>(online)
+            .map_or_else(Default::default, |v| v.0.clone());
         off_tick::run(
             world,
             player,
-            async move { qstat_listing(&pool, &name, &character_id, viewer_role).await },
+            async move {
+                qstat_listing(&pool, &name, &character_id, viewer_role, Some(live_vars)).await
+            },
             |world, player, text| send_to(world, player, text),
         )
         .await;
@@ -319,7 +326,7 @@ async fn qstat_other(
         async move {
             match mud_db::characters::find_by_name(&pool, &target_name).await {
                 Ok(Some(row)) if row.invis_level <= viewer_level => {
-                    qstat_listing(&pool, &row.name, &row.id, viewer_role).await
+                    qstat_listing(&pool, &row.name, &row.id, viewer_role, None).await
                 }
                 Ok(_) => "No such player around.\r\n".to_string(),
                 Err(e) => {
@@ -334,15 +341,109 @@ async fn qstat_other(
 }
 
 /// The staff view of one character's quests: a header naming them, then
-/// the usual listing plus each quest's variables.
+/// the usual listing plus each quest's variables, then the scripted quests
+/// (the `quest:NAME:*` entries of the character's `ScriptVars`, which is
+/// where the trigger scripts keep their state). `live_vars` is the online
+/// player's in-memory bag; `None` reads the saved copy.
 async fn qstat_listing(
     pool: &mud_db::sqlx::PgPool,
     name: &str,
     character_id: &str,
     viewer_role: UserRole,
+    live_vars: Option<std::collections::BTreeMap<String, String>>,
 ) -> String {
-    let body = quests_text(pool, character_id, viewer_role, true).await;
+    let mut body = quests_text(pool, character_id, viewer_role, true).await;
+    let vars = match live_vars {
+        Some(v) => v,
+        None => match mud_db::characters::load_script_vars(pool, character_id).await {
+            Ok(Some(json)) => script_vars_from_json(&json),
+            Ok(None) => std::collections::BTreeMap::default(),
+            Err(e) => {
+                tracing::warn!(error = %e, character_id, "qstat script_vars load failed");
+                std::collections::BTreeMap::default()
+            }
+        },
+    };
+    let scripted = scripted_quests_text(&vars);
+    if !scripted.is_empty() {
+        // "No active or completed quests" would contradict the scripted list.
+        if body.contains("No active or completed quests.") {
+            body = "\r\n".to_string();
+        }
+        body.push_str(&scripted);
+    }
     format!("\r\nQuests of {name}:{body}")
+}
+
+/// The saved `Characters.script_vars` JSON object as the runtime
+/// `ScriptVars` map (string values; other scalars are rendered).
+fn script_vars_from_json(json: &serde_json::Value) -> std::collections::BTreeMap<String, String> {
+    json.as_object()
+        .map(|m| {
+            m.iter()
+                .map(|(k, v)| {
+                    let text = match v {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
+                    (k.clone(), text)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Staff listing of the scripted quests in a `ScriptVars` bag. Keys follow
+/// the script API contract: `quest:NAME:stage`, `quest:NAME:completed`,
+/// `quest:NAME:failed` and `quest:NAME:var:VAR`. Empty when there are none.
+fn scripted_quests_text(vars: &std::collections::BTreeMap<String, String>) -> String {
+    #[derive(Default)]
+    struct Quest<'a> {
+        stage: Option<&'a str>,
+        completed: bool,
+        failed: bool,
+        vars: Vec<(&'a str, &'a str)>,
+    }
+    let mut quests: std::collections::BTreeMap<&str, Quest> = std::collections::BTreeMap::new();
+    for (key, value) in vars {
+        let Some(rest) = key.strip_prefix("quest:") else {
+            continue;
+        };
+        if let Some((quest, var)) = rest.split_once(":var:") {
+            quests.entry(quest).or_default().vars.push((var, value));
+        } else if let Some((quest, field)) = rest.rsplit_once(':') {
+            let q = quests.entry(quest).or_default();
+            match field {
+                "stage" => q.stage = Some(value),
+                "completed" => q.completed = value == "1",
+                "failed" => q.failed = value == "1",
+                _ => {}
+            }
+        }
+    }
+    if quests.is_empty() {
+        return String::new();
+    }
+    let mut out = format!("Scripted quests ({}):\r\n", quests.len());
+    for (name, q) in &quests {
+        let mut line = format!("  {name}");
+        if let Some(stage) = q.stage {
+            line.push_str(&format!("  stage {stage}"));
+        }
+        if q.completed {
+            line.push_str("  [completed]");
+        }
+        if q.failed {
+            line.push_str("  [failed]");
+        }
+        out.push_str(&line);
+        out.push_str("\r\n");
+        for (var, value) in &q.vars {
+            out.push_str(&format!("        {var} = {value}\r\n"));
+        }
+    }
+    out.push_str("\r\n");
+    out
 }
 
 /// Indented `key = value` lines for a quest's stored variables; empty
@@ -2397,6 +2498,70 @@ mod qstat_other_tests {
         assert!(out.contains("      met_king = true\r\n"), "{out}");
         assert!(out.contains("      who = \"Bob\"\r\n"), "{out}");
         assert_eq!(variable_lines(&serde_json::json!({}), "    "), "");
+    }
+
+    #[test]
+    fn scripted_quests_group_stage_flags_and_vars_by_quest() {
+        let vars: std::collections::BTreeMap<String, String> = [
+            ("quest:megalith_quest:stage", "1"),
+            ("quest:megalith_quest:var:item1", "salt"),
+            ("quest:megalith_quest:var:item2", "0"),
+            ("quest:old_one:stage", "5"),
+            ("quest:old_one:completed", "1"),
+            ("quest:failed_one:stage", "2"),
+            ("quest:failed_one:failed", "1"),
+            ("unrelated", "x"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let out = scripted_quests_text(&vars);
+        assert!(out.starts_with("Scripted quests (3):\r\n"), "{out}");
+        assert!(out.contains("  megalith_quest  stage 1\r\n"), "{out}");
+        assert!(out.contains("        item1 = salt\r\n"), "{out}");
+        assert!(out.contains("        item2 = 0\r\n"), "{out}");
+        assert!(out.contains("  old_one  stage 5  [completed]\r\n"), "{out}");
+        assert!(out.contains("  failed_one  stage 2  [failed]\r\n"), "{out}");
+        assert!(!out.contains("unrelated"), "{out}");
+        assert_eq!(
+            scripted_quests_text(&std::collections::BTreeMap::default()),
+            ""
+        );
+    }
+
+    #[test]
+    fn saved_script_vars_json_becomes_the_runtime_map() {
+        let json = serde_json::json!({"quest:q:stage": "3", "quest:q:var:n": 4});
+        let map = script_vars_from_json(&json);
+        assert_eq!(map.get("quest:q:stage").map(String::as_str), Some("3"));
+        assert_eq!(map.get("quest:q:var:n").map(String::as_str), Some("4"));
+        assert!(script_vars_from_json(&serde_json::json!([1])).is_empty());
+    }
+
+    /// An online player's scripted quests show up from the live bag, even
+    /// when the database (unreachable here) has nothing.
+    #[tokio::test(flavor = "current_thread")]
+    async fn immortal_qstat_lists_the_online_targets_scripted_quests() {
+        let (mut world, room) = setup();
+        let (imm, mut rx) = person(&mut world, room, "Daedela", UserRole::Immortal, 100);
+        let (bob, _b) = person(&mut world, room, "Bob", UserRole::Player, 20);
+        world.entity_mut(bob).insert(mud_world::ScriptVars(
+            [
+                ("quest:megalith_quest:stage".to_string(), "1".to_string()),
+                (
+                    "quest:megalith_quest:var:item1".to_string(),
+                    "salt".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        ));
+        run(&mut world, imm, "qstat bob").await;
+        let out = drain(&mut rx);
+        assert!(out.contains("Quests of Bob:"), "{out}");
+        assert!(out.contains("Scripted quests (1):"), "{out}");
+        assert!(out.contains("megalith_quest  stage 1"), "{out}");
+        assert!(out.contains("item1 = salt"), "{out}");
     }
 
     /// An immortal naming an online player gets the listing under a header

@@ -166,6 +166,7 @@ const METHOD_CASES: &[(&str, &str, &str)] = &[
     ("LuaActor", "save", "d:save()"),
     ("LuaActor", "set_flag", "d:set_flag('nosummon', true)"),
     ("LuaActor", "has_skill", "d:has_skill('bash')"),
+    ("LuaActor", "get_skill", "d:get_skill('bash')"),
     ("LuaActor", "get_has_spell", "d:get_has_spell('fireball')"),
     ("LuaActor", "has_effect", "d:has_effect('bless')"),
     ("LuaActor", "has_item", "d:has_item(99, 1)"),

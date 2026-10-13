@@ -45,6 +45,31 @@ pub struct YieldedThread {
     /// Tick value at which this thread becomes due to resume. Computed
     /// at park time as `host.current_tick + wait_secs * TICK_HZ`.
     resume_at_tick: u64,
+    /// Which trigger spawned the thread (set by the dispatcher via
+    /// [`LuaHost::set_origin`]); lets a failure after `wait()` be recorded
+    /// against the trigger like a failure in the first slice.
+    origin: Option<TriggerOrigin>,
+}
+
+/// Identity of the trigger a parked thread belongs to.
+#[derive(Debug, Clone)]
+struct TriggerOrigin {
+    zone: i32,
+    id: i32,
+    name: String,
+    event: &'static str,
+}
+
+/// A Lua error raised by a thread resumed after `wait()`. The host collects
+/// these in [`LuaHost::take_resume_failures`] so mud-server can run them
+/// through the same error recording as a failure in the first slice.
+#[derive(Debug, Clone)]
+pub struct ResumeFailure {
+    pub zone: i32,
+    pub id: i32,
+    pub name: String,
+    pub event: String,
+    pub message: String,
 }
 
 /// Legacy `script_driver` (`dg_scripts.cpp`) gates every MOB trigger
@@ -137,6 +162,11 @@ pub struct LuaHost {
     /// Name of the event the next exec call is firing for (`"SPEECH"`,
     /// `"RANDOM"`, ...); see [`LuaHost::set_event`].
     event: &'static str,
+    /// Trigger the exec calls in progress belong to; see
+    /// [`LuaHost::set_origin`].
+    origin: Option<(i32, i32, String)>,
+    /// Errors from resumed threads, waiting for [`LuaHost::take_resume_failures`].
+    resume_failures: Vec<ResumeFailure>,
     /// Shared metatables used to build each trigger's private
     /// environment; see [`EnvKit`].
     env_kit: EnvKit,
@@ -681,6 +711,8 @@ impl LuaHost {
             gate: ScriptGate::Off,
             bindings: Vec::new(),
             event: "",
+            origin: None,
+            resume_failures: Vec::new(),
             env_kit,
         }
     }
@@ -730,6 +762,18 @@ impl LuaHost {
         self.gate = gate;
     }
 
+    /// Name the trigger (`zone`, `id`, `name`) the following exec calls run,
+    /// or `None` to clear it. A thread that parks on `wait()` keeps it, so
+    /// an error after the wait is attributed to the trigger.
+    pub fn set_origin(&mut self, origin: Option<(i32, i32, &str)>) {
+        self.origin = origin.map(|(z, i, n)| (z, i, n.to_string()));
+    }
+
+    /// Drain the errors raised by threads resumed in [`Self::tick_yielded`].
+    pub fn take_resume_failures(&mut self) -> Vec<ResumeFailure> {
+        std::mem::take(&mut self.resume_failures)
+    }
+
     /// Number of threads currently parked waiting for `wait(N)` to
     /// elapse. Surfaced for diagnostics (the `show` admin command).
     #[must_use]
@@ -776,12 +820,22 @@ impl LuaHost {
                 }
             }
             resumed += 1;
-            // Errors during resume are swallowed — the body's already
-            // partway through, and mud-server's outbox-drain happens
-            // around `tick_yielded`, so any pre-error output reaches
-            // the player. Future work could route the error to
-            // `ScriptErrorLog` like the initial-fire path.
-            let _ = self.resume_thread(world, yielded);
+            // A resume error is queued for `take_resume_failures`, which
+            // mud-server records like a failure in the first slice. Output
+            // the body produced before the error still reaches the player
+            // via the outbox drain around `tick_yielded`.
+            let origin = yielded.origin.clone();
+            if let Err(message) = self.resume_thread(world, yielded)
+                && let Some(o) = origin
+            {
+                self.resume_failures.push(ResumeFailure {
+                    zone: o.zone,
+                    id: o.id,
+                    name: o.name,
+                    event: o.event.to_string(),
+                    message,
+                });
+            }
         }
         resumed
     }
@@ -874,6 +928,7 @@ impl LuaHost {
                     extras: yielded.extras,
                     gate: yielded.gate,
                     resume_at_tick,
+                    origin: yielded.origin,
                 });
                 Ok(())
             }
@@ -1180,6 +1235,12 @@ impl LuaHost {
                             .collect(),
                         gate,
                         resume_at_tick,
+                        origin: self.origin.as_ref().map(|(zone, id, name)| TriggerOrigin {
+                            zone: *zone,
+                            id: *id,
+                            name: name.clone(),
+                            event,
+                        }),
                     });
                 }
                 Ok((out, return_bool))
@@ -2671,6 +2732,7 @@ const READ_ACTOR_FIELDS: &[&str] = &[
 /// Query methods forwarded from the full `LuaActor`.
 const READ_ACTOR_METHODS: &[&str] = &[
     "has_skill",
+    "get_skill",
     "has_effect",
     "has_item",
     "has_equipped",
@@ -2880,6 +2942,37 @@ impl UserData for LuaActor {
                     } else if on && let Ok(mut em) = world.get_entity_mut(entity) {
                         em.insert(mud_world::MobBehaviors(vec![flag]));
                     }
+                })
+            },
+        );
+
+        // `actor:get_skill(name)` — the proficiency number (0..=1000, the
+        // `KnownAbilities` scale `skills.set_level` writes), 0 when the
+        // ability is unknown or the character has no row for it. Legacy DG
+        // `%actor.skill[name]%` returned the percentage; arithmetic and
+        // threshold checks (`get_skill("bash") >= 500`, the paid trainers'
+        // price formula) need this, not the boolean of `has_skill`.
+        methods.add_method(
+            "get_skill",
+            |lua, this, name: String| -> mlua::Result<i64> {
+                world_from_lua(lua, |w| {
+                    let key = name.trim().to_ascii_lowercase();
+                    let Some(id) = w
+                        .resource::<AbilityCatalog>()
+                        .by_name
+                        .get(&key)
+                        .map(|d| d.id)
+                    else {
+                        return 0;
+                    };
+                    mud_world::known_abilities_of(w, this.entity)
+                        .and_then(|ka| {
+                            ka.entries
+                                .iter()
+                                .find(|(aid, _, _)| *aid == id)
+                                .map(|(_, prof, _)| i64::from(*prof))
+                        })
+                        .unwrap_or(0)
                 })
             },
         );
@@ -5532,6 +5625,64 @@ mod tests {
     }
 
     #[test]
+    fn error_after_a_wait_is_reported_against_the_trigger() {
+        let (mut world, actor) = make_world_with_actor();
+        let mut host = LuaHost::new();
+        host.set_current_tick(0);
+        host.set_event("SPEECH");
+        host.set_origin(Some((557, 5, "Phase Armor - Where")));
+        host.exec_for_actor(&mut world, actor, "wait(1)\nlocal x = nil\nreturn x.field")
+            .expect("first slice parks cleanly");
+        host.set_origin(None);
+        assert_eq!(host.yielded_count(), 1);
+        assert!(host.take_resume_failures().is_empty());
+        host.set_current_tick(10);
+        assert_eq!(host.tick_yielded(&mut world), 1);
+        let failures = host.take_resume_failures();
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        let f = &failures[0];
+        assert_eq!((f.zone, f.id), (557, 5));
+        assert_eq!(f.name, "Phase Armor - Where");
+        assert_eq!(f.event, "SPEECH");
+        assert!(f.message.contains("lua resume error"), "{}", f.message);
+        assert!(host.take_resume_failures().is_empty(), "drained once");
+    }
+
+    #[test]
+    fn error_after_a_second_wait_keeps_the_origin() {
+        let (mut world, actor) = make_world_with_actor();
+        let mut host = LuaHost::new();
+        host.set_current_tick(0);
+        host.set_origin(Some((30, 40, "blob")));
+        host.exec_for_actor(&mut world, actor, "wait(1)\nwait(1)\nerror('boom')")
+            .expect("ok");
+        host.set_current_tick(10);
+        host.tick_yielded(&mut world);
+        assert!(
+            host.take_resume_failures().is_empty(),
+            "re-parked, no error yet"
+        );
+        host.set_current_tick(30);
+        host.tick_yielded(&mut world);
+        let failures = host.take_resume_failures();
+        assert_eq!(failures.len(), 1);
+        assert_eq!((failures[0].zone, failures[0].id), (30, 40));
+        assert!(failures[0].message.contains("boom"));
+    }
+
+    #[test]
+    fn resumed_body_without_an_origin_records_nothing() {
+        let (mut world, actor) = make_world_with_actor();
+        let mut host = LuaHost::new();
+        host.set_current_tick(0);
+        host.exec_for_actor(&mut world, actor, "wait(1)\nerror('x')")
+            .expect("ok");
+        host.set_current_tick(10);
+        host.tick_yielded(&mut world);
+        assert!(host.take_resume_failures().is_empty());
+    }
+
+    #[test]
     fn actor_name_round_trips() {
         let (mut world, actor) = make_world_with_actor();
         let mut host = LuaHost::new();
@@ -5745,6 +5896,30 @@ mod tests {
         );
         world.insert_resource(catalog);
         world
+    }
+
+    #[test]
+    fn get_skill_returns_the_proficiency_number_has_skill_the_boolean() {
+        let mut world = world_with_ability();
+        let actor = world.spawn((Player, Named { name: "P".into() })).id();
+        let mut host = LuaHost::new();
+        let run = |host: &mut LuaHost, world: &mut World, code: &str| {
+            host.exec_for_actor(world, actor, code).expect("ok")
+        };
+        // No row yet: 0, and arithmetic on it works.
+        let out = run(
+            &mut host,
+            &mut world,
+            "print(actor:get_skill('bash'), actor:has_skill('bash'), 2 * actor:get_skill('bash'))",
+        );
+        assert_eq!(out, "0\tfalse\t0\r\n");
+        run(&mut host, &mut world, "skills.set_level(self, 'bash', 550)");
+        let out = run(
+            &mut host,
+            &mut world,
+            "print(actor:get_skill('Bash'), actor:has_skill('bash'), actor:get_skill('nope'))",
+        );
+        assert_eq!(out, "550\ttrue\t0\r\n");
     }
 
     #[test]
