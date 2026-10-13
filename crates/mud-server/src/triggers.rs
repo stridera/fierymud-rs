@@ -99,11 +99,166 @@ fn record_fire(
         });
 }
 
-/// Push a fire failure into the in-memory `ScriptErrorLog` and emit
-/// the matching tracing warn. Called from every event dispatcher's
-/// error arm.
+/// At most this many WARNs + `script_error_log` rows per trigger per
+/// [`ERROR_WINDOW`]; further failures are only counted.
+const ERRORS_PER_WINDOW: u32 = 5;
+const ERROR_WINDOW: std::time::Duration = std::time::Duration::from_secs(600);
+
+#[derive(Debug)]
+struct ThrottleWindow {
+    start: std::time::Instant,
+    persisted: u32,
+    suppressed: u32,
+}
+
+/// What to do with one trigger failure.
+#[derive(Debug, PartialEq, Eq)]
+enum ErrorVerdict {
+    /// Log and persist it.
+    Record,
+    /// Count only: the trigger is over its budget for this window.
+    Suppress,
+}
+
+/// A finished window that swallowed errors: `(zone, id, suppressed)`.
+type SuppressedSummary = (i32, i32, u32);
+
+/// Per-trigger rate limit for the WARN + DB row a failure produces, so a
+/// script that fails on every fire cannot flood the log or the database.
+/// The in-memory `ScriptErrorLog` ring and `TriggerStats` are NOT
+/// throttled: they keep counting every failure.
+#[derive(Resource, Debug, Default)]
+pub struct ScriptErrorThrottle {
+    windows: HashMap<(i32, i32), ThrottleWindow>,
+}
+
+impl ScriptErrorThrottle {
+    /// Judge one failure of trigger `key` at `now`. When the trigger's
+    /// previous window had swallowed errors, the summary comes back too (the
+    /// failure itself then opens the new window).
+    fn admit(
+        &mut self,
+        key: (i32, i32),
+        now: std::time::Instant,
+    ) -> (ErrorVerdict, Option<SuppressedSummary>) {
+        let mut summary = None;
+        let w = self.windows.entry(key).or_insert(ThrottleWindow {
+            start: now,
+            persisted: 0,
+            suppressed: 0,
+        });
+        if now.duration_since(w.start) >= ERROR_WINDOW {
+            if w.suppressed > 0 {
+                summary = Some((key.0, key.1, w.suppressed));
+            }
+            *w = ThrottleWindow {
+                start: now,
+                persisted: 0,
+                suppressed: 0,
+            };
+        }
+        if w.persisted < ERRORS_PER_WINDOW {
+            w.persisted += 1;
+            (ErrorVerdict::Record, summary)
+        } else {
+            w.suppressed += 1;
+            (ErrorVerdict::Suppress, summary)
+        }
+    }
+
+    /// Close windows that have expired: returns summaries for those that
+    /// swallowed errors (so a trigger that stopped failing still reports),
+    /// and forgets every expired window.
+    fn flush(&mut self, now: std::time::Instant) -> Vec<SuppressedSummary> {
+        let mut out = Vec::new();
+        self.windows.retain(|key, w| {
+            if now.duration_since(w.start) < ERROR_WINDOW {
+                return true;
+            }
+            if w.suppressed > 0 {
+                out.push((key.0, key.1, w.suppressed));
+            }
+            false
+        });
+        out
+    }
+}
+
+/// Fire-and-forget insert into `script_error_log`.
+fn persist_script_error(
+    world: &World,
+    zone: i32,
+    id: i32,
+    error_type: &'static str,
+    message: String,
+    context: serde_json::Value,
+) {
+    if let Some(pool) = world
+        .get_resource::<crate::commands::DbPool>()
+        .map(|p| p.0.clone())
+    {
+        tokio::spawn(async move {
+            if let Err(e) =
+                mud_db::script_errors::record(&pool, zone, id, error_type, &message, &context).await
+            {
+                tracing::warn!(error = %e, "script_error_log persist failed");
+            }
+        });
+    }
+}
+
+fn report_suppressed(world: &World, (zone, id, count): SuppressedSummary) {
+    let message = format!(
+        "suppressed {count} further errors for trigger {zone}:{id} in the last {} minutes",
+        ERROR_WINDOW.as_secs() / 60
+    );
+    warn!(zone, id, suppressed = count, "{message}");
+    persist_script_error(
+        world,
+        zone,
+        id,
+        "suppressed",
+        message,
+        serde_json::json!({ "suppressed": count }),
+    );
+}
+
+/// Report windows that closed with swallowed errors even though their
+/// trigger stopped failing. Called from the per-tick coroutine pass; cheap
+/// (one pass over the triggers that have recently failed).
+fn flush_error_throttle(world: &mut World) {
+    let Some(mut throttle) = world.get_resource_mut::<ScriptErrorThrottle>() else {
+        return;
+    };
+    for summary in throttle.flush(std::time::Instant::now()) {
+        report_suppressed(world, summary);
+    }
+}
+
+/// Push a fire failure into the in-memory `ScriptErrorLog` and, within the
+/// per-trigger budget ([`ScriptErrorThrottle`]), emit the matching tracing
+/// warn and persist it. Called from every event dispatcher's error arm.
 fn record_failure(world: &mut World, zone: i32, id: i32, name: &str, event: &str, message: &str) {
-    warn!(zone, id, name = %name, event = %event, error = %message, "trigger fire failed");
+    record_failure_at(
+        world,
+        zone,
+        id,
+        name,
+        event,
+        message,
+        std::time::Instant::now(),
+    );
+}
+
+fn record_failure_at(
+    world: &mut World,
+    zone: i32,
+    id: i32,
+    name: &str,
+    event: &str,
+    message: &str,
+    now: std::time::Instant,
+) {
     if !world.contains_resource::<ScriptErrorLog>() {
         world.insert_resource(ScriptErrorLog::default());
     }
@@ -115,27 +270,32 @@ fn record_failure(world: &mut World, zone: i32, id: i32, name: &str, event: &str
         event: event.to_string(),
         message: message.to_string(),
     });
-    // Fire-and-forget DB persistence into `script_error_log`.
+    if !world.contains_resource::<ScriptErrorThrottle>() {
+        world.insert_resource(ScriptErrorThrottle::default());
+    }
+    let (verdict, summary) = world
+        .resource_mut::<ScriptErrorThrottle>()
+        .admit((zone, id), now);
+    if let Some(summary) = summary {
+        report_suppressed(world, summary);
+    }
+    if verdict == ErrorVerdict::Suppress {
+        return;
+    }
+    warn!(zone, id, name = %name, event = %event, error = %message, "trigger fire failed");
     // mlua errors are mostly runtime today; mark `runtime` until
     // the dispatcher learns to differentiate compile-vs-runtime.
-    if let Some(pool) = world
-        .get_resource::<crate::commands::DbPool>()
-        .map(|p| p.0.clone())
-    {
-        let context = serde_json::json!({
+    persist_script_error(
+        world,
+        zone,
+        id,
+        "runtime",
+        message.to_string(),
+        serde_json::json!({
             "trigger_name": name,
             "event": event,
-        });
-        let message_owned = message.to_string();
-        tokio::spawn(async move {
-            if let Err(e) =
-                mud_db::script_errors::record(&pool, zone, id, "runtime", &message_owned, &context)
-                    .await
-            {
-                tracing::warn!(error = %e, "script_error_log persist failed");
-            }
-        });
-    }
+        }),
+    );
 }
 
 /// Run `f` with the mob sleep / casting gate selected for `event`.
@@ -1176,6 +1336,7 @@ pub fn lua_coroutine_tick(world: &mut World) {
     for f in failures {
         record_failure(world, f.zone, f.id, &f.name, &f.event, &f.message);
     }
+    flush_error_throttle(world);
     if resumed > 0 {
         crate::commands::drain_lua_outbox(world);
         tracing::info!(resumed, parked, "lua_coroutine_tick resumed parked threads");
@@ -2784,5 +2945,61 @@ mod resume_error_tests {
         world.resource_mut::<crate::TickCount>().0 = 40;
         lua_coroutine_tick(&mut world);
         assert_eq!(error_count(&world), 1);
+    }
+
+    #[test]
+    fn throttle_persists_a_budget_then_suppresses_and_summarises() {
+        let mut t = ScriptErrorThrottle::default();
+        let t0 = std::time::Instant::now();
+        let key = (557, 5);
+        for _ in 0..ERRORS_PER_WINDOW {
+            assert_eq!(t.admit(key, t0), (ErrorVerdict::Record, None));
+        }
+        for _ in 0..7 {
+            assert_eq!(t.admit(key, t0).0, ErrorVerdict::Suppress);
+        }
+        // Another trigger has its own budget.
+        assert_eq!(t.admit((557, 6), t0).0, ErrorVerdict::Record);
+        // Still inside the window.
+        let near = t0 + std::time::Duration::from_secs(ERROR_WINDOW.as_secs() - 1);
+        assert_eq!(t.admit(key, near).0, ErrorVerdict::Suppress);
+        // Window rolls: one summary of everything swallowed, then a fresh budget.
+        let later = t0 + ERROR_WINDOW;
+        assert_eq!(
+            t.admit(key, later),
+            (ErrorVerdict::Record, Some((557, 5, 8)))
+        );
+        assert_eq!(t.admit(key, later), (ErrorVerdict::Record, None));
+    }
+
+    #[test]
+    fn throttle_flush_reports_triggers_that_stopped_failing() {
+        let mut t = ScriptErrorThrottle::default();
+        let t0 = std::time::Instant::now();
+        for _ in 0..ERRORS_PER_WINDOW + 3 {
+            t.admit((1, 1), t0);
+        }
+        t.admit((2, 2), t0); // under budget: nothing to report
+        assert!(
+            t.flush(t0 + std::time::Duration::from_secs(ERROR_WINDOW.as_secs() - 1))
+                .is_empty()
+        );
+        assert_eq!(t.flush(t0 + ERROR_WINDOW), vec![(1, 1, 3)]);
+        assert!(t.windows.is_empty(), "expired windows are forgotten");
+        assert!(t.flush(t0 + ERROR_WINDOW * 2).is_empty());
+    }
+
+    #[test]
+    fn flooding_failures_still_fill_the_ring_in_full() {
+        let (mut world, ..) = fixture();
+        let t0 = std::time::Instant::now();
+        for i in 0..40 {
+            record_failure_at(&mut world, 557, 5, "flood", "SPEECH", "boom", t0);
+            assert_eq!(error_count(&world), i + 1, "the ring counts everything");
+        }
+        let throttle = world.resource::<ScriptErrorThrottle>();
+        let w = &throttle.windows[&(557, 5)];
+        assert_eq!(w.persisted, ERRORS_PER_WINDOW);
+        assert_eq!(w.suppressed, 40 - ERRORS_PER_WINDOW);
     }
 }

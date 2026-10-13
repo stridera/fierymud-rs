@@ -1189,3 +1189,106 @@ fn combat_panel_clears_when_teleported_out_of_a_fight() {
     let fr = frames(&drain_bytes(&mut rx));
     assert_eq!(of(&fr, "Char.Combat"), vec!["{}".to_string()], "{fr:?}");
 }
+
+fn plain_effect(on: Entity, secs: i32) -> (mud_world::EffectInstance, mud_world::AppliedTo) {
+    (
+        mud_world::EffectInstance {
+            kind: EFFECT,
+            name: "ward".to_string(),
+            strength: 10,
+            remaining_secs: secs,
+            source: mud_world::EffectSource::Spell,
+            ability_id: Some(ARMOR),
+        },
+        mud_world::AppliedTo(on),
+    )
+}
+
+#[test]
+fn prompt_with_no_effect_change_sends_no_char_effects() {
+    let (mut fx, p, mut rx) = world_with_armor();
+    fx.world.spawn(plain_effect(p, 30));
+    super::send_prompt(&mut fx.world, p);
+    let fr = frames(&drain_bytes(&mut rx));
+    assert_eq!(of(&fr, "Char.Effects").len(), 1, "{fr:?}");
+    // Nothing about the effects changed: the next prompts stay silent.
+    for _ in 0..3 {
+        super::send_prompt(&mut fx.world, p);
+        super::push_effect_changes(&mut fx.world);
+        let fr = frames(&drain_bytes(&mut rx));
+        assert!(of(&fr, "Char.Effects").is_empty(), "{fr:?}");
+    }
+}
+
+#[test]
+fn bearer_index_follows_add_retarget_and_despawn() {
+    let (mut fx, p, _rx) = world_with_armor();
+    let other = fx.world.spawn_empty().id();
+    // First lookup builds the index from what already exists.
+    let early = fx.world.spawn(plain_effect(p, 5)).id();
+    assert_eq!(mud_world::effects_on(&mut fx.world, p), vec![early]);
+    let late = fx.world.spawn(plain_effect(p, 6)).id();
+    let theirs = fx.world.spawn(plain_effect(other, 7)).id();
+    assert_eq!(mud_world::effects_on(&mut fx.world, p), vec![early, late]);
+    assert_eq!(mud_world::effects_on(&mut fx.world, other), vec![theirs]);
+    // Retarget: replaced edge leaves the old bearer's list.
+    fx.world
+        .entity_mut(late)
+        .insert(mud_world::AppliedTo(other));
+    assert_eq!(mud_world::effects_on(&mut fx.world, p), vec![early]);
+    assert_eq!(
+        mud_world::effects_on(&mut fx.world, other),
+        vec![theirs, late]
+    );
+    // Removing the component or despawning drops it too.
+    fx.world.entity_mut(late).remove::<mud_world::AppliedTo>();
+    fx.world.despawn(early);
+    assert!(mud_world::effects_on(&mut fx.world, p).is_empty());
+    assert_eq!(mud_world::effects_on(&mut fx.world, other), vec![theirs]);
+    // Agrees with a full scan.
+    let mut scan: Vec<Entity> = {
+        let mut q = fx.world.query::<(Entity, &mud_world::AppliedTo)>();
+        q.iter(&fx.world).map(|(e, _)| e).collect()
+    };
+    scan.sort();
+    let mut idx: Vec<Entity> = fx
+        .world
+        .resource::<mud_world::EffectsByBearer>()
+        .0
+        .values()
+        .flatten()
+        .copied()
+        .collect();
+    idx.sort();
+    assert_eq!(scan, idx);
+}
+
+/// Prompt cost must not grow with the number of effects elsewhere in the
+/// world. Run with `--nocapture` to see the timings.
+#[test]
+fn char_effects_cost_ignores_other_bearers_effects() {
+    let (mut fx, p, _rx) = world_with_armor();
+    fx.world.spawn(plain_effect(p, 30));
+    let bystanders: Vec<Entity> = (0..200).map(|_| fx.world.spawn_empty().id()).collect();
+    for i in 0..20_000 {
+        fx.world
+            .spawn(plain_effect(bystanders[i % bystanders.len()], 30));
+    }
+    let _ = mud_world::effects_on(&mut fx.world, p); // build the index
+    let t = std::time::Instant::now();
+    for _ in 0..1000 {
+        std::hint::black_box(crate::commands::gmcp::build_char_effects(&mut fx.world, p));
+    }
+    let indexed = t.elapsed();
+    let t = std::time::Instant::now();
+    for _ in 0..1000 {
+        let mut q = fx
+            .world
+            .query::<(&mud_world::EffectInstance, &mud_world::AppliedTo)>();
+        let n = q.iter(&fx.world).filter(|(_, a)| a.0 == p).count();
+        std::hint::black_box(n);
+    }
+    let scan = t.elapsed();
+    eprintln!("1000 builds, 20k bystander effects: indexed {indexed:?}; scan alone {scan:?}");
+    assert!(indexed < scan, "indexed {indexed:?} vs scan {scan:?}");
+}

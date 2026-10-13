@@ -12,8 +12,8 @@ use std::hash::{Hash, Hasher};
 
 use bevy_ecs::prelude::*;
 use mud_world::{
-    AccountWealth, AppliedTo, BankWealth, EffectInstance, EffectSource, Exits, Fighting, Located,
-    Named, Profile, RoomSector, SpellSlotData, SpellSlots, Wealth, WorldKey, WorldKeyIndex,
+    AccountWealth, BankWealth, EffectInstance, EffectSource, Exits, Fighting, Located, Named,
+    Profile, RoomSector, SpellSlotData, SpellSlots, Wealth, WorldKey, WorldKeyIndex,
 };
 use serde_json::{Value, json};
 
@@ -293,13 +293,10 @@ pub(crate) fn send_room_info(world: &mut World, viewer: Entity, force: bool) {
 /// display name ("" when none), `duration` seconds remaining
 /// (-1 = permanent), `source` the high-level origin tag.
 pub(crate) fn build_char_effects(world: &mut World, target: Entity) -> String {
-    let mut rows: Vec<EffectInstance> = Vec::new();
-    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-    for (inst, applied) in q.iter(world) {
-        if applied.0 == target {
-            rows.push(inst.clone());
-        }
-    }
+    let rows: Vec<EffectInstance> = mud_world::effects_on(world, target)
+        .into_iter()
+        .filter_map(|e| world.get::<EffectInstance>(e).cloned())
+        .collect();
     // One entry per effect, as the `effects` command lists them: instances
     // of the same ability under the same label (Statue's several parts) fold
     // into the first, which keeps its place and lasts as long as the longest
@@ -368,6 +365,15 @@ fn effect_key(inst: &EffectInstance) -> EffectKey {
     (inst.kind, inst.ability_id, inst.strength, source)
 }
 
+/// Keys of the effects currently on `target`, via the bearer index (cost is
+/// the target's own effects, not the world's).
+fn effect_keys_of(world: &mut World, target: Entity) -> Vec<EffectKey> {
+    mud_world::effects_on(world, target)
+        .into_iter()
+        .filter_map(|e| world.get::<EffectInstance>(e).map(effect_key))
+        .collect()
+}
+
 fn hash_effect_keys(mut keys: Vec<EffectKey>) -> u64 {
     keys.sort_unstable();
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -384,14 +390,7 @@ fn hash_effect_keys(mut keys: Vec<EffectKey>) -> u64 {
 pub(crate) fn send_char_effects(world: &mut World, target: Entity) {
     let payload = build_char_effects(world, target);
     send_if_changed(world, target, "Char.Effects", &payload, false);
-    let keys: Vec<EffectKey> = {
-        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-        q.iter(world)
-            .filter(|(_, applied)| applied.0 == target)
-            .map(|(inst, _)| effect_key(inst))
-            .collect()
-    };
-    let hash = hash_effect_keys(keys);
+    let hash = hash_effect_keys(effect_keys_of(world, target));
     if let Some(mut sent) = world.get_mut::<GmcpSent>(target) {
         sent.0.insert(EFFECT_SET_KEY, hash);
     }
@@ -407,16 +406,11 @@ pub(crate) fn send_char_effects(world: &mut World, target: Entity) {
 /// refreshes those. Players that have not yet been sent a full
 /// `Char.Effects` (login in progress) are only tracked, never pushed to.
 pub(crate) fn push_effect_changes(world: &mut World) {
-    let mut sets: HashMap<Entity, Vec<EffectKey>> = HashMap::new();
-    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-    for (inst, applied) in q.iter(world) {
-        sets.entry(applied.0).or_default().push(effect_key(inst));
-    }
     let mut players = world.query_filtered::<Entity, (With<Connection>, With<GmcpSent>)>();
     let players: Vec<Entity> = players.iter(world).collect();
     let mut todo: Vec<Entity> = Vec::new();
     for p in players {
-        let hash = hash_effect_keys(sets.remove(&p).unwrap_or_default());
+        let hash = hash_effect_keys(effect_keys_of(world, p));
         let Some(mut sent) = world.get_mut::<GmcpSent>(p) else {
             continue;
         };

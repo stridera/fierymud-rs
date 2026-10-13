@@ -3277,8 +3277,70 @@ pub struct EffectInstance {
 }
 
 /// Edge from an `EffectInstance` entity back to the entity that's affected.
+/// Its insert / replace hooks keep [`EffectsByBearer`] current (when that
+/// resource exists), so "the effects on X" is a lookup, not a world scan.
 #[derive(Component, Debug, Clone, Copy)]
+#[component(on_insert = index_effect_added, on_replace = index_effect_removed)]
 pub struct AppliedTo(pub Entity);
+
+/// Reverse index of [`AppliedTo`]: bearer -> effect entities, in the order
+/// they were applied. Maintained by `AppliedTo`'s hooks once the resource
+/// exists; [`effects_on`] creates it (backfilled from the world) on first
+/// use, so a world that never asks pays nothing.
+#[derive(Resource, Debug, Default)]
+pub struct EffectsByBearer(pub HashMap<Entity, Vec<Entity>>);
+
+fn index_effect_added(
+    mut world: bevy_ecs::world::DeferredWorld,
+    ctx: bevy_ecs::lifecycle::HookContext,
+) {
+    let Some(bearer) = world.get::<AppliedTo>(ctx.entity).map(|a| a.0) else {
+        return;
+    };
+    if let Some(mut idx) = world.get_resource_mut::<EffectsByBearer>() {
+        let list = idx.0.entry(bearer).or_default();
+        if !list.contains(&ctx.entity) {
+            list.push(ctx.entity);
+        }
+    }
+}
+
+fn index_effect_removed(
+    mut world: bevy_ecs::world::DeferredWorld,
+    ctx: bevy_ecs::lifecycle::HookContext,
+) {
+    let Some(bearer) = world.get::<AppliedTo>(ctx.entity).map(|a| a.0) else {
+        return;
+    };
+    if let Some(mut idx) = world.get_resource_mut::<EffectsByBearer>()
+        && let Some(list) = idx.0.get_mut(&bearer)
+    {
+        list.retain(|e| *e != ctx.entity);
+        if list.is_empty() {
+            idx.0.remove(&bearer);
+        }
+    }
+}
+
+/// Every `AppliedTo` entity bearing on `bearer`, in application order.
+/// O(the bearer's own effects) after the first call, which builds the
+/// index from the world.
+pub fn effects_on(world: &mut World, bearer: Entity) -> Vec<Entity> {
+    if !world.contains_resource::<EffectsByBearer>() {
+        let mut idx = EffectsByBearer::default();
+        let mut q = world.query::<(Entity, &AppliedTo)>();
+        for (e, applied) in q.iter(world) {
+            idx.0.entry(applied.0).or_default().push(e);
+        }
+        world.insert_resource(idx);
+    }
+    world
+        .resource::<EffectsByBearer>()
+        .0
+        .get(&bearer)
+        .cloned()
+        .unwrap_or_default()
+}
 
 /// Per-effect "what stat did I bump and by how much" companion record
 /// for `modify`-effect-type `EffectInstance`s. Lives on the effect
