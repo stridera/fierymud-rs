@@ -483,6 +483,78 @@ fn weapon_element_resistance(
     }
 }
 
+/// Legacy `skill_to_dtype` / `convert_weapon_damage`: the damage type a swing is
+/// judged by for the target's composition susceptibility
+/// ([`mud_db::enums::Composition::susceptibility`]). An elemental weapon deals its
+/// element (align is flat 100, so it reads as neutral `Physical`); a physical
+/// weapon deals its family's slash / pierce / crush; barehand is crush, except
+/// that an unarmed body whose composition deals a non-physical default (AIR
+/// shock, FIRE and LAVA fire, WATER water) hits with that element instead
+/// (`fight.cpp` `hit()`: `COMPOSITION_DAM`). A mob's natural attack picks its
+/// verb's type.
+fn swing_damage_element(
+    world: &World,
+    attacker: Entity,
+    armed: bool,
+    weapon_family: Option<&'static str>,
+    weapon_element: Option<mud_db::enums::DamageType>,
+) -> mud_db::enums::ElementType {
+    use mud_db::enums::{Composition as C, DamageType as D, ElementType as E};
+    if let Some(element) = weapon_element {
+        return match element {
+            D::Fire => E::Fire,
+            D::Cold => E::Cold,
+            D::Acid => E::Acid,
+            D::Shock => E::Shock,
+            D::Poison => E::Poison,
+            _ => E::Physical,
+        };
+    }
+    if armed {
+        return match weapon_family {
+            Some("slashing") => E::Slash,
+            Some("piercing") => E::Pierce,
+            _ => E::Crush,
+        };
+    }
+    match mud_world::actor_composition(world, attacker) {
+        C::Air => return E::Shock,
+        C::Fire | C::Lava => return E::Fire,
+        C::Water => return E::Water,
+        _ => {}
+    }
+    match world
+        .get::<mud_world::NaturalAttackType>(attacker)
+        .map(|n| n.0)
+    {
+        Some(D::Bite | D::Pierce | D::Stab | D::Sting) => E::Pierce,
+        Some(D::Claw | D::Slash | D::Thrash | D::Whip) => E::Slash,
+        Some(D::Fire) => E::Fire,
+        Some(D::Cold) => E::Cold,
+        Some(D::Acid) => E::Acid,
+        Some(D::Shock) => E::Shock,
+        Some(D::Poison) => E::Poison,
+        _ => E::Crush,
+    }
+}
+
+/// Legacy `dam_suscept_adjust`'s percentage for a swing: the victim's
+/// composition susceptibility to `element`, except that a blessed attacker's
+/// blow is not resisted at all by an ETHER body (`blessed_blow`).
+fn swing_composition_sus(
+    world: &World,
+    attacker: Entity,
+    target: Entity,
+    element: mud_db::enums::ElementType,
+) -> i32 {
+    if world.get::<mud_world::Bless>(attacker).is_some()
+        && mud_world::actor_composition(world, target) == mud_db::enums::Composition::Ether
+    {
+        return 100;
+    }
+    mud_world::composition_susceptibility(world, target, element)
+}
+
 /// Coloured `(you-verb, it-verb)` for an elemental weapon swing, from legacy's
 /// damage-type table (`damage.cpp`: burn, freeze, corrode, poison, rebuke).
 fn weapon_element_verbs(
@@ -881,6 +953,10 @@ pub(crate) struct SwingMitigation {
     pub stealth_bonus_pct: i32, // A6 hidden-attacker damage % bonus (0 if not hidden)
     pub variance_delta: i32,    // signed delta applied (-band..=+band)
     pub after_variance: i32,
+    /// Composition susceptibility applied (percent) and the damage after it;
+    /// `None` when the body is neutral (100).
+    pub comp_sus: Option<i32>,
+    pub after_comp: i32,
     pub armor_pct: i32, // effective_armor_pct (after pen)
     pub armor_k: i32,   // ARMOR_K constant
     pub after_armor_pct: i32,
@@ -986,6 +1062,9 @@ fn show_dice_swing(detail: SwingDetail, mit: SwingMitigation) -> String {
             format!("±var({}) ={} ", mit.variance_delta, mit.after_variance)
         }
     };
+    let comp_step = mit
+        .comp_sus
+        .map_or_else(String::new, |p| format!("body {p}% ={} ", mit.after_comp));
     let armor_pct_step = format!(
         "armor×K{}/({}+{})={} ",
         mit.armor_k, mit.armor_pct, mit.armor_k, mit.after_armor_pct
@@ -1008,7 +1087,7 @@ fn show_dice_swing(detail: SwingDetail, mit: SwingMitigation) -> String {
         String::new()
     };
     format!(
-        "  ({header})\r\n{ap_step}{crit_step}{stealth_step}{variance_step}{armor_pct_step}{armor_flat_step}{resist_step}{hardness_step}→ final {}\r\n",
+        "  ({header})\r\n{ap_step}{crit_step}{stealth_step}{variance_step}{comp_step}{armor_pct_step}{armor_flat_step}{resist_step}{hardness_step}→ final {}\r\n",
         mit.final_dmg
     )
 }
@@ -1951,6 +2030,17 @@ fn apply_swing(world: &mut World, s: &Swing) {
     } else {
         None
     };
+    // Legacy `dam_suscept_adjust`: the victim's composition scales the swing
+    // by its susceptibility to the swing's damage type (fire staff on a plant
+    // 120%, slashing blade on an ether body 0%) before anything else reduces it.
+    let comp_element =
+        swing_damage_element(world, s.attacker, s.armed, s.weapon_family, weapon_element);
+    let comp_sus = swing_composition_sus(world, s.attacker, s.target, comp_element);
+    if comp_sus != 100 {
+        damage = damage.saturating_mul(comp_sus) / 100;
+        mit.comp_sus = Some(comp_sus);
+    }
+    mit.after_comp = damage;
     // Mitigation pipeline per docs/design/combat.md steps 4-7.
     // Today every weapon swing is treated as PHYSICAL (engages
     // armor) and `is_magical = false` (skips ward). Type
@@ -4213,6 +4303,69 @@ mod tests {
         assert!(out.contains("0\u{1b}[0m damage"), "{out}");
         assert!(!out.contains("critical"), "{out}");
         assert_eq!(world.get::<Health>(target).unwrap().hp, 500);
+    }
+
+    /// Hit `target` once with a player attacker whose natural attack is `attack`;
+    /// returns (target hp afterwards, what the attacker was sent).
+    fn composition_swing(
+        comp: mud_db::enums::Composition,
+        attack: mud_db::enums::DamageType,
+        blessed: bool,
+    ) -> (i32, String) {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let target = make_target(&mut world, room, 1000);
+        world
+            .entity_mut(target)
+            .insert(mud_world::CompositionOverride(comp));
+        let attacker = make_attacker(&mut world, room, target, 40);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+        world.entity_mut(attacker).insert((
+            Player,
+            crate::commands::Connection(tx),
+            PlayerFlags(vec![mud_db::enums::PlayerFlag::ShowDiceRolls]),
+            mud_world::NaturalAttackType(attack),
+        ));
+        if blessed {
+            world.entity_mut(attacker).insert(mud_world::Bless);
+        }
+        run_combat_tick(&mut world);
+        let mut out = String::new();
+        while let Ok(bytes) = rx.try_recv() {
+            out.push_str(&String::from_utf8_lossy(&bytes));
+        }
+        (world.get::<Health>(target).unwrap().hp, out)
+    }
+
+    /// Legacy `dam_suscept_adjust`: a plant takes 120% of fire, and the swing's
+    /// dice line says so.
+    #[test]
+    fn a_fire_swing_on_a_plant_is_scaled_by_its_susceptibility() {
+        use mud_db::enums::{Composition, DamageType};
+        let (_, out) = composition_swing(Composition::Plant, DamageType::Fire, false);
+        assert!(out.contains("body 120%"), "{out}");
+        let (_, out) = composition_swing(Composition::Flesh, DamageType::Fire, false);
+        assert!(!out.contains("body "), "{out}");
+    }
+
+    #[test]
+    fn a_fire_body_shrugs_off_fire_but_not_cold() {
+        use mud_db::enums::{Composition, DamageType};
+        let (hp, _) = composition_swing(Composition::Fire, DamageType::Fire, false);
+        assert_eq!(hp, 1000, "immune to fire");
+        let (hp, _) = composition_swing(Composition::Fire, DamageType::Cold, false);
+        assert!(hp < 1000, "cold is neutral on a fire body, hp {hp}");
+    }
+
+    /// Legacy `dam_suscept_adjust` skips the ETHER resistance for a blessed
+    /// attacker (`blessed_blow`); everyone else's physical blows pass through.
+    #[test]
+    fn an_ether_body_takes_physical_damage_only_from_a_blessed_attacker() {
+        use mud_db::enums::{Composition, DamageType};
+        let (hp, _) = composition_swing(Composition::Ether, DamageType::Slash, false);
+        assert_eq!(hp, 1000);
+        let (hp, _) = composition_swing(Composition::Ether, DamageType::Slash, true);
+        assert!(hp < 1000, "blessed blow lands, hp {hp}");
     }
 
     #[test]

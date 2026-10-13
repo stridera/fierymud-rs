@@ -81,7 +81,7 @@ pub use mob_ai_rules::{
 };
 pub use mob_effects::{
     actor_composition, actor_is_illusory, actor_is_rigid, actor_is_solid_char,
-    composition_state_phrase, mob_composition,
+    composition_state_phrase, composition_susceptibility, mob_composition,
 };
 pub use mob_spawn::{
     PET_MOVE_MULTIPLIER, base_move_points, mob_ai_enabled, pet_move_points, spawn_mob_from_proto,

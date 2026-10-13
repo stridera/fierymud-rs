@@ -68,6 +68,19 @@ pub fn actor_composition(world: &World, target: Entity) -> mud_db::enums::Compos
         .map_or(Composition::Flesh, |r| r.default_composition)
 }
 
+/// Legacy `susceptibility(ch, dtype)`'s composition column: how much of a hit
+/// of `element` `target`'s body takes, in percent (see
+/// [`mud_db::enums::Composition::susceptibility`]). 100 for anything without a
+/// composition.
+#[must_use]
+pub fn composition_susceptibility(
+    world: &World,
+    target: Entity,
+    element: mud_db::enums::ElementType,
+) -> i32 {
+    actor_composition(world, target).susceptibility(element)
+}
+
 /// Legacy `RIGID(ch)`: `target`'s current body is in the solid phase.
 #[must_use]
 pub fn actor_is_rigid(world: &World, target: Entity) -> bool {

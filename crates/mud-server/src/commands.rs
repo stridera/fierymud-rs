@@ -586,6 +586,12 @@ mod channels;
 mod clan_chat;
 #[path = "commands/combat.rs"]
 mod combat_commands;
+#[cfg(test)]
+#[path = "commands/composition_sus_tests.rs"]
+mod composition_sus_tests;
+#[cfg(test)]
+#[path = "commands/endurance_family_tests.rs"]
+mod endurance_family_tests;
 pub(crate) use combat_commands::ReengageLag;
 #[cfg(test)]
 #[path = "commands/combat_hunt_tests.rs"]
@@ -18440,6 +18446,7 @@ pub(crate) fn invoke_ability_core(
                             );
                         }
                     }
+                    let mut body_sus = 100;
                     amount = if components.is_empty() {
                         // Resolve raw amount, then apply the spec's
                         // element resistance.
@@ -18454,7 +18461,12 @@ pub(crate) fn invoke_ability_core(
                             &per_target_ctx,
                         )
                         .unwrap_or(0);
-                        apply_resistance(raw, resist)
+                        // Legacy `mag_damage`: `dam = dam * sus / 100`, the
+                        // victim's composition susceptibility to the spell's
+                        // damage type, before the per-mob resistance.
+                        body_sus =
+                            mud_world::composition_susceptibility(world, target_entity, element);
+                        apply_resistance(raw.saturating_mul(body_sus) / 100, resist)
                     } else {
                         // Multi-component path: apply each component's
                         // resistance individually before summing — a
@@ -18462,6 +18474,7 @@ pub(crate) fn invoke_ability_core(
                         // hitting a cold-resistant target still takes
                         // the FORCE portion at full damage.
                         let mut total = 0i32;
+                        let mut main_pct = i32::MIN;
                         for c in &components {
                             let raw = evaluate_simple_formula_ctx(
                                 &normalize_dice_notation(&c.damage_formula),
@@ -18476,7 +18489,19 @@ pub(crate) fn invoke_ability_core(
                             let element_blob = serde_json::json!({"type": &c.element});
                             let element = resolve_damage_element(Some(&element_blob), None);
                             let resist = target_resists.get(&element).copied().unwrap_or(0);
-                            let after = apply_resistance(scaled, resist);
+                            let sus = mud_world::composition_susceptibility(
+                                world,
+                                target_entity,
+                                element,
+                            );
+                            // The pain reaction follows the component that
+                            // carries most of the damage (legacy spells have
+                            // one damage type).
+                            if c.percentage > main_pct {
+                                main_pct = c.percentage;
+                                body_sus = sus;
+                            }
+                            let after = apply_resistance(scaled.saturating_mul(sus) / 100, resist);
                             total = total.saturating_add(after);
                         }
                         total
@@ -18667,6 +18692,16 @@ pub(crate) fn invoke_ability_core(
                                 );
                             }
                         }
+                        // Legacy `mag_damage`: a body that is very vulnerable
+                        // to the spell's damage type sometimes shows it.
+                        spell_pain_reaction(
+                            world,
+                            target_entity,
+                            &target_name_pre,
+                            target_p_pre,
+                            body_sus,
+                            rand::random_range(1..=4),
+                        );
                         // Snapshot victim HP for lifesteal — apply_damage
                         // can clamp at 0, so the *actual* damage dealt
                         // can be smaller than `amount`. Caster heal uses
@@ -19435,6 +19470,10 @@ pub(crate) fn invoke_ability_core(
                         let sign = if a >= 0 { "+" } else { "" };
                         format!("{pretty} ({sign}{a} {t})")
                     }
+                    // A formula that rolled 0 (a low-skill quaffer) changed
+                    // nothing, but the target is fine: say so instead of
+                    // blaming the target name.
+                    (Some(t), None) if amount == Some(0) => format!("{pretty} (+0 {t})"),
                     (Some(t), None) => format!("{pretty} ({t}: unsupported target)"),
                     (None, _) => format!("{pretty} (no target specified)"),
                 });
@@ -22378,6 +22417,42 @@ pub(crate) fn resolve_damage_element(
         Some("nature" | "natural") => E::Nature,
         _ => E::Physical,
     }
+}
+
+/// Legacy `mag_damage`'s pain reaction to a damage spell, given the victim's
+/// susceptibility `sus` (percent) and a `1..=4` roll: above 119 a one-in-four
+/// "cries out in pain!", above 104 a one-in-four "cringes with a pained look".
+pub(crate) fn pain_reaction_line(sus: i32, roll: i32, name: &str, poss: &str) -> Option<String> {
+    if roll != 1 {
+        return None;
+    }
+    if sus > 119 {
+        Some(format!("{name} cries out in pain!\r\n"))
+    } else if sus > 104 {
+        Some(format!(
+            "{name} cringes with a pained look on {poss} face.\r\n"
+        ))
+    } else {
+        None
+    }
+}
+
+/// Tell the room (not the victim) about [`pain_reaction_line`].
+fn spell_pain_reaction(
+    world: &mut World,
+    victim: Entity,
+    name: &str,
+    pronouns: Pronouns,
+    sus: i32,
+    roll: i32,
+) {
+    let Some(line) = pain_reaction_line(sus, roll, name, pronouns.possessive) else {
+        return;
+    };
+    let Some(room) = world.get::<Located>(victim).map(|l| l.0) else {
+        return;
+    };
+    broadcast_room_anonymised(world, room, &[victim], &[(victim, name)], &line);
 }
 
 /// Apply per-element resistance to a damage amount (A7 / combat.md

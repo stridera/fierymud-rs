@@ -1237,13 +1237,12 @@ impl LifeForce {
 
 /// What a creature is physically made of. Mirrors the schema's
 /// `Composition` enum (order = legacy `COMP_FLESH..COMP_PLANT`).
-/// `FLESH` is the default. Today it only drives the `look` appearance
-/// line; legacy also keys the following off it, none of which is ported
-/// yet (see `fierymud_legacy/src/composition.cpp` `compositions[]`):
-/// per-damage-type susceptibility percentages (`sus_*`), the bare-hand
-/// damage type (`default_dtype`), the phase (`RIGID`/`PHASE`: whether
-/// physical attacks pass through and whether a corpse is left), and the
-/// display color.
+/// `FLESH` is the default. It drives the `look` appearance line, the phase
+/// (`RIGID`/`PHASE`: whether a corpse is left) and the per-damage-type
+/// susceptibility table ([`Composition::susceptibility`], legacy `sus_*`).
+/// Not ported yet (see `fierymud_legacy/src/composition.cpp`
+/// `compositions[]`): the bare-hand damage type (`default_dtype`) beyond
+/// the combat swing, and `damage_evasion`'s cubic all-or-nothing dodge.
 #[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[sqlx(type_name = r#""Composition""#, rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Composition {
@@ -1303,6 +1302,48 @@ impl Composition {
     #[must_use]
     pub const fn is_rigid(self) -> bool {
         matches!(self.phase(), Phase::Solid)
+    }
+
+    /// Legacy `compositions[].sus_*`: how much of a hit of `element` this body
+    /// takes, in percent. 100 is neutral, below 100 resists, above 100 is
+    /// vulnerable (fire on PLANT is 120), 0 is immune. Elements the legacy
+    /// table has no column for (force, sonic, holy, ...) are neutral.
+    ///
+    /// This is a runtime invariant, not builder content: it is the legacy
+    /// `composition.cpp` table verbatim (columns slash, pierce, crush, shock,
+    /// fire, water, cold, acid, poison). Per-mob tuning lives in
+    /// `Mobs.resistances`; the two multiply.
+    #[must_use]
+    pub const fn susceptibility(self, element: ElementType) -> i32 {
+        let col = match element {
+            ElementType::Slash => 0,
+            ElementType::Pierce => 1,
+            ElementType::Crush => 2,
+            ElementType::Shock => 3,
+            ElementType::Fire => 4,
+            ElementType::Water => 5,
+            ElementType::Cold => 6,
+            ElementType::Acid => 7,
+            ElementType::Poison => 8,
+            _ => return 100,
+        };
+        let row: [i32; 9] = match self {
+            //                 slash pierce crush shock fire water cold acid poison
+            Self::Flesh => [100, 100, 100, 100, 100, 100, 100, 100, 100],
+            Self::Earth => [90, 120, 50, 75, 75, 120, 40, 80, 0],
+            Self::Air => [20, 20, 20, 0, 120, 75, 0, 0, 0],
+            Self::Fire => [30, 30, 30, 75, 0, 120, 100, 0, 0],
+            Self::Water => [120, 60, 40, 100, 50, 0, 120, 0, 0],
+            Self::Ice => [75, 90, 120, 100, 75, 0, 0, 0, 0],
+            Self::Mist => [30, 30, 30, 80, 50, 100, 120, 0, 0],
+            Self::Ether => [0, 0, 0, 75, 75, 50, 25, 0, 0],
+            Self::Metal => [25, 40, 75, 100, 25, 30, 50, 120, 0],
+            Self::Stone => [50, 75, 90, 0, 50, 75, 50, 100, 0],
+            Self::Bone => [80, 50, 120, 25, 120, 100, 25, 100, 0],
+            Self::Lava => [40, 40, 40, 50, 25, 120, 100, 50, 0],
+            Self::Plant => [120, 70, 60, 75, 120, 50, 75, 100, 50],
+        };
+        row[col]
     }
 
     /// Human-readable name for staff stat output ("Flesh", "Ice", ...).
@@ -1747,5 +1788,60 @@ mod damage_type_order_tests {
             assert_eq!(DamageType::legacy_index_of_label(d.label()), 0);
         }
         assert_eq!(DamageType::legacy_index_of_label("nonsense"), 0);
+    }
+}
+
+#[cfg(test)]
+mod composition_susceptibility_tests {
+    use super::{Composition as C, ElementType as E};
+
+    #[test]
+    fn plant_is_weak_to_fire_and_slashing_and_half_poison() {
+        assert_eq!(C::Plant.susceptibility(E::Fire), 120);
+        assert_eq!(C::Plant.susceptibility(E::Slash), 120);
+        assert_eq!(C::Plant.susceptibility(E::Poison), 50);
+        assert_eq!(C::Plant.susceptibility(E::Water), 50);
+    }
+
+    #[test]
+    fn flesh_is_neutral_to_every_element() {
+        for e in [
+            E::Slash,
+            E::Pierce,
+            E::Crush,
+            E::Shock,
+            E::Fire,
+            E::Water,
+            E::Cold,
+            E::Acid,
+            E::Poison,
+            E::Holy,
+            E::Physical,
+        ] {
+            assert_eq!(C::Flesh.susceptibility(e), 100, "{e:?}");
+        }
+    }
+
+    #[test]
+    fn legacy_rows_spot_checks() {
+        assert_eq!(C::Fire.susceptibility(E::Fire), 0);
+        assert_eq!(C::Fire.susceptibility(E::Water), 120);
+        assert_eq!(C::Water.susceptibility(E::Cold), 120);
+        assert_eq!(C::Ether.susceptibility(E::Slash), 0);
+        assert_eq!(C::Metal.susceptibility(E::Acid), 120);
+        assert_eq!(C::Bone.susceptibility(E::Crush), 120);
+        assert_eq!(C::Earth.susceptibility(E::Cold), 40);
+        assert_eq!(C::Stone.susceptibility(E::Shock), 0);
+        assert_eq!(C::Lava.susceptibility(E::Water), 120);
+        assert_eq!(C::Ice.susceptibility(E::Crush), 120);
+        assert_eq!(C::Mist.susceptibility(E::Cold), 120);
+        assert_eq!(C::Air.susceptibility(E::Fire), 120);
+    }
+
+    #[test]
+    fn elements_without_a_legacy_column_are_neutral() {
+        assert_eq!(C::Ether.susceptibility(E::Holy), 100);
+        assert_eq!(C::Plant.susceptibility(E::Force), 100);
+        assert_eq!(C::Plant.susceptibility(E::Physical), 100);
     }
 }
