@@ -422,6 +422,10 @@ fn gmcp_char_effects_lists_an_ability_with_two_effects_once() {
     let statue: Vec<_> = arr.iter().filter(|e| e["name"] == "Statue").collect();
     assert_eq!(statue.len(), 1, "{json}");
     assert_eq!(statue[0]["duration"], 900, "the longest part wins: {json}");
+    assert_eq!(
+        statue[0]["duration_hours"], 12,
+        "900s = 12 MUD hours: {json}"
+    );
 }
 
 #[test]
@@ -445,6 +449,47 @@ fn gmcp_char_effects_keeps_a_permanent_part_permanent() {
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(v.as_array().unwrap().len(), 1, "{json}");
     assert_eq!(v[0]["duration"], -1, "{json}");
+    assert_eq!(v[0]["duration_hours"], -1, "{json}");
+}
+
+/// Issue #155: GMCP carries MUD hours, as the `effects` listing and legacy do.
+#[test]
+fn gmcp_char_effects_reports_mud_hours_like_the_effects_command() {
+    let (mut world, player, mut rx) = setup();
+    catalog_with(&mut world, &[(9, "Stone Skin")]);
+    for remaining in [750, 751, 30] {
+        world.spawn((
+            EffectInstance {
+                kind: remaining,
+                name: format!("e{remaining}"),
+                strength: 1,
+                remaining_secs: remaining,
+                source: EffectSource::Spell,
+                ability_id: None,
+            },
+            AppliedTo(player),
+        ));
+    }
+    let json = super::gmcp::build_char_effects(&mut world, player);
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let hours: Vec<(i64, i64)> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e["duration"].as_i64().unwrap(),
+                e["duration_hours"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    assert!(hours.contains(&(750, 10)), "{json}");
+    assert!(hours.contains(&(751, 11)), "partial hours round up: {json}");
+    assert!(hours.contains(&(30, 1)), "sub-hour reads one hour: {json}");
+    super::info::cmd_effects(&mut world, player, "");
+    let out = plain(&drain(&mut rx));
+    assert!(out.contains("(10 hours remaining)"), "{out}");
+    assert!(out.contains("(11 hours remaining)"), "{out}");
 }
 
 #[test]

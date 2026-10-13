@@ -165,7 +165,10 @@ Array<{
                        // ability spawned it. Key icons / tiles on this.
   name: string,        // display label ("Stone Skin"); may be reworded, don't key on it
   ability: string,     // originating spell's display name ("Stone Skin"), "" when none
-  duration: number,    // seconds remaining; -1 = permanent
+  duration: number,    // real seconds remaining; -1 = permanent
+  duration_hours: number, // MUD hours remaining, as the `effects` command
+                       // lists them (1 MUD hour = 75 real seconds, rounded
+                       // up, never below 1); -1 = permanent
   source: string,      // origin tag: "spell" | "item" | "room" | "admin" | "other"
   strength: number,    // 1..n stacking strength
 }>
@@ -176,7 +179,7 @@ the tick an effect is added, removed or restacked (even if the player
 receives no other output), and re-sent on a prompt when a duration
 changed. An empty array `[]` means no active effects. Snapshot every
 effect each emission — the client diffs by `id`. Permanent effects
-(`duration: -1`) tick at -1 forever; the client just doesn't decrement
+(`duration: -1`, `duration_hours: -1`) tick at -1 forever; the client just doesn't decrement
 them.
 
 **Consumer:** `Effects/Effects.lua`.

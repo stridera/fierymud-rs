@@ -14469,12 +14469,19 @@ pub(crate) fn effect_label(world: &World, inst: &EffectInstance) -> String {
         .unwrap_or_else(|| effect_display_name(&inst.name))
 }
 
+/// Whole MUD hours (75 real seconds each) left on an effect, rounded up and
+/// never below one: the number the `effects` listing shows and the GMCP
+/// `duration_hours` field carries. Callers handle permanent (< 0) first.
+pub(super) fn effect_hours_left(remaining_secs: i32) -> i32 {
+    let per_hour = crate::item_decay::SECS_PER_MUD_HOUR;
+    (remaining_secs.max(0).saturating_add(per_hour - 1) / per_hour).max(1)
+}
+
 /// Remaining effect time in MUD hours (75 real seconds each), rounded up
 /// and never below one, matching legacy `show_active_spells` where
 /// `duration + 1` hours are shown ("1 hour", "3 hours").
 pub(super) fn format_effect_hours(remaining_secs: i32) -> String {
-    let per_hour = crate::item_decay::SECS_PER_MUD_HOUR;
-    let hours = (remaining_secs.max(0).saturating_add(per_hour - 1) / per_hour).max(1);
+    let hours = effect_hours_left(remaining_secs);
     if hours == 1 {
         "1 hour".to_string()
     } else {
