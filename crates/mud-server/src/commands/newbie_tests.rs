@@ -894,3 +894,170 @@ fn read_keeps_the_layout_of_a_map() {
         "{out:?}"
     );
 }
+
+// --- put/drop: DROP fires before the move and can cancel it ---------------
+
+fn drop_trigger_world(body: &str) -> (World, Entity, Rx, Entity, Entity) {
+    let (mut world, player, rx) = warrior_world();
+    let mut protos = ObjectPrototypes::default();
+    protos
+        .by_key
+        .insert((99, 18), object_proto(99, 18, ObjectType::Container));
+    world.insert_resource(protos);
+    let mut catalog = TriggerCatalog::default();
+    catalog
+        .by_key
+        .insert((99, 1), object_trigger(99, 1, TriggerEvent::Drop, body));
+    world.insert_resource(catalog);
+    world.insert_resource(mud_script::LuaHost::new());
+    let bag = plain_item(&mut world, "a leather bag", "bag", (99, 18), player);
+    let stick = plain_item(&mut world, "a stick", "stick", (99, 17), player);
+    world
+        .entity_mut(stick)
+        .insert(mud_world::AttachedTriggers(vec![(99, 1)]));
+    (world, player, rx, bag, stick)
+}
+
+/// Legacy `drop_otrigger` returns `script_driver(..) && obj`: a DROP trigger
+/// that purges its item cancels the put, so nothing is put and nothing is
+/// announced (the burning branch relied on this ordering, r10 #11).
+#[test]
+fn put_is_cancelled_when_the_drop_trigger_purges_the_item() {
+    let (mut world, player, mut rx, bag, stick) = drop_trigger_world("world.destroy(self)");
+    super::info::cmd_put(&mut world, player, "stick bag");
+    let out = drain(&mut rx);
+    assert!(!out.contains("You put"), "{out}");
+    assert!(world.get_entity(stick).is_err(), "the trigger purged it");
+    assert!(world.get_entity(bag).is_ok());
+}
+
+#[test]
+fn drop_is_cancelled_when_the_drop_trigger_purges_the_item() {
+    let (mut world, player, mut rx, _bag, stick) = drop_trigger_world("world.destroy(self)");
+    super::info::cmd_drop(&mut world, player, "stick");
+    let out = drain(&mut rx);
+    assert!(!out.contains("You drop"), "{out}");
+    assert!(world.get_entity(stick).is_err());
+    // Same through `drop all`.
+    let (mut world, player, mut rx, _bag, stick) = drop_trigger_world("world.destroy(self)");
+    super::info::cmd_drop(&mut world, player, "all.stick");
+    assert!(!drain(&mut rx).contains("You drop"));
+    assert!(world.get_entity(stick).is_err());
+}
+
+/// A DROP trigger that does not purge anything lets the put and the drop
+/// go through, and it has fired by the time they are announced.
+#[test]
+fn drop_trigger_that_leaves_the_item_alone_lets_put_and_drop_through() {
+    let (mut world, player, mut rx, bag, stick) =
+        drop_trigger_world(r#"actor:send("the stick twitches")"#);
+    let room = world.get::<Located>(player).unwrap().0;
+    super::info::cmd_put(&mut world, player, "stick bag");
+    let out = drain(&mut rx);
+    let twitch = out.find("twitches").expect(&out);
+    assert!(twitch < out.find("You put").expect(&out), "{out}");
+    assert_eq!(world.get::<Located>(stick).map(|l| l.0), Some(bag));
+    world.entity_mut(stick).insert(Located(player));
+    super::info::cmd_drop(&mut world, player, "stick");
+    let out = drain(&mut rx);
+    assert!(out.find("twitches").expect(&out) < out.find("You drop").expect(&out));
+    assert_eq!(world.get::<Located>(stick).map(|l| l.0), Some(room));
+}
+
+/// `put all`: a trigger that destroys the container ends the loop; no item
+/// is moved into a dead container.
+#[test]
+fn put_all_stops_when_a_trigger_destroys_the_container() {
+    let (mut world, player, mut rx, bag, stick) = drop_trigger_world("world.destroy(target)");
+    let rock = plain_item(&mut world, "a rock", "rock", (99, 19), player);
+    super::info::cmd_put(&mut world, player, "all.stick bag");
+    let out = drain(&mut rx);
+    assert!(!out.contains("You put"), "{out}");
+    assert!(world.get_entity(bag).is_err(), "the trigger destroyed it");
+    assert_eq!(world.get::<Located>(stick).map(|l| l.0), Some(player));
+    assert_eq!(world.get::<Located>(rock).map(|l| l.0), Some(player));
+    let _ = rock;
+}
+
+/// A cancelled item in `put all` / `drop all` stays in hand while the rest go.
+#[test]
+fn put_all_skips_only_the_cancelled_item() {
+    let (mut world, player, mut rx, bag, stick) = drop_trigger_world("world.destroy(self)");
+    let rock = plain_item(&mut world, "a rock", "rock", (99, 19), player);
+    super::info::cmd_put(&mut world, player, "all bag");
+    let out = drain(&mut rx);
+    assert!(out.contains("You put a rock in a leather bag."), "{out}");
+    assert!(!out.contains("You put a stick"), "{out}");
+    assert!(world.get_entity(stick).is_err());
+    assert_eq!(world.get::<Located>(rock).map(|l| l.0), Some(bag));
+}
+
+/// Break burning branch (520:2): DROP, `wait(1)`, three embers, then the
+/// branch purges itself (legacy `opurge burning-branch` matches the script's
+/// own object by keyword, wherever it is). Put into a bag the branch is gone
+/// after the wait and the embers do not pile up on repeated put / get.
+#[test]
+fn burning_branch_consumes_itself_whether_dropped_or_put_in_a_bag() {
+    let (mut world, player, mut rx) = warrior_world();
+    let mut protos = ObjectPrototypes::default();
+    protos
+        .by_key
+        .insert((99, 18), object_proto(99, 18, ObjectType::Container));
+    let mut ember = object_proto(520, 35, ObjectType::Other);
+    ember.name = "an ember".into();
+    ember.keywords = vec!["ember".into()];
+    protos.by_key.insert((520, 35), ember);
+    world.insert_resource(protos);
+    let mut catalog = TriggerCatalog::default();
+    catalog.by_key.insert(
+        (520, 2),
+        object_trigger(
+            520,
+            2,
+            TriggerEvent::Drop,
+            "wait(1)\n\
+             self.room:send(\"The branch cracks and breaks into 3 pieces!\")\n\
+             self.room:spawn_object(520, 35)\n\
+             self.room:spawn_object(520, 35)\n\
+             self.room:spawn_object(520, 35)\n\
+             world.destroy(self)",
+        ),
+    );
+    world.insert_resource(catalog);
+    world.insert_resource(mud_script::LuaHost::new());
+    let bag = plain_item(&mut world, "a leather bag", "bag", (99, 18), player);
+    let branch_in = |world: &mut World, name: &str| {
+        let branch = plain_item(world, name, "burning-branch", (520, 34), player);
+        world
+            .entity_mut(branch)
+            .insert(mud_world::AttachedTriggers(vec![(520, 2)]));
+        branch
+    };
+    let embers = |world: &mut World| {
+        let mut q = world.query::<&Named>();
+        q.iter(world).filter(|n| n.name == "an ember").count()
+    };
+    let mut tick = 0u64;
+    let mut pass_time = |world: &mut World| {
+        tick += 100_000;
+        world.insert_resource(crate::TickCount(tick));
+        crate::triggers::lua_coroutine_tick(world);
+    };
+
+    // Into the bag: the trigger ran first, the put went through, and a
+    // second later the branch is consumed.
+    let branch = branch_in(&mut world, "a burning branch");
+    super::info::cmd_put(&mut world, player, "branch bag");
+    assert_eq!(world.get::<Located>(branch).map(|l| l.0), Some(bag));
+    pass_time(&mut world);
+    assert!(drain(&mut rx).contains("cracks and breaks"));
+    assert!(world.get_entity(branch).is_err(), "branch consumed");
+    assert_eq!(embers(&mut world), 3);
+
+    // A fresh branch dropped on the floor: three more, no leftovers.
+    let branch = branch_in(&mut world, "a burning branch");
+    super::info::cmd_drop(&mut world, player, "branch");
+    pass_time(&mut world);
+    assert!(world.get_entity(branch).is_err());
+    assert_eq!(embers(&mut world), 6);
+}

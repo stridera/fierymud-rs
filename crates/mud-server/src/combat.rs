@@ -2894,6 +2894,9 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
                 .collect()
         };
         if illusory {
+            // No corpse to catch what a queued DEATH trigger loads: it stays
+            // on the floor instead of vanishing with the mob.
+            try_insert(world, victim, mud_world::DeathCorpse(None));
             // Legacy `make_corpse`: an illusory mob "seems to have vanished
             // entirely" -- no corpse, so no loot or coin; whatever it carried
             // goes with it (`extract_char`).
@@ -2930,6 +2933,12 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
                 },
             ))
             .id();
+        // A DEATH trigger still queued behind a running script fires after
+        // this point; its `mload`s must reach the corpse, not the mob that is
+        // about to despawn.
+        if let Ok(mut em) = world.get_entity_mut(victim) {
+            em.insert(mud_world::DeathCorpse(Some(corpse)));
+        }
         // Record the dead mob's level on the corpse for downstream
         // mechanics — ANIMATE_DEAD reads it to scale the spawned
         // skeleton's HP. Profile is the canonical source for mob
@@ -7050,6 +7059,43 @@ mod tests {
             .get(mud_db::enums::EntityType::Mob, 1, 1, "killer")
             .cloned();
         assert_eq!(seen, Some("a goblin".into()));
+    }
+
+    /// A script kills a mob: its DEATH trigger is deferred behind that
+    /// script, and by then the mob's inventory is in the corpse and the mob
+    /// despawns. What the trigger `mload`s must survive in the corpse (legacy
+    /// ran DEATH before `make_corpse`), not vanish with the mob.
+    #[test]
+    fn deferred_death_trigger_loot_lands_in_the_corpse() {
+        let mut world = World::new();
+        let room = make_room(&mut world);
+        let goblin = credit_goblin(&mut world, room, 0, None);
+        let mut protos = mud_world::ObjectPrototypes::default();
+        protos.by_key.insert(
+            (99, 5),
+            crate::commands::test_support::object_proto(99, 5, mud_db::enums::ObjectType::Other),
+        );
+        world.insert_resource(protos);
+        goblin_with_death_body(&mut world, goblin, "self.room:spawn_object(99, 5)");
+        // The outer script holds the host while it kills the goblin.
+        world.insert_resource(mud_script::ScriptRunning);
+        super::handle_death(&mut world, goblin, "a goblin", room);
+        assert!(world.get_entity(goblin).is_ok(), "mob outlives the script");
+        world.remove_resource::<mud_script::ScriptRunning>();
+        crate::deferred_triggers::drain(&mut world);
+        assert!(world.get_entity(goblin).is_err(), "mob despawned");
+
+        let corpse = {
+            let mut q = world.query_filtered::<Entity, With<Corpse>>();
+            q.single(&world).expect("one corpse")
+        };
+        let mut q = world.query_filtered::<(Entity, &Located), With<Item>>();
+        let loot: Vec<_> = q
+            .iter(&world)
+            .filter(|(e, _)| *e != corpse)
+            .map(|(_, l)| l.0)
+            .collect();
+        assert_eq!(loot, vec![corpse], "the spawned item is in the corpse");
     }
 
     /// FIGHT fires once per round per fighting mob, however many swings

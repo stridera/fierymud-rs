@@ -1265,6 +1265,15 @@ pub struct Ghost;
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Corpse;
 
+/// On a mob that has just died: the corpse its inventory went into, or
+/// `None` when it left none (an illusory mob). The mob lingers (its DEATH
+/// trigger may still be queued behind a running script) and then despawns,
+/// so anything that trigger loads "into the mob" has to land in the corpse
+/// (or stay on the room floor) to survive. Legacy ran DEATH triggers before
+/// `make_corpse`, so those items ended up in the corpse with the rest.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct DeathCorpse(pub Option<Entity>);
+
 /// Companion marker on player corpses (distinct from mob corpses)
 /// so spells like `ANIMATE_DEAD` can refuse them outright — raising
 /// a fellow adventurer as your undead servant is a hard no even

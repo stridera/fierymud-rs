@@ -5251,7 +5251,17 @@ fn mload_into_script_mob(lua: &Lua, room: Entity, item: Entity) {
         {
             return;
         }
-        world.entity_mut(item).insert(Located(me));
+        // A mob that just died keeps its place in the room only until its
+        // (deferred) DEATH trigger is done, then despawns: its inventory is
+        // already in the corpse, so the new item goes there, as legacy's
+        // pre-`make_corpse` DEATH trigger would have left it.
+        let holder = match world.get::<mud_world::DeathCorpse>(me).map(|c| c.0) {
+            Some(Some(corpse)) if world.get_entity(corpse).is_ok() => corpse,
+            // Corpse gone or none made: the item stays on the floor.
+            Some(_) => return,
+            None => me,
+        };
+        world.entity_mut(item).insert(Located(holder));
     })
     .ok();
 }

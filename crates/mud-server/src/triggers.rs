@@ -637,7 +637,7 @@ pub fn fire_greet_in_room(world: &mut World, entering: Entity, room: Entity) {
 /// object-attached event whose dispatch shape is "the item observed
 /// the actor doing X to it."
 pub fn fire_item_event(world: &mut World, item: Entity, actor: Entity, event: TriggerEvent) {
-    fire_item_event_with_target(world, item, actor, event, None);
+    fire_item_event_gate(world, item, actor, event, None);
 }
 
 /// [`fire_item_event`] with legacy's `target` binding: for `put` the DROP
@@ -651,15 +651,37 @@ pub fn fire_item_event_with_target(
     event: TriggerEvent,
     target: Option<Entity>,
 ) {
+    fire_item_event_gate(world, item, actor, event, target);
+}
+
+/// [`fire_item_event_with_target`] as a gate, for the events legacy fires
+/// *before* the action (`drop_otrigger`): returns `false` when the action
+/// must not happen. Legacy returns `script_driver(..) && obj`, so a trigger
+/// that purged its own item cancels the action; an item the trigger took
+/// out of its holder's hands (a script `give`) has nothing left to act on
+/// either.
+///
+/// The body's return value is deliberately not read: the converter maps
+/// DG `return 0` (cancel) and the unset default (allow) to the same Lua
+/// `true`, and DG `return 1` (allow) to `false`, so it carries no refusal
+/// signal for these events. A run that has to be deferred behind a
+/// running script cannot veto anything.
+pub fn fire_item_event_gate(
+    world: &mut World,
+    item: Entity,
+    actor: Entity,
+    event: TriggerEvent,
+    target: Option<Entity>,
+) -> bool {
     if crate::deferred_triggers::lua_busy(world) {
         crate::deferred_triggers::defer(world, move |w| {
             fire_item_event_with_target(w, item, actor, event, target);
         });
-        return;
+        return true;
     }
     let to_fire: Vec<(i32, i32, String, String)> = {
         let Some(at) = world.get::<AttachedTriggers>(item) else {
-            return;
+            return true;
         };
         let keys = at.0.clone();
         let catalog = world.resource::<TriggerCatalog>();
@@ -674,9 +696,7 @@ pub fn fire_item_event_with_target(
             })
             .collect()
     };
-    if to_fire.is_empty() {
-        return;
-    }
+    let held_before = world.get::<mud_world::Located>(item).map(|l| l.0);
     for (zone, id, name, body) in to_fire {
         if skip_if_busy(world, item, zone, id, event) {
             continue;
@@ -696,7 +716,13 @@ pub fn fire_item_event_with_target(
         if let Err(e) = result {
             record_failure(world, zone, id, &name, &format!("{event:?}"), &e);
         }
+        if world.get_entity(item).is_err()
+            || world.get::<mud_world::Located>(item).map(|l| l.0) != held_before
+        {
+            return false;
+        }
     }
+    true
 }
 
 /// Fire `event`-flagged triggers on `listener` with a separate

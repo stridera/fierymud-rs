@@ -12116,22 +12116,31 @@ fn get_all_from_floor(world: &mut World, player: Entity, room: Entity, filter: &
 }
 
 /// Legacy `perform_put` fires DROP on the item (`target` = container) and
-/// on the container (`target` = item) as it is put away.
-fn fire_put_triggers(world: &mut World, player: Entity, item: Entity, container: Entity) {
-    crate::triggers::fire_item_event_with_target(
+/// on the container (`target` = item) *before* anything moves, and stops
+/// there when either trigger cancels it (`!drop_otrigger(..) ||
+/// !drop_otrigger(..)`). Returns whether the item may go into the container:
+/// false when a trigger purged or took the item, or the container is gone.
+fn fire_put_triggers(world: &mut World, player: Entity, item: Entity, container: Entity) -> bool {
+    if !crate::triggers::fire_item_event_gate(
         world,
         item,
         player,
         mud_world::TriggerEvent::Drop,
         Some(container),
-    );
-    crate::triggers::fire_item_event_with_target(
+    ) {
+        return false;
+    }
+    if world.get_entity(container).is_err() {
+        return false;
+    }
+    crate::triggers::fire_item_event_gate(
         world,
         container,
         player,
         mud_world::TriggerEvent::Drop,
         Some(item),
-    );
+    ) && world.get_entity(item).is_ok()
+        && world.get::<Located>(item).map(|l| l.0) == Some(player)
 }
 
 /// `put <item> <container>`: move a carried item into a container
@@ -12285,14 +12294,28 @@ fn put_plain(world: &mut World, player: Entity, args: &str) {
             }
             return;
         }
-        let count = items.len();
         // Legacy `perform_put`: a fluid hand only notices the item turn solid
         // when the container is not one it carries.
         let carried_by_player = world.get::<Located>(container).map(|l| l.0) == Some(player);
+        let mut moved = 0usize;
         for (item, item_name) in &items {
-            if world.get::<Located>(*item).is_some() {
-                world.entity_mut(*item).insert(Located(container));
+            // A trigger earlier in the loop may have destroyed the
+            // container (or purged / handed off a later item).
+            if world.get_entity(container).is_err() {
+                break;
             }
+            if world.get::<Located>(*item).map(|l| l.0) != Some(player) {
+                continue;
+            }
+            // DROP fires before the move; a cancelled item stays in hand.
+            if !fire_put_triggers(world, player, *item, container) {
+                if world.get_entity(container).is_err() {
+                    break;
+                }
+                continue;
+            }
+            world.entity_mut(*item).insert(Located(container));
+            moved += 1;
             send_rendered(
                 world,
                 player,
@@ -12301,17 +12324,18 @@ fn put_plain(world: &mut World, player: Entity, args: &str) {
             if !carried_by_player {
                 crate::commands::composition::note_item_turns_solid(world, player, item_name);
             }
-            fire_put_triggers(world, player, *item, container);
         }
-        broadcast_room_except_rendered(
-            world,
-            room,
-            &[player],
-            &format!(
-                "{player_name} puts {count} {} in {container_name}.\r\n",
-                crate::commands::plural(count, "item", "items")
-            ),
-        );
+        if moved > 0 {
+            broadcast_room_except_rendered(
+                world,
+                room,
+                &[player],
+                &format!(
+                    "{player_name} puts {moved} {} in {container_name}.\r\n",
+                    crate::commands::plural(moved, "item", "items")
+                ),
+            );
+        }
         return;
     }
 
@@ -12332,9 +12356,12 @@ fn put_plain(world: &mut World, player: Entity, args: &str) {
     if refuse_drop_blocked(world, player, item, &item_name) {
         return;
     }
-    if world.get::<Located>(item).is_some() {
-        world.entity_mut(item).insert(Located(container));
+    // DROP fires before the move; a trigger that cancels it (or purges the
+    // item) leaves everything where it was.
+    if !fire_put_triggers(world, player, item, container) {
+        return;
     }
+    world.entity_mut(item).insert(Located(container));
     send_rendered(
         world,
         player,
@@ -12349,7 +12376,6 @@ fn put_plain(world: &mut World, player: Entity, args: &str) {
     if world.get::<Located>(container).map(|l| l.0) != Some(player) {
         crate::commands::composition::note_item_turns_solid(world, player, &item_name);
     }
-    fire_put_triggers(world, player, item, container);
 }
 
 /// `junk <item>` / `trash <item>`: destroy a carried item. Equipped
@@ -12683,9 +12709,22 @@ fn drop_plain(world: &mut World, player: Entity, args: &str) {
                 blocked += 1;
                 continue;
             }
-            if world.get::<Located>(*item).is_some() {
-                world.entity_mut(*item).insert(Located(room));
+            // An earlier trigger in the loop may have purged or moved it.
+            if world.get::<Located>(*item).map(|l| l.0) != Some(player) {
+                continue;
             }
+            // Legacy `perform_drop` fires DROP before the item moves and
+            // drops nothing if the trigger cancels it.
+            if !crate::triggers::fire_item_event_gate(
+                world,
+                *item,
+                player,
+                mud_world::TriggerEvent::Drop,
+                None,
+            ) {
+                continue;
+            }
+            world.entity_mut(*item).insert(Located(room));
             // Identification is broken when the item leaves the
             // player's possession to the ground. Whoever picks it
             // up next will see only its surface description until
@@ -12695,7 +12734,6 @@ fn drop_plain(world: &mut World, player: Entity, args: &str) {
             }
             send_rendered(world, player, &format!("You drop {item_name}.\r\n"));
             crate::commands::composition::note_item_turns_solid(world, player, item_name);
-            crate::triggers::fire_item_event(world, *item, player, mud_world::TriggerEvent::Drop);
             dropped += 1;
         }
         if dropped > 0 {
@@ -12757,9 +12795,19 @@ fn drop_plain(world: &mut World, player: Entity, args: &str) {
         return;
     }
 
-    if world.get::<Located>(item).is_some() {
-        world.entity_mut(item).insert(Located(room));
+    // Legacy `perform_drop` fires DROP before the item moves; a trigger that
+    // cancels the drop (or purges the item) leaves it in hand.
+    if !crate::triggers::fire_item_event_gate(
+        world,
+        item,
+        player,
+        mud_world::TriggerEvent::Drop,
+        None,
+    ) {
+        refresh_player_items_gmcp(world, player);
+        return;
     }
+    world.entity_mut(item).insert(Located(room));
     // Drop breaks identification — see `Identified` doc comment.
     // Cleared after the Located mutation so the bookkeeping
     // stays sequential with the move.
@@ -12775,7 +12823,6 @@ fn drop_plain(world: &mut World, player: Entity, args: &str) {
         &format!("{player_name} drops {item_name}.\r\n"),
     );
     crate::commands::composition::note_item_turns_solid(world, player, &item_name);
-    crate::triggers::fire_item_event(world, item, player, mud_world::TriggerEvent::Drop);
     refresh_player_items_gmcp(world, player);
 }
 
