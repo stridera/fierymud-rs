@@ -42,7 +42,7 @@ fn damage_effect() -> EffectDef {
 
 /// A mortal "Hero" with no spells, and a catalog of damaging backstab / kick /
 /// tame skills plus an area `earthquake` spell.
-fn arena() -> (Fx, Entity, Rx) {
+pub(super) fn arena() -> (Fx, Entity, Rx) {
     let mut fx = fixture();
     let mut catalog = AbilityCatalog::default();
     for (id, name, violent) in [

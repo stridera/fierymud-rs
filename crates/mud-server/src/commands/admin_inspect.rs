@@ -1304,6 +1304,21 @@ pub(crate) fn cmd_mstat(world: &mut World, player: Entity, args: &str) {
         p.alignment
     ));
     out.push_str(&format!("role:          {}\r\n", p.role.label()));
+    // class_id → resolved class name when the catalog has a row;
+    // raw `Some(N)` is unhelpful to a human reader.
+    let class_label = p.class_id.map_or_else(
+        || String::from("none"),
+        |id| {
+            world
+                .get_resource::<mud_world::ClassCatalog>()
+                .and_then(|c| c.by_id.get(&id).map(|d| d.plain_name.clone()))
+                .map_or_else(
+                    || format!("id {id} (unknown)"),
+                    |name| format!("{name} (id {id})"),
+                )
+        },
+    );
+    out.push_str(&format!("class:         {class_label}\r\n"));
     out.push_str(&format!("race:          {}\r\n", p.race));
     out.push_str(&format!("gender:        {}\r\n", p.gender));
     // Mob latent parity (Wave 2.L) fields — size / life force /
@@ -1312,6 +1327,10 @@ pub(crate) fn cmd_mstat(world: &mut World, player: Entity, args: &str) {
     // the proto without round-tripping through Muditor.
     out.push_str(&format!("size:          {}\r\n", p.size.label()));
     out.push_str(&format!("life force:    {}\r\n", p.life_force.label()));
+    out.push_str(&format!(
+        "composition:   {}\r\n",
+        mud_world::mob_composition(world, &p).label()
+    ));
     out.push_str(&format!("damage type:   {}\r\n", p.damage_type.label()));
     out.push_str(&format!(
         "default pos:   {}\r\n",
@@ -1356,21 +1375,6 @@ pub(crate) fn cmd_mstat(world: &mut World, player: Entity, args: &str) {
     out.push_str(&format!("perception:    {}\r\n", p.perception));
     out.push_str(&format!("concealment:   {}\r\n", p.concealment));
     out.push_str(&format!("wealth:        {} cp\r\n", p.wealth));
-    // class_id → resolved class name when the catalog has a row;
-    // raw `Some(N)` is unhelpful to a human reader.
-    let class_label = p.class_id.map_or_else(
-        || String::from("none"),
-        |id| {
-            world
-                .get_resource::<mud_world::ClassCatalog>()
-                .and_then(|c| c.by_id.get(&id).map(|d| d.plain_name.clone()))
-                .map_or_else(
-                    || format!("id {id} (unknown)"),
-                    |name| format!("{name} (id {id})"),
-                )
-        },
-    );
-    out.push_str(&format!("class:         {class_label}\r\n"));
     out.push_str(&format!("triggers:      {trig_count}\r\n"));
     out.push_str(&format!("live count:    {live}\r\n"));
     send_to(world, player, out);

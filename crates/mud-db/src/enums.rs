@@ -1305,6 +1305,26 @@ impl Composition {
         matches!(self.phase(), Phase::Solid)
     }
 
+    /// Human-readable name for staff stat output ("Flesh", "Ice", ...).
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Flesh => "Flesh",
+            Self::Earth => "Earth",
+            Self::Air => "Air",
+            Self::Fire => "Fire",
+            Self::Water => "Water",
+            Self::Ice => "Ice",
+            Self::Mist => "Mist",
+            Self::Ether => "Ether",
+            Self::Metal => "Metal",
+            Self::Stone => "Stone",
+            Self::Bone => "Bone",
+            Self::Lava => "Lava",
+            Self::Plant => "Plant",
+        }
+    }
+
     /// Legacy `compositions[].adjective`: how the body reads in "in your
     /// watery state".
     #[must_use]

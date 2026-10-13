@@ -572,6 +572,9 @@ pub(crate) use banish::extract_mob;
 mod boards;
 pub(crate) use boards::compose_board_step;
 #[cfg(test)]
+#[path = "commands/batch_149_tests.rs"]
+mod batch_149_tests;
+#[cfg(test)]
 #[path = "commands/buff_strip_gate_tests.rs"]
 mod buff_strip_gate_tests;
 #[cfg(test)]

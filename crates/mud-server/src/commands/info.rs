@@ -12317,8 +12317,9 @@ pub(crate) fn cmd_junk(world: &mut World, player: Entity, args: &str) {
     if refuse_nonempty_container(world, player, item, &item_name) {
         return;
     }
-    // Destroying an item is letting go of it: NO_DROP / soulbound items stay.
-    if refuse_drop_blocked(world, player, item, &item_name) {
+    // Destroying an item is letting go of it: NO_DROP / soulbound items stay
+    // (a god ignores NO_DROP, as in legacy).
+    if refuse_let_go_blocked(world, player, item, &item_name) {
         return;
     }
     crate::equip_apply::despawn_item(world, item);
@@ -12356,7 +12357,7 @@ pub(crate) fn cmd_donate(world: &mut World, player: Entity, args: &str) {
     let room = located.0;
     let item_name = name_of(world, item);
     let player_name = name_of(world, player);
-    if refuse_drop_blocked(world, player, item, &item_name) {
+    if refuse_let_go_blocked(world, player, item, &item_name) {
         return;
     }
     if world.get::<Located>(item).is_some() {
@@ -12440,7 +12441,31 @@ pub(crate) fn refuse_drop_blocked(
     item: Entity,
     item_name: &str,
 ) -> bool {
-    if has_restriction(world, item, mud_db::enums::ObjectRestriction::NoDrop) {
+    refuse_drop_blocked_inner(world, player, item, item_name, false)
+}
+
+/// [`refuse_drop_blocked`] for the routes where a god ignores `NO_DROP`
+/// (legacy `perform_drop` / junk: `GET_LEVEL(ch) >= 100`). Soulbound still
+/// holds: that bond is not a curse and legacy has no equivalent.
+pub(crate) fn refuse_let_go_blocked(
+    world: &mut World,
+    player: Entity,
+    item: Entity,
+    item_name: &str,
+) -> bool {
+    refuse_drop_blocked_inner(world, player, item, item_name, true)
+}
+
+fn refuse_drop_blocked_inner(
+    world: &mut World,
+    player: Entity,
+    item: Entity,
+    item_name: &str,
+    gods_ignore_nodrop: bool,
+) -> bool {
+    if has_restriction(world, item, mud_db::enums::ObjectRestriction::NoDrop)
+        && !(gods_ignore_nodrop && mud_world::bypasses_restrictions(world, player))
+    {
         send_rendered(
             world,
             player,
@@ -12467,6 +12492,15 @@ pub(crate) fn refuse_drop_blocked(
 #[must_use]
 pub(crate) fn item_drop_blocked(world: &World, item: Entity) -> bool {
     has_restriction(world, item, mud_db::enums::ObjectRestriction::NoDrop)
+        || has_object_flag(world, item, mud_db::enums::ObjectFlag::Soulbound)
+}
+
+/// [`item_drop_blocked`] as seen by `player` letting go of the item: a god
+/// ignores `NO_DROP` (legacy `perform_drop`), but not soulbound.
+#[must_use]
+pub(crate) fn item_drop_blocked_for(world: &World, player: Entity, item: Entity) -> bool {
+    (has_restriction(world, item, mud_db::enums::ObjectRestriction::NoDrop)
+        && !mud_world::bypasses_restrictions(world, player))
         || has_object_flag(world, item, mud_db::enums::ObjectFlag::Soulbound)
 }
 
@@ -12525,7 +12559,7 @@ fn drop_plain(world: &mut World, player: Entity, args: &str) {
             // the singular path below surfaces the message. Mass-
             // dropping shouldn't spam one rejection line per
             // protected item; a tail-count line summarizes instead.
-            if item_drop_blocked(world, *item) {
+            if item_drop_blocked_for(world, player, *item) {
                 blocked += 1;
                 continue;
             }
@@ -12584,7 +12618,9 @@ fn drop_plain(world: &mut World, player: Entity, args: &str) {
     // NO_DROP / SOULBOUND gates. Two separate messages so the player
     // can tell which kind of stickiness they're dealing with (curse
     // vs. permanent bond) — useful when planning around either.
-    if has_restriction(world, item, mud_db::enums::ObjectRestriction::NoDrop) {
+    if has_restriction(world, item, mud_db::enums::ObjectRestriction::NoDrop)
+        && !mud_world::bypasses_restrictions(world, player)
+    {
         send_rendered(
             world,
             player,
@@ -12667,7 +12703,9 @@ fn give_plain(world: &mut World, player: Entity, args: &str) {
         );
         return;
     }
-    if has_restriction(world, item, mud_db::enums::ObjectRestriction::NoDrop) {
+    if has_restriction(world, item, mud_db::enums::ObjectRestriction::NoDrop)
+        && !mud_world::bypasses_restrictions(world, player)
+    {
         send_rendered(
             world,
             player,
