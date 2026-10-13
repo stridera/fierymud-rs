@@ -5703,19 +5703,18 @@ pub(crate) fn snapshot_player(
     let effect_instances_json: Option<serde_json::Value> = {
         let mut q = world.query::<(
             &mud_world::EffectInstance,
-            &mud_world::AppliedTo,
             Option<&mud_world::ModifyDelta>,
             Option<&mud_world::SpellResistanceDelta>,
             Option<&mud_world::AlignmentProtectionTag>,
             Has<mud_world::InvisibleSource>,
         )>();
-        let effects: Vec<PersistedEffectInstance> = q
-            .iter(world)
-            .filter(|(_, applied, ..)| applied.0 == entity)
+        let effects: Vec<PersistedEffectInstance> = mud_world::effects_on(world, entity)
+            .into_iter()
+            .filter_map(|e| q.get(world, e).ok())
             // Race innates are rebuilt from `RaceEffects` at login.
             .filter(|(inst, ..)| !mud_world::mob_effects::is_innate_effect(&inst.source))
             .map(
-                |(inst, _, modd, resist, align, invisible)| PersistedEffectInstance {
+                |(inst, modd, resist, align, invisible)| PersistedEffectInstance {
                     kind: inst.kind,
                     name: inst.name.clone(),
                     strength: inst.strength,

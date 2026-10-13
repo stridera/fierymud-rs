@@ -1567,11 +1567,10 @@ fn hold_gate(world: &mut World, player: Entity, cmd: &Command) -> bool {
     }
     let (mut paralyzed, mut mesmerized, mut stunned) = (false, false, false);
     {
-        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-        for (eff, applied) in q.iter(world) {
-            if applied.0 != player {
+        for e in mud_world::effects_on(world, player) {
+            let Some(eff) = world.get::<EffectInstance>(e) else {
                 continue;
-            }
+            };
             if eff.name.eq_ignore_ascii_case("paralyzed") {
                 paralyzed = true;
             } else if eff.name.eq_ignore_ascii_case("mesmerized") {
@@ -2045,10 +2044,8 @@ fn is_plain_stunned(world: &mut World, entity: Entity) -> bool {
     if world.get::<Stunned>(entity).is_none() {
         return false;
     }
-    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-    q.iter(world).any(|(eff, applied)| {
-        applied.0 == entity
-            && (eff.name.eq_ignore_ascii_case("stun") || eff.name.eq_ignore_ascii_case("stunned"))
+    mud_world::any_effect_on(world, entity, |eff| {
+        eff.name.eq_ignore_ascii_case("stun") || eff.name.eq_ignore_ascii_case("stunned")
     })
 }
 
@@ -9899,10 +9896,11 @@ pub(crate) fn apply_room_environment(world: &mut World, player: Entity, room: En
     // Snapshot which Room-sourced effects are already on the
     // player so we don't pile duplicates on quick re-entries.
     let already_on: std::collections::HashSet<i32> = {
-        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-        q.iter(world)
-            .filter(|(ei, at)| at.0 == player && ei.source == EffectSource::Room)
-            .map(|(ei, _)| ei.kind)
+        mud_world::effects_on(world, player)
+            .into_iter()
+            .filter_map(|e| world.get::<EffectInstance>(e))
+            .filter(|ei| ei.source == EffectSource::Room)
+            .map(|ei| ei.kind)
             .collect()
     };
     for eid in effect_ids {
@@ -12827,11 +12825,9 @@ pub(crate) fn break_invisibility(world: &mut World, entity: Entity) {
         return;
     }
     let sources: Vec<Entity> = {
-        let mut q =
-            world.query_filtered::<(Entity, &AppliedTo), With<mud_world::InvisibleSource>>();
-        q.iter(world)
-            .filter(|(_, a)| a.0 == entity)
-            .map(|(e, _)| e)
+        mud_world::effects_on(world, entity)
+            .into_iter()
+            .filter(|&e| world.get::<mud_world::InvisibleSource>(e).is_some())
             .collect()
     };
     for src in sources {
@@ -17935,11 +17931,7 @@ pub(crate) fn invoke_ability_core(
                 .and_then(serde_json::Value::as_bool)
                 == Some(false)
         })
-        && {
-            let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-            q.iter(world)
-                .any(|(e, at)| at.0 == target_entity && e.ability_id == Some(def.id))
-        }
+        && mud_world::any_effect_on(world, target_entity, |e| e.ability_id == Some(def.id))
     {
         send_to(world, player, "Nothing seems to happen.\r\n");
         settle_slot(world, player, slot_hold, true);
@@ -18104,11 +18096,7 @@ pub(crate) fn invoke_ability_core(
         ]
         .iter()
         .any(|n| def.plain_name.eq_ignore_ascii_case(n))
-        && {
-            let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-            q.iter(world)
-                .any(|(e, at)| at.0 == target_entity && e.ability_id == Some(def.id))
-        };
+        && mud_world::any_effect_on(world, target_entity, |e| e.ability_id == Some(def.id));
     let render_header = || {
         let caster_template = messages_pre.as_ref().and_then(|m| {
             if target_entity == player {
@@ -18512,16 +18500,14 @@ pub(crate) fn invoke_ability_core(
                         amount = (amount.saturating_mul(150) / 100).max(1);
                         if world.get::<mud_world::Empowered>(player).is_some() {
                             try_remove::<mud_world::Empowered>(world, player);
-                            let to_despawn: Vec<Entity> = {
-                                let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
-                                q.iter(world)
-                                    .filter(|(_, inst, applied)| {
-                                        applied.0 == player
-                                            && inst.name.eq_ignore_ascii_case("empowered")
+                            let to_despawn: Vec<Entity> = mud_world::effects_on(world, player)
+                                .into_iter()
+                                .filter(|&e| {
+                                    world.get::<EffectInstance>(e).is_some_and(|inst| {
+                                        inst.name.eq_ignore_ascii_case("empowered")
                                     })
-                                    .map(|(e, _, _)| e)
-                                    .collect()
-                            };
+                                })
+                                .collect();
                             for e in to_despawn {
                                 if let Ok(em) = world.get_entity_mut(e) {
                                     em.despawn();
@@ -21287,17 +21273,13 @@ pub(crate) fn invoke_ability_core(
                                 try_insert(world, target_entity, mud_world::ProtectFromGood);
                             }
                         }
-                        let last = {
-                            let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
-                            q.iter(world)
-                                .filter(|(_, inst, applied)| {
-                                    applied.0 == target_entity
-                                        && inst.kind == spec.id
-                                        && inst.ability_id == Some(def.id)
+                        let last = mud_world::effects_on(world, target_entity)
+                            .into_iter()
+                            .rfind(|&e| {
+                                world.get::<EffectInstance>(e).is_some_and(|inst| {
+                                    inst.kind == spec.id && inst.ability_id == Some(def.id)
                                 })
-                                .map(|(e, _, _)| e)
-                                .last()
-                        };
+                            });
                         if let Some(eff_e) = last
                             && let Ok(mut em) = world.get_entity_mut(eff_e)
                         {
@@ -21354,17 +21336,13 @@ pub(crate) fn invoke_ability_core(
                         // already advanced; we re-borrow by querying
                         // for the freshly-spawned instance below via
                         // its AppliedTo + matching name.
-                        let last = {
-                            let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
-                            q.iter(world)
-                                .filter(|(_, inst, applied)| {
-                                    applied.0 == target_entity
-                                        && inst.kind == spec.id
-                                        && inst.ability_id == Some(def.id)
+                        let last = mud_world::effects_on(world, target_entity)
+                            .into_iter()
+                            .rfind(|&e| {
+                                world.get::<EffectInstance>(e).is_some_and(|inst| {
+                                    inst.kind == spec.id && inst.ability_id == Some(def.id)
                                 })
-                                .map(|(e, _, _)| e)
-                                .last()
-                        };
+                            });
                         if let Some(eff_e) = last
                             && let Ok(mut em) = world.get_entity_mut(eff_e)
                         {
@@ -22586,20 +22564,18 @@ pub(crate) fn remove_effects_by_tag(
     if tag_match.is_empty() && magic_ability_ids.is_empty() {
         return 0;
     }
-    let mut to_remove: Vec<Entity> = {
-        let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
-        q.iter(world)
-            .filter(|(_, eff, applied)| {
-                applied.0 == target
-                    && !mud_world::mob_effects::is_innate_effect(&eff.source)
+    let mut to_remove: Vec<Entity> = mud_world::effects_on(world, target)
+        .into_iter()
+        .filter(|&e| {
+            world.get::<EffectInstance>(e).is_some_and(|eff| {
+                !mud_world::mob_effects::is_innate_effect(&eff.source)
                     && (tag_match.contains(&eff.kind)
                         || eff
                             .ability_id
                             .is_some_and(|aid| magic_ability_ids.contains(&aid)))
             })
-            .map(|(e, _, _)| e)
-            .collect()
-    };
+        })
+        .collect();
     if matches!(scope, DispelScope::First) {
         to_remove.truncate(1);
     }
@@ -23234,9 +23210,7 @@ pub(crate) fn apply_heal_stamina(world: &mut World, target: Entity, amount: i32)
 /// to refuse re-applying an already-active debuff/buff. O(E) over
 /// active effects; cheap at typical world scale (low hundreds).
 pub(crate) fn has_effect_named(world: &mut World, target: Entity, name: &str) -> bool {
-    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-    q.iter(world)
-        .any(|(eff, applied)| applied.0 == target && eff.name.eq_ignore_ascii_case(name))
+    mud_world::any_effect_on(world, target, |eff| eff.name.eq_ignore_ascii_case(name))
 }
 
 /// Which prevent-flag the caller is checking on a target's active
@@ -23264,13 +23238,11 @@ pub(crate) fn effect_prevents(world: &mut World, target: Entity, kind: Prevent) 
 /// The name of the first active effect on `target` that [`effect_prevents`]
 /// counts for `kind`, if any. Lets a refusal name its real cause.
 fn blocking_effect_name(world: &mut World, target: Entity, kind: Prevent) -> Option<String> {
-    let active: Vec<(i32, String)> = {
-        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-        q.iter(world)
-            .filter(|(_, a)| a.0 == target)
-            .map(|(eff, _)| (eff.kind, eff.name.clone()))
-            .collect()
-    };
+    let active: Vec<(i32, String)> = mud_world::effects_on(world, target)
+        .into_iter()
+        .filter_map(|e| world.get::<EffectInstance>(e))
+        .map(|eff| (eff.kind, eff.name.clone()))
+        .collect();
     if active.is_empty() {
         return None;
     }
@@ -23333,17 +23305,15 @@ fn despawn_effects_on(world: &mut World, target: Entity, effects: Vec<Entity>) -
 /// `name` (case-insensitive). Returns the number despawned. Used by
 /// curative skills (bandage stops bleed).
 pub(crate) fn remove_effect_named(world: &mut World, target: Entity, name: &str) -> usize {
-    let to_remove: Vec<Entity> = {
-        let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
-        q.iter(world)
-            .filter(|(_, eff, applied)| {
-                applied.0 == target
-                    && !mud_world::mob_effects::is_innate_effect(&eff.source)
+    let to_remove: Vec<Entity> = mud_world::effects_on(world, target)
+        .into_iter()
+        .filter(|&e| {
+            world.get::<EffectInstance>(e).is_some_and(|eff| {
+                !mud_world::mob_effects::is_innate_effect(&eff.source)
                     && eff.name.eq_ignore_ascii_case(name)
             })
-            .map(|(e, _, _)| e)
-            .collect()
-    };
+        })
+        .collect();
     despawn_effects_on(world, target, to_remove)
 }
 
@@ -23378,12 +23348,11 @@ pub(crate) fn remove_effects_for_condition(
     // Every spelling of the blindness flag answers to the `blind` condition.
     let blind_condition = mud_world::mob_effects::is_blind_flag(&condition.to_ascii_lowercase());
     let (mut to_remove, source_abilities): (Vec<Entity>, Vec<i32>) = {
-        let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
-        let hits: Vec<(Entity, Option<i32>)> = q
-            .iter(world)
-            .filter(|(_, eff, applied)| {
-                applied.0 == target
-                    && !mud_world::mob_effects::is_innate_effect(&eff.source)
+        let hits: Vec<(Entity, Option<i32>)> = mud_world::effects_on(world, target)
+            .into_iter()
+            .filter_map(|e| Some((e, world.get::<EffectInstance>(e)?)))
+            .filter(|(_, eff)| {
+                !mud_world::mob_effects::is_innate_effect(&eff.source)
                     && (eff.name.eq_ignore_ascii_case(condition)
                         || (blind_condition
                             && mud_world::mob_effects::is_blind_flag(
@@ -23391,7 +23360,7 @@ pub(crate) fn remove_effects_for_condition(
                             ))
                         || eff.ability_id.is_some_and(|id| ability_ids.contains(&id)))
             })
-            .map(|(e, eff, _)| (e, eff.ability_id))
+            .map(|(e, eff)| (e, eff.ability_id))
             .collect();
         (
             hits.iter().map(|(e, _)| *e).collect(),
@@ -23402,18 +23371,17 @@ pub(crate) fn remove_effects_for_condition(
     // carries accuracy / evasion penalties next to its status flag, and
     // curing the flag must lift those too.
     if !source_abilities.is_empty() {
-        let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
-        let siblings: Vec<Entity> = q
-            .iter(world)
-            .filter(|(e, eff, applied)| {
-                applied.0 == target
-                    && !mud_world::mob_effects::is_innate_effect(&eff.source)
-                    && !to_remove.contains(e)
-                    && eff
-                        .ability_id
-                        .is_some_and(|id| source_abilities.contains(&id))
+        let siblings: Vec<Entity> = mud_world::effects_on(world, target)
+            .into_iter()
+            .filter(|e| {
+                !to_remove.contains(e)
+                    && world.get::<EffectInstance>(*e).is_some_and(|eff| {
+                        !mud_world::mob_effects::is_innate_effect(&eff.source)
+                            && eff
+                                .ability_id
+                                .is_some_and(|id| source_abilities.contains(&id))
+                    })
             })
-            .map(|(e, _, _)| e)
             .collect();
         to_remove.extend(siblings);
     }
@@ -23453,15 +23421,14 @@ pub(crate) fn name_approval_gate(world: &World, player: Entity) -> bool {
 /// innates that belong to their source (race, worn gear). Used by
 /// `cleanse` effects whose `condition` is `"all"`.
 pub(crate) fn remove_all_effects_on(world: &mut World, target: Entity) -> usize {
-    let to_remove: Vec<Entity> = {
-        let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
-        q.iter(world)
-            .filter(|(_, eff, applied)| {
-                applied.0 == target && !mud_world::mob_effects::is_innate_effect(&eff.source)
-            })
-            .map(|(e, _, _)| e)
-            .collect()
-    };
+    let to_remove: Vec<Entity> = mud_world::effects_on(world, target)
+        .into_iter()
+        .filter(|&e| {
+            world
+                .get::<EffectInstance>(e)
+                .is_some_and(|eff| !mud_world::mob_effects::is_innate_effect(&eff.source))
+        })
+        .collect();
     despawn_effects_on(world, target, to_remove)
 }
 
@@ -25038,17 +25005,14 @@ pub(crate) fn refresh_existing_effect(
     ability_id: i32,
 ) {
     let name_lc = name.to_ascii_lowercase();
-    let matches: Vec<Entity> = {
-        let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
-        q.iter(world)
-            .filter(|(_, eff, app)| {
-                app.0 == target
-                    && eff.ability_id == Some(ability_id)
-                    && eff.name.eq_ignore_ascii_case(&name_lc)
+    let matches: Vec<Entity> = mud_world::effects_on(world, target)
+        .into_iter()
+        .filter(|&e| {
+            world.get::<EffectInstance>(e).is_some_and(|eff| {
+                eff.ability_id == Some(ability_id) && eff.name.eq_ignore_ascii_case(&name_lc)
             })
-            .map(|(e, _, _)| e)
-            .collect()
-    };
+        })
+        .collect();
     for matched in matches {
         // The shared teardown reverses every numeric companion (stat
         // `ModifyDelta`, `SpellResistanceDelta`, regen bonus) the way expiry

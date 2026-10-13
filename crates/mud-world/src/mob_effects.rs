@@ -122,17 +122,21 @@ fn alignment_tag_backed(
     want: crate::components::AlignmentProtectionTag,
 ) -> bool {
     use crate::components::AlignmentProtectionTag as Tag;
-    let mut q = world.query::<(&AppliedTo, &Tag)>();
-    q.iter(world).any(|(a, t)| {
-        a.0 == target && matches!((*t, want), (Tag::Evil, Tag::Evil) | (Tag::Good, Tag::Good))
-    })
+    crate::components::effects_on(world, target)
+        .into_iter()
+        .any(|e| {
+            world.get::<Tag>(e).is_some_and(|t| {
+                matches!((*t, want), (Tag::Evil, Tag::Evil) | (Tag::Good, Tag::Good))
+            })
+        })
 }
 
 /// An `InvisibleSource`-tagged instance (`INVISIBLE` / `MASS_INVIS`, a
 /// permanent `invisible` flag) is what keeps `Invisible` on.
 fn invisible_tag_backed(world: &mut World, target: Entity) -> bool {
-    let mut q = world.query_filtered::<&AppliedTo, With<crate::components::InvisibleSource>>();
-    q.iter(world).any(|a| a.0 == target)
+    crate::components::effects_on(world, target)
+        .into_iter()
+        .any(|e| world.get::<crate::components::InvisibleSource>(e).is_some())
 }
 
 /// Every spelling of the blindness flag: `blinded` (mob / race / item
@@ -453,13 +457,11 @@ pub fn teardown_flag_marker(world: &mut World, target: Entity, name: &str) -> bo
         return false;
     };
     let named_backing = {
-        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-        q.iter(world).any(|(eff, applied)| {
-            applied.0 == target
-                && marker
-                    .flags
-                    .iter()
-                    .any(|f| eff.name.eq_ignore_ascii_case(f))
+        crate::components::any_effect_on(world, target, |eff| {
+            marker
+                .flags
+                .iter()
+                .any(|f| eff.name.eq_ignore_ascii_case(f))
         })
     };
     if named_backing || marker.tag_backed.is_some_and(|b| b(world, target)) {
@@ -723,13 +725,14 @@ fn apply_race_effects_inner(
 ) {
     // Drop the previous application first so calling twice never doubles.
     if fresh_with.is_none() {
-        let stale: Vec<Entity> = {
-            let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
-            q.iter(world)
-                .filter(|(_, inst, applied)| applied.0 == entity && is_race_effect(&inst.source))
-                .map(|(e, _, _)| e)
-                .collect()
-        };
+        let stale: Vec<Entity> = crate::components::effects_on(world, entity)
+            .into_iter()
+            .filter(|&e| {
+                world
+                    .get::<EffectInstance>(e)
+                    .is_some_and(|inst| is_race_effect(&inst.source))
+            })
+            .collect();
         for e in stale {
             world.despawn(e);
         }
@@ -758,10 +761,8 @@ fn apply_race_effects_inner(
             let already = if fresh_with.is_some() {
                 known.iter().any(|k| k.eq_ignore_ascii_case(&flag))
             } else {
-                let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-                q.iter(world).any(|(inst, applied)| {
-                    applied.0 == entity
-                        && inst.remaining_secs < 0
+                crate::components::any_effect_on(world, entity, |inst| {
+                    inst.remaining_secs < 0
                         && !is_worn_item_effect(&inst.source)
                         && inst.name.eq_ignore_ascii_case(&flag)
                 }) || granted.iter().any(|g| g.flag.eq_ignore_ascii_case(&flag))

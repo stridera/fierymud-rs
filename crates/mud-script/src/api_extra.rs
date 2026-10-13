@@ -18,9 +18,9 @@ use bevy_ecs::prelude::*;
 use mlua::{Lua, MultiValue, Table, UserDataMethods, Value, Variadic};
 use mud_db::enums::{DamageType, ObjectType, UserRole};
 use mud_world::components::{
-    Account, Charges, EffectInstance, EquippedSlot, Fighting, Item, KnownAbilities, LightFuel,
-    LiquidContainer, Located, Mob, MobBehaviors, MobTraits, Named, ObjectFlags, ObjectRestrictions,
-    Online, Player, PlayerFlags, Room, WorldKey,
+    Account, Charges, EquippedSlot, Fighting, Item, KnownAbilities, LightFuel, LiquidContainer,
+    Located, Mob, MobBehaviors, MobTraits, Named, ObjectFlags, ObjectRestrictions, Online, Player,
+    PlayerFlags, Room, WorldKey,
 };
 use mud_world::liquid_legacy::LiquidLegacyIndex;
 use mud_world::resources::{
@@ -483,10 +483,7 @@ fn has_eff_flag(world: &mut World, entity: Entity, flag: &str) -> bool {
     if want.is_empty() {
         return false;
     }
-    let mut q = world.query::<(&EffectInstance, &mud_world::components::AppliedTo)>();
-    q.iter(world)
-        .filter(|(_, applied)| applied.0 == entity)
-        .any(|(inst, _)| norm(&inst.name).starts_with(&want))
+    mud_world::any_effect_on(world, entity, |inst| norm(&inst.name).starts_with(&want))
 }
 
 /// `actor:set_skill(name, prof)`. Script use only: it refuses to run when
@@ -952,7 +949,7 @@ pub(crate) fn actor_field(lua: &Lua, entity: Entity, key: &str) -> mlua::Result<
 mod tests {
     use super::*;
     use crate::LuaHost;
-    use mud_world::components::{AppliedTo, EffectSource, GroupMember, Health};
+    use mud_world::components::{AppliedTo, EffectInstance, EffectSource, GroupMember, Health};
     use mud_world::liquid_legacy::LegacyLiquidRow;
     use mud_world::resources::{AbilityDef, ObjectProto, TriggerAttach, TriggerDef};
     use std::sync::{Arc, Mutex};

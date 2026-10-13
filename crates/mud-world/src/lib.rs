@@ -63,9 +63,10 @@ pub use components::{
     Stealth, Stunned, SummonedMount, SwitchedFrom, SwitchedInto, SyslogMinLevel, TellLog, Thirst,
     TimePlayed, Title, Trophy, TrophyEntry, TrophyKind, UiStyle, UnarmedDamage, WallCaster,
     WallTraversal, WatchingSyslog, WaterWalk, Wealth, WeaponHitroll, WearableIn, WimpyThreshold,
-    WizInvis, WorldKey, Zone, ZoneClimate, ZoneDoorReset, ZoneVisits, effects_on, group_members,
-    group_pets, group_root, innate_cooldown_key, is_lit, mob_sleeps_at_night, room_in_god_zone,
-    wear_keyword_slot, zone_grants_exploration, zone_is_god, zone_is_internal,
+    WizInvis, WorldKey, Zone, ZoneClimate, ZoneDoorReset, ZoneVisits, any_effect_on, effects_on,
+    effects_on_ro, group_members, group_pets, group_root, innate_cooldown_key, is_lit,
+    mob_sleeps_at_night, room_in_god_zone, wear_keyword_slot, zone_grants_exploration, zone_is_god,
+    zone_is_internal,
 };
 pub use item_spawn::{
     SECS_PER_MUD_HOUR, attach_timer_if_decaying, spawn_item_for_reset, spawn_item_from_proto,

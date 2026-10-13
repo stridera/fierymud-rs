@@ -81,10 +81,13 @@ fn instance_is_fear(inst: &EffectInstance, default_rows: &[(i32, String)]) -> bo
 /// Every effect instance on `actor` that carries the fear flag.
 fn fear_effects_on(world: &mut World, actor: Entity) -> Vec<Entity> {
     let rows = fear_default_rows(world);
-    let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
-    q.iter(world)
-        .filter(|(_, inst, applied)| applied.0 == actor && instance_is_fear(inst, &rows))
-        .map(|(e, _, _)| e)
+    mud_world::effects_on(world, actor)
+        .into_iter()
+        .filter(|&e| {
+            world
+                .get::<EffectInstance>(e)
+                .is_some_and(|inst| instance_is_fear(inst, &rows))
+        })
         .collect()
 }
 
@@ -370,13 +373,12 @@ fn clear_fear(world: &mut World, victim: Entity) {
 /// longer effect already running is not shortened.
 fn stun_for(world: &mut World, victim: Entity, name: &str, secs: i32, source: &str) {
     let mut found = false;
-    {
-        let mut q = world.query::<(&mut EffectInstance, &AppliedTo)>();
-        for (mut inst, applied) in q.iter_mut(world) {
-            if applied.0 == victim && inst.name.eq_ignore_ascii_case(name) {
-                inst.remaining_secs = inst.remaining_secs.max(secs);
-                found = true;
-            }
+    for e in mud_world::effects_on(world, victim) {
+        if let Some(mut inst) = world.get_mut::<EffectInstance>(e)
+            && inst.name.eq_ignore_ascii_case(name)
+        {
+            inst.remaining_secs = inst.remaining_secs.max(secs);
+            found = true;
         }
     }
     if found {
@@ -686,14 +688,13 @@ pub(crate) fn sync_markers(world: &mut World) {
     if marked.is_empty() {
         return;
     }
-    let backed: HashSet<Entity> = {
-        let rows = fear_default_rows(world);
-        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-        q.iter(world)
-            .filter(|(eff, _)| instance_is_fear(eff, &rows))
-            .map(|(_, applied)| applied.0)
-            .collect()
-    };
+    // Only the marked actors' own effects are looked at.
+    let rows = fear_default_rows(world);
+    let backed: HashSet<Entity> = marked
+        .iter()
+        .copied()
+        .filter(|&e| mud_world::any_effect_on(world, e, |eff| instance_is_fear(eff, &rows)))
+        .collect();
     for e in marked {
         if !backed.contains(&e) {
             try_remove::<Feared>(world, e);

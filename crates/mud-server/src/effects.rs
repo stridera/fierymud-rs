@@ -119,9 +119,7 @@ pub(crate) fn is_sleep_name(name: &str) -> bool {
 
 /// True while any sleep effect is active on `target`.
 pub(crate) fn has_sleep_effect(world: &mut World, target: Entity) -> bool {
-    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-    q.iter(world)
-        .any(|(eff, applied)| applied.0 == target && is_sleep_name(&eff.name))
+    mud_world::any_effect_on(world, target, |eff| is_sleep_name(&eff.name))
 }
 
 /// The Sleep spell lands: `target` drops into the sleeping posture, so it
@@ -170,11 +168,7 @@ fn wake_after_sleep(world: &mut World, target: Entity) {
 /// acting (`perform_violence`, `attack_ok`, the command interpreter), so
 /// both kinds back the same marker.
 pub(crate) fn sync_stunned(world: &mut World, target: Entity) {
-    let backed = {
-        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-        q.iter(world)
-            .any(|(eff, applied)| applied.0 == target && is_stun_name(&eff.name))
-    };
+    let backed = mud_world::any_effect_on(world, target, |eff| is_stun_name(&eff.name));
     if backed {
         try_insert(world, target, Stunned);
     } else {
@@ -283,13 +277,13 @@ fn break_kind(name: &str) -> BreakKind {
 /// three lines per kind; Major Paralysis stays. Returns whether something
 /// broke.
 pub(crate) fn break_on_hit(world: &mut World, attacker: Entity, victim: Entity) -> bool {
-    let breaking: Vec<(Entity, BreakKind)> = {
-        let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
-        q.iter(world)
-            .filter(|(_, inst, applied)| applied.0 == victim && breaks_on_hit(world, inst))
-            .map(|(e, inst, _)| (e, break_kind(&inst.name)))
-            .collect()
-    };
+    let breaking: Vec<(Entity, BreakKind)> = mud_world::effects_on(world, victim)
+        .into_iter()
+        .filter_map(|e| {
+            let inst = world.get::<EffectInstance>(e)?;
+            breaks_on_hit(world, inst).then(|| (e, break_kind(&inst.name)))
+        })
+        .collect();
     if breaking.is_empty() {
         return false;
     }
@@ -370,23 +364,29 @@ fn combat_break_params(
 /// the first round lands; non-combat actions never reach it.
 pub fn break_on_combat_tick(world: &mut World) {
     type Ended = (Entity, Entity, String, i32, Option<String>, Option<String>);
-    let fighters: std::collections::HashSet<Entity> = world
+    let fighters: Vec<Entity> = world
         .query_filtered::<Entity, With<mud_world::Fighting>>()
         .iter(world)
         .collect();
     if fighters.is_empty() {
         return;
     }
-    let breaking: Vec<Ended> = {
-        let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
-        q.iter(world)
-            .filter(|(_, inst, applied)| inst.ability_id.is_some() && fighters.contains(&applied.0))
-            .filter_map(|(e, inst, applied)| {
-                let (msg, room) = combat_break_params(world, inst)?;
-                Some((applied.0, e, inst.name.clone(), inst.ability_id?, msg, room))
-            })
-            .collect()
-    };
+    // Per fighter, not a sweep of every effect in the world.
+    let mut breaking: Vec<Ended> = Vec::new();
+    for &fighter in &fighters {
+        for e in mud_world::effects_on(world, fighter) {
+            let Some(inst) = world.get::<EffectInstance>(e) else {
+                continue;
+            };
+            let Some(ability) = inst.ability_id else {
+                continue;
+            };
+            let Some((msg, room)) = combat_break_params(world, inst) else {
+                continue;
+            };
+            breaking.push((fighter, e, inst.name.clone(), ability, msg, room));
+        }
+    }
     let mut told: std::collections::HashSet<(Entity, i32)> = std::collections::HashSet::new();
     for (target, e, name, ability, msg, room) in breaking {
         // A sibling's hook may already have taken it.
@@ -439,8 +439,9 @@ pub(crate) fn teardown_markers_after_removal(world: &mut World, target: Entity, 
     // them by their tag.)
     if name.eq_ignore_ascii_case("invisible") {
         let still_invisible = {
-            let mut q = world.query::<(&mud_world::InvisibleSource, &AppliedTo)>();
-            q.iter(world).any(|(_, applied)| applied.0 == target)
+            mud_world::effects_on(world, target)
+                .into_iter()
+                .any(|e| world.get::<mud_world::InvisibleSource>(e).is_some())
         };
         if !still_invisible {
             crate::commands::invisibility_faded(world, target);
@@ -448,9 +449,8 @@ pub(crate) fn teardown_markers_after_removal(world: &mut World, target: Entity, 
     }
     if name.eq_ignore_ascii_case("empowered") {
         let still_empowered = {
-            let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-            q.iter(world).any(|(eff, applied)| {
-                applied.0 == target && eff.name.eq_ignore_ascii_case("empowered")
+            mud_world::any_effect_on(world, target, |eff| {
+                eff.name.eq_ignore_ascii_case("empowered")
             })
         };
         if !still_empowered {
@@ -465,12 +465,11 @@ pub(crate) fn teardown_markers_after_removal(world: &mut World, target: Entity, 
     // only one source goes.
     if name.eq_ignore_ascii_case("globe") {
         let highest = {
-            let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-            q.iter(world)
-                .filter(|(eff, applied)| {
-                    applied.0 == target && eff.name.eq_ignore_ascii_case("globe")
-                })
-                .map(|(eff, _)| eff.strength)
+            mud_world::effects_on(world, target)
+                .into_iter()
+                .filter_map(|e| world.get::<EffectInstance>(e))
+                .filter(|eff| eff.name.eq_ignore_ascii_case("globe"))
+                .map(|eff| eff.strength)
                 .max()
         };
         match highest {
@@ -608,8 +607,9 @@ fn teardown_effect_instance(world: &mut World, target: Entity, eff_entity: Entit
     teardown_markers_after_removal(world, target, &name);
     if was_invisibility_source && !name.eq_ignore_ascii_case("invisible") {
         let still_invisible = {
-            let mut q = world.query::<(&mud_world::InvisibleSource, &AppliedTo)>();
-            q.iter(world).any(|(_, applied)| applied.0 == target)
+            mud_world::effects_on(world, target)
+                .into_iter()
+                .any(|e| world.get::<mud_world::InvisibleSource>(e).is_some())
         };
         if !still_invisible {
             crate::commands::invisibility_faded(world, target);
@@ -715,15 +715,14 @@ pub(crate) fn remove_effect_instance(world: &mut World, target: Entity, eff_enti
 /// grants (see [`mud_world::mob_effects::is_innate_effect`]) stay, since
 /// their lifetime belongs to the race / the item. Returns how many went.
 pub(crate) fn strip_non_innate_effects(world: &mut World, target: Entity) -> usize {
-    let doomed: Vec<Entity> = {
-        let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
-        q.iter(world)
-            .filter(|(_, inst, applied)| {
-                applied.0 == target && !mud_world::mob_effects::is_innate_effect(&inst.source)
-            })
-            .map(|(e, ..)| e)
-            .collect()
-    };
+    let doomed: Vec<Entity> = mud_world::effects_on(world, target)
+        .into_iter()
+        .filter(|&e| {
+            world
+                .get::<EffectInstance>(e)
+                .is_some_and(|inst| !mud_world::mob_effects::is_innate_effect(&inst.source))
+        })
+        .collect();
     let mut removed = 0;
     for e in doomed {
         // A hook or sibling removal may already have taken it.
@@ -1005,9 +1004,8 @@ pub fn effects_tick(world: &mut World) {
             // marker so room_is_dark / room_has_light read normally.
             if name.eq_ignore_ascii_case("light") {
                 let still_lit = {
-                    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-                    q.iter(world).any(|(eff, applied)| {
-                        applied.0 == target && eff.name.eq_ignore_ascii_case("light")
+                    mud_world::any_effect_on(world, target, |eff| {
+                        eff.name.eq_ignore_ascii_case("light")
                     })
                 };
                 if !still_lit {
@@ -1028,9 +1026,8 @@ pub fn effects_tick(world: &mut World) {
             // Mirror for DARKNESS.
             if name.eq_ignore_ascii_case("darkness") {
                 let still_dark = {
-                    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-                    q.iter(world).any(|(eff, applied)| {
-                        applied.0 == target && eff.name.eq_ignore_ascii_case("darkness")
+                    mud_world::any_effect_on(world, target, |eff| {
+                        eff.name.eq_ignore_ascii_case("darkness")
                     })
                 };
                 if !still_dark {
@@ -1051,9 +1048,8 @@ pub fn effects_tick(world: &mut World) {
             // CIRCLE_OF_FIRE teardown.
             if name.eq_ignore_ascii_case("burning") {
                 let still_burning = {
-                    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-                    q.iter(world).any(|(eff, applied)| {
-                        applied.0 == target && eff.name.eq_ignore_ascii_case("burning")
+                    mud_world::any_effect_on(world, target, |eff| {
+                        eff.name.eq_ignore_ascii_case("burning")
                     })
                 };
                 if !still_burning {
@@ -1082,8 +1078,9 @@ pub fn effects_tick(world: &mut World) {
             // Invisible marker drops.
             {
                 let still_invisible = {
-                    let mut q = world.query::<(&mud_world::InvisibleSource, &AppliedTo)>();
-                    q.iter(world).any(|(_, applied)| applied.0 == target)
+                    mud_world::effects_on(world, target)
+                        .into_iter()
+                        .any(|e| world.get::<mud_world::InvisibleSource>(e).is_some())
                 };
                 if !still_invisible {
                     crate::commands::invisibility_faded(world, target);

@@ -11,8 +11,8 @@
 
 use bevy_ecs::prelude::*;
 use mud_world::{
-    AppliedTo, EffectInstance, EffectSource, Fighting, Flying, Located, Mob, MobPrototypes,
-    Mounted, Named, Player, Posture, PostureKind, RiddenBy, Stunned, Title, WorldKey,
+    EffectInstance, EffectSource, Fighting, Flying, Located, Mob, MobPrototypes, Mounted, Named,
+    Player, Posture, PostureKind, RiddenBy, Stunned, Title, WorldKey,
 };
 
 use crate::commands::{cap_sentence_start, seen_name};
@@ -41,11 +41,10 @@ impl Hold {
 pub(crate) fn hold_of(world: &mut World, actor: Entity) -> Option<Hold> {
     world.get::<Stunned>(actor)?;
     let mut hold = Hold::Stunned;
-    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-    for (inst, applied) in q.iter(world) {
-        if applied.0 != actor {
+    for e in mud_world::effects_on(world, actor) {
+        let Some(inst) = world.get::<EffectInstance>(e) else {
             continue;
-        }
+        };
         if inst.name.eq_ignore_ascii_case("paralyzed") {
             return Some(Hold::Paralyzed);
         }
@@ -88,10 +87,8 @@ fn flying_off_default(world: &mut World, actor: Entity) -> bool {
     if world.get::<Mob>(actor).is_none() {
         return true;
     }
-    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-    !q.iter(world).any(|(inst, applied)| {
-        applied.0 == actor
-            && inst.name.eq_ignore_ascii_case("fly")
+    !mud_world::any_effect_on(world, actor, |inst| {
+        inst.name.eq_ignore_ascii_case("fly")
             && (mud_world::mob_effects::is_innate_effect(&inst.source)
                 || matches!(&inst.source, EffectSource::Other(s) if s == "mob_default"))
     })

@@ -1,9 +1,9 @@
 use bevy_ecs::prelude::*;
 use mud_world::{
-    AppliedTo, CombatStats, Corpse, CorpseDecay, Description, EffectInstance, EquippedSlot, Exits,
-    Fighting, FromMobReset, Ghost, Guarding, Health, Item, Keywords, Located, Mob, MobPrototypes,
-    Named, NaturalDamage, ObjectPrototypes, Player, PlayerFlags, Posture, PostureKind, Slot,
-    Stunned, Wealth, WearableIn, WorldKey, WorldKeyIndex,
+    CombatStats, Corpse, CorpseDecay, Description, EquippedSlot, Exits, Fighting, FromMobReset,
+    Ghost, Guarding, Health, Item, Keywords, Located, Mob, MobPrototypes, Named, NaturalDamage,
+    ObjectPrototypes, Player, PlayerFlags, Posture, PostureKind, Slot, Stunned, Wealth, WearableIn,
+    WorldKey, WorldKeyIndex,
 };
 use tracing::info;
 
@@ -1129,14 +1129,20 @@ pub fn combat_tick(world: &mut World) {
     // away (no open exit) is cornered and fights on.
     crate::fear::feared_mobs_flee(world);
 
-    // Pre-pass: collect all entities currently affected by `berserk`
-    // so the swing snapshot can apply a +50% damage bonus without a
-    // separate per-attacker effect lookup.
+    // Pre-pass: collect the fighters currently affected by `berserk` so the
+    // swing snapshot can apply a +50% damage bonus without a separate
+    // per-attacker effect lookup. Only entities with `Fighting` can swing, so
+    // each one's own effects are checked, not every effect in the world.
     let berserk_attackers: std::collections::HashSet<Entity> = {
-        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-        q.iter(world)
-            .filter(|(eff, _)| eff.name.eq_ignore_ascii_case("berserk"))
-            .map(|(_, a)| a.0)
+        let fighters: Vec<Entity> = world
+            .query_filtered::<Entity, With<Fighting>>()
+            .iter(world)
+            .collect();
+        fighters
+            .into_iter()
+            .filter(|&e| {
+                mud_world::any_effect_on(world, e, |eff| eff.name.eq_ignore_ascii_case("berserk"))
+            })
             .collect()
     };
 
@@ -1582,11 +1588,9 @@ pub(crate) fn engage_swing_now(world: &mut World, attacker: Entity, target: Enti
     let scaled = (weapon_roll.saturating_mul(100 + cs.attack_power)) / 100;
     let base = scaled.max(1);
     // Berserk multiplier — single-attacker scan is fine on engage.
-    let berserk = {
-        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-        q.iter(world)
-            .any(|(eff, a)| a.0 == attacker && eff.name.eq_ignore_ascii_case("berserk"))
-    };
+    let berserk = mud_world::any_effect_on(world, attacker, |eff| {
+        eff.name.eq_ignore_ascii_case("berserk")
+    });
     let damage = if berserk { (base * 3) / 2 } else { base };
 
     // Guard redirect: same lookup combat_tick does, single-pair scope.
@@ -2908,9 +2912,7 @@ pub(crate) fn is_player_pet(world: &mut World, mob: Entity) -> bool {
     {
         return true;
     }
-    let mut q = world.query::<(&mud_world::EffectInstance, &mud_world::AppliedTo)>();
-    q.iter(world)
-        .any(|(i, a)| a.0 == mob && i.name.starts_with("summoned-"))
+    mud_world::any_effect_on(world, mob, |i| i.name.starts_with("summoned-"))
 }
 
 /// Drop the durable `PersistentPet` marker from every mob whose follow link

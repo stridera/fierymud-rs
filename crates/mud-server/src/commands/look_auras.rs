@@ -8,9 +8,7 @@
 //! `EffectAuraCatalog`; builders edit them without a recompile.
 
 use bevy_ecs::prelude::{Entity, World};
-use mud_world::{
-    AppliedTo, CombatStats, EffectAuraCatalog, EffectInstance, MobPrototypes, Profile, WorldKey,
-};
+use mud_world::{CombatStats, EffectAuraCatalog, EffectInstance, MobPrototypes, Profile, WorldKey};
 
 fn normalize(label: &str) -> String {
     label.replace('_', " ").to_ascii_lowercase()
@@ -51,10 +49,10 @@ pub(super) fn target_gender(world: &World, target: Entity) -> String {
 /// ability's name and the effect's own flag name.
 fn effect_labels(world: &mut World, target: Entity) -> Vec<String> {
     let rows: Vec<(String, Option<i32>)> = {
-        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-        q.iter(world)
-            .filter(|(_, a)| a.0 == target)
-            .map(|(inst, _)| (inst.name.clone(), inst.ability_id))
+        mud_world::effects_on(world, target)
+            .into_iter()
+            .filter_map(|e| world.get::<EffectInstance>(e))
+            .map(|inst| (inst.name.clone(), inst.ability_id))
             .collect()
     };
     let catalog = world.get_resource::<mud_world::AbilityCatalog>();

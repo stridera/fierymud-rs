@@ -18,7 +18,7 @@ use mlua::{
 };
 use mud_db::enums::EntityType;
 use mud_world::{
-    AbilityCatalog, AppliedTo, ClassCatalog, CombatStats, CoreStats, Description, EffectCatalog,
+    AbilityCatalog, ClassCatalog, CombatStats, CoreStats, Description, EffectCatalog,
     EffectInstance, EntityVariableCache, EquippedSlot, Fighting, Follower, Health, Hiddenness,
     Item, Keywords, KnownAbilities, Located, LuaOutbox, Mob, MobPrototypes, Named,
     ObjectPrototypes, Online, Player, Posture, PostureKind, Profile, Title, WorldKey,
@@ -3019,9 +3019,8 @@ impl UserData for LuaActor {
                     else {
                         return false;
                     };
-                    let mut q = w.query::<(&EffectInstance, &AppliedTo)>();
-                    q.iter(w).any(|(inst, applied)| {
-                        applied.0 == this.entity && inst.ability_id == Some(target_id)
+                    mud_world::any_effect_on(w, this.entity, |inst| {
+                        inst.ability_id == Some(target_id)
                     })
                 })
             },
@@ -3036,15 +3035,10 @@ impl UserData for LuaActor {
             |lua, this, name: String| -> mlua::Result<bool> {
                 world_mut_from_lua(lua, |w| {
                     let needle = name.trim().to_ascii_lowercase();
-                    let mut effect_ids: Vec<i32> = Vec::new();
-                    {
-                        let mut q = w.query::<(&EffectInstance, &AppliedTo)>();
-                        for (inst, applied) in q.iter(w) {
-                            if applied.0 == this.entity {
-                                effect_ids.push(inst.kind);
-                            }
-                        }
-                    }
+                    let effect_ids: Vec<i32> = mud_world::effects_on(w, this.entity)
+                        .into_iter()
+                        .filter_map(|e| w.get::<EffectInstance>(e).map(|inst| inst.kind))
+                        .collect();
                     let catalog = w.resource::<EffectCatalog>();
                     effect_ids.iter().any(|id| {
                         catalog
@@ -4188,11 +4182,12 @@ impl UserData for LuaActor {
                     // spaces; absent → empty string.
                     "flags" | "aff_flags" | "eff_flags" => {
                         let s = world_mut_from_lua(lua, |w| {
-                            let mut q = w.query::<(&EffectInstance, &AppliedTo)>();
-                            let names: Vec<String> = q
-                                .iter(w)
-                                .filter(|(_, a)| a.0 == this.entity)
-                                .map(|(inst, _)| inst.name.to_ascii_uppercase())
+                            let names: Vec<String> = mud_world::effects_on(w, this.entity)
+                                .into_iter()
+                                .filter_map(|e| {
+                                    w.get::<EffectInstance>(e)
+                                        .map(|inst| inst.name.to_ascii_uppercase())
+                                })
                                 .collect();
                             names.join(" ")
                         })?;

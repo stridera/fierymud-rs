@@ -6,9 +6,9 @@
 use bevy_ecs::prelude::{Entity, World};
 use mud_db::enums::{Alignment, LifeForce, ObjectFlag, Sector, Size};
 use mud_world::{
-    AbilityCatalog, AppliedTo, Blinded, CombatStats, DetectAlign, EffectInstance, Infravision,
-    LifeForceTag, LiquidContainer, Located, Mob, ObjectFlags, ObjectPrototypes, Player, RoomSector,
-    SenseLife, Sized, WorldKey, is_lit,
+    AbilityCatalog, Blinded, CombatStats, DetectAlign, EffectInstance, Infravision, LifeForceTag,
+    LiquidContainer, Located, Mob, ObjectFlags, ObjectPrototypes, Player, RoomSector, SenseLife,
+    Sized, WorldKey, is_lit,
 };
 
 use super::{can_see_player, hidden_by_magic_from, wiz_hidden_from};
@@ -111,13 +111,11 @@ pub(crate) fn item_alignment_aura(
 /// `look_auras`.
 fn viewer_has_effect(world: &World, viewer: Entity, labels: &[&str]) -> bool {
     let norm = |s: &str| s.replace('_', " ").to_ascii_lowercase();
-    let Some(mut q) = world.try_query::<(&EffectInstance, &AppliedTo)>() else {
-        return false;
-    };
     let catalog = world.get_resource::<AbilityCatalog>();
-    q.iter(world)
-        .filter(|(_, applied)| applied.0 == viewer)
-        .any(|(inst, _)| {
+    mud_world::effects_on_ro(world, viewer)
+        .into_iter()
+        .filter_map(|e| world.get::<EffectInstance>(e))
+        .any(|inst| {
             labels.contains(&norm(&inst.name).as_str())
                 || inst
                     .ability_id

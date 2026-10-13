@@ -3342,6 +3342,34 @@ pub fn effects_on(world: &mut World, bearer: Entity) -> Vec<Entity> {
         .unwrap_or_default()
 }
 
+/// [`effects_on`] for callers holding only `&World`. Uses the index when it
+/// exists (the server inserts it at boot); otherwise falls back to a scan, so
+/// the answer is the same either way.
+pub fn effects_on_ro(world: &World, bearer: Entity) -> Vec<Entity> {
+    if let Some(idx) = world.get_resource::<EffectsByBearer>() {
+        return idx.0.get(&bearer).cloned().unwrap_or_default();
+    }
+    let Some(mut q) = world.try_query::<(Entity, &AppliedTo)>() else {
+        return Vec::new();
+    };
+    q.iter(world)
+        .filter(|(_, a)| a.0 == bearer)
+        .map(|(e, _)| e)
+        .collect()
+}
+
+/// Whether any [`EffectInstance`] on `bearer` satisfies `pred`. Same lookup
+/// as [`effects_on`]: O(the bearer's own effects).
+pub fn any_effect_on(
+    world: &mut World,
+    bearer: Entity,
+    mut pred: impl FnMut(&EffectInstance) -> bool,
+) -> bool {
+    effects_on(world, bearer)
+        .into_iter()
+        .any(|e| world.get::<EffectInstance>(e).is_some_and(&mut pred))
+}
+
 /// Per-effect "what stat did I bump and by how much" companion record
 /// for `modify`-effect-type `EffectInstance`s. Lives on the effect
 /// entity alongside `EffectInstance` and `AppliedTo`. Used by the

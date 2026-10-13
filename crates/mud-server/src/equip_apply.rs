@@ -753,9 +753,8 @@ pub fn base_progression(world: &mut World, wearer: Entity) -> Option<BaseProgres
             }
         }
     }
-    let mut effects = world.query::<(&AppliedTo, &mud_world::ModifyDelta)>();
-    for (applied_to, delta) in effects.iter(world) {
-        if applied_to.0 == wearer {
+    for e in mud_world::effects_on(world, wearer) {
+        if let Some(delta) = world.get::<mud_world::ModifyDelta>(e) {
             add(&mut applied, &delta.target, delta.amount);
         }
     }

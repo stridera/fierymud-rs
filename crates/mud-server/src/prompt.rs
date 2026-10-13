@@ -30,9 +30,9 @@
 
 use bevy_ecs::prelude::{Entity, World};
 use mud_world::{
-    AbilityCatalog, AppliedTo, BankWealth, ClassCatalog, CombatStats, Cooldowns, EffectInstance,
-    Fighting, Health, Located, MudClock, Named, PlayerFlags, Profile, Stamina, SwitchedInto,
-    Wealth, WizInvis,
+    AbilityCatalog, BankWealth, ClassCatalog, CombatStats, Cooldowns, EffectInstance, Fighting,
+    Health, Located, MudClock, Named, PlayerFlags, Profile, Stamina, SwitchedInto, Wealth,
+    WizInvis,
 };
 
 use crate::commands::{
@@ -593,9 +593,11 @@ const COOLDOWN_SELECTORS: &str = "abcdDefghijklmnopqrstuvwxy1234567";
 fn active_effects(world: &mut World, target: Entity) -> Vec<EffectEntry> {
     let mut found: Vec<(String, i32, bool)> = Vec::new();
     {
-        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-        for (inst, applied) in q.iter(world) {
-            if applied.0 != target || inst.remaining_secs < 0 {
+        for e in mud_world::effects_on(world, target) {
+            let Some(inst) = world.get::<EffectInstance>(e) else {
+                continue;
+            };
+            if inst.remaining_secs < 0 {
                 continue;
             }
             let label = crate::commands::info::effect_label(world, inst);
@@ -787,6 +789,7 @@ pub(crate) fn build_prompt_ctx(world: &mut World, target: Entity) -> PromptCtx {
 mod tests {
     use super::*;
     use crate::commands::{ColorMode, render_color_tags};
+    use mud_world::AppliedTo;
 
     fn plain(s: &str) -> String {
         render_color_tags(s, ColorMode::Strip)

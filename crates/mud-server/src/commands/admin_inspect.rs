@@ -6,11 +6,10 @@ use std::collections::HashMap;
 use bevy_ecs::prelude::*;
 use mud_db::enums::{Direction, MobBehavior, UserRole};
 use mud_world::{
-    AbilityCatalog, Account, AppliedTo, AttachedTriggers, ClassCatalog, CombatStats,
-    EffectInstance, EquippedSlot, ExitData, Exits, Fighting, FromObjectReset, Health, Item,
-    Keywords, Located, Mob, MobPrototypes, Named, ObjectPrototypes, Online, Player, PlayerFlags,
-    Posture, Profile, RoomSector, ShopCatalog, Stamina, TriggerCatalog, Wealth, WorldKey,
-    WorldKeyIndex, ZoneClimate,
+    AbilityCatalog, Account, AttachedTriggers, ClassCatalog, CombatStats, EffectInstance,
+    EquippedSlot, ExitData, Exits, Fighting, FromObjectReset, Health, Item, Keywords, Located, Mob,
+    MobPrototypes, Named, ObjectPrototypes, Online, Player, PlayerFlags, Posture, Profile,
+    RoomSector, ShopCatalog, Stamina, TriggerCatalog, Wealth, WorldKey, WorldKeyIndex, ZoneClimate,
 };
 
 use super::admin_world::{ActorKind, find_actor_anywhere_of};
@@ -2437,10 +2436,10 @@ pub(crate) fn cmd_astat(world: &mut World, player: Entity, args: &str) {
     };
     let target_name = name_of(world, target);
     let active: Vec<(String, i32, i32, mud_world::EffectSource, Option<i32>)> = {
-        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-        q.iter(world)
-            .filter(|(_, a)| a.0 == target)
-            .map(|(inst, _)| {
+        mud_world::effects_on(world, target)
+            .into_iter()
+            .filter_map(|e| world.get::<EffectInstance>(e))
+            .map(|inst| {
                 (
                     inst.name.clone(),
                     inst.remaining_secs,
@@ -2790,10 +2789,10 @@ pub(crate) fn cmd_rstat(world: &mut World, player: Entity, args: &str) {
     }
     // EffectInstances applied to this room (environmental auras).
     let effects: Vec<(String, i32)> = {
-        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-        q.iter(world)
-            .filter(|(_, applied)| applied.0 == room)
-            .map(|(eff, _)| (eff.name.clone(), eff.remaining_secs))
+        mud_world::effects_on(world, room)
+            .into_iter()
+            .filter_map(|e| world.get::<EffectInstance>(e))
+            .map(|eff| (eff.name.clone(), eff.remaining_secs))
             .collect()
     };
     if effects.is_empty() {
@@ -3082,10 +3081,10 @@ pub(crate) fn cmd_stat(world: &mut World, player: Entity, args: &str) {
     }
     // EffectInstances applied to this entity.
     let effects: Vec<(String, i32)> = {
-        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-        q.iter(world)
-            .filter(|(_, applied)| applied.0 == target)
-            .map(|(eff, _)| (eff.name.clone(), eff.remaining_secs))
+        mud_world::effects_on(world, target)
+            .into_iter()
+            .filter_map(|e| world.get::<EffectInstance>(e))
+            .map(|eff| (eff.name.clone(), eff.remaining_secs))
             .collect()
     };
     if effects.is_empty() {

@@ -777,10 +777,13 @@ struct RoundCtx {
     attackers: Option<HashMap<Entity, Vec<Entity>>>,
     /// room -> mobs standing in it.
     room_mobs: Option<HashMap<Entity, Vec<Entity>>>,
-    /// entity -> beneficial / harmful spell effects on it.
-    tally: Option<HashMap<Entity, EffectTally>>,
-    /// `(entity, ability id)` for every ability effect currently applied.
-    applied: Option<HashSet<(Entity, i32)>>,
+    /// ability id -> whether it is a violent (harmful) one.
+    violent: Option<HashMap<i32, bool>>,
+    /// entity -> beneficial / harmful spell effects on it. Filled per entity
+    /// from the by-bearer effect index, only for the entities asked about.
+    tally: HashMap<Entity, EffectTally>,
+    /// entity -> ids of the abilities whose effects it currently carries.
+    applied: HashMap<Entity, HashSet<i32>>,
     rolls: MobRolls,
 }
 
@@ -835,7 +838,10 @@ impl RoundCtx {
     }
 
     fn effects_on(&mut self, world: &mut World, entity: Entity) -> EffectTally {
-        if self.tally.is_none() {
+        if let Some(t) = self.tally.get(&entity) {
+            return *t;
+        }
+        if self.violent.is_none() {
             // Building the tally needs the ability table; do that first.
             let violent: HashMap<i32, bool> = self
                 .abilities
@@ -851,38 +857,43 @@ impl RoundCtx {
             } else {
                 violent
             };
-            let mut map: HashMap<Entity, EffectTally> = HashMap::new();
-            let mut q = world.query::<(&mud_world::EffectInstance, &mud_world::AppliedTo)>();
-            for (eff, on) in q.iter(world) {
-                let Some(&is_violent) = eff.ability_id.and_then(|id| violent.get(&id)) else {
-                    continue;
-                };
-                let t = map.entry(on.0).or_default();
-                if is_violent {
-                    t.debuffs += 1;
-                } else {
-                    t.buffs += 1;
-                }
-            }
-            self.tally = Some(map);
+            self.violent = Some(violent);
         }
-        self.tally
-            .as_ref()
-            .and_then(|m| m.get(&entity).copied())
-            .unwrap_or_default()
+        let violent = self.violent.as_ref();
+        let mut t = EffectTally::default();
+        for e in mud_world::effects_on(world, entity) {
+            let Some(eff) = world.get::<mud_world::EffectInstance>(e) else {
+                continue;
+            };
+            let Some(&is_violent) = eff
+                .ability_id
+                .and_then(|id| violent.and_then(|v| v.get(&id)))
+            else {
+                continue;
+            };
+            if is_violent {
+                t.debuffs += 1;
+            } else {
+                t.buffs += 1;
+            }
+        }
+        self.tally.insert(entity, t);
+        t
     }
 
     /// Whether `entity` already carries an effect from `ability_id`: a buff
     /// the mob already has, or a hindrance the victim is already under, is
     /// not cast again.
     fn has_effect_from(&mut self, world: &mut World, entity: Entity, ability_id: i32) -> bool {
-        let set = self.applied.get_or_insert_with(|| {
-            let mut q = world.query::<(&mud_world::EffectInstance, &mud_world::AppliedTo)>();
-            q.iter(world)
-                .filter_map(|(eff, on)| eff.ability_id.map(|id| (on.0, id)))
-                .collect()
-        });
-        set.contains(&(entity, ability_id))
+        self.applied
+            .entry(entity)
+            .or_insert_with(|| {
+                mud_world::effects_on(world, entity)
+                    .into_iter()
+                    .filter_map(|e| world.get::<mud_world::EffectInstance>(e)?.ability_id)
+                    .collect()
+            })
+            .contains(&ability_id)
     }
 }
 
@@ -1048,7 +1059,7 @@ fn wields_weapon_type(world: &World, mob: Entity, wanted: &str) -> bool {
 /// Whether `entity` carries a debuff answering to one of `names`: an effect of
 /// that name, or one applied by the ability of that name (`blind` also answers
 /// to every blindness flag). The same matching the cleansing spells use.
-fn has_named_debuff(world: &mut World, entity: Entity, names: &[String]) -> bool {
+pub(crate) fn has_named_debuff(world: &mut World, entity: Entity, names: &[String]) -> bool {
     let key = |s: &str| -> String {
         s.chars()
             .filter(char::is_ascii_alphanumeric)
@@ -1069,10 +1080,8 @@ fn has_named_debuff(world: &mut World, entity: Entity, names: &[String]) -> bool
     let blind = names
         .iter()
         .any(|n| mud_world::mob_effects::is_blind_flag(&n.to_ascii_lowercase()));
-    let mut q = world.query::<(&mud_world::EffectInstance, &mud_world::AppliedTo)>();
-    q.iter(world).any(|(eff, applied)| {
-        applied.0 == entity
-            && !mud_world::mob_effects::is_innate_effect(&eff.source)
+    mud_world::any_effect_on(world, entity, |eff| {
+        !mud_world::mob_effects::is_innate_effect(&eff.source)
             && (names.iter().any(|n| eff.name.eq_ignore_ascii_case(n))
                 || (blind && mud_world::mob_effects::is_blind_flag(&eff.name.to_ascii_lowercase()))
                 || eff.ability_id.is_some_and(|id| ability_ids.contains(&id)))

@@ -30,9 +30,9 @@ use mud_db::{
 };
 use mud_net::Outbound;
 use mud_world::{
-    Account, AppliedTo, ClassCatalog, CombatStats, EffectInstance, Exits, Health, Item,
-    LastInputAt, Located, LoggedInAt, Mob, MobPrototypes, Named, ObjectPrototypes, Online, Player,
-    Posture, Profile, Stamina, TriggerCatalog, WorldKey, WorldKeyIndex,
+    Account, ClassCatalog, CombatStats, EffectInstance, Exits, Health, Item, LastInputAt, Located,
+    LoggedInAt, Mob, MobPrototypes, Named, ObjectPrototypes, Online, Player, Posture, Profile,
+    Stamina, TriggerCatalog, WorldKey, WorldKeyIndex,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -1875,10 +1875,10 @@ pub(crate) fn inspect_actor(world: &mut World, name: &str) -> AdminResponse {
     let hunger = world.get::<mud_world::Hunger>(entity).map(|h| h.0);
     let thirst = world.get::<mud_world::Thirst>(entity).map(|t| t.0);
     let effects: Vec<Value> = {
-        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-        q.iter(world)
-            .filter(|(_, applied)| applied.0 == entity)
-            .map(|(eff, _)| {
+        mud_world::effects_on(world, entity)
+            .into_iter()
+            .filter_map(|e| world.get::<EffectInstance>(e))
+            .map(|eff| {
                 json!({
                     "name": eff.name,
                     "remaining_secs": eff.remaining_secs,

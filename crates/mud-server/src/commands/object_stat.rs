@@ -8,7 +8,7 @@ use bevy_ecs::prelude::*;
 use mud_db::enums::{ObjectFlag, ObjectRestriction};
 use mud_world::components::WeaponDiceSizeAdjust;
 use mud_world::{
-    AbilityCatalog, AppliedTo, ClassCatalog, EffectInstance, EquippedSlot, Item, Keywords, Located,
+    AbilityCatalog, ClassCatalog, EffectInstance, EquippedSlot, Item, Keywords, Located,
     ObjectFlags, ObjectProto, ObjectRestrictions, WorldKey,
 };
 
@@ -368,10 +368,10 @@ fn append_instance(world: &mut World, out: &mut String, item: Entity) {
         }
     }
     let effects: Vec<(String, i32)> = {
-        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-        q.iter(world)
-            .filter(|(_, a)| a.0 == item)
-            .map(|(e, _)| (e.name.clone(), e.remaining_secs))
+        mud_world::effects_on(world, item)
+            .into_iter()
+            .filter_map(|e| world.get::<EffectInstance>(e))
+            .map(|e| (e.name.clone(), e.remaining_secs))
             .collect()
     };
     if effects.is_empty() {

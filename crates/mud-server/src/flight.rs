@@ -19,9 +19,8 @@
 use bevy_ecs::prelude::*;
 use mud_db::enums::{Direction, ExitState, Sector};
 use mud_world::{
-    AppliedTo, EffectInstance, EffectSource, Exits, Falling, Flying, Ghost, Health, Located,
-    MovementModeTag, ObjectPrototypes, Player, Posture, PostureKind, RoomSector, Sized,
-    effective_level,
+    EffectSource, Exits, Falling, Flying, Ghost, Health, Located, MovementModeTag,
+    ObjectPrototypes, Player, Posture, PostureKind, RoomSector, Sized, effective_level,
 };
 
 use crate::TickCount;
@@ -249,9 +248,8 @@ pub(crate) fn check_overweight(world: &mut World, e: Entity) {
         return;
     }
     let spell_backed = {
-        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-        q.iter(world).any(|(i, a)| {
-            a.0 == e && i.name.eq_ignore_ascii_case("fly") && i.source == EffectSource::Spell
+        mud_world::any_effect_on(world, e, |i| {
+            i.name.eq_ignore_ascii_case("fly") && i.source == EffectSource::Spell
         })
     };
     send_to(

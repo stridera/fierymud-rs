@@ -13,7 +13,7 @@
 use bevy_ecs::prelude::*;
 use mud_db::enums::Composition;
 use mud_world::{
-    AppliedTo, EffectInstance, Located, actor_composition, actor_is_illusory, actor_is_rigid,
+    EffectInstance, Located, actor_composition, actor_is_illusory, actor_is_rigid,
     actor_is_solid_char, bypasses_restrictions, composition_state_phrase,
 };
 
@@ -441,12 +441,14 @@ fn strip_effects_of(
         return 0;
     }
     let doomed: Vec<(Entity, String, Option<i32>)> = {
-        let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
-        q.iter(world)
-            .filter(|(_, inst, applied)| {
-                applied.0 == target && inst.ability_id.is_some_and(|id| rigid_only.contains(&id))
+        mud_world::effects_on(world, target)
+            .into_iter()
+            .filter_map(|e| {
+                let inst = world.get::<EffectInstance>(e)?;
+                inst.ability_id
+                    .is_some_and(|id| rigid_only.contains(&id))
+                    .then(|| (e, inst.name.clone(), inst.ability_id))
             })
-            .map(|(e, inst, _)| (e, inst.name.clone(), inst.ability_id))
             .collect()
     };
     let mut removed = 0;

@@ -3846,10 +3846,10 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
         let hunger = world.get::<mud_world::Hunger>(player).map_or(0, |h| h.0);
         let thirst = world.get::<mud_world::Thirst>(player).map_or(0, |t| t.0);
         let self_effects: Vec<String> = {
-            let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-            q.iter(world)
-                .filter(|(_, a)| a.0 == player)
-                .map(|(inst, _)| inst.name.clone())
+            mud_world::effects_on(world, player)
+                .into_iter()
+                .filter_map(|e| world.get::<EffectInstance>(e))
+                .map(|inst| inst.name.clone())
                 .collect()
         };
         if let Some(c) = condition_summary(hunger, thirst, &self_effects) {
@@ -3870,10 +3870,10 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
             let hunger = world.get::<mud_world::Hunger>(player).map_or(0, |h| h.0);
             let thirst = world.get::<mud_world::Thirst>(player).map_or(0, |t| t.0);
             let self_effects: Vec<String> = {
-                let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-                q.iter(world)
-                    .filter(|(_, a)| a.0 == player)
-                    .map(|(inst, _)| inst.name.clone())
+                mud_world::effects_on(world, player)
+                    .into_iter()
+                    .filter_map(|e| world.get::<EffectInstance>(e))
+                    .map(|inst| inst.name.clone())
                     .collect()
             };
             if let Some(c) = condition_summary(hunger, thirst, &self_effects) {
@@ -8187,12 +8187,11 @@ pub(crate) fn cmd_score(world: &mut World, player: Entity, _args: &str) {
     // Detail (duration + source) stays in `cmd_effects`. Filter
     // by AppliedTo so we only get the player's own effects.
     let active_effects: Vec<String> = {
-        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
         let mut seen: Vec<String> = Vec::new();
-        for (inst, applied) in q.iter(world) {
-            if applied.0 != player {
+        for e in mud_world::effects_on(world, player) {
+            let Some(inst) = world.get::<EffectInstance>(e) else {
                 continue;
-            }
+            };
             // Permanent effects (innate, worn gear, mob defaults) are
             // listed too, tagged so they read apart from timed buffs.
             let label = if inst.remaining_secs < 0 {
@@ -13346,14 +13345,13 @@ pub(crate) fn cmd_visible(world: &mut World, player: Entity, _args: &str) {
     let mut item_backed = false;
     if invisible {
         let sources: Vec<(Entity, bool)> = {
-            let mut q = world.query_filtered::<(
-                Entity,
-                &AppliedTo,
-                &EffectInstance,
-            ), With<mud_world::InvisibleSource>>();
-            q.iter(world)
-                .filter(|(_, a, _)| a.0 == player)
-                .map(|(e, _, inst)| (e, mud_world::mob_effects::is_innate_effect(&inst.source)))
+            mud_world::effects_on(world, player)
+                .into_iter()
+                .filter(|&e| world.get::<mud_world::InvisibleSource>(e).is_some())
+                .filter_map(|e| {
+                    let inst = world.get::<EffectInstance>(e)?;
+                    Some((e, mud_world::mob_effects::is_innate_effect(&inst.source)))
+                })
                 .collect()
         };
         for (src, innate) in sources {
@@ -14564,15 +14562,14 @@ pub(crate) fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
     let active: Vec<ActiveEffectRow> = {
         let mut q = world.query::<(
             &EffectInstance,
-            &AppliedTo,
             Option<&mud_world::ModifyDelta>,
             Option<&mud_world::GrantedByItem>,
             Has<mud_world::InvisibleSource>,
         )>();
-        let rows: Vec<_> = q
-            .iter(world)
-            .filter(|(_, a, ..)| a.0 == player)
-            .map(|(inst, _, delta, granted, invisible)| {
+        let rows: Vec<_> = mud_world::effects_on(world, player)
+            .into_iter()
+            .filter_map(|e| q.get(world, e).ok())
+            .map(|(inst, delta, granted, invisible)| {
                 (
                     effect_label(world, inst),
                     inst.ability_id
@@ -16535,10 +16532,10 @@ pub(crate) fn render_identify_block(
     // Active effects on the item itself (rare today; surfaces if
     // any are applied via consume/quaff bindings later).
     let item_effects: Vec<String> = {
-        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-        q.iter(world)
-            .filter(|(_, a)| a.0 == item)
-            .map(|(inst, _)| inst.name.clone())
+        mud_world::effects_on(world, item)
+            .into_iter()
+            .filter_map(|e| world.get::<EffectInstance>(e))
+            .map(|inst| inst.name.clone())
             .collect()
     };
     if !item_effects.is_empty() {

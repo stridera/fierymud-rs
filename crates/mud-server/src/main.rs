@@ -21,6 +21,8 @@ mod corpses;
 mod deferred_triggers;
 mod drowning;
 mod effects;
+#[cfg(test)]
+mod effects_index_tests;
 mod entity_vars;
 mod envflags;
 mod equip_apply;
@@ -316,6 +318,8 @@ async fn main() {
     let mut world = World::new();
     world.insert_resource(mud_world::GearReleaseHook(equip_apply::release_gear));
     world.insert_resource(TickCount::default());
+    // Reverse index of AppliedTo, kept current from the first spawn.
+    world.insert_resource(mud_world::EffectsByBearer::default());
     world.insert_resource(mud_world::movement::GloryWitnessQueue::default());
     world.insert_resource(commands::PromptState::default());
     world.insert_resource(tick_stats::TickStats::default());

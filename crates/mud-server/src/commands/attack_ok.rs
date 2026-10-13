@@ -20,27 +20,23 @@
 use bevy_ecs::prelude::*;
 use mud_db::enums::{MobBehavior, PlayerFlag};
 use mud_world::{
-    AppliedTo, ArenaRoom, EffectInstance, Follower, Ghost, Located, Mob, MobBehaviors,
-    MobPrototypes, PeacefulRoom, Player, PlayerFlags, RuntimeConfig, WorldKey,
+    ArenaRoom, EffectInstance, Follower, Ghost, Located, Mob, MobBehaviors, MobPrototypes,
+    PeacefulRoom, Player, PlayerFlags, RuntimeConfig, WorldKey,
 };
 
 use super::{cap_sentence_start, name_of, send_to};
 
 /// `EFF_CHARM`: a `charmed` status effect sits on the entity.
 pub(super) fn is_charmed(world: &mut World, entity: Entity) -> bool {
-    let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
-    q.iter(world)
-        .any(|(i, a)| a.0 == entity && i.name.eq_ignore_ascii_case("charmed"))
+    mud_world::any_effect_on(world, entity, |i| i.name.eq_ignore_ascii_case("charmed"))
 }
 
 /// Read-only [`is_charmed`] for callers that only hold `&World`.
 pub(super) fn is_charmed_ro(world: &World, entity: Entity) -> bool {
-    world
-        .try_query::<(&EffectInstance, &AppliedTo)>()
-        .is_some_and(|mut q| {
-            q.iter(world)
-                .any(|(i, a)| a.0 == entity && i.name.eq_ignore_ascii_case("charmed"))
-        })
+    mud_world::effects_on_ro(world, entity)
+        .into_iter()
+        .filter_map(|e| world.get::<EffectInstance>(e))
+        .any(|i| i.name.eq_ignore_ascii_case("charmed"))
 }
 
 /// A mob that serves someone: a player's pet (shop pet, summoned or

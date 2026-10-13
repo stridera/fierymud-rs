@@ -481,18 +481,26 @@ pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
         .map(|a| a.character_id.clone());
     let player_room = world.get::<mud_world::Located>(player).map(|l| l.0);
     let rows: Vec<CancelRow> = {
-        let mut q = world.query::<(
-            Entity,
-            &EffectInstance,
-            &AppliedTo,
-            Option<&mud_world::WallCaster>,
-        )>();
+        // Only the player's own effects and the room's walls are candidates.
+        let mut candidates: Vec<(Entity, bool)> = mud_world::effects_on(world, player)
+            .into_iter()
+            .map(|e| (e, false))
+            .collect();
+        if let Some(room) = player_room.filter(|&r| r != player) {
+            candidates.extend(
+                mud_world::effects_on(world, room)
+                    .into_iter()
+                    .map(|e| (e, true)),
+            );
+        }
         let mut rows = Vec::new();
-        for (e, inst, a, caster) in q.iter(world) {
-            let is_wall = a.0 != player
-                && player_room.is_some_and(|r| a.0 == r)
-                && inst.name.starts_with("wall-");
-            if a.0 != player && !is_wall {
+        for (e, on_room) in candidates {
+            let Some(inst) = world.get::<EffectInstance>(e) else {
+                continue;
+            };
+            let caster = world.get::<mud_world::WallCaster>(e);
+            let is_wall = on_room && inst.name.starts_with("wall-");
+            if on_room && !is_wall {
                 continue;
             }
             let status = if is_wall {
