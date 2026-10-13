@@ -291,11 +291,12 @@ pub(crate) fn send_room_info(world: &mut World, viewer: Entity, force: bool) {
 /// `name` the effect's player-facing label
 /// ([`super::info::effect_label`]), `ability` the originating spell's
 /// display name ("" when none), `duration` seconds remaining
-/// (-1 = permanent), `source` the high-level origin tag.
+/// (-1 = permanent), `duration_hours` the MUD hours the `effects` command
+/// shows (-1 = permanent), `source` the high-level origin tag.
 pub(crate) fn build_char_effects(world: &mut World, target: Entity) -> String {
-    let rows: Vec<EffectInstance> = mud_world::effects_on(world, target)
+    let rows: Vec<EffectInstance> = live_effects_on(world, target)
         .into_iter()
-        .filter_map(|e| world.get::<EffectInstance>(e).cloned())
+        .map(|(_, inst)| inst)
         .collect();
     // One entry per effect, as the `effects` command lists them: instances
     // of the same ability under the same label (Statue's several parts) fold
@@ -344,6 +345,13 @@ pub(crate) fn build_char_effects(world: &mut World, target: Entity) -> String {
                 // Seconds left; -1 marks a permanent effect (kept numeric
                 // for the client, which tests `< 0`).
                 "duration": inst.remaining_secs,
+                // The same hours the `effects` command lists (75 real
+                // seconds each, rounded up); -1 when permanent.
+                "duration_hours": if inst.remaining_secs < 0 {
+                    -1
+                } else {
+                    super::info::effect_hours_left(inst.remaining_secs)
+                },
                 "source": source,
                 "strength": inst.strength,
             })
@@ -365,12 +373,26 @@ fn effect_key(inst: &EffectInstance) -> EffectKey {
     (inst.kind, inst.ability_id, inst.strength, source)
 }
 
-/// Keys of the effects currently on `target`, via the bearer index (cost is
-/// the target's own effects, not the world's).
-fn effect_keys_of(world: &mut World, target: Entity) -> Vec<EffectKey> {
+/// The effects a client should see on `target`, via the bearer index (cost
+/// is the target's own effects, not the world's). An index entry only counts
+/// while its entity still carries an `EffectInstance` *and* still points at
+/// `target` (`AppliedTo`): a removed or retargeted instance is never
+/// reported, and neither is an instance with no name, which no client can
+/// show (issue #136: a blank entry with duration -1 for one update).
+fn live_effects_on(world: &mut World, target: Entity) -> Vec<(Entity, EffectInstance)> {
     mud_world::effects_on(world, target)
         .into_iter()
-        .filter_map(|e| world.get::<EffectInstance>(e).map(effect_key))
+        .filter(|&e| world.get::<mud_world::AppliedTo>(e).map(|a| a.0) == Some(target))
+        .filter_map(|e| Some((e, world.get::<EffectInstance>(e)?.clone())))
+        .filter(|(_, inst)| !inst.name.trim().is_empty())
+        .collect()
+}
+
+/// Keys of the effects currently on `target` (see [`live_effects_on`]).
+fn effect_keys_of(world: &mut World, target: Entity) -> Vec<EffectKey> {
+    live_effects_on(world, target)
+        .iter()
+        .map(|(_, inst)| effect_key(inst))
         .collect()
 }
 

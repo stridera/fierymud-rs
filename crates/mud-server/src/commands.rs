@@ -12863,6 +12863,11 @@ pub(crate) fn break_invisibility(world: &mut World, entity: Entity) {
     // `aggro_tick` pulse, like legacy `mobile_activity`.
 }
 
+/// What the bearer reads when their invisibility ends. Also the wear-off text
+/// of the invisibility abilities, which the wear-off sender leaves to
+/// [`invisibility_faded`] so it is said once.
+pub(crate) const FADE_BACK_LINE: &str = "You fade back into view.";
+
 /// Magical invisibility ran out: the `Invisible` marker is already
 /// gone (or about to be) — tell the actor and the room, refresh the
 /// "who's here" panels and let aggressive mobs react. No-op when the
@@ -12872,7 +12877,7 @@ pub(crate) fn invisibility_faded(world: &mut World, entity: Entity) {
         return;
     }
     try_remove::<mud_world::Invisible>(world, entity);
-    send_to(world, entity, "You fade back into view.\r\n");
+    send_to(world, entity, format!("{FADE_BACK_LINE}\r\n"));
     if let Some(room) = world.get::<Located>(entity).map(|l| l.0) {
         let name = cap_sentence_start(&name_of(world, entity));
         broadcast_room_except_rendered(

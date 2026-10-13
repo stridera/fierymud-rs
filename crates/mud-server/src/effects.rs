@@ -792,7 +792,18 @@ fn send_wearoff_templates(
             format!("{line}\r\n")
         },
     );
-    send_msg(world, target, target_msg);
+    // Invisibility's own wear-off text is the fade line `invisibility_faded`
+    // sends when the last source goes (issue #136: `cancel invis` printed it
+    // twice). While the bearer is still marked invisible that call is yet to
+    // come, so sending it here too would double it; if another source keeps
+    // them hidden they do not fade, and the line would be a lie anyway.
+    let announced_by_fade = target_line.is_some_and(|t| {
+        t.trim()
+            .eq_ignore_ascii_case(crate::commands::FADE_BACK_LINE)
+    }) && world.get::<mud_world::Invisible>(target).is_some();
+    if !announced_by_fade {
+        send_msg(world, target, target_msg);
+    }
     if let Some(line) = room_line
         && let Some(located) = world.get::<Located>(target).copied()
     {

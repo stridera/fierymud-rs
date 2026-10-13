@@ -1292,3 +1292,144 @@ fn char_effects_cost_ignores_other_bearers_effects() {
     eprintln!("1000 builds, 20k bystander effects: indexed {indexed:?}; scan alone {scan:?}");
     assert!(indexed < scan, "indexed {indexed:?} vs scan {scan:?}");
 }
+
+/// `world_with_armor` plus a castable Invisibility whose wear-off text is the
+/// one the real ability row carries.
+fn world_with_invisibility() -> (Fx, Entity, Rx) {
+    const INVIS: i32 = 77;
+    let (mut fx, p, rx) = world_with_armor();
+    {
+        let mut cat = fx.world.resource_mut::<mud_world::AbilityCatalog>();
+        let mut d = ability_def(INVIS, "Invisibility", AbilityKind::Spell);
+        d.cast_time_rounds = 0;
+        d.plain_name = "INVISIBLE".into();
+        cat.by_name.insert("invisibility".to_string(), d);
+        cat.effects_for.insert(
+            INVIS,
+            vec![(
+                EFFECT,
+                Some(serde_json::json!({ "target": "evasion", "amount": 40, "duration": 60 })),
+            )],
+        );
+        cat.messages.insert(
+            INVIS,
+            mud_world::AbilityMessageSet {
+                wearoff_to_target: Some("You fade back into view.".into()),
+                ..Default::default()
+            },
+        );
+    }
+    fx.world
+        .get_mut::<KnownAbilities>(p)
+        .unwrap()
+        .entries
+        .push((INVIS, 500, true));
+    (fx, p, rx)
+}
+
+fn cast_invisibility(fx: &mut Fx, p: Entity) {
+    dispatch(&mut fx.world, p, "cast 'invisibility'");
+    for _ in 0..10 {
+        crate::casting::casting_tick(&mut fx.world);
+    }
+    assert!(fx.world.get::<mud_world::Invisible>(p).is_some());
+}
+
+/// Issue #136: `cancel invis` said "You fade back into view." twice, once
+/// from the ability's wear-off text and once from the fade itself.
+#[test]
+fn cancelling_invisibility_says_the_fade_line_once() {
+    let (mut fx, p, mut rx) = world_with_invisibility();
+    cast_invisibility(&mut fx, p);
+    drain_bytes(&mut rx);
+    dispatch(&mut fx.world, p, "cancel invis");
+    let out = String::from_utf8_lossy(&drain_bytes(&mut rx)).into_owned();
+    assert!(out.contains("You cancel Invisibility."), "{out}");
+    assert_eq!(out.matches("You fade back into view.").count(), 1, "{out}");
+    assert!(fx.world.get::<mud_world::Invisible>(p).is_none());
+}
+
+#[test]
+fn invisibility_wearing_off_says_the_fade_line_once() {
+    let (mut fx, p, mut rx) = world_with_invisibility();
+    cast_invisibility(&mut fx, p);
+    drain_bytes(&mut rx);
+    {
+        let mut q = fx.world.query::<&mut mud_world::EffectInstance>();
+        for mut i in q.iter_mut(&mut fx.world) {
+            i.remaining_secs = 1;
+        }
+    }
+    fx.world.insert_resource(crate::TickCount(10));
+    crate::effects::effects_tick(&mut fx.world);
+    let out = String::from_utf8_lossy(&drain_bytes(&mut rx)).into_owned();
+    assert_eq!(out.matches("You fade back into view.").count(), 1, "{out}");
+    assert!(fx.world.get::<mud_world::Invisible>(p).is_none());
+}
+
+/// With a second invisibility source still up the bearer does not fade, so
+/// the first one's wear-off text must not claim they did.
+#[test]
+fn a_remaining_invisibility_source_keeps_the_fade_line_unsaid() {
+    let (mut fx, p, mut rx) = world_with_invisibility();
+    cast_invisibility(&mut fx, p);
+    fx.world.spawn((
+        mud_world::EffectInstance {
+            kind: 1,
+            name: "invisible".into(),
+            strength: 1,
+            remaining_secs: -1,
+            source: mud_world::EffectSource::Other("worn_item".into()),
+            ability_id: None,
+        },
+        mud_world::AppliedTo(p),
+        mud_world::InvisibleSource,
+    ));
+    drain_bytes(&mut rx);
+    dispatch(&mut fx.world, p, "cancel invis");
+    let out = String::from_utf8_lossy(&drain_bytes(&mut rx)).into_owned();
+    assert!(!out.contains("fade back into view"), "{out}");
+    assert!(fx.world.get::<mud_world::Invisible>(p).is_some());
+}
+
+/// Issue #136: Char.Effects never carries a nameless entry, and one for an
+/// instance that no longer points at the player (a stale index entry).
+#[test]
+fn char_effects_skips_nameless_and_retargeted_instances() {
+    let (mut fx, p, _rx) = world_with_armor();
+    let inst = |name: &str| mud_world::EffectInstance {
+        kind: 1,
+        name: name.into(),
+        strength: 1,
+        remaining_secs: -1,
+        source: mud_world::EffectSource::Spell,
+        ability_id: None,
+    };
+    mud_world::effects_on(&mut fx.world, p); // builds the bearer index
+    fx.world.spawn((inst("ward"), mud_world::AppliedTo(p)));
+    fx.world.spawn((inst(""), mud_world::AppliedTo(p)));
+    // In the player's index list, but pointed at someone else.
+    let other = fx.world.spawn_empty().id();
+    let moved = fx
+        .world
+        .spawn((inst("sanctuary"), mud_world::AppliedTo(p)))
+        .id();
+    fx.world
+        .entity_mut(moved)
+        .insert(mud_world::AppliedTo(other));
+    fx.world
+        .resource_mut::<mud_world::EffectsByBearer>()
+        .0
+        .entry(p)
+        .or_default()
+        .push(moved);
+    let v: Value =
+        serde_json::from_str(&super::gmcp::build_char_effects(&mut fx.world, p)).unwrap();
+    let names: Vec<&str> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["Ward"], "{v}");
+}
