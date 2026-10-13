@@ -637,8 +637,24 @@ pub fn fire_greet_in_room(world: &mut World, entering: Entity, room: Entity) {
 /// object-attached event whose dispatch shape is "the item observed
 /// the actor doing X to it."
 pub fn fire_item_event(world: &mut World, item: Entity, actor: Entity, event: TriggerEvent) {
+    fire_item_event_with_target(world, item, actor, event, None);
+}
+
+/// [`fire_item_event`] with legacy's `target` binding: for `put` the DROP
+/// trigger of the item sees the container as `target`, and the
+/// container's own DROP trigger sees the item (legacy `perform_put`:
+/// `drop_otrigger(obj, ch, cont)` and `drop_otrigger(cont, ch, obj)`).
+pub fn fire_item_event_with_target(
+    world: &mut World,
+    item: Entity,
+    actor: Entity,
+    event: TriggerEvent,
+    target: Option<Entity>,
+) {
     if crate::deferred_triggers::lua_busy(world) {
-        crate::deferred_triggers::defer(world, move |w| fire_item_event(w, item, actor, event));
+        crate::deferred_triggers::defer(world, move |w| {
+            fire_item_event_with_target(w, item, actor, event, target);
+        });
         return;
     }
     let to_fire: Vec<(i32, i32, String, String)> = {
@@ -667,7 +683,12 @@ pub fn fire_item_event(world: &mut World, item: Entity, actor: Entity, event: Tr
         }
         let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
             gated(&mut host, event, (zone, id, &name), |h| {
-                h.exec_for_listener_with_extras(world, item, actor, &body, &[])
+                if let Some(t) = target {
+                    h.set_bindings(vec![("target", mud_script::Binding::Actor(t))]);
+                }
+                let out = h.exec_for_listener_with_extras(world, item, actor, &body, &[]);
+                h.set_bindings(Vec::new());
+                out
             })
         });
         drain_lua_outbox(world);

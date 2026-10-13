@@ -718,3 +718,179 @@ fn where_corpse_names_the_room_and_the_way_back() {
     super::admin_world::cmd_where(&mut world, player, "corpse");
     assert!(drain(&mut rx).contains("1 room away; head east."));
 }
+
+// --- playtest round 10: put/DROP triggers, script gives, junk -------------
+
+fn object_trigger(zone: i32, id: i32, event: TriggerEvent, body: &str) -> TriggerDef {
+    TriggerDef {
+        attach_type: TriggerAttach::Object,
+        ..lua_trigger(zone, id, event, body)
+    }
+}
+
+fn plain_item(world: &mut World, name: &str, keyword: &str, key: (i32, i32), at: Entity) -> Entity {
+    world
+        .spawn((
+            mud_world::Item,
+            Named { name: name.into() },
+            mud_world::Keywords(vec![keyword.into()]),
+            mud_world::WorldKey {
+                zone: key.0,
+                id: key.1,
+            },
+            Located(at),
+        ))
+        .id()
+}
+
+/// Legacy `perform_put` fires `drop_otrigger(obj, ch, cont)` and
+/// `drop_otrigger(cont, ch, obj)`: the Academy's `put stick bag` lesson (and the
+/// Heavens Gate pedestal) listen for exactly that, reading `target`.
+#[test]
+fn put_fires_drop_triggers_on_the_item_and_the_container() {
+    let (mut world, player, mut rx) = warrior_world();
+    let mut protos = ObjectPrototypes::default();
+    protos
+        .by_key
+        .insert((99, 18), object_proto(99, 18, ObjectType::Container));
+    world.insert_resource(protos);
+    let mut catalog = TriggerCatalog::default();
+    catalog.by_key.insert(
+        (99, 1),
+        object_trigger(
+            99,
+            1,
+            TriggerEvent::Drop,
+            r#"if target and target.id == 18 then actor:send("stick sees bag") end"#,
+        ),
+    );
+    catalog.by_key.insert(
+        (99, 2),
+        object_trigger(
+            99,
+            2,
+            TriggerEvent::Drop,
+            r#"actor:send("bag sees item " .. tostring(target.id))"#,
+        ),
+    );
+    world.insert_resource(catalog);
+    world.insert_resource(mud_script::LuaHost::new());
+    let bag = plain_item(&mut world, "a leather bag", "bag", (99, 18), player);
+    let stick = plain_item(&mut world, "a stick", "stick", (99, 17), player);
+    world
+        .entity_mut(stick)
+        .insert(mud_world::AttachedTriggers(vec![(99, 1)]));
+    world
+        .entity_mut(bag)
+        .insert(mud_world::AttachedTriggers(vec![(99, 2)]));
+
+    super::info::cmd_put(&mut world, player, "stick bag");
+    let out = drain(&mut rx);
+    assert!(out.contains("You put a stick in a leather bag."), "{out}");
+    assert!(out.contains("tick sees bag"), "{out}");
+    assert!(out.contains("ag sees item 17"), "{out}");
+
+    // A plain drop carries no `target`; scripts that test it stay quiet.
+    world.entity_mut(stick).insert(Located(player));
+    super::info::cmd_drop(&mut world, player, "stick");
+    let out = drain(&mut rx);
+    assert!(!out.contains("tick sees bag"), "{out}");
+}
+
+/// DG `mload obj` in a mob script (converted as `self.room:spawn_object`)
+/// loads into the mob's inventory, so the `give` that follows can hand it
+/// over; `tostring(actor)` is the bare name DG's `%actor%` expands to.
+#[test]
+fn mob_script_loads_an_object_and_gives_it_to_the_player() {
+    let (mut world, player, mut rx) = warrior_world();
+    let mut protos = ObjectPrototypes::default();
+    let mut ration = object_proto(99, 5, ObjectType::Food);
+    ration.name = "a ration".into();
+    ration.keywords = vec!["ration".into()];
+    protos.by_key.insert((99, 5), ration);
+    let mut anvil = object_proto(99, 6, ObjectType::Other);
+    anvil.name = "an anvil".into();
+    anvil.keywords = vec!["anvil".into()];
+    anvil.restrictions = vec![mud_db::enums::ObjectRestriction::NoTake];
+    protos.by_key.insert((99, 6), anvil);
+    world.insert_resource(protos);
+    let mut catalog = TriggerCatalog::default();
+    catalog.by_key.insert(
+        (99, 1),
+        lua_trigger(
+            99,
+            1,
+            TriggerEvent::Speech,
+            r#"
+            self.room:spawn_object(99, 5)
+            self:command("give ration " .. tostring(actor))
+            self.room:spawn_object(99, 6)
+            "#,
+        ),
+    );
+    world.insert_resource(catalog);
+    world.insert_resource(mud_script::LuaHost::new());
+    let room = world.get::<Located>(player).unwrap().0;
+    let mob = mob_with_trigger(&mut world, room, "the quartermaster", (99, 1));
+
+    crate::triggers::fire_speech_in_room(&mut world, player, room, "hello");
+    let out = drain(&mut rx);
+    assert!(out.contains("gives you"), "{out}");
+
+    let mut q = world.query::<(&Named, &Located)>();
+    let find = |name: &str, q: &mut QueryState<(&Named, &Located)>, w: &World| {
+        q.iter(w).find(|(n, _)| n.name == name).map(|(_, l)| l.0)
+    };
+    assert_eq!(find("a ration", &mut q, &world), Some(player));
+    // A NO_TAKE object stays where `mload` could only put it: the floor.
+    assert_eq!(find("an anvil", &mut q, &world), Some(room));
+    assert_ne!(mob, player);
+}
+
+#[test]
+fn junk_takes_all_dot_and_counts_like_drop() {
+    let (mut world, player, mut rx) = warrior_world();
+    let belt1 = plain_item(&mut world, "a small belt", "belt", (99, 1), player);
+    let belt2 = plain_item(&mut world, "a small belt", "belt", (99, 1), player);
+    let sword = plain_item(&mut world, "a sword", "sword", (99, 2), player);
+    let rag1 = plain_item(&mut world, "a rag", "rag", (99, 3), player);
+    let rag2 = plain_item(&mut world, "a rag", "rag", (99, 3), player);
+    let rag3 = plain_item(&mut world, "a rag", "rag", (99, 3), player);
+
+    super::info::cmd_junk(&mut world, player, "all.belt");
+    assert!(drain(&mut rx).contains("You destroy a small belt."));
+    assert!(world.get_entity(belt1).is_err() && world.get_entity(belt2).is_err());
+    assert!(world.get_entity(sword).is_ok());
+
+    super::info::cmd_junk(&mut world, player, "2 rag");
+    let alive = [rag1, rag2, rag3]
+        .iter()
+        .filter(|e| world.get_entity(**e).is_ok())
+        .count();
+    assert_eq!(alive, 1);
+
+    // Bare `junk all` is refused; a keyword nobody carries says so.
+    super::info::cmd_junk(&mut world, player, "all");
+    assert!(drain(&mut rx).contains("Go to the dump"));
+    assert!(world.get_entity(sword).is_ok());
+    super::info::cmd_junk(&mut world, player, "all.shield");
+    assert!(drain(&mut rx).contains("You don't seem to have any shield."));
+}
+
+/// `read map` keeps the object's line breaks and the first line's indentation
+/// (r10 #33: the Academy map came out as one 2,000-character line).
+#[test]
+fn read_keeps_the_layout_of_a_map() {
+    let (mut world, player, mut rx) = warrior_world();
+    let map = plain_item(&mut world, "a small map", "map", (30, 90), player);
+    world.entity_mut(map).insert(mud_world::Description(
+        "\n        Mielikki, by Kara\n\n   #   |  1: Temple\n   #   |  2: Inn\n".to_string(),
+    ));
+    super::info::cmd_read(&mut world, player, "map");
+    // The wire layer turns bare newlines into CRLF.
+    let out = drain(&mut rx).replace("\r\n", "\n");
+    assert!(
+        out.contains(":\n        Mielikki, by Kara\n\n   #   |  1: Temple\n   #   |  2: Inn\n"),
+        "{out:?}"
+    );
+}

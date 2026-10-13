@@ -2829,11 +2829,11 @@ impl UserData for LuaActor {
             },
         );
         methods.add_meta_method(MetaMethod::ToString, |lua, this, ()| {
+            // The bare name: scripts splice `tostring(actor)` into command
+            // lines (`give bag " .. tostring(actor)`), as DG `%actor%` does.
             world_from_lua(lua, |w| {
-                let name = w
-                    .get::<Named>(this.entity)
-                    .map_or_else(|| "<unknown>".to_string(), |n| n.name.clone());
-                format!("Actor({name})")
+                w.get::<Named>(this.entity)
+                    .map_or_else(|| "<unknown>".to_string(), |n| n.name.clone())
             })
         });
 
@@ -4600,10 +4600,23 @@ impl UserData for LuaRoom {
         // `room:spawn_object(zone, id)` materializes a fresh Item from
         // the prototype catalog into this room. Returns a LuaActor on
         // the new item entity, or nil if the proto doesn't exist.
+        //
+        // DG `mload obj` (every converted mob script spells it
+        // `self.room:spawn_object`) loads into the mob's inventory unless
+        // the object cannot be taken (legacy `do_mload`). So when the
+        // running script's `self` is a mob standing in this room, the
+        // object goes into its hands, ready for the `give` / `wear` /
+        // `drop` that follows.
         methods.add_method(
             "spawn_object",
             |lua, this, (zone, id): (i32, i32)| -> mlua::Result<Value> {
-                spawn_obj_proto(lua, this.entity, zone, id)
+                let value = spawn_obj_proto(lua, this.entity, zone, id)?;
+                if let Value::UserData(ud) = &value
+                    && let Ok(item) = ud.borrow::<LuaActor>().map(|a| a.entity)
+                {
+                    mload_into_script_mob(lua, this.entity, item);
+                }
+                Ok(value)
             },
         );
 
@@ -5222,6 +5235,27 @@ fn spawn_obj_proto(lua: &Lua, room: Entity, zone: i32, id: i32) -> mlua::Result<
     }
 }
 
+/// Legacy `do_mload` for objects: a freshly loaded `item` that was spawned
+/// into `room` by a mob's own script moves into that mob's inventory,
+/// unless it is `NO_TAKE` (it then stays on the floor).
+fn mload_into_script_mob(lua: &Lua, room: Entity, item: Entity) {
+    let Some(me) = lua.app_data_ref::<SelfEntity>().map(|s| s.0) else {
+        return;
+    };
+    world_mut_from_lua(lua, |world| {
+        if world.get::<Mob>(me).is_none()
+            || world.get::<Located>(me).map(|l| l.0) != Some(room)
+            || world
+                .get::<mud_world::ObjectRestrictions>(item)
+                .is_some_and(|r| r.has(mud_db::enums::ObjectRestriction::NoTake))
+        {
+            return;
+        }
+        world.entity_mut(item).insert(Located(me));
+    })
+    .ok();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5823,13 +5857,13 @@ mod tests {
     }
 
     #[test]
-    fn tostring_renders_actor_with_name() {
+    fn tostring_renders_actor_as_bare_name() {
         let (mut world, actor) = make_world_with_actor();
         let mut host = LuaHost::new();
         let out = host
             .exec_for_actor(&mut world, actor, "print(tostring(actor))")
             .expect("ok");
-        assert_eq!(out, "Actor(TestActor)\r\n");
+        assert_eq!(out, "TestActor\r\n");
     }
 
     #[test]
@@ -6071,7 +6105,7 @@ mod tests {
             .exec_for_actor(&mut world, actor, "print(tostring(actor))")
             .expect("ok");
         // Named missing falls back to "<unknown>".
-        assert_eq!(tostring, "Actor(<unknown>)\r\n");
+        assert_eq!(tostring, "<unknown>\r\n");
     }
 
     /// Spawn a Mob with a `WorldKey` so `:setvar` has the (kind, zone,

@@ -10180,6 +10180,19 @@ pub(crate) fn cmd_lock(world: &mut World, player: Entity, args: &str) {
     );
 }
 
+/// `text` without its leading blank lines and trailing whitespace; the
+/// indentation of the first real line stays.
+fn trim_blank_lines(text: &str) -> &str {
+    let mut start = 0;
+    for line in text.split_inclusive('\n') {
+        if !line.trim().is_empty() {
+            break;
+        }
+        start += line.len();
+    }
+    text[start..].trim_end()
+}
+
 /// `read <item>`: find an item by keyword on the player or in their
 /// room and print its Description. Refuses on mobs/players (use
 /// `examine`). The Description component is the same one
@@ -10215,11 +10228,17 @@ pub(crate) fn cmd_read(world: &mut World, player: Entity, args: &str) {
     let name_rendered = render_color_tags(&name, mode);
     let mut out = format!("\r\nYou read {name_rendered}:\r\n");
     if let Some(desc) = world.get::<Description>(target) {
-        let body = desc.0.trim();
+        // Only blank lines at the edges go: the first line's indentation is
+        // part of a map's or sign's layout.
+        let body = trim_blank_lines(&desc.0);
         if body.is_empty() {
             out.push_str("It's blank.\r\n");
         } else {
-            out.push_str(&format!("{}\r\n", render_color_tags(body, mode)));
+            let width = crate::layout::wrap_width(world, player);
+            out.push_str(&format!(
+                "{}\r\n",
+                render_color_tags(&crate::layout::wrap_lines(body, width), mode)
+            ));
         }
     } else {
         out.push_str("It's blank.\r\n");
@@ -12096,6 +12115,25 @@ fn get_all_from_floor(world: &mut World, player: Entity, room: Entity, filter: &
     }
 }
 
+/// Legacy `perform_put` fires DROP on the item (`target` = container) and
+/// on the container (`target` = item) as it is put away.
+fn fire_put_triggers(world: &mut World, player: Entity, item: Entity, container: Entity) {
+    crate::triggers::fire_item_event_with_target(
+        world,
+        item,
+        player,
+        mud_world::TriggerEvent::Drop,
+        Some(container),
+    );
+    crate::triggers::fire_item_event_with_target(
+        world,
+        container,
+        player,
+        mud_world::TriggerEvent::Drop,
+        Some(item),
+    );
+}
+
 /// `put <item> <container>`: move a carried item into a container
 /// the player is carrying or which sits in the room.
 fn put_plain(world: &mut World, player: Entity, args: &str) {
@@ -12263,6 +12301,7 @@ fn put_plain(world: &mut World, player: Entity, args: &str) {
             if !carried_by_player {
                 crate::commands::composition::note_item_turns_solid(world, player, item_name);
             }
+            fire_put_triggers(world, player, *item, container);
         }
         broadcast_room_except_rendered(
             world,
@@ -12310,17 +12349,72 @@ fn put_plain(world: &mut World, player: Entity, args: &str) {
     if world.get::<Located>(container).map(|l| l.0) != Some(player) {
         crate::commands::composition::note_item_turns_solid(world, player, &item_name);
     }
+    fire_put_triggers(world, player, item, container);
 }
 
 /// `junk <item>` / `trash <item>`: destroy a carried item. Equipped
 /// items are refused — `remove` first. No coin is awarded; if the
 /// player is throwing it away, they're throwing it away.
+///
+/// Takes the same item syntax as `drop`: `junk all.<name>` destroys every
+/// matching carried item, `junk 3 stick` the first three, `junk 2.stick`
+/// the second. Bare `junk all` is refused (legacy: "Go to the dump").
 pub(crate) fn cmd_junk(world: &mut World, player: Entity, args: &str) {
     let target_word = args.trim();
     if target_word.is_empty() {
         send_to(world, player, "Junk what?\r\n");
         return;
     }
+    if let Some(filter) = parse_all_filter(target_word) {
+        junk_all(world, player, &filter);
+        return;
+    }
+    let (count, rest) = parse_count_prefix(target_word);
+    match count {
+        Some(n) => repeat_carried(world, player, rest, n, |w, p| junk_one(w, p, rest)),
+        None => junk_one(world, player, rest),
+    }
+}
+
+/// `junk all.<filter>`: destroy every carried, unequipped item whose name or
+/// keywords match. Items that cannot be junked say why and stay.
+fn junk_all(world: &mut World, player: Entity, filter: &str) {
+    if filter.is_empty() {
+        send_to(
+            world,
+            player,
+            "Go to the dump if you want to junk EVERYTHING!\r\n",
+        );
+        return;
+    }
+    let mut items: Vec<Entity> = {
+        let mut q = world.query_filtered::<(
+            Entity,
+            &Located,
+            &Named,
+            Option<&Keywords>,
+            Option<&EquippedSlot>,
+        ), With<Item>>();
+        q.iter(world)
+            .filter(|(_, l, n, kw, eq)| l.0 == player && eq.is_none() && matches(filter, n, *kw))
+            .map(|(e, _, _, _, _)| e)
+            .collect()
+    };
+    if items.is_empty() {
+        send_to(
+            world,
+            player,
+            format!("You don't seem to have any {filter}.\r\n"),
+        );
+        return;
+    }
+    crate::commands::sort_newest_first(world, player, &mut items, |e| *e);
+    for item in items {
+        junk_item(world, player, item);
+    }
+}
+
+fn junk_one(world: &mut World, player: Entity, target_word: &str) {
     let Some(item) = find_item(world, player, target_word, ItemClass::Inventory) else {
         send_rendered(
             world,
@@ -12329,6 +12423,10 @@ pub(crate) fn cmd_junk(world: &mut World, player: Entity, args: &str) {
         );
         return;
     };
+    junk_item(world, player, item);
+}
+
+fn junk_item(world: &mut World, player: Entity, item: Entity) {
     let item_name = name_of(world, item);
     let player_name = name_of(world, player);
     let Some(located) = world.get::<Located>(player).copied() else {
