@@ -5,7 +5,7 @@ use mud_db::{
     abilities, ability_components, ability_damage_components, ability_effects, ability_messages,
     ability_restrictions, ability_saving_throw, ability_targeting, achievements, boards, classes,
     command_help, command_policy, content_tables, discord_config, effects, game_config, help,
-    levels, liquids, login_message, mob_ai, mob_reset_equipment, mob_resets, mobs,
+    levels, liquids, login_message, mob_ai, mob_reset_equipment, mob_resets, mobs, mount_types,
     object_abilities, object_reset_contents, object_resets, objects, races, room_exits, rooms,
     shops, socials, spell_circles, spell_slots, sphere_styles, sqlx::PgPool, system_text, triggers,
     weather_text, zones,
@@ -209,6 +209,23 @@ async fn load_sphere_styles(pool: &PgPool) -> sqlx::Result<crate::sphere_style::
                  fierylib/data/sql/2026-10-12-sphere-colors.sql is applied"
             );
             Ok(crate::sphere_style::SphereStyles::default())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// `MountType` summon-mount tiers. A database without the table or its columns (42P01 /
+/// 42703) yields the built-in tiers and an ERROR log.
+async fn load_mount_types(pool: &PgPool) -> sqlx::Result<crate::mount_type::MountTypes> {
+    match mount_types::list_all(pool).await {
+        Ok(rows) => Ok(crate::mount_type::MountTypes::from_rows(rows)),
+        Err(e) if is_missing_schema(&e) => {
+            error!(
+                "table \"MountType\" is missing or out of date; summonmount uses the built-in \
+                 mount tiers until the muditor schema is pushed (prisma db push) and \
+                 fierylib/data/sql/2026-10-13-mount-types.sql is applied"
+            );
+            Ok(crate::mount_type::MountTypes::default())
         }
         Err(e) => Err(e),
     }
@@ -1023,6 +1040,13 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         "spell circle recovery times loaded (built-in table fills the rest)"
     );
     world.insert_resource(spell_slot_data);
+
+    let mount_types = load_mount_types(pool).await?;
+    info!(
+        tiers = mount_types.len(),
+        "summon-mount tiers loaded (built-in tiers fill a side with no rows)"
+    );
+    world.insert_resource(mount_types);
 
     let weather_text = load_weather_text(pool).await?;
     info!(

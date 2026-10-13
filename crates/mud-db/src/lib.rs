@@ -46,6 +46,7 @@ pub mod mob_default_effects;
 pub mod mob_reset_equipment;
 pub mod mob_resets;
 pub mod mobs;
+pub mod mount_types;
 pub mod object_abilities;
 pub mod object_effects;
 pub mod object_extra_descriptions;

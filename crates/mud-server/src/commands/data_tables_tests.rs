@@ -63,3 +63,34 @@ async fn seeded_tables_reproduce_the_builtin_weather_lines_and_circle_times() {
         assert_eq!(data.circle_recover_secs(circle), *secs);
     }
 }
+
+/// The seeded `"MountType"` rows must pick and roll exactly like the built-in tier table.
+#[tokio::test]
+#[ignore = "requires live fierydev DB; run with: cargo test -p mud-server -- --ignored"]
+async fn seeded_mount_types_reproduce_the_builtin_tiers() {
+    use mud_world::MountTypes;
+
+    let _ = dotenvy::from_path("../../.env");
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let pool = mud_db::connect(&url).await.expect("connect");
+
+    let rows = mud_db::mount_types::list_all(&pool)
+        .await
+        .expect("mount types");
+    assert_eq!(rows.len(), 8, "four tiers x two sides");
+    let db = MountTypes::from_rows(rows);
+    let builtin = MountTypes::default();
+    assert_eq!(db, builtin);
+    for anti in [false, true] {
+        for level in 0..=105 {
+            for step in -21..=21 {
+                let alignment = step * 50;
+                assert_eq!(
+                    db.plan(anti, level, alignment),
+                    builtin.plan(anti, level, alignment),
+                    "anti={anti} level={level} alignment={alignment}"
+                );
+            }
+        }
+    }
+}

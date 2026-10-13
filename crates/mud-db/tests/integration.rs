@@ -1673,6 +1673,74 @@ async fn weather_and_circle_queries_degrade_when_the_tables_are_missing() {
 
 #[tokio::test]
 #[ignore = "requires live fierydev DB"]
+async fn mount_types_are_seeded_and_reference_real_mobs() {
+    let pool = pool().await;
+    let rows = mud_db::mount_types::list_all(&pool)
+        .await
+        .expect("mount types");
+    assert_eq!(rows.len(), 8);
+    let find = |tier: i32, side: &str| {
+        rows.iter()
+            .find(|r| r.tier == tier && r.alignment_side == side)
+            .unwrap_or_else(|| panic!("missing tier {tier} {side}"))
+    };
+    let warhorse = find(3, "good");
+    assert_eq!(
+        (warhorse.min_level, warhorse.min_alignment),
+        (60, 900),
+        "tier 3 gates"
+    );
+    assert_eq!((warhorse.mob_zone_id, warhorse.mob_id), (0, 45));
+    assert_eq!((warhorse.hp_bonus, warhorse.mv_bonus), (50, 50));
+    let shadowmare = find(4, "evil");
+    assert_eq!((shadowmare.mob_zone_id, shadowmare.mob_id), (0, 52));
+    assert_eq!((shadowmare.hp_bonus, shadowmare.mv_bonus), (100, 100));
+}
+
+/// A database that predates the table fails with Postgres 42P01, the code the loader keys on
+/// to fall back to the built-in tiers.
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn mount_type_query_reports_a_missing_table_as_42p01() {
+    let _ = dotenvy::from_path("../../.env");
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .expect("connect");
+    let schema = format!("scratch_mount_{}", std::process::id());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&pool)
+        .await
+        .expect("create schema");
+    let result: sqlx::Result<_> = async {
+        sqlx::query(&format!("SET search_path = {schema}"))
+            .execute(&pool)
+            .await?;
+        Ok(mud_db::mount_types::list_all(&pool).await)
+    }
+    .await;
+    sqlx::query("SET search_path = public")
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&pool)
+        .await
+        .ok();
+    let err = result
+        .expect("scratch setup")
+        .expect_err("no table in the scratch schema");
+    let code = err
+        .as_database_error()
+        .and_then(sqlx::error::DatabaseError::code)
+        .map(std::borrow::Cow::into_owned);
+    assert_eq!(code.as_deref(), Some("42P01"));
+}
+
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
 async fn internal_zones_are_the_seeded_plumbing_zones() {
     let pool = pool().await;
     let ids = mud_db::zones::list_internal_zones(&pool)

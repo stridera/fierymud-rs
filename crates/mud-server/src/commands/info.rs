@@ -7522,63 +7522,6 @@ pub(crate) fn cmd_trophy(world: &mut World, player: Entity, args: &str) {
     crate::commands::send_rendered(world, player, &out);
 }
 
-/// One row of the legacy `mount_types` table (`act.other.cpp`), best tier
-/// last. Hard-coded scaffolding until mount tiers are builder-editable data.
-struct MountTier {
-    min_level: i32,
-    min_align: i32,
-    hp_bonus: i32,
-    mv_bonus: i32,
-    paladin: (i32, i32),
-    anti: (i32, i32),
-}
-
-/// gelding/mare, rouncy/destrier, warhorse/nightmare, courser/shadowmare.
-const MOUNT_TIERS: [MountTier; 4] = [
-    MountTier {
-        min_level: 0,
-        min_align: 0,
-        hp_bonus: 0,
-        mv_bonus: 0,
-        paladin: (0, 48),
-        anti: (0, 47),
-    },
-    MountTier {
-        min_level: 30,
-        min_align: 700,
-        hp_bonus: 0,
-        mv_bonus: 0,
-        paladin: (0, 49),
-        anti: (0, 50),
-    },
-    MountTier {
-        min_level: 60,
-        min_align: 900,
-        hp_bonus: 50,
-        mv_bonus: 50,
-        paladin: (0, 45),
-        anti: (0, 46),
-    },
-    MountTier {
-        min_level: 90,
-        min_align: 1000,
-        hp_bonus: 100,
-        mv_bonus: 100,
-        paladin: (0, 51),
-        anti: (0, 52),
-    },
-];
-
-/// Which mount, and the base pools `cmd_summonmount` rolls around.
-#[derive(Debug, PartialEq, Eq)]
-struct SummonMountPlan {
-    proto: (i32, i32),
-    /// Added to a 50..=100 roll for the mount's max HP.
-    base_hp: i32,
-    /// Added to a 0..=50 roll for the mount's max movement.
-    base_mv: i32,
-}
-
 /// Anti-Paladin class names carry colour markup (`<b:red>Anti-</>...`), so
 /// compare the plain text.
 fn summon_mount_is_anti(class_name: &str) -> bool {
@@ -7593,36 +7536,6 @@ fn summon_mount_is_anti(class_name: &str) -> bool {
         }
     }
     plain.to_ascii_lowercase().contains("anti")
-}
-
-/// Legacy `do_summon_mount`: the highest tier whose level and alignment
-/// floors the summoner meets; HP is `hp_bonus + 2 * level`, movement
-/// `mv_bonus + align/2 - 100` for a Paladin and `mv_bonus + 150 - align/4`
-/// for an Anti-Paladin.
-fn summon_mount_plan(anti: bool, level: i32, alignment: i32) -> SummonMountPlan {
-    let mut tier = &MOUNT_TIERS[0];
-    for t in &MOUNT_TIERS[1..] {
-        let aligned = if anti {
-            -t.min_align >= alignment
-        } else {
-            t.min_align <= alignment
-        };
-        if t.min_level <= level && aligned {
-            tier = t;
-        } else {
-            break;
-        }
-    }
-    let (proto, base_mv) = if anti {
-        (tier.anti, tier.mv_bonus + 150 - alignment / 4)
-    } else {
-        (tier.paladin, tier.mv_bonus + alignment / 2 - 100)
-    };
-    SummonMountPlan {
-        proto,
-        base_hp: tier.hp_bonus + 2 * level,
-        base_mv,
-    }
 }
 
 /// Legacy `IS_GOOD`: alignment +350 or better.
@@ -7762,7 +7675,7 @@ pub(crate) fn cmd_summonmount(world: &mut World, player: Entity, _args: &str) {
             return;
         }
     }
-    // Mount tier by level and alignment, per the legacy `mount_types` table.
+    // Mount tier by level and alignment (the `MountType` table).
     let class_name = world
         .get::<Profile>(player)
         .and_then(|p| p.class_id)
@@ -7822,7 +7735,11 @@ pub(crate) fn cmd_summonmount(world: &mut World, player: Entity, _args: &str) {
         return;
     }
 
-    let plan = summon_mount_plan(anti, level, alignment);
+    // Tiers from the "MountType" table (the built-in table without it).
+    let plan = world.get_resource::<mud_world::MountTypes>().map_or_else(
+        || mud_world::MountTypes::default().plan(anti, level, alignment),
+        |t| t.plan(anti, level, alignment),
+    );
     let (zone, id) = plan.proto;
     if !world
         .resource::<MobPrototypes>()
@@ -18893,7 +18810,12 @@ mod r2_playtest_tests {
 
 #[cfg(test)]
 mod summon_mount_plan_tests {
-    use super::{summon_mount_is_anti, summon_mount_plan};
+    use super::summon_mount_is_anti;
+    use mud_world::MountTypes;
+
+    fn summon_mount_plan(anti: bool, level: i32, alignment: i32) -> mud_world::MountPlan {
+        MountTypes::default().plan(anti, level, alignment)
+    }
 
     #[test]
     fn paladin_tier_follows_level_and_alignment() {
