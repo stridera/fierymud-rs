@@ -21376,7 +21376,7 @@ pub(crate) fn invoke_ability_core(
                     crate::bookkeeping::reset::<crate::combat::HateList>(world, target_entity);
                     crate::bookkeeping::reset::<crate::combat::MobMemory>(world, target_entity);
                     // Spell-effort spent → tag as durable so the
-                    // disconnect-save snapshots it for ≤1h restore.
+                    // disconnect-save snapshots it and respawns it at login.
                     try_insert(world, target_entity, mud_world::PersistentPet);
                 }
                 push_ability_label(&mut applied_msgs, &ability_label);

@@ -989,3 +989,125 @@ fn narrow_terminal_drops_the_unlimited_stock_column_before_cutting_names() {
     cmd_list(&mut world, player, "");
     assert!(drain(&mut rx).contains("unlimited"));
 }
+
+fn mare_shop() -> ShopDef {
+    shop_def(
+        Vec::new(),
+        vec![ShopPetOffering {
+            mob_zone_id: 30,
+            mob_id: 81,
+            amount: -1,
+            price: 0,
+        }],
+    )
+}
+
+fn mare_mv() -> i32 {
+    15 * mud_world::mob_spawn::mount_move_points(4)
+}
+
+fn give_account(world: &mut World, player: Entity) {
+    world.entity_mut(player).insert((
+        mud_world::Account {
+            user_id: "u".to_string(),
+            character_id: "c".to_string(),
+            role: mud_db::enums::UserRole::Player,
+            account_role: mud_db::enums::UserRole::Player,
+            perms: Vec::new(),
+        },
+        mud_world::Health { hp: 10, max: 10 },
+    ));
+}
+
+/// Legacy pet shop: `GET_MAX_MOVE(pet) *= 15; GET_MOVE(pet) = GET_MAX_MOVE(pet)`
+/// (#118: a bought mare had the wild ~75 mv instead of a little over 1000).
+#[test]
+fn bought_mount_carries_the_legacy_fifteen_fold_movement_pool() {
+    let (mut world, player, mut rx) = world_with_shop(mare_shop(), 1_000);
+    cmd_buy(&mut world, player, "mare");
+    assert!(drain(&mut rx).contains("You hire a stout mare"));
+    let pets = followers_of(&mut world, player);
+    let mv = world.get::<mud_world::MovementPoints>(pets[0]).unwrap();
+    assert_eq!((mv.current, mv.max), (mare_mv(), mare_mv()));
+    // The level-5 stout mare of the real world comes to 1125 (75 wild).
+    assert_eq!(mud_world::mob_spawn::mount_move_points(5) * 15, 1125);
+}
+
+/// The shop shows the pool the buyer would get, not 0 / the raw proto value.
+#[test]
+fn inspecting_a_shop_mount_shows_its_pet_movement_pool() {
+    let (mut world, player, mut rx) = world_with_shop(mare_shop(), 1_000);
+    cmd_inspect(&mut world, player, "mare");
+    let out = drain(&mut rx);
+    assert!(
+        out.contains(&format!("Movement Points: {}", mare_mv())),
+        "{out}"
+    );
+}
+
+/// Pets are saved with the owner and come back at login however long the
+/// owner was away, on a freshly booted world (legacy `save_pets` /
+/// `load_pets`, #118).
+#[test]
+fn pets_survive_a_long_logout_and_a_server_restart() {
+    let (mut world, player, mut rx) = world_with_shop(mare_shop(), 1_000);
+    give_account(&mut world, player);
+    cmd_buy(&mut world, player, "mare");
+    assert!(drain(&mut rx).contains("You hire a stout mare"));
+    // Tire the mare out: the save records the pool, not the current points.
+    let mare = followers_of(&mut world, player)[0];
+    world
+        .get_mut::<mud_world::MovementPoints>(mare)
+        .unwrap()
+        .current = 3;
+
+    // Logout: the save records the pets (this is the blob in `Characters.pets`).
+    let snap = crate::login::snapshot_player(&mut world, player, 1).expect("snapshot");
+    let mut blob = snap.pets_json.expect("the mare is recorded");
+    // Month-long absence: no time limit on a pet.
+    blob["saved_at_unix"] = serde_json::json!(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 30 * 24 * 3600
+    );
+    drop(world);
+
+    // Server restart: a brand new world, the character logs back in.
+    let (mut world, player, mut rx) = world_with_shop(mare_shop(), 0);
+    assert!(followers_of(&mut world, player).is_empty());
+    let persisted: crate::login::PersistedPets = serde_json::from_value(blob).unwrap();
+    crate::login::restore_persisted_pets(&mut world, player, persisted);
+    let pets = followers_of(&mut world, player);
+    assert_eq!(pets.len(), 1, "the mare is back");
+    assert!(world.get::<mud_world::PersistentPet>(pets[0]).is_some());
+    assert_eq!(
+        world.get::<mud_world::Named>(pets[0]).unwrap().name,
+        "Tester's stout mare"
+    );
+    let mv = world.get::<mud_world::MovementPoints>(pets[0]).unwrap();
+    assert_eq!((mv.current, mv.max), (mare_mv(), mare_mv()), "rested");
+    cmd_mount(&mut world, player, "mare");
+    assert!(drain(&mut rx).contains("You mount"));
+}
+
+/// Rows saved before the pool was recorded get the pet-shop pool of the
+/// prototype, not the wild one.
+#[test]
+fn pet_saved_without_a_pool_gets_the_shop_pool_on_restore() {
+    let (mut world, player, _rx) = world_with_shop(mare_shop(), 0);
+    let persisted: crate::login::PersistedPets = serde_json::from_value(serde_json::json!({
+        "saved_at_unix": 1,
+        "pets": [{
+            "proto_zone_id": 30, "proto_id": 81,
+            "name": "Tester's stout mare", "hp": 10, "max_hp": 10
+        }]
+    }))
+    .unwrap();
+    crate::login::restore_persisted_pets(&mut world, player, persisted);
+    let pets = followers_of(&mut world, player);
+    assert_eq!(pets.len(), 1);
+    let mv = world.get::<mud_world::MovementPoints>(pets[0]).unwrap();
+    assert_eq!(mv.max, mare_mv());
+}

@@ -83,7 +83,9 @@ pub use mob_effects::{
     actor_composition, actor_is_illusory, actor_is_rigid, actor_is_solid_char,
     composition_state_phrase, mob_composition,
 };
-pub use mob_spawn::{mob_ai_enabled, spawn_mob_from_proto};
+pub use mob_spawn::{
+    PET_MOVE_MULTIPLIER, base_move_points, mob_ai_enabled, pet_move_points, spawn_mob_from_proto,
+};
 pub use reset_gear::{
     ContentEntry, GearStats, MobGearCatalog, MobGearEntry, ObjectContentsCatalog,
     attach_proto_charges, fill_container, gear_cap, object_world_counts, outfit_mob, proto_charges,

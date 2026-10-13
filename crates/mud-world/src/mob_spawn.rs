@@ -39,6 +39,32 @@ pub fn mount_move_points(level: i32) -> i32 {
     base + JITTER
 }
 
+/// Movement pool a fresh instance of `proto` spawns with. Zero movement
+/// points = "unconstrained" per legacy, except mounts: a mountable mob's pool
+/// follows its level (legacy `natural_move`), since it pays the rider's steps.
+#[must_use]
+pub fn base_move_points(proto: &MobProto) -> i32 {
+    if proto.move_points > 0 {
+        proto.move_points
+    } else if proto.is_mountable() {
+        mount_move_points(proto.level)
+    } else {
+        0
+    }
+}
+
+/// Legacy pet shops and `load_pets` multiply a pet's movement by this
+/// (`GET_MAX_MOVE(pet) *= 15`), so a bought mare carries her rider over the
+/// ~1000 mv the pool of a wild mount (~75 at level 5) never could.
+pub const PET_MOVE_MULTIPLIER: i32 = 15;
+
+/// Movement pool of `proto` as a pet-shop pet (and as `inspect` shows it):
+/// the wild pool times [`PET_MOVE_MULTIPLIER`]; 0 stays "unconstrained".
+#[must_use]
+pub fn pet_move_points(proto: &MobProto) -> i32 {
+    base_move_points(proto).saturating_mul(PET_MOVE_MULTIPLIER)
+}
+
 /// Spawn a fresh mob from `proto` into `room` and apply its
 /// `MobDefaultEffects`. `reset_id` tags the instance with the
 /// `MobResets` row that owns it (boot / respawn paths); `None` for
@@ -100,16 +126,7 @@ pub fn spawn_mob_from_proto(
         Some(reset_id) => world.spawn((base, FromMobReset(reset_id))),
         None => world.spawn(base),
     };
-    // Zero movement points = "unconstrained" per legacy, except mounts: a
-    // mountable mob's pool follows its level (legacy `natural_move`), since
-    // it pays the rider's steps.
-    let move_points = if proto.move_points > 0 {
-        proto.move_points
-    } else if proto.is_mountable() {
-        mount_move_points(proto.level)
-    } else {
-        0
-    };
+    let move_points = base_move_points(proto);
     if move_points > 0 {
         em.insert(MovementPoints {
             current: move_points,

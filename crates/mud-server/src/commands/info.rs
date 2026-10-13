@@ -4871,7 +4871,7 @@ pub(crate) fn cmd_inspect(world: &mut World, player: Entity, args: &str) {
              Damage: {}d{}+{}, Accuracy: {}, Evasion: {}\r\n{}",
             proto.name,
             proto.rolled_hp(),
-            proto.move_points,
+            mud_world::pet_move_points(&proto),
             proto.damage_dice_num,
             proto.damage_dice_size,
             proto.damage_dice_bonus,
@@ -5233,7 +5233,7 @@ pub(crate) fn cmd_hire(world: &mut World, player: Entity, args: &str) {
     // leading article) so room listings disambiguate from wild mobs of the same proto. The
     // `PersistentPet` marker tags this as a paid follower so the
     // disconnect-save snapshots it (gold spent → durable across
-    // reconnect under the 1h cap).
+    // reconnect and reboot, like legacy `save_pets`).
     let player_name = name_of(world, player);
     let pet_name = crate::commands::possessive_name(&player_name, &proto.name);
     let pet_entity = mud_world::spawn_mob_from_proto(world, &proto, located.0, None);
@@ -5244,6 +5244,14 @@ pub(crate) fn cmd_hire(world: &mut World, player: Entity, args: &str) {
             Follower(player),
             mud_world::PersistentPet,
         ));
+        // Legacy pet shop: `GET_MAX_MOVE(pet) *= 15; GET_MOVE = GET_MAX_MOVE`.
+        let move_points = mud_world::pet_move_points(&proto);
+        if move_points > 0 {
+            em.insert(mud_world::MovementPoints {
+                current: move_points,
+                max: move_points,
+            });
+        }
     }
     let price_str = format_wealth(price_copper).unwrap_or_else(|| "free".to_string());
     send_rendered(

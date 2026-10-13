@@ -665,10 +665,18 @@ pub(crate) struct PersistedPet {
     name: String,
     hp: i32,
     max_hp: i32,
+    /// Movement pool (`MovementPoints.max`); `None` for a pet without one and
+    /// for rows saved before it was recorded (those get the pet-shop pool of
+    /// their prototype). Current movement is not saved: legacy `load_pets`
+    /// brings a pet back fully rested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_move: Option<i32>,
 }
 
-/// Persisted active-pets envelope. Same 1h disconnect-cap pattern as
-/// `PersistedEffects`.
+/// Persisted active-pets envelope. Unlike `PersistedEffects` there is no
+/// disconnect cap: legacy `save_pets` / `load_pets` kept a pet file per
+/// player and respawned its pets at every login, however long the owner was
+/// away (and across reboots, the blob lives in the DB).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PersistedPets {
     saved_at_unix: i64,
@@ -735,21 +743,12 @@ pub(crate) fn insert_loaded_script_vars(
 }
 
 /// Shared restore logic: spawn one mob entity per persisted pet
-/// entry, dropping all entries past the disconnect cap (no staff-
-/// exception equivalent for pets — they're player-owned investments,
-/// not staff rewards). Located next to the player; HP restored
-/// verbatim (a wounded pet stays wounded). Everything else comes
-/// from the proto via `mud_world::spawn_mob_from_proto`.
+/// entry, however long the owner was away (legacy `load_pets` has no
+/// time limit; they are player-owned investments). Located next to the
+/// player; HP restored verbatim (a wounded pet stays wounded). Everything
+/// else comes from the proto via `mud_world::spawn_mob_from_proto`;
+/// movement is the saved pool, full.
 pub(crate) fn restore_persisted_pets(world: &mut World, player: Entity, persisted: PersistedPets) {
-    let now_unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
-    let elapsed = now_unix.saturating_sub(persisted.saved_at_unix).max(0);
-    if elapsed > EFFECT_DISCONNECT_CAP_SECS {
-        // All pets exceeded the cap — drop them all. Mirrors the
-        // effects rule: log off for the night, come back without.
-        return;
-    }
     let player_room = match world.get::<Located>(player) {
         Some(l) => l.0,
         None => return,
@@ -789,6 +788,16 @@ pub(crate) fn restore_persisted_pets(world: &mut World, player: Entity, persiste
                 Follower(player),
                 mud_world::PersistentPet,
             ));
+            // Legacy `GET_MOVE(pet) = GET_MAX_MOVE(pet)`: back fully rested.
+            let max_move = pet
+                .max_move
+                .unwrap_or_else(|| mud_world::pet_move_points(&proto));
+            if max_move > 0 {
+                em.insert(mud_world::MovementPoints {
+                    current: max_move,
+                    max: max_move,
+                });
+            }
         }
     }
 }
@@ -4745,9 +4754,8 @@ impl ConnRouter {
         // Logging in mid-air without wings: the gravity tick re-checks
         // flight next tick, once worn items have re-applied their effects.
         mud_world::movement::begin_fall_if_unsupported(world, entity);
-        // Hired / charmed pets — same 1h cap. Helper drops the
-        // whole envelope when elapsed exceeds the cap, otherwise
-        // spawns each pet next to the player with HP restored.
+        // Hired / charmed pets: legacy `load_pets`, no time limit. Spawns
+        // each pet next to the player with HP restored.
         if let Some(json) = pets_json
             && let Ok(persisted) = serde_json::from_value::<PersistedPets>(json)
         {
@@ -5373,7 +5381,7 @@ pub(crate) struct PlayerSaveSnapshot {
     ignore_list_json: Option<serde_json::Value>,
     command_grants_json: Option<serde_json::Value>,
     pub(crate) effect_instances_json: Option<serde_json::Value>,
-    pets_json: Option<serde_json::Value>,
+    pub(crate) pets_json: Option<serde_json::Value>,
     ability_rows: Vec<mud_db::character_abilities::CharacterAbilityRow>,
     alias_rows: Vec<mud_db::character_aliases::CharacterAliasRow>,
     core_stats_payload: Option<mud_db::characters::CoreStatsPayload>,
@@ -5757,16 +5765,18 @@ pub(crate) fn snapshot_player(
             &WorldKey,
             &Health,
             &Follower,
+            Option<&mud_world::MovementPoints>,
         ), (With<Mob>, With<mud_world::PersistentPet>)>();
         let pets: Vec<PersistedPet> = q
             .iter(world)
-            .filter(|(_, _, _, follower)| follower.0 == entity)
-            .map(|(named, wk, health, _)| PersistedPet {
+            .filter(|(_, _, _, follower, _)| follower.0 == entity)
+            .map(|(named, wk, health, _, mv)| PersistedPet {
                 proto_zone_id: wk.zone,
                 proto_id: wk.id,
                 name: named.name.clone(),
                 hp: health.hp,
                 max_hp: health.max,
+                max_move: mv.map(|m| m.max),
             })
             .collect();
         if pets.is_empty() {
