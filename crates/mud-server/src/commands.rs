@@ -538,6 +538,9 @@ mod admin_management;
 mod admin_reload;
 #[path = "commands/lists.rs"]
 mod lists;
+#[cfg(test)]
+#[path = "commands/misdirection_tests.rs"]
+mod misdirection_tests;
 #[path = "commands/object_spell_modes.rs"]
 mod object_spell_modes;
 #[cfg(test)]
@@ -549,6 +552,11 @@ mod object_spells;
 mod object_stat;
 #[path = "commands/off_tick.rs"]
 pub(crate) mod off_tick;
+#[path = "commands/ventriloquate.rs"]
+pub(crate) mod ventriloquate;
+#[cfg(test)]
+#[path = "commands/ventriloquate_tests.rs"]
+mod ventriloquate_tests;
 pub(crate) use admin_reload::shutdown_poll;
 #[path = "commands/admin_world.rs"]
 mod admin_world;
@@ -16944,6 +16952,22 @@ fn resolve_and_gate_target(
         );
         return None;
     }
+    // Ventriloquate (legacy TAR_CHAR_ROOM | TAR_NOT_SELF): a character in the
+    // room, never the caster.
+    if ventriloquate::is_speak_as(world, def) {
+        if target_word.is_some() && target_entity == player {
+            send_to(
+                world,
+                player,
+                format!("You cannot {verb} this spell upon yourself!\r\n"),
+            );
+            return None;
+        }
+        if target_word.is_none() || world.get::<Item>(target_entity).is_some() {
+            send_to(world, player, "Cannot find the target of your spell!\r\n");
+            return None;
+        }
+    }
     // AbilityTargeting gate: refuse if the resolved target doesn't
     // match the schema's `valid_targets` list. Only enforces the
     // recognized types (ENEMY_PC, ENEMY_NPC); CORPSE / RIDER /
@@ -17175,6 +17199,14 @@ pub(crate) fn invoke_ability_core(
     let is_enhance_ability = def.plain_name.eq_ignore_ascii_case("ENHANCE_ABILITY");
     let (target_word, enhance_stat) = if is_enhance_ability {
         split_enhance_args(target_word)
+    } else {
+        (target_word, None)
+    };
+    // Ventriloquate takes the words to put in the target's mouth after the
+    // target's name (`cast 'ventriloquate' bob hello there`).
+    let is_speak_as = ventriloquate::is_speak_as(world, &def);
+    let (target_word, speak_text) = if is_speak_as {
+        ventriloquate::split_tail(target_word)
     } else {
         (target_word, None)
     };
@@ -17614,6 +17646,22 @@ pub(crate) fn invoke_ability_core(
     // CAST triggers (legacy `call_magic`): the caster's room, then the
     // targeted object or mob, before the spell does anything.
     crate::triggers::fire_cast(world, player, target_entity, &def.name);
+    // Ventriloquate (legacy manual spell): the room hears the target say the
+    // caster's words. Nothing is applied to anybody.
+    if is_speak_as {
+        let skill = caster_formula_ctx(world, player, def.id).skill;
+        ventriloquate::speak_as(
+            world,
+            player,
+            target_entity,
+            skill,
+            speak_text,
+            &mut |max| rand::random_range(1..=max),
+        );
+        bump_use_skill_quest_progress(world, player, def.id);
+        settle_slot(world, player, slot_hold, true);
+        return;
+    }
     // Spells on objects (Curse, Remove Curse; legacy `mag_alter_obj`)
     // carry `alter_object` effects and skip the actor-only machinery
     // (saves, damage, effect instances) below.
@@ -26251,19 +26299,18 @@ pub(crate) fn would_create_cycle(world: &mut World, start: Entity, end: Entity) 
     false
 }
 
-// Walk + follower cascade + per-mover notifications + auto-look + stamina
-// drain — naturally a long sequence; splitting into helpers would just
-// shuffle the order. Directional shims (cmd_north etc) call this from
-// commands/movement_directions.rs.
-#[allow(clippy::too_many_lines)]
-pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
+/// The gates every step starts with: awake (a sitter stands up), not held
+/// by an effect, not in a fight. Sends the refusal and returns false when
+/// the character cannot take a step. Shared with the misdirected move,
+/// which must not show a fake departure for a step that cannot happen.
+pub(crate) fn may_start_move(world: &mut World, player: Entity) -> bool {
     if !require_alert_posture(world, player, "move") {
-        return;
+        return false;
     }
     if effect_prevents(world, player, Prevent::Movement) {
         let msg = prevent_refusal(world, player, Prevent::Movement);
         send_to(world, player, msg);
-        return;
+        return false;
     }
     // Combat lock: walking out of a fight is cheating. Players must
     // disengage explicitly — `flee` for the panic exit, or one of
@@ -26272,6 +26319,18 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
     // melee'd player can just step away with full HP intact.
     if world.get::<mud_world::Fighting>(player).is_some() {
         send_to(world, player, "No way!  You're fighting for your life!\r\n");
+        return false;
+    }
+    true
+}
+
+// Walk + follower cascade + per-mover notifications + auto-look + stamina
+// drain — naturally a long sequence; splitting into helpers would just
+// shuffle the order. Directional shims (cmd_north etc) call this from
+// commands/movement_directions.rs.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
+    if !may_start_move(world, player) {
         return;
     }
     // Typed movement never gets here mid-cast (the dispatcher refuses
@@ -26672,10 +26731,22 @@ pub(crate) fn cmd_move(world: &mut World, player: Entity, dir: Direction) {
             ),
             None => format!("{} {verb} {dir_name}.\r\n", cap_sentence_start(&mover_name)),
         };
-        let hush_here = hush_for_steed(world, from_room, mover, &steeds, &hush);
+        let mut hush_here = hush_for_steed(world, from_room, mover, &steeds, &hush);
+        // A misdirected step (legacy `EFF_MISDIRECTING`, never while mounted)
+        // is told to nobody but the staff who see through it; the room
+        // already watched the fake departure.
+        let misdirected =
+            steed_of(mover).is_none() && world.get::<mud_world::Misdirecting>(mover).is_some();
+        if misdirected {
+            hush_here.extend(crate::misdirection::fooled_observers(
+                world, from_room, mover,
+            ));
+        }
         broadcast_room_visual(world, from_room, mover, &hush_here, &line);
         // Observers who missed it but sense life feel it go.
-        senses::sense_departure(world, from_room, mover, &movers);
+        if !misdirected {
+            senses::sense_departure(world, from_room, mover, &movers);
+        }
     }
 
     // Fire PREENTRY triggers on the destination room before any

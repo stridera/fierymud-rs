@@ -2092,6 +2092,19 @@ pub struct Blur;
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Familiar;
 
+/// Marker: the bearer can misdirect its movement (`misdirection`; legacy
+/// `EFF_MISDIRECTION`). While it holds, `<dir> <fake-dir>` shows the room a
+/// false direction (see `mud-server`'s `misdirection` module); a mob with it
+/// does the same whenever it wanders.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Misdirection;
+
+/// Transient marker (legacy `EFF_MISDIRECTING`): the bearer is mid-step in a
+/// misdirected move, so its real leave message goes only to staff who see
+/// through the trick. Added and removed around a single move.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Misdirecting;
+
 /// Marker: the bearer shines with divine magnificence (`glory`; legacy
 /// `EFF_GLORY`). Aggressive mobs that can see it hold back from picking
 /// fights, with a small chance to attack the bearer instead (see

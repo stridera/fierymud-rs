@@ -210,19 +210,31 @@ pub fn wander_tick(world: &mut World) {
         // A hiding mob wears its hiding down as it walks, and observers
         // who cannot see it through that hear nothing of it.
         crate::hiding::decay_on_move(world, mob, &mut |lo, hi| rand::random_range(lo..=hi));
+        // A mob with the misdirection flag shows a false direction first (or
+        // only pretends to leave and stays), then slips away unannounced.
+        let step = crate::misdirection::mob_step(world, mob, dir);
+        if step == crate::misdirection::MobStep::Pretend {
+            continue;
+        }
         if player_rooms.contains(&from_room) {
+            let mut except = vec![mob];
+            if step == crate::misdirection::MobStep::Silent {
+                except.extend(crate::misdirection::fooled_observers(world, from_room, mob));
+            }
             crate::commands::broadcast_room_visual(
                 world,
                 from_room,
                 mob,
-                &[mob],
+                &except,
                 &format!(
                     "{} leaves {}.\r\n",
                     crate::commands::cap_sentence_start(&mob_name),
                     direction_name(dir),
                 ),
             );
-            crate::commands::senses::sense_departure(world, from_room, mob, &[mob]);
+            if step == crate::misdirection::MobStep::Normal {
+                crate::commands::senses::sense_departure(world, from_room, mob, &[mob]);
+            }
         }
         // ENTRY triggers on the mover; LEAVE triggers only matter where a
         // player is there to be reacted to (their `actor` is the mob).

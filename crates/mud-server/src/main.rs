@@ -39,6 +39,7 @@ mod layout;
 mod login;
 mod login_menu;
 mod memorize;
+mod misdirection;
 mod mob_ai;
 #[cfg(test)]
 mod mob_ai_conditions_tests;

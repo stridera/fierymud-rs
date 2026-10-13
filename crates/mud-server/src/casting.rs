@@ -509,7 +509,13 @@ pub(crate) fn announce_cast_start(
     };
     let mut recognized = Vec::new();
     let dark = room_dark_for_all(world, caster);
+    // Ventriloquate is not announced: only staff of at least the caster's
+    // level hear it start (legacy `start_chant`).
+    let silent = crate::commands::ventriloquate::is_speak_as(world, def);
     for observer in observers(world, caster) {
+        if silent && !crate::misdirection::sees_through(world, observer, caster) {
+            continue;
+        }
         let staff = is_staff(world, observer);
         let skill = know_spell_id
             .and_then(|id| {
@@ -550,6 +556,17 @@ pub(crate) fn announce_cast_start(
 /// the room's "completes their spell", then the words spoken (true
 /// name for those who recognised it).
 fn announce_cast_complete(world: &mut World, caster: Entity, snap: &Casting) {
+    // Ventriloquate has no "you complete your spell" and no words spoken
+    // (legacy `complete_spell` / `end_chant`).
+    if world
+        .resource::<AbilityCatalog>()
+        .by_name
+        .values()
+        .find(|d| d.id == snap.ability_id)
+        .is_some_and(|d| crate::commands::ventriloquate::is_speak_as(world, d))
+    {
+        return;
+    }
     let noun = match snap.kind_label.as_str() {
         "chant" => "chant",
         "song" => "song",

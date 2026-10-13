@@ -306,6 +306,18 @@ const FLAG_MARKERS: &[FlagMarker] = &[
         }),
         tag_backed: None,
     },
+    // Legacy `EFF_MISDIRECTION`: `<dir> <fake-dir>` misleads the room about
+    // where the bearer went, and a wandering mob does it on its own.
+    FlagMarker {
+        flags: &["misdirection"],
+        insert: |e| {
+            e.insert(crate::components::Misdirection);
+        },
+        remove: Some(|e| {
+            e.remove::<crate::components::Misdirection>();
+        }),
+        tag_backed: None,
+    },
     FlagMarker {
         flags: &["familiarity"],
         insert: |e| {
@@ -810,6 +822,7 @@ mod tests {
             ("detect_align", |w, e| w.get::<DetectAlign>(e).is_some()),
             ("blur", |w, e| w.get::<Blur>(e).is_some()),
             ("familiarity", |w, e| w.get::<Familiar>(e).is_some()),
+            ("misdirection", |w, e| w.get::<Misdirection>(e).is_some()),
             ("glory", |w, e| w.get::<Glory>(e).is_some()),
             ("waterwalk", |w, e| w.get::<WaterWalk>(e).is_some()),
             ("farsee", |w, e| w.get::<Farsee>(e).is_some()),
