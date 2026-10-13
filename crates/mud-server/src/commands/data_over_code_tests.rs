@@ -360,6 +360,78 @@ fn a_summoned_mount_that_dies_starts_the_cooldown() {
     );
 }
 
+fn summon_cooldown_on(world: &World, owner: Entity) -> bool {
+    world
+        .get::<Cooldowns>(owner)
+        .and_then(|c| c.ready_at.get(&SUMMON_MOUNT))
+        .is_some_and(|r| *r > std::time::Instant::now())
+}
+
+#[test]
+fn a_mount_told_to_follow_self_leaves_and_starts_the_cooldown() {
+    let (mut world, p, mut rx) = mount_world(PALADIN, 500);
+    cmd_summonmount(&mut world, p, "");
+    drain(&mut rx);
+    let mount = mounts_of(&mut world, p)[0];
+    super::info::cmd_follow(&mut world, mount, "self");
+    assert!(world.get_entity(mount).is_err(), "mount extracted");
+    assert!(summon_cooldown_on(&world, p), "cooldown started");
+    cmd_summonmount(&mut world, p, "");
+    assert!(drain(&mut rx).contains("You must wait another"));
+    assert!(mounts_of(&mut world, p).is_empty());
+}
+
+#[test]
+fn a_mount_told_to_follow_someone_else_leaves_and_starts_the_cooldown() {
+    let (mut world, p, mut rx) = mount_world(PALADIN, 500);
+    cmd_summonmount(&mut world, p, "");
+    drain(&mut rx);
+    let mount = mounts_of(&mut world, p)[0];
+    let room = world.get::<Located>(p).unwrap().0;
+    let bob = world
+        .spawn((Mob, Located(room), mud_world::Named { name: "Bob".into() }))
+        .id();
+    super::info::cmd_follow(&mut world, mount, "bob");
+    assert!(world.get_entity(mount).is_err(), "mount extracted");
+    assert!(world.get_entity(bob).is_ok());
+    assert!(summon_cooldown_on(&world, p), "cooldown on the owner");
+    assert!(
+        world.query::<&Follower>().iter(&world).next().is_none(),
+        "nothing re-pointed at bob"
+    );
+}
+
+#[test]
+fn removing_a_grouped_mount_notifies_and_cools_down_once() {
+    let (mut world, p, mut rx) = mount_world(PALADIN, 500);
+    cmd_summonmount(&mut world, p, "");
+    drain(&mut rx);
+    let mount = mounts_of(&mut world, p)[0];
+    world.entity_mut(mount).insert(mud_world::GroupMember(p));
+    super::info::cmd_unfollow(&mut world, mount, "");
+    assert!(world.get_entity(mount).is_err(), "mount extracted");
+    assert!(summon_cooldown_on(&world, p));
+    let out = drain(&mut rx);
+    assert_eq!(out.matches("has left the group").count(), 1, "{out}");
+    assert_eq!(out.matches("group has been disbanded").count(), 1, "{out}");
+
+    // Extracting a grouped mount directly (death/despawn path) is also single.
+    cmd_summonmount(&mut world, p, "");
+    world
+        .get_mut::<Cooldowns>(p)
+        .unwrap()
+        .ready_at
+        .insert(SUMMON_MOUNT, std::time::Instant::now());
+    cmd_summonmount(&mut world, p, "");
+    drain(&mut rx);
+    let mount2 = mounts_of(&mut world, p)[0];
+    world.entity_mut(mount2).insert(mud_world::GroupMember(p));
+    super::release_from(&mut world, mount2, p);
+    assert!(world.get_entity(mount2).is_err());
+    let out = drain(&mut rx);
+    assert!(out.matches("left").count() <= 1, "{out}");
+}
+
 #[test]
 fn the_sweep_removes_mounts_and_pets_whose_owner_is_gone() {
     let (mut world, p, mut rx) = mount_world(PALADIN, 500);

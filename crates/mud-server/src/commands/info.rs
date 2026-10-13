@@ -16047,6 +16047,13 @@ pub(crate) fn cmd_follow(world: &mut World, player: Entity, args: &str) {
         return;
     }
 
+    // Legacy `stop_follower`: a summoned mount told to follow somebody else
+    // leaves the game and starts its owner's summon-mount cooldown.
+    if world.get::<mud_world::SummonedMount>(player).is_some() {
+        dismiss_unfollowing_mount(world, player);
+        return;
+    }
+
     // Falling in behind someone other than the group leader leaves the group.
     if world
         .get::<mud_world::GroupMember>(player)
@@ -16081,7 +16088,36 @@ pub(crate) fn cmd_follow(world: &mut World, player: Entity, args: &str) {
     );
 }
 
+/// A summoned mount stops following its owner (`order <mount> follow self`
+/// or `follow <someone else>`): the owner is told, then the mount is
+/// extracted and the owner's summon-mount cooldown starts, as in legacy
+/// `stop_follower`.
+fn dismiss_unfollowing_mount(world: &mut World, mount: Entity) {
+    let owner = world.get::<Follower>(mount).map(|f| f.0);
+    if let Some(owner) = owner {
+        let mount_name = name_of(world, mount);
+        send_msg(
+            world,
+            owner,
+            format!("{mount_name} stops following you.\r\n"),
+        );
+    }
+    try_remove::<Follower>(world, mount);
+    dismiss_summoned_mount(world, mount, owner);
+}
+
 pub(crate) fn cmd_unfollow(world: &mut World, player: Entity, _args: &str) {
+    if world.get::<mud_world::SummonedMount>(player).is_some() {
+        // Leave any group first (the mount may be a stray member).
+        if world.get::<mud_world::GroupMember>(player).is_some() {
+            ungroup(world, player, true, false);
+        }
+        // Group teardown can already have dismissed the mount.
+        if world.get_entity(player).is_ok() {
+            dismiss_unfollowing_mount(world, player);
+        }
+        return;
+    }
     // A group member can have no follow link at all (the leader was already
     // following them when they accepted), so leaving the group cannot hinge
     // on one. Walking away from your group leader leaves the group.

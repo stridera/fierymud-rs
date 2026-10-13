@@ -26028,6 +26028,15 @@ pub(crate) fn is_grouped(world: &mut World, ch: Entity) -> bool {
 /// membership, whichever point at `leader`. Other groups / leaders are
 /// left alone.
 pub(crate) fn release_from(world: &mut World, member: Entity, leader: Entity) {
+    // Drop the group marker first: a dismissed mount is extracted below, and
+    // its despawn hook (`ungroup_on_despawn`) would otherwise walk back into
+    // `ungroup` and `release_from` for the same member.
+    if world
+        .get::<mud_world::GroupMember>(member)
+        .is_some_and(|g| g.0 == leader)
+    {
+        try_remove::<mud_world::GroupMember>(world, member);
+    }
     if world.get::<Follower>(member).is_some_and(|f| f.0 == leader) {
         try_remove::<Follower>(world, member);
         // A dismissed pet is no longer the master's paid follower.
@@ -26036,14 +26045,7 @@ pub(crate) fn release_from(world: &mut World, member: Entity, leader: Entity) {
         // leaves the game and starts the owner's summon-mount cooldown.
         if world.get::<mud_world::SummonedMount>(member).is_some() {
             info::dismiss_summoned_mount(world, member, Some(leader));
-            return;
         }
-    }
-    if world
-        .get::<mud_world::GroupMember>(member)
-        .is_some_and(|g| g.0 == leader)
-    {
-        try_remove::<mud_world::GroupMember>(world, member);
     }
 }
 
