@@ -1072,3 +1072,120 @@ fn char_effects_includes_effects_restored_at_login() {
     assert_eq!(v.as_array().unwrap().len(), 1, "{fr:?}");
     assert_eq!(v[0]["id"], "armor");
 }
+
+#[test]
+fn char_status_carries_alignment_and_resends_on_shift() {
+    let mut fx = fixture();
+    let a = fx.a;
+    let (p, mut rx) = player(&mut fx.world, a, "Seeker");
+    fx.world.entity_mut(p).insert(mud_world::CombatStats {
+        alignment: -350,
+        ..Default::default()
+    });
+    super::send_prompt(&mut fx.world, p);
+    let fr = frames(&drain_bytes(&mut rx));
+    let v: Value = serde_json::from_str(&of(&fr, "Char.Status")[0]).unwrap();
+    assert_eq!(v["alignment"], -350);
+    let vars: Value = serde_json::from_str(&of(&fr, "Char.StatusVars")[0]).unwrap();
+    assert_eq!(vars["alignment"], "Alignment");
+
+    fx.world
+        .get_mut::<mud_world::CombatStats>(p)
+        .unwrap()
+        .alignment = 400;
+    super::send_prompt(&mut fx.world, p);
+    let fr = frames(&drain_bytes(&mut rx));
+    let v: Value = serde_json::from_str(&of(&fr, "Char.Status")[0]).unwrap();
+    assert_eq!(v["alignment"], 400);
+}
+
+#[test]
+fn cancel_pushes_an_empty_char_effects_list() {
+    let (mut fx, p, mut rx) = world_with_armor();
+    // No sweep has run yet: the prompt send alone must set the baseline.
+    super::send_prompt(&mut fx.world, p);
+    dispatch(&mut fx.world, p, "cast 'armor'");
+    for _ in 0..10 {
+        crate::casting::casting_tick(&mut fx.world);
+    }
+    super::push_effect_changes(&mut fx.world);
+    let fr = frames(&drain_bytes(&mut rx));
+    assert_eq!(
+        serde_json::from_str::<Value>(of(&fr, "Char.Effects").last().unwrap()).unwrap()[0]["id"],
+        "armor",
+        "{fr:?}"
+    );
+    dispatch(&mut fx.world, p, "cancel armor");
+    let mut bytes = drain_bytes(&mut rx);
+    assert!(
+        String::from_utf8_lossy(&bytes).contains("You cancel"),
+        "{:?}",
+        String::from_utf8_lossy(&bytes)
+    );
+    super::push_effect_changes(&mut fx.world);
+    bytes.extend(drain_bytes(&mut rx));
+    let fr = frames(&bytes);
+    assert_eq!(
+        of(&fr, "Char.Effects").last().map(String::as_str),
+        Some("[]"),
+        "{fr:?}"
+    );
+}
+
+#[test]
+fn combat_panel_clears_after_a_successful_flee() {
+    let (mut fx, p, mut rx) = world_with_skills();
+    let (a, b) = (fx.a, fx.b);
+    fx.world
+        .get_mut::<Exits>(a)
+        .unwrap()
+        .0
+        .insert(Direction::East, exit(b, ExitState::Open, false, &["door"]));
+    let wolf = mob(&mut fx.world, a, "a wolf");
+    fx.world
+        .entity_mut(wolf)
+        .insert(mud_world::Health { hp: 10, max: 10 });
+    fx.world.entity_mut(p).insert(mud_world::Fighting(wolf));
+    fx.world.entity_mut(wolf).insert(mud_world::Fighting(p));
+    super::send_prompt(&mut fx.world, p);
+    let fr = frames(&drain_bytes(&mut rx));
+    assert_eq!(of(&fr, "Char.Combat").len(), 1, "{fr:?}");
+
+    dispatch(&mut fx.world, p, "flee");
+    let mut bytes = drain_bytes(&mut rx);
+    assert!(
+        String::from_utf8_lossy(&bytes).contains("You flee"),
+        "{:?}",
+        String::from_utf8_lossy(&bytes)
+    );
+    assert!(fx.world.get::<mud_world::Fighting>(p).is_none());
+    // Cleared by the flee itself, before any end-of-tick sweep.
+    let fr = frames(&bytes);
+    assert_eq!(
+        of(&fr, "Char.Combat").last().map(String::as_str),
+        Some("{}"),
+        "{fr:?}"
+    );
+    super::push_combat_ends(&mut fx.world);
+    bytes = drain_bytes(&mut rx);
+    assert!(of(&frames(&bytes), "Char.Combat").is_empty());
+}
+
+#[test]
+fn combat_panel_clears_when_teleported_out_of_a_fight() {
+    let (mut fx, p, mut rx) = world_with_skills();
+    let (a, b) = (fx.a, fx.b);
+    let wolf = mob(&mut fx.world, a, "a wolf");
+    fx.world
+        .entity_mut(wolf)
+        .insert(mud_world::Health { hp: 10, max: 10 });
+    fx.world.entity_mut(p).insert(mud_world::Fighting(wolf));
+    fx.world.entity_mut(wolf).insert(mud_world::Fighting(p));
+    super::send_prompt(&mut fx.world, p);
+    drain_bytes(&mut rx);
+    // Recall, teleport and summon all land here.
+    mud_world::movement::move_to_room(&mut fx.world, p, b);
+    super::push_combat_ends(&mut fx.world);
+    let fr = frames(&drain_bytes(&mut rx));
+    assert_eq!(of(&fr, "Char.Combat"), vec!["{}".to_string()], "{fr:?}");
+}

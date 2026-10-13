@@ -886,3 +886,39 @@ fn a_dimension_door_to_a_mob_is_refused_before_the_wind_up() {
     assert!(fx.world.get::<mud_world::Casting>(p).is_none());
     assert_eq!(slots_used(&fx.world, p), 0);
 }
+
+// -- #143: a multi-row ability is labelled once ----------------------------
+
+#[test]
+fn an_ability_with_two_flag_rows_shows_its_name_once_in_the_apply_tail() {
+    let (mut fx, p, mut rx) = spell_fx(
+        "Statue",
+        "STATUE",
+        0,
+        false,
+        "status",
+        serde_json::json!({"flag": "statue", "duration": 60}),
+    );
+    fx.world
+        .resource_mut::<AbilityCatalog>()
+        .effects_for
+        .insert(
+            SPELL,
+            vec![
+                (
+                    EFFECT,
+                    Some(serde_json::json!({"flag": "statue", "duration": 60})),
+                ),
+                (
+                    EFFECT,
+                    Some(serde_json::json!({"flag": "familiarity", "duration": 60})),
+                ),
+            ],
+        );
+    fx.world.insert_resource(crate::DevMode(true));
+    dispatch(&mut fx.world, p, "cast 'statue'");
+    let out = plain(&drain(&mut rx));
+    assert!(out.contains("(Statue)"), "{out}");
+    assert!(!out.contains("Familiarity"), "{out}");
+    assert_eq!(effect_count(&mut fx.world, p), 2, "both rows still apply");
+}

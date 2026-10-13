@@ -643,6 +643,8 @@ pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
             crate::effects::remove_effect_instance(world, bearer, e);
         }
     }
+    // Tell GMCP clients now instead of at the end of the tick.
+    crate::commands::push_effect_changes(world);
 }
 /// Resolve what `study` was given with the cast matcher: quoted or unquoted
 /// multi-word names, an exact name first, then a name prefix.

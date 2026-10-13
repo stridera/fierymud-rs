@@ -1,13 +1,11 @@
-//! `report` (HP/stamina announcement to group or room) and
+//! `report` (HP/stamina announcement to a player or the room) and
 //! `socials` (lists every registered social verb).
 
 use bevy_ecs::prelude::*;
 use mud_db::enums::UserRole;
-use mud_world::{Health, Located, MovementPoints, Player, SocialRegistry, Stamina};
+use mud_world::{Health, MovementPoints, SocialRegistry, Stamina};
 
-use crate::commands::{
-    Category, Command, Help, group_members, group_root, name_of, send_rendered, send_to,
-};
+use crate::commands::{Category, Command, Help, send_to};
 
 inventory::submit! {
     Command {
@@ -16,12 +14,13 @@ inventory::submit! {
         required_perm: None,
         category: Category::Communication,
         help: Help {
-            usage: "report",
-            summary: "Announce your HP/stamina to your group or room.",
-            long: "If you're grouped, the report goes to every group \
-                   member regardless of room (useful for healers in \
-                   adjacent rooms). Solo players announce to the \
-                   room only.",
+            usage: "report [<player>]",
+            summary: "Announce your HP/stamina to the room or one player.",
+            long: "With no argument, says your hit and movement points \
+                   to everyone in the room. 'report <player>' tells \
+                   that player instead (only they see it, and the \
+                   usual tell refusals apply). Use 'greport' to \
+                   report to your whole group.",
         },
         run: cmd_report,
     }
@@ -72,33 +71,17 @@ pub(crate) fn report_body(world: &World, who: Entity) -> String {
     }
 }
 
-fn cmd_report(world: &mut World, player: Entity, _args: &str) {
-    let Some(located) = world.get::<Located>(player).copied() else {
-        return;
-    };
-    let speaker = name_of(world, player);
-    let body = report_body(world, player);
-    let root = group_root(world, player);
-    let group = group_members(world, root);
-    let (targets, self_label, third_label) = if group.len() > 1 {
-        (group, "your group", "the group")
-    } else {
-        let in_room: Vec<Entity> = {
-            let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-            q.iter(world)
-                .filter(|(_, l)| l.0 == located.0)
-                .map(|(e, _)| e)
-                .collect()
-        };
-        (in_room, "the room", "the room")
-    };
-    for target in targets {
-        let line = if target == player {
-            format!("You report to {self_label}: {body}.\r\n")
-        } else {
-            format!("{speaker} reports to {third_label}: {body}.\r\n")
-        };
-        send_rendered(world, target, &line);
+/// Legacy `do_report`: `report <player>` tells that player the vitals line
+/// (the `tell` path, so offline / `notell` / ignore refusals apply and only
+/// the target sees it); a bare `report` says it to the room. Reporting to the
+/// whole group is `greport`.
+fn cmd_report(world: &mut World, player: Entity, args: &str) {
+    let body = format!("{}.", report_body(world, player));
+    match args.split_whitespace().next() {
+        Some(target) => {
+            crate::commands::tells::cmd_tell(world, player, &format!("{target} {body}"));
+        }
+        None => crate::commands::room_chat::cmd_say(world, player, &body),
     }
 }
 

@@ -9450,6 +9450,7 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
             "race": "Race",
             "xp": "Experience",
             "wealth": "Wealth",
+            "alignment": "Alignment",
         })
         .to_string();
         gmcp::send_if_changed(world, target, "Char.StatusVars", &payload, false);
@@ -9465,6 +9466,7 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
             })
             .unwrap_or("");
         let wealth = world.get::<Wealth>(target).map_or(0, |w| w.0);
+        let alignment = world.get::<CombatStats>(target).map_or(0, |c| c.alignment);
         let payload = serde_json::json!({
             "name": name.unwrap_or(""),
             "level": prof.level,
@@ -9472,6 +9474,7 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
             "class": class_label,
             "race": prof.race,
             "wealth": wealth,
+            "alignment": alignment,
         })
         .to_string();
         gmcp::send_if_changed(world, target, "Char.Status", &payload, false);
@@ -9556,8 +9559,7 @@ pub(crate) fn send_prompt(world: &mut World, target: Entity) {
     // empty for admin grants / auras); `duration` is seconds remaining
     // (-1 = permanent). An empty array is sent when the last effect
     // fades so clients clear stale icons. Change-gated.
-    let effects = gmcp::build_char_effects(world, target);
-    gmcp::send_if_changed(world, target, "Char.Effects", &effects, false);
+    gmcp::send_char_effects(world, target);
 
     // Room.Info — IRE-shaped mapper feed (see `gmcp::build_room_info`).
     // `look` (and therefore every movement) pushes it ahead of the room
@@ -18049,6 +18051,9 @@ pub(crate) fn invoke_ability_core(
     // templates once per bolt itself.
     let mut per_hit_messaging = false;
     let mut applied_msgs: Vec<String> = Vec::with_capacity(effect_specs.len());
+    // The flag-style rows of a multi-row ability (Statue: statue plus
+    // familiarity) share one diagnostic label, the ability's own name.
+    let ability_label = info::ability_label(&def);
     let mut spawn_count: usize = 0;
     // Effects the `cleanse` arm removed so far; Remove Curse only lifts a
     // carried object's curse when the person had none (legacy).
@@ -21297,7 +21302,7 @@ pub(crate) fn invoke_ability_core(
                         }
                         // Skip the element-map path below — alignment
                         // protections don't ride on Resistances.
-                        applied_msgs.push(pretty.clone());
+                        push_ability_label(&mut applied_msgs, &ability_label);
                         continue;
                     }
                     let element = match type_str.as_str() {
@@ -21392,7 +21397,7 @@ pub(crate) fn invoke_ability_core(
                     // disconnect-save snapshots it for ≤1h restore.
                     try_insert(world, target_entity, mud_world::PersistentPet);
                 }
-                applied_msgs.push(pretty.clone());
+                push_ability_label(&mut applied_msgs, &ability_label);
             }
         }
     }
@@ -24983,6 +24988,14 @@ pub(crate) fn refuse_hidden_exit(
 pub(crate) fn try_insert<C: bevy_ecs::component::Component>(world: &mut World, e: Entity, c: C) {
     if let Ok(mut em) = world.get_entity_mut(e) {
         em.insert(c);
+    }
+}
+
+/// Add `label` to the cast diagnostic list unless it is already there, so an
+/// ability that applies several flag rows shows its name once.
+fn push_ability_label(applied: &mut Vec<String>, label: &str) {
+    if !applied.iter().any(|m| m == label) {
+        applied.push(label.to_string());
     }
 }
 

@@ -99,7 +99,7 @@ inventory::submit! {
     }
 }
 
-fn cmd_tell(world: &mut World, player: Entity, args: &str) {
+pub(super) fn cmd_tell(world: &mut World, player: Entity, args: &str) {
     let parts: Vec<&str> = args.splitn(2, char::is_whitespace).collect();
     if parts.len() != 2 || parts[1].trim().is_empty() {
         send_to(

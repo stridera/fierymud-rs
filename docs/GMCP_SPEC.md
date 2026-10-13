@@ -36,9 +36,10 @@ Identity strip + tracker baseline.
 | `xp`     | number  | Lifetime XP — drives Tracker delta + rate   |
 | `wealth` | number  | Lifetime gold — drives Tracker delta + rate |
 | `race`   | string  | Optional (reserved; unused today)           |
+| `alignment` | number | Alignment score, -1000 (evil) to 1000 (good); 0 neutral |
 
 **Cadence:** On login + on any change to the listed fields (level-up,
-class change, wealth tick). At minimum, re-emit on every prompt so
+class change, wealth tick, alignment shift). At minimum, re-emit on every prompt so
 the Tracker can compute XP/hr without integrating gaps.
 
 **Consumer:** `src/scripts/FierymudRs/Vitals/Vitals.lua` (identity)

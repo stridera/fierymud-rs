@@ -2040,6 +2040,9 @@ pub(crate) fn flee_through_exit(world: &mut World, player: Entity) {
         &format!("{mover_capped} arrives, panting, from {arrival_dir}.\r\n"),
     );
     send_to(world, player, format!("You flee {dir_name}!\r\n"));
+    // Clear the client's combat panel with the flee text rather than
+    // leaving it to the end-of-tick sweep.
+    crate::commands::send_char_combat(world, player);
     cmd_look(world, player, "");
 }
 /// `one` when `n == 1`, else `many` (`1 hit`, `2 hits`).

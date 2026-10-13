@@ -355,41 +355,68 @@ pub(crate) fn build_char_effects(world: &mut World, target: Entity) -> String {
     Value::Array(entries).to_string()
 }
 
+type EffectKey = (i32, Option<i32>, i32, u8);
+
+fn effect_key(inst: &EffectInstance) -> EffectKey {
+    let source = match &inst.source {
+        EffectSource::Spell => 0u8,
+        EffectSource::Item => 1,
+        EffectSource::Room => 2,
+        EffectSource::Admin => 3,
+        EffectSource::Other(_) => 4,
+    };
+    (inst.kind, inst.ability_id, inst.strength, source)
+}
+
+fn hash_effect_keys(mut keys: Vec<EffectKey>) -> u64 {
+    keys.sort_unstable();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    keys.hash(&mut h);
+    h.finish()
+}
+
+/// Send `Char.Effects` (change-gated on the payload) and remember which
+/// effect *set* it showed, so [`push_effect_changes`] has a baseline to
+/// compare against. Without the baseline, an effect added or removed
+/// (`cancel`, dispel, a strip) between this send and the sweep's first look
+/// at the player would go unnoticed: the sweep would record the new set as
+/// its starting point and the client would keep showing the old one.
+pub(crate) fn send_char_effects(world: &mut World, target: Entity) {
+    let payload = build_char_effects(world, target);
+    send_if_changed(world, target, "Char.Effects", &payload, false);
+    let keys: Vec<EffectKey> = {
+        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+        q.iter(world)
+            .filter(|(_, applied)| applied.0 == target)
+            .map(|(inst, _)| effect_key(inst))
+            .collect()
+    };
+    let hash = hash_effect_keys(keys);
+    if let Some(mut sent) = world.get_mut::<GmcpSent>(target) {
+        sent.0.insert(EFFECT_SET_KEY, hash);
+    }
+}
+
 /// Push `Char.Effects` the moment a connected player's effect set changes
 /// (an effect added, removed or restacked), rather than waiting for their
 /// next prompt: silent buffs and expiries would otherwise leave a client's
-/// icon bar stale until the player happens to receive output. Duration
+/// icon bar stale until the player happens to receive output. Every removal
+/// path (natural expiry, `cancel`, dispel, a combat break, a strip) is
+/// covered because they all change the instance set this looks at. Duration
 /// countdowns are deliberately not "changes" here; the prompt path still
 /// refreshes those. Players that have not yet been sent a full
 /// `Char.Effects` (login in progress) are only tracked, never pushed to.
 pub(crate) fn push_effect_changes(world: &mut World) {
-    type EffectKey = (i32, Option<i32>, i32, u8);
     let mut sets: HashMap<Entity, Vec<EffectKey>> = HashMap::new();
     let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
     for (inst, applied) in q.iter(world) {
-        let source = match &inst.source {
-            EffectSource::Spell => 0u8,
-            EffectSource::Item => 1,
-            EffectSource::Room => 2,
-            EffectSource::Admin => 3,
-            EffectSource::Other(_) => 4,
-        };
-        sets.entry(applied.0).or_default().push((
-            inst.kind,
-            inst.ability_id,
-            inst.strength,
-            source,
-        ));
+        sets.entry(applied.0).or_default().push(effect_key(inst));
     }
     let mut players = world.query_filtered::<Entity, (With<Connection>, With<GmcpSent>)>();
     let players: Vec<Entity> = players.iter(world).collect();
     let mut todo: Vec<Entity> = Vec::new();
     for p in players {
-        let mut keys = sets.remove(&p).unwrap_or_default();
-        keys.sort_unstable();
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        keys.hash(&mut h);
-        let hash = h.finish();
+        let hash = hash_effect_keys(sets.remove(&p).unwrap_or_default());
         let Some(mut sent) = world.get_mut::<GmcpSent>(p) else {
             continue;
         };
@@ -402,8 +429,7 @@ pub(crate) fn push_effect_changes(world: &mut World) {
         }
     }
     for p in todo {
-        let payload = build_char_effects(world, p);
-        send_if_changed(world, p, "Char.Effects", &payload, false);
+        send_char_effects(world, p);
     }
 }
 

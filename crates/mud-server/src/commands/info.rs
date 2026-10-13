@@ -15636,12 +15636,21 @@ pub(crate) fn cmd_group(world: &mut World, player: Entity, args: &str) {
             .get::<Health>(*m)
             .and_then(|h| vital_color_tag(h.hp, h.max));
         let hp_text = hp_open.map_or(hp_padded.clone(), |open| format!("{open}{hp_padded}</>"));
+        // Movement (legacy `make_group_report_line` shows `NNNv/NNNV`).
+        let mv_inner = world
+            .get::<Stamina>(*m)
+            .map_or(String::new(), |s| format!("MV {}/{}", s.current, s.max));
+        let mv_padded = format!("{mv_inner:<12}");
+        let mv_open = world
+            .get::<Stamina>(*m)
+            .and_then(|s| vital_color_tag(s.current, s.max));
+        let mv_text = mv_open.map_or(mv_padded.clone(), |open| format!("{open}{mv_padded}</>"));
         let here_text = match (my_room, world.get::<Located>(*m).map(|l| l.0)) {
             (Some(mine), Some(theirs)) if mine == theirs => "<green>here</>",
             _ => "<dim>elsewhere</>",
         };
         out.push_str(&format!(
-            "  {role_text} {name_text} {hp_text} ({here_text})\r\n"
+            "  {role_text} {name_text} {hp_text} {mv_text} ({here_text})\r\n"
         ));
     }
     send_to(world, player, out);

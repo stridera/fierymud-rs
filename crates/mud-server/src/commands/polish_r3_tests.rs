@@ -228,6 +228,104 @@ fn report_says_hp_and_stamina() {
     );
 }
 
+fn report_pair(world: &mut World) -> ((Entity, Rx), (Entity, Rx), (Entity, Rx)) {
+    let room = world.spawn_empty().id();
+    let other_room = world.spawn_empty().id();
+    let (p, prx) = player(world, "Reader", 10, None);
+    world.entity_mut(p).insert((
+        Located(room),
+        Health { hp: 80, max: 100 },
+        mud_world::Stamina {
+            current: 40,
+            max: 50,
+        },
+    ));
+    let (t, trx) = player(world, "Target", 10, None);
+    world.entity_mut(t).insert(Located(other_room));
+    let (b, brx) = player(world, "Bystander", 10, None);
+    world.entity_mut(b).insert(Located(room));
+    ((p, prx), (t, trx), (b, brx))
+}
+
+#[test]
+fn report_with_a_name_tells_only_that_player() {
+    let mut world = world();
+    let ((p, mut prx), (_t, mut trx), (_b, mut brx)) = report_pair(&mut world);
+    dispatch(&mut world, p, "report Target");
+    let mine = plain(&drain(&mut prx));
+    assert!(
+        mine.contains("You tell Target, \"I have 80 (100) hit and 40 (50) stamina points.\""),
+        "{mine}"
+    );
+    let theirs = plain(&drain(&mut trx));
+    assert!(
+        theirs.contains("Reader tells you, \"I have 80 (100) hit and 40 (50) stamina points.\""),
+        "{theirs}"
+    );
+    let bystander = plain(&drain(&mut brx));
+    assert!(!bystander.contains("I have"), "{bystander}");
+}
+
+#[test]
+fn report_with_no_name_says_to_the_room() {
+    let mut world = world();
+    let ((p, mut prx), (_t, mut trx), (_b, mut brx)) = report_pair(&mut world);
+    dispatch(&mut world, p, "report");
+    let mine = plain(&drain(&mut prx));
+    assert!(mine.contains("You say, \"I have 80 (100) hit"), "{mine}");
+    let bystander = plain(&drain(&mut brx));
+    assert!(
+        bystander.contains("Reader says, \"I have 80"),
+        "{bystander}"
+    );
+    assert!(plain(&drain(&mut trx)).is_empty());
+}
+
+#[test]
+fn report_to_a_player_obeys_tell_refusals() {
+    let mut world = world();
+    let ((p, mut prx), (t, mut trx), _b) = report_pair(&mut world);
+    dispatch(&mut world, p, "report Nobody");
+    assert!(plain(&drain(&mut prx)).contains("'Nobody' isn't online."));
+
+    let mut ignores = mud_world::IgnoreList::default();
+    ignores.add("Reader");
+    world.entity_mut(t).insert(ignores);
+    dispatch(&mut world, p, "report Target");
+    assert!(plain(&drain(&mut prx)).contains("Target is not accepting tells"));
+    assert!(plain(&drain(&mut trx)).is_empty());
+}
+
+#[test]
+fn group_roster_shows_movement() {
+    let mut world = world();
+    let room = world.spawn_empty().id();
+    let (leader, mut lrx) = player(&mut world, "Boss", 10, None);
+    let (mate, _m) = player(&mut world, "Mate", 11, None);
+    world.entity_mut(leader).insert((
+        Located(room),
+        Health { hp: 90, max: 100 },
+        mud_world::Stamina {
+            current: 33,
+            max: 60,
+        },
+    ));
+    world.entity_mut(mate).insert((
+        GroupMember(leader),
+        Located(room),
+        Health { hp: 50, max: 50 },
+        mud_world::Stamina {
+            current: 12,
+            max: 44,
+        },
+    ));
+    dispatch(&mut world, leader, "group");
+    let out = plain(&drain(&mut lrx));
+    assert!(out.contains("HP 90/100"), "{out}");
+    assert!(out.contains("MV 33/60"), "{out}");
+    assert!(out.contains("MV 12/44"), "{out}");
+}
+
 // ----------------------------------------------------------- who legend
 
 #[test]
