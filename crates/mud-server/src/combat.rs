@@ -432,6 +432,74 @@ pub(crate) fn weapon_family(damage_type: &str) -> Option<&'static str> {
     }
 }
 
+/// Elemental damage type of a weapon whose `weapon_damage_type` is an element
+/// (fire / cold / acid / shock / poison / align). Legacy `convert_weapon_damage`
+/// swaps a weapon's damage type for its `EFF_*_WEAPON` element, and fierylib now
+/// imports that bit as the element itself, so the prototype's type column is the
+/// single source. `None` for physical, untyped or unrecognised types.
+pub(crate) fn weapon_element(damage_type: &str) -> Option<mud_db::enums::DamageType> {
+    use mud_db::enums::DamageType as D;
+    match damage_type.to_ascii_lowercase().as_str() {
+        "fire" => Some(D::Fire),
+        "cold" => Some(D::Cold),
+        "acid" => Some(D::Acid),
+        "shock" => Some(D::Shock),
+        "poison" => Some(D::Poison),
+        "align" => Some(D::Align),
+        _ => None,
+    }
+}
+
+/// The resistance element an elemental weapon swing is checked against
+/// (legacy `ALIGN` damage is the modern `RADIANT`).
+fn weapon_element_resistance(element: mud_db::enums::DamageType) -> mud_db::enums::ElementType {
+    use mud_db::enums::{DamageType as D, ElementType as E};
+    match element {
+        D::Fire => E::Fire,
+        D::Cold => E::Cold,
+        D::Acid => E::Acid,
+        D::Shock => E::Shock,
+        D::Poison => E::Poison,
+        D::Align => E::Radiant,
+        _ => E::Physical,
+    }
+}
+
+/// Coloured `(you-verb, it-verb)` for an elemental weapon swing, from legacy's
+/// damage-type table (`damage.cpp`: burn, freeze, corrode, poison, rebuke).
+fn weapon_element_verbs(
+    element: mud_db::enums::DamageType,
+) -> Option<(&'static str, &'static str)> {
+    use mud_db::enums::DamageType as D;
+    Some(match element {
+        D::Fire => ("<b:red>burn</>", "<b:red>burns</>"),
+        D::Cold => ("<blue>freeze</>", "<blue>freezes</>"),
+        D::Acid => ("<green>corrode</>", "<green>corrodes</>"),
+        D::Shock => ("<b:yellow>shock</>", "<b:yellow>shocks</>"),
+        D::Poison => ("<b:green>poison</>", "<b:green>poisons</>"),
+        D::Align => ("<b:cyan>rebuke</>", "<b:cyan>rebukes</>"),
+        _ => return None,
+    })
+}
+
+/// Elemental damage type of the dice weapon `attacker` wields, if any.
+fn wielded_weapon_element(
+    world: &mut World,
+    attacker: Entity,
+) -> Option<mud_db::enums::DamageType> {
+    let key = {
+        let mut q = world.query::<(&Located, &EquippedSlot, &WorldKey)>();
+        q.iter(world).find_map(|(loc, eq, key)| {
+            (loc.0 == attacker && eq.0 == Slot::Wield).then_some((key.zone, key.id))
+        })?
+    };
+    let proto = world.get_resource::<ObjectPrototypes>()?.by_key.get(&key)?;
+    if proto.weapon_dice_num <= 0 || proto.weapon_dice_size <= 0 {
+        return None;
+    }
+    weapon_element(proto.weapon_damage_type.as_deref()?)
+}
+
 /// Weapon-skill family label (`weapon_type` param of the passives); `None` for
 /// an untyped or elemental weapon.
 type WeaponFamily = Option<&'static str>;
@@ -1849,6 +1917,13 @@ fn apply_swing(world: &mut World, s: &Swing) {
         mit.variance_delta = delta;
     }
     mit.after_variance = damage;
+    // Elemental weapon type, if the attacker wields one (drives the
+    // resistance lookup in step 6 and the combat verbs below).
+    let weapon_element = if s.armed {
+        wielded_weapon_element(world, s.attacker)
+    } else {
+        None
+    };
     // Mitigation pipeline per docs/design/combat.md steps 4-7.
     // Today every weapon swing is treated as PHYSICAL (engages
     // armor) and `is_magical = false` (skips ward). Type
@@ -1883,13 +1958,17 @@ fn apply_swing(world: &mut World, s: &Swing) {
     // Step 5: ward — skipped for mundane weapon swings (caller
     // routes magical abilities through a separate path that
     // engages it).
-    // Step 6: type resistance against PHYSICAL.
+    // Step 6: type resistance. A physical swing checks PHYSICAL; an
+    // elemental weapon (fire / cold / acid / shock / poison / align damage
+    // type, e.g. a staff of tremors or the conjured dagger of ice) checks the
+    // defender's resistance to that element instead, like legacy
+    // `susceptibility(victim, convert_weapon_damage(weapon))`.
+    let resist_element = weapon_element.map_or(
+        mud_db::enums::ElementType::Physical,
+        weapon_element_resistance,
+    );
     if let Some(res) = world.get::<mud_world::Resistances>(s.target) {
-        let pct = res
-            .0
-            .get(&mud_db::enums::ElementType::Physical)
-            .copied()
-            .unwrap_or(0);
+        let pct = res.0.get(&resist_element).copied().unwrap_or(0);
         // capped at +100 immunity; negative is unbounded vulnerability per docs.
         let pct = pct.min(100);
         mit.resist_pct = pct;
@@ -1961,7 +2040,12 @@ fn apply_swing(world: &mut World, s: &Swing) {
     let natural_verb_t = world
         .get::<mud_world::NaturalAttackType>(s.attacker)
         .map(|n| n.0.verb());
-    let attacker_verb_third = natural_verb_t.unwrap_or("hits");
+    // An elemental weapon narrates its element ("You freeze the orc ...")
+    // ahead of the natural-attack verb.
+    let element_verbs = weapon_element.and_then(weapon_element_verbs);
+    let attacker_verb_third =
+        element_verbs.map_or_else(|| natural_verb_t.unwrap_or("hits"), |v| v.1);
+    let attacker_verb_you = element_verbs.map_or("hit", |v| v.0);
     // First-person attacker line: pluralize-removing the trailing 's'
     // is too aggressive (`bludgeons` → `bludgeon`, but `slashes` →
     // `slashe`). The attacker line is only ever for players today
@@ -1969,7 +2053,9 @@ fn apply_swing(world: &mut World, s: &Swing) {
     send_to(
         world,
         s.attacker,
-        format!("You hit <b:cyan>{target_name}</> for {damage_label} damage{crit_tag}.\r\n{tail}"),
+        format!(
+            "You {attacker_verb_you} <b:cyan>{target_name}</> for {damage_label} damage{crit_tag}.\r\n{tail}"
+        ),
     );
     let attacker_name_cap = crate::commands::cap_sentence_start(&s.attacker_name);
     let attacker_to_target = crate::commands::cap_sentence_start(&crate::commands::seen_name(
@@ -7916,6 +8002,127 @@ end
         assert_eq!(hitroll_now(&mut world, attacker), 20);
         crate::commands::reverse_modify_delta(&mut world, attacker, "weapon_hitroll", 20);
         assert_eq!(hitroll_now(&mut world, attacker), 0);
+    }
+
+    fn resistant_to(world: &mut World, target: Entity, element: mud_db::enums::ElementType) {
+        world.entity_mut(target).insert(mud_world::Resistances(
+            [(element, 100)].into_iter().collect(),
+        ));
+    }
+
+    #[test]
+    fn weapon_element_reads_only_elemental_damage_types() {
+        use mud_db::enums::DamageType as D;
+        assert_eq!(weapon_element("FIRE"), Some(D::Fire));
+        assert_eq!(weapon_element("Cold"), Some(D::Cold));
+        assert_eq!(weapon_element("acid"), Some(D::Acid));
+        assert_eq!(weapon_element("SHOCK"), Some(D::Shock));
+        assert_eq!(weapon_element("POISON"), Some(D::Poison));
+        assert_eq!(weapon_element("ALIGN"), Some(D::Align));
+        assert_eq!(weapon_element("PIERCE"), None);
+        assert_eq!(weapon_element("CRUSH"), None);
+    }
+
+    #[test]
+    fn elemental_weapon_is_checked_against_its_element_not_physical() {
+        use mud_db::enums::ElementType as E;
+        // 1d1+9 = 10 per round, fire staff.
+        let (mut world, attacker, target) = duel();
+        wield(&mut world, attacker, 9, Some("FIRE"));
+        resistant_to(&mut world, target, E::Fire);
+        assert_eq!(damage_of_one_round(&mut world, attacker, target), 0);
+
+        // Physical immunity does not stop a fire weapon.
+        let (mut world, attacker, target) = duel();
+        wield(&mut world, attacker, 9, Some("FIRE"));
+        resistant_to(&mut world, target, E::Physical);
+        assert_eq!(damage_of_one_round(&mut world, attacker, target), 10);
+
+        // And a physical weapon ignores fire immunity.
+        let (mut world, attacker, target) = duel();
+        wield(&mut world, attacker, 9, Some("SLASH"));
+        resistant_to(&mut world, target, E::Fire);
+        assert_eq!(damage_of_one_round(&mut world, attacker, target), 10);
+        let (mut world, attacker, target) = duel();
+        wield(&mut world, attacker, 9, Some("SLASH"));
+        resistant_to(&mut world, target, E::Physical);
+        assert_eq!(damage_of_one_round(&mut world, attacker, target), 0);
+    }
+
+    #[test]
+    fn each_weapon_element_maps_to_its_resistance() {
+        use mud_db::enums::{DamageType as D, ElementType as E};
+        for (dmg, name, element) in [
+            (D::Fire, "FIRE", E::Fire),
+            (D::Cold, "COLD", E::Cold),
+            (D::Acid, "ACID", E::Acid),
+            (D::Shock, "SHOCK", E::Shock),
+            (D::Poison, "POISON", E::Poison),
+            (D::Align, "ALIGN", E::Radiant),
+        ] {
+            assert_eq!(weapon_element_resistance(dmg), element);
+            let (mut world, attacker, target) = duel();
+            wield(&mut world, attacker, 9, Some(name));
+            resistant_to(&mut world, target, element);
+            assert_eq!(
+                damage_of_one_round(&mut world, attacker, target),
+                0,
+                "{name}"
+            );
+        }
+    }
+
+    /// Output a player wielding a `damage_type` weapon and the player it
+    /// hits are sent for one swing, as `(attacker, target)`.
+    fn swing_messages(damage_type: &str) -> (String, String) {
+        let (mut world, attacker, target) = duel();
+        wield(&mut world, attacker, 9, Some(damage_type));
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+        let (ttx, mut trx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+        world
+            .entity_mut(attacker)
+            .insert((Player, crate::commands::Connection(tx)));
+        world
+            .entity_mut(target)
+            .insert((Player, crate::commands::Connection(ttx)));
+        let _ = damage_of_one_round(&mut world, attacker, target);
+        let drain = |rx: &mut tokio::sync::mpsc::Receiver<Vec<u8>>| {
+            let mut out = String::new();
+            while let Ok(bytes) = rx.try_recv() {
+                out.push_str(&String::from_utf8_lossy(&bytes));
+            }
+            out
+        };
+        (drain(&mut rx), drain(&mut trx))
+    }
+
+    #[test]
+    fn elemental_weapon_swings_use_element_verbs() {
+        for (damage_type, you, it) in [
+            ("FIRE", "burn", "burns"),
+            ("COLD", "freeze", "freezes"),
+            ("ACID", "corrode", "corrodes"),
+            ("SHOCK", "shock", "shocks"),
+            ("POISON", "poison", "poisons"),
+            ("ALIGN", "rebuke", "rebukes"),
+        ] {
+            let (mine, theirs) = swing_messages(damage_type);
+            assert!(
+                mine.contains(you) && !mine.contains("You hit"),
+                "{damage_type}: {mine}"
+            );
+            assert!(
+                theirs.contains(it) && !theirs.contains(" hits you"),
+                "{damage_type}: {theirs}"
+            );
+        }
+    }
+
+    #[test]
+    fn physical_weapon_swings_keep_the_plain_verb() {
+        let (mine, theirs) = swing_messages("PIERCE");
+        assert!(mine.contains("You hit"), "{mine}");
+        assert!(theirs.contains("hits you"), "{theirs}");
     }
 
     /// Pin the d100 hit roll to `roll`, run one combat tick, report whether
