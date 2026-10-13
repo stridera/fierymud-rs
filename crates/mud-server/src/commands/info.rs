@@ -15691,6 +15691,25 @@ pub(crate) fn cmd_decline(world: &mut World, player: Entity, _args: &str) {
     }
 }
 
+/// The `group` roster's "L25 Warrior" cell: level, then the class's plain
+/// name when it has one. Empty for a member with no `Profile`.
+fn group_level_class(world: &World, member: Entity) -> String {
+    let Some(prof) = world.get::<Profile>(member) else {
+        return String::new();
+    };
+    let class = prof.class_id.and_then(|cid| {
+        world
+            .get_resource::<ClassCatalog>()?
+            .by_id
+            .get(&cid)
+            .map(|c| c.plain_name.clone())
+    });
+    match class {
+        Some(c) => format!("L{} {c}", prof.level),
+        None => format!("L{}", prof.level),
+    }
+}
+
 /// `group` (no args): list the player's current group — everyone
 /// transitively connected via `Follower` chains rooted at the
 /// chain's top. The leader is shown first, followed by members
@@ -15739,6 +15758,10 @@ pub(crate) fn cmd_group(world: &mut World, player: Entity, args: &str) {
         let role_text = format!("{role_open}{role_inner}</>");
         let name_padded = format!("{name:<20}");
         let name_text = format!("<cyan>{name_padded}</>");
+        // Level and class, compactly ("L25 Warrior"); a pet or mount with no
+        // profile leaves the column blank.
+        let who_inner = group_level_class(world, *m);
+        let who_text = format!("{who_inner:<16}");
         let hp_inner = world
             .get::<Health>(*m)
             .map_or(String::new(), |h| format!("HP {}/{}", h.hp, h.max));
@@ -15762,7 +15785,7 @@ pub(crate) fn cmd_group(world: &mut World, player: Entity, args: &str) {
             _ => "<dim>elsewhere</>",
         };
         out.push_str(&format!(
-            "  {role_text} {name_text} {hp_text} {mv_text} ({here_text})\r\n"
+            "  {role_text} {name_text} {who_text} {hp_text} {mv_text} ({here_text})\r\n"
         ));
     }
     send_to(world, player, out);

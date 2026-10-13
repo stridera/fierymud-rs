@@ -326,6 +326,41 @@ fn group_roster_shows_movement() {
     assert!(out.contains("MV 12/44"), "{out}");
 }
 
+/// Issue #146: the roster also names each member's level and class,
+/// compactly; a pet with no profile leaves that cell blank.
+#[test]
+fn group_roster_shows_level_and_class() {
+    let mut world = world();
+    world
+        .resource_mut::<ClassCatalog>()
+        .by_id
+        .insert(3, class(3, "Warrior", 1.0));
+    let room = world.spawn_empty().id();
+    let (leader, mut lrx) = player(&mut world, "Boss", 105, Some(3));
+    let (mate, _m) = player(&mut world, "Mate", 7, None);
+    world.entity_mut(leader).insert((
+        Located(room),
+        Health { hp: 90, max: 100 },
+        mud_world::Stamina {
+            current: 33,
+            max: 60,
+        },
+    ));
+    world.entity_mut(mate).insert((
+        GroupMember(leader),
+        Located(room),
+        Health { hp: 50, max: 50 },
+    ));
+    dispatch(&mut world, leader, "group");
+    let out = plain(&drain(&mut lrx));
+    let boss = out.lines().find(|l| l.contains("Boss")).expect(&out);
+    assert!(boss.contains("L105 Warrior"), "{out}");
+    assert!(boss.contains("HP 90/100"), "{out}");
+    let mate = out.lines().find(|l| l.contains("Mate")).expect(&out);
+    assert!(mate.contains("L7 "), "{out}");
+    assert!(!mate.contains("Warrior"), "{out}");
+}
+
 /// A mount or pet in the group carries `MovementPoints`, not `Stamina`;
 /// the roster reads it like `report` does.
 #[test]
