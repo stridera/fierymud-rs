@@ -7522,6 +7522,109 @@ pub(crate) fn cmd_trophy(world: &mut World, player: Entity, args: &str) {
     crate::commands::send_rendered(world, player, &out);
 }
 
+/// One row of the legacy `mount_types` table (`act.other.cpp`), best tier
+/// last. Hard-coded scaffolding until mount tiers are builder-editable data.
+struct MountTier {
+    min_level: i32,
+    min_align: i32,
+    hp_bonus: i32,
+    mv_bonus: i32,
+    paladin: (i32, i32),
+    anti: (i32, i32),
+}
+
+/// gelding/mare, rouncy/destrier, warhorse/nightmare, courser/shadowmare.
+const MOUNT_TIERS: [MountTier; 4] = [
+    MountTier {
+        min_level: 0,
+        min_align: 0,
+        hp_bonus: 0,
+        mv_bonus: 0,
+        paladin: (0, 48),
+        anti: (0, 47),
+    },
+    MountTier {
+        min_level: 30,
+        min_align: 700,
+        hp_bonus: 0,
+        mv_bonus: 0,
+        paladin: (0, 49),
+        anti: (0, 50),
+    },
+    MountTier {
+        min_level: 60,
+        min_align: 900,
+        hp_bonus: 50,
+        mv_bonus: 50,
+        paladin: (0, 45),
+        anti: (0, 46),
+    },
+    MountTier {
+        min_level: 90,
+        min_align: 1000,
+        hp_bonus: 100,
+        mv_bonus: 100,
+        paladin: (0, 51),
+        anti: (0, 52),
+    },
+];
+
+/// Which mount, and the base pools `cmd_summonmount` rolls around.
+#[derive(Debug, PartialEq, Eq)]
+struct SummonMountPlan {
+    proto: (i32, i32),
+    /// Added to a 50..=100 roll for the mount's max HP.
+    base_hp: i32,
+    /// Added to a 0..=50 roll for the mount's max movement.
+    base_mv: i32,
+}
+
+/// Anti-Paladin class names carry colour markup (`<b:red>Anti-</>...`), so
+/// compare the plain text.
+fn summon_mount_is_anti(class_name: &str) -> bool {
+    let mut plain = String::new();
+    let mut in_tag = false;
+    for c in class_name.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => plain.push(c),
+            _ => {}
+        }
+    }
+    plain.to_ascii_lowercase().contains("anti")
+}
+
+/// Legacy `do_summon_mount`: the highest tier whose level and alignment
+/// floors the summoner meets; HP is `hp_bonus + 2 * level`, movement
+/// `mv_bonus + align/2 - 100` for a Paladin and `mv_bonus + 150 - align/4`
+/// for an Anti-Paladin.
+fn summon_mount_plan(anti: bool, level: i32, alignment: i32) -> SummonMountPlan {
+    let mut tier = &MOUNT_TIERS[0];
+    for t in &MOUNT_TIERS[1..] {
+        let aligned = if anti {
+            -t.min_align >= alignment
+        } else {
+            t.min_align <= alignment
+        };
+        if t.min_level <= level && aligned {
+            tier = t;
+        } else {
+            break;
+        }
+    }
+    let (proto, base_mv) = if anti {
+        (tier.anti, tier.mv_bonus + 150 - alignment / 4)
+    } else {
+        (tier.paladin, tier.mv_bonus + alignment / 2 - 100)
+    };
+    SummonMountPlan {
+        proto,
+        base_hp: tier.hp_bonus + 2 * level,
+        base_mv,
+    }
+}
+
 pub(crate) fn cmd_summonmount(world: &mut World, player: Entity, _args: &str) {
     if world.get::<Fighting>(player).is_some() {
         send_to(
@@ -7578,30 +7681,33 @@ pub(crate) fn cmd_summonmount(world: &mut World, player: Entity, _args: &str) {
         return;
     }
 
-    // Pick a proto: the first MobProto whose keywords match the
-    // basic horse/steed heuristic. Future polish: scale by level
-    // / alignment per the legacy mount_types table.
-    let candidate: Option<(i32, i32)> = {
-        let protos = world.resource::<MobPrototypes>();
-        protos
-            .by_key
-            .iter()
-            .find(|(_, p)| {
-                p.keywords.iter().any(|k| {
-                    let lc = k.to_ascii_lowercase();
-                    lc.contains("horse") || lc.contains("steed") || lc.contains("mount")
-                })
-            })
-            .map(|((z, id), _)| (*z, *id))
-    };
-    let Some((zone, id)) = candidate else {
+    // Mount tier by level and alignment, per the legacy `mount_types` table.
+    let class_name = world
+        .get::<Profile>(player)
+        .and_then(|p| p.class_id)
+        .and_then(|id| {
+            world
+                .get_resource::<mud_world::ClassCatalog>()
+                .and_then(|c| c.by_id.get(&id).map(|d| d.name.clone()))
+        })
+        .unwrap_or_default();
+    let anti = summon_mount_is_anti(&class_name);
+    let level = world.get::<Profile>(player).map_or(0, |p| p.level);
+    let alignment = world.get::<CombatStats>(player).map_or(0, |s| s.alignment);
+    let plan = summon_mount_plan(anti, level, alignment);
+    let (zone, id) = plan.proto;
+    if !world
+        .resource::<MobPrototypes>()
+        .by_key
+        .contains_key(&(zone, id))
+    {
         send_to(
             world,
             player,
             "No mount could be found in the world. Tell a god.\r\n",
         );
         return;
-    };
+    }
     // Reuse the MCP/admin spawn flow indirectly: build a minimal
     // mob entity from the proto. We deliberately skip MobResets
     // bookkeeping (no FromMobReset) so the respawn tick won't
@@ -7620,6 +7726,18 @@ pub(crate) fn cmd_summonmount(world: &mut World, player: Entity, _args: &str) {
             Posture(PostureKind::Standing),
             mud_world::Mountable,
             Follower(player),
+        ));
+        // Summoned mounts carry their own pools (legacy `summon_mount`):
+        // HP and movement come from the tier, the rider's level and their
+        // alignment, not from the prototype.
+        let hp = (plan.base_hp + rand::random_range(50..=100)).max(10);
+        let mv = (plan.base_mv + rand::random_range(0..=50)).max(10);
+        em.insert((
+            Health { hp, max: hp },
+            mud_world::MovementPoints {
+                current: mv,
+                max: mv,
+            },
         ));
     }
     let mount_name = name_of(world, mount_entity);
@@ -18595,5 +18713,44 @@ mod r2_playtest_tests {
         assert!(out.contains("Uptime"), "{out}");
         assert!(!out.contains("World tick"), "{out}");
         assert!(!out.contains("1234"), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod summon_mount_plan_tests {
+    use super::{summon_mount_is_anti, summon_mount_plan};
+
+    #[test]
+    fn paladin_tier_follows_level_and_alignment() {
+        // Level 15, plain mare/gelding tier.
+        let p = summon_mount_plan(false, 15, 500);
+        assert_eq!(p.proto, (0, 48));
+        assert_eq!(p.base_hp, 30);
+        assert_eq!(p.base_mv, 500 / 2 - 100);
+        // Level met but alignment short of 700: still tier 1.
+        assert_eq!(summon_mount_plan(false, 40, 600).proto, (0, 48));
+        assert_eq!(summon_mount_plan(false, 40, 700).proto, (0, 49));
+        // Warhorse carries the +50/+50 bonuses.
+        let w = summon_mount_plan(false, 60, 900);
+        assert_eq!(w.proto, (0, 45));
+        assert_eq!((w.base_hp, w.base_mv), (50 + 120, 50 + 450 - 100));
+        assert_eq!(summon_mount_plan(false, 100, 1000).proto, (0, 51));
+    }
+
+    #[test]
+    fn anti_paladin_uses_negative_alignment() {
+        let p = summon_mount_plan(true, 15, -1000);
+        assert_eq!(p.proto, (0, 47));
+        assert_eq!(p.base_mv, 150 + 250);
+        assert_eq!(summon_mount_plan(true, 40, -700).proto, (0, 50));
+        assert_eq!(summon_mount_plan(true, 40, -699).proto, (0, 47));
+        assert_eq!(summon_mount_plan(true, 100, -1000).proto, (0, 52));
+    }
+
+    #[test]
+    fn anti_class_name_ignores_markup() {
+        assert!(summon_mount_is_anti("<b:red>Anti-</><b:black>Paladin</>"));
+        assert!(summon_mount_is_anti("Anti-Paladin"));
+        assert!(!summon_mount_is_anti("Paladin"));
     }
 }
