@@ -151,6 +151,44 @@ impl Fx {
     }
 }
 
+/// Everything a receiver got, as raw bytes (text and GMCP frames alike).
+fn raw(rx: &mut Rx) -> Vec<u8> {
+    let mut out = Vec::new();
+    while let Ok(bytes) = rx.try_recv() {
+        out.extend_from_slice(&bytes);
+    }
+    out
+}
+
+/// True when `bytes` carry a `Comm.Channel.Text` GMCP frame.
+fn has_say_gmcp(bytes: &[u8]) -> bool {
+    String::from_utf8_lossy(bytes).contains("Comm.Channel.Text {\"channel\":\"say\"")
+}
+
+/// The text part of `bytes`, with telnet subnegotiation (GMCP) frames
+/// (`IAC SB .. IAC SE`) and ANSI colour codes removed.
+fn visible(bytes: &[u8]) -> String {
+    let mut text = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(&[0xFF, 0xFA]) {
+            while i < bytes.len() && !bytes[i..].starts_with(&[0xFF, 0xF0]) {
+                i += 1;
+            }
+            i += 2;
+        } else if bytes[i] == 0x1B {
+            while i < bytes.len() && bytes[i] != b'm' {
+                i += 1;
+            }
+            i += 1;
+        } else {
+            text.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&text).into_owned()
+}
+
 /// A roller that returns the given values in order (clamped into range).
 fn rolls(values: &[i32]) -> impl FnMut(i32) -> i32 + '_ {
     let mut it = values.iter().copied();
@@ -192,8 +230,9 @@ fn a_cast_makes_the_room_hear_the_target_and_tells_the_caster_nothing() {
     let (_, mut cara) = fx.player("Cara", 1, 0);
     let out = fx.cast("'ventriloquate' bob hello there");
     assert_eq!(out, "", "the caster sees nothing: {out:?}");
-    let heard = drain(&mut cara);
-    assert_eq!(heard, "Bob says, 'hello there'\r\n");
+    let heard = raw(&mut cara);
+    assert!(has_say_gmcp(&heard), "fooled listener gets the say frame");
+    assert_eq!(visible(&heard), "Bob says, \"hello there\"\r\n");
 }
 
 #[test]
@@ -289,7 +328,7 @@ fn failing_both_rolls_believes_it() {
         Some("boo"),
         &mut rolls(&[70, 22]),
     );
-    assert_eq!(drain(&mut cara), "Bob says, 'boo'\r\n");
+    assert_eq!(visible(&raw(&mut cara)), "Bob says, \"boo\"\r\n");
 }
 
 #[test]
@@ -317,7 +356,7 @@ fn each_listener_rolls_for_themselves() {
     // The roll value is 60 for both: it beats Cara's 70, never Dana's 1.
     speak_as(&mut fx.world, caster, bob, 80, Some("hm"), &mut |_| 60);
     assert!(drain(&mut sharp).starts_with("Someone tried"));
-    assert_eq!(drain(&mut dull), "Bob says, 'hm'\r\n");
+    assert_eq!(visible(&raw(&mut dull)), "Bob says, \"hm\"\r\n");
 }
 
 #[test]
@@ -328,7 +367,7 @@ fn a_blind_listener_cannot_name_the_speaker_but_hears_the_words() {
     fx.world.entity_mut(cara).insert(mud_world::Blinded);
     let caster = fx.caster;
     speak_as(&mut fx.world, caster, bob, 80, Some("hi"), &mut |max| max);
-    assert_eq!(drain(&mut crx), "Someone says, 'hi'\r\n");
+    assert_eq!(visible(&raw(&mut crx)), "Someone says, \"hi\"\r\n");
 }
 
 #[test]
@@ -410,8 +449,67 @@ fn the_cast_is_announced_to_nobody_but_equal_or_higher_staff() {
     }
     let out = drain(&mut fx.rx);
     assert!(!out.contains("You complete"), "{out}");
-    assert_eq!(drain(&mut cara), "Bob says, 'hello'\r\n");
+    assert_eq!(visible(&raw(&mut cara)), "Bob says, \"hello\"\r\n");
     let god_out = drain(&mut grx);
     assert!(!god_out.contains("completes"), "{god_out}");
     assert!(!god_out.contains("utters"), "{god_out}");
+}
+
+/// Cara (level 1, wisdom 0) in a fresh world watching Bob say "boo": a real
+/// say by the player Bob, or Cara fooled by a ventriloquated mob Bob. Returns
+/// every byte Cara received.
+fn cara_hears(forged: bool) -> Vec<u8> {
+    let mut fx = fx(true, 0);
+    let (_, mut cara) = fx.player("Cara", 1, 0);
+    if forged {
+        fx.mob("Bob");
+        let caster = fx.caster;
+        let bob = fx
+            .world
+            .query_filtered::<(Entity, &Named), With<Mob>>()
+            .iter(&fx.world)
+            .map(|(e, _)| e)
+            .next()
+            .unwrap();
+        speak_as(&mut fx.world, caster, bob, 80, Some("boo"), &mut |max| max);
+    } else {
+        let (bob, _bob_rx) = fx.player("Bob", 1, 0);
+        crate::commands::room_chat::cmd_say(&mut fx.world, bob, "boo");
+    }
+    raw(&mut cara)
+}
+
+#[test]
+fn a_fooled_listener_gets_exactly_what_a_real_say_gives() {
+    let real = cara_hears(false);
+    let forged = cara_hears(true);
+    assert!(has_say_gmcp(&real), "{:?}", String::from_utf8_lossy(&real));
+    assert_eq!(forged, real, "text and GMCP bytes match a real say");
+}
+
+#[test]
+fn only_fooled_listeners_get_the_say_frame() {
+    let mut fx = fx(true, 0);
+    let bob = fx.mob("Bob");
+    let (_, mut fooled) = fx.player("Cara", 1, 0);
+    let (_, mut sharp) = fx.player("Dana", 50, 40);
+    let (_, mut spotter) = fx.player("Eve", 50, 40);
+    let caster = fx.caster;
+    // Roll 60 (< 70) sees through for Dana and Eve, never for Cara.
+    speak_as(&mut fx.world, caster, bob, 80, Some("hm"), &mut |_| 60);
+    assert!(has_say_gmcp(&raw(&mut fooled)));
+    assert!(!has_say_gmcp(&raw(&mut sharp)));
+    assert!(!has_say_gmcp(&raw(&mut spotter)));
+    let mut n = 0;
+    speak_as(&mut fx.world, caster, bob, 80, Some("hm"), &mut |_| {
+        n += 1;
+        // Each listener rolls twice: 70 (not seen through), then 21 (spotted).
+        if n % 2 == 1 { 70 } else { 21 }
+    });
+    assert!(has_say_gmcp(&raw(&mut fooled)));
+    for rx in [&mut sharp, &mut spotter] {
+        let out = raw(rx);
+        assert!(!has_say_gmcp(&out));
+        assert!(visible(&out).contains("tries to make it sound like Bob says,"));
+    }
 }

@@ -15,7 +15,8 @@
 //!   sees through it: "Someone tried to make it sound like Bob said, '...'!";
 //! * failing that, `1..=8*(skill+24) < (level + wis)/4` also spots the
 //!   caster: "Cara tries to make it sound like Bob says, '...'!";
-//! * otherwise they just hear "Bob says, '...'".
+//! * otherwise they hear exactly what a real `say` from Bob would show them,
+//!   coloured line and `say` Comm.Channel GMCP frame included.
 
 use bevy_ecs::prelude::*;
 use mud_world::{AbilityDef, CoreStats, EffectCatalog, Player, Posture, PostureKind};
@@ -155,7 +156,11 @@ pub(crate) fn speak_as(
             Heard::CasterSpotted => format!(
                 "{caster_seen} tries to make it sound like {victim_seen} says, '{msg}'!\r\n"
             ),
-            Heard::Fooled => format!("{victim_seen} says, '{msg}'\r\n"),
+            Heard::Fooled => {
+                // Exactly what a real say from the victim looks like, GMCP included.
+                super::room_chat::hear_say(world, listener, victim, &victim_name, msg);
+                continue;
+            }
         };
         send_msg(world, listener, line);
     }

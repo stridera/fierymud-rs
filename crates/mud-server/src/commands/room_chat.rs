@@ -162,7 +162,30 @@ fn shown_name(world: &World, observer: Entity, actor: Entity, name: &str) -> Str
     }
 }
 
-fn cmd_say(world: &mut World, player: Entity, message: &str) {
+/// What `listener` sees and gets over GMCP when `speaker` (named
+/// `speaker_name`) says `message` in their room: the coloured "says" line and
+/// the `say` Comm.Channel frame. Listeners who can't see the speaker hear
+/// "Someone". Shared by `say` and Ventriloquate's fooled listeners so a
+/// forged say is byte-identical to a real one.
+pub(super) fn hear_say(
+    world: &World,
+    listener: Entity,
+    speaker: Entity,
+    speaker_name: &str,
+    message: &str,
+) {
+    let shown = shown_name(world, listener, speaker, speaker_name);
+    // Say/says verb framed in green (room-local speech reads
+    // friendly / open vs the louder yellow/red wide channels).
+    // Speaker name emphasized so the eye lands on who's
+    // talking; message body inherits authored color.
+    let line = format!("<b:green>{shown}</> <green>says,</> \"{message}\"\r\n");
+    send_rendered(world, listener, &line);
+    let gmcp_text = format!("{shown} says, \"{message}\"");
+    send_comm_channel_text(world, listener, "say", &shown, &gmcp_text);
+}
+
+pub(super) fn cmd_say(world: &mut World, player: Entity, message: &str) {
     let message = message.trim();
     if message.is_empty() {
         send_to(world, player, "Say what?\r\n");
@@ -189,21 +212,17 @@ fn cmd_say(world: &mut World, player: Entity, message: &str) {
     };
     let norepeat = has_flag(world, player, PlayerFlag::NoRepeat);
     for target in targets {
-        // Listeners who can't see the speaker hear "Someone".
-        let speaker = shown_name(world, target, player, &speaker);
-        let gmcp_text = format!("{speaker} says, \"{message}\"");
-        // Say/says verb framed in green (room-local speech reads
-        // friendly / open vs the louder yellow/red wide channels).
-        // Speaker name emphasized so the eye lands on who's
-        // talking; message body inherits authored color.
-        let line = if target == player && norepeat {
+        if target != player {
+            hear_say(world, target, player, &speaker, message);
+            continue;
+        }
+        let line = if norepeat {
             "Ok.\r\n".to_string()
-        } else if target == player {
-            format!("<green>You say,</> \"{message}\"\r\n")
         } else {
-            format!("<b:green>{speaker}</> <green>says,</> \"{message}\"\r\n")
+            format!("<green>You say,</> \"{message}\"\r\n")
         };
         send_rendered(world, target, &line);
+        let gmcp_text = format!("{speaker} says, \"{message}\"");
         send_comm_channel_text(world, target, "say", &speaker, &gmcp_text);
     }
     crate::triggers::fire_speech_in_room(world, player, located.0, message);
