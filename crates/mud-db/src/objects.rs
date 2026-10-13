@@ -35,6 +35,12 @@ pub struct Object {
     /// Weapon damage type (SLASH / PIERCE / CRUSH / etc.). `None`
     /// for non-weapons or weapons without an authored damage type.
     pub weapon_damage_type: Option<DamageType>,
+    /// Element the weapon deals (fire / cold / acid / shock / poison / align),
+    /// `Objects.weapon_element`. Separate from `weapon_damage_type`, which keeps the
+    /// physical type that picks the weapon family and proficiency. `None` for
+    /// physical weapons, and for every row when the column does not exist yet
+    /// (see [`list_objects_without_weapon_element`]).
+    pub weapon_element: Option<DamageType>,
     /// Alignments that CANNOT use this item. Empty for
     /// unrestricted gear. Mirrors `Objects.restricted_alignments`.
     pub restricted_alignments: Vec<Alignment>,
@@ -114,6 +120,55 @@ pub async fn list_objects(pool: &PgPool) -> sqlx::Result<Vec<Object>> {
             weapon_dice_size,
             weapon_dice_bonus,
             weapon_damage_type AS "weapon_damage_type: DamageType",
+            weapon_element AS "weapon_element: DamageType",
+            restricted_alignments AS "restricted_alignments!: Vec<Alignment>",
+            restricted_class_ids AS "restricted_class_ids!: Vec<i32>",
+            restricted_races::text[] AS "restricted_races!: Vec<String>",
+            flags AS "flags!: Vec<ObjectFlag>",
+            restrictions AS "restrictions!: Vec<ObjectRestriction>",
+            timer,
+            decompose_timer,
+            allowed_races::text[] AS "allowed_races!: Vec<String>",
+            min_size::text AS "min_size?: String",
+            max_size::text AS "max_size?: String",
+            camp_kit_tier,
+            concealment
+        FROM "Objects"
+        ORDER BY zone_id, id
+        "#
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// [`list_objects`] for a database that predates `Objects.weapon_element`
+/// (`fierylib/data/sql/2026-10-13-object-effect-mapping.sql` adds it): every
+/// row's `weapon_element` comes back `None`, so an elemental `weapon_damage_type`
+/// is read as the element. Only the loader's missing-column (42703) fallback
+/// should call this.
+pub async fn list_objects_without_weapon_element(pool: &PgPool) -> sqlx::Result<Vec<Object>> {
+    sqlx::query_as!(
+        Object,
+        r#"
+        SELECT
+            zone_id,
+            id,
+            type AS "type: ObjectType",
+            name,
+            keywords AS "keywords!: Vec<String>",
+            room_description,
+            examine_description,
+            level,
+            weight,
+            cost,
+            "wearFlags" AS "wear_flags!: Vec<WearFlag>",
+            values AS "values!: serde_json::Value",
+            armor_pct,
+            weapon_dice_num,
+            weapon_dice_size,
+            weapon_dice_bonus,
+            weapon_damage_type AS "weapon_damage_type: DamageType",
+            NULL::"DamageType" AS "weapon_element: DamageType",
             restricted_alignments AS "restricted_alignments!: Vec<Alignment>",
             restricted_class_ids AS "restricted_class_ids!: Vec<i32>",
             restricted_races::text[] AS "restricted_races!: Vec<String>",

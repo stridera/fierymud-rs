@@ -1560,6 +1560,91 @@ async fn liquid_queries_degrade_when_the_legacy_columns_are_missing() {
     assert_eq!(rows[0].legacy_index, None);
 }
 
+/// An `"Objects"` table that predates `weapon_element` fails the full query with Postgres
+/// 42703 (`undefined_column`, what the loader's fallback keys on); the fallback query still
+/// reads the weapon with `weapon_element = None`, and a table that has the column returns it.
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn object_queries_degrade_when_weapon_element_is_missing() {
+    let _ = dotenvy::from_path("../../.env");
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    // One connection so the scratch `search_path` sticks to every query. The scratch schema
+    // is a copy of the live table (structure only), so it carries every other column.
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .expect("connect");
+    let schema = format!("scratch_objects_{}", std::process::id());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&pool)
+        .await
+        .expect("create schema");
+    let result: sqlx::Result<_> = async {
+        // The enums stay in `public`; the copied table keeps resolving them there.
+        sqlx::query(&format!(
+            r#"CREATE TABLE {schema}."Objects" (LIKE public."Objects" INCLUDING DEFAULTS)"#
+        ))
+        .execute(&pool)
+        .await?;
+        sqlx::query(&format!("SET search_path = {schema}, public"))
+            .execute(&pool)
+            .await?;
+        // Borrow one live weapon row (every array column filled), typed PIERCE / COLD.
+        sqlx::query(&format!(
+            r#"INSERT INTO {schema}."Objects" SELECT * FROM public."Objects" WHERE type = 'WEAPON' LIMIT 1"#
+        ))
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            r#"UPDATE "Objects" SET weapon_damage_type = 'PIERCE', weapon_element = 'COLD'"#,
+        )
+        .execute(&pool)
+        .await?;
+        let with_column = mud_db::objects::list_objects(&pool).await;
+        sqlx::query(r#"ALTER TABLE "Objects" DROP COLUMN weapon_element"#)
+            .execute(&pool)
+            .await?;
+        let full = mud_db::objects::list_objects(&pool).await;
+        let fallback = mud_db::objects::list_objects_without_weapon_element(&pool).await;
+        Ok((with_column, full, fallback))
+    }
+    .await;
+    sqlx::query("SET search_path = public")
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&pool)
+        .await
+        .ok();
+    let (with_column, full, fallback) = result.expect("scratch setup");
+    let rows = with_column.expect("query with the column");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].weapon_damage_type,
+        Some(mud_db::enums::DamageType::Pierce)
+    );
+    assert_eq!(
+        rows[0].weapon_element,
+        Some(mud_db::enums::DamageType::Cold)
+    );
+    let err = full.expect_err("full query must fail without the column");
+    assert_eq!(
+        err.as_database_error()
+            .and_then(sqlx::error::DatabaseError::code)
+            .as_deref(),
+        Some("42703")
+    );
+    let rows = fallback.expect("fallback query");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].weapon_damage_type,
+        Some(mud_db::enums::DamageType::Pierce)
+    );
+    assert_eq!(rows[0].weapon_element, None);
+}
+
 #[tokio::test]
 #[ignore = "requires live fierydev DB"]
 async fn sphere_styles_hold_the_default_palette() {

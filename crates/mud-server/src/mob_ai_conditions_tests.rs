@@ -797,3 +797,29 @@ fn a_buff_the_mob_already_wears_is_not_cast_again() {
     ));
     assert!(!fires(&mut f, 1));
 }
+
+/// The dagger of ice (PIERCE type, COLD element) still counts as a piercing weapon:
+/// the AI condition reads the physical type, not the element.
+#[test]
+fn requires_weapon_type_ignores_the_weapon_element() {
+    let r = with_conditions(
+        rule(KICK, AiKind::Skill, AiTarget::Auto),
+        vec![AiCondition::RequiresWeaponType("piercing".into())],
+    );
+    let mut f = fixture(vec![r]);
+    equip(
+        &mut f.world,
+        f.mob,
+        3,
+        Slot::Wield,
+        ObjectType::Weapon,
+        Some("Pierce"),
+    );
+    f.world
+        .resource_mut::<ObjectPrototypes>()
+        .by_key
+        .get_mut(&(1, 3))
+        .expect("wielded proto")
+        .weapon_element = Some("COLD".into());
+    assert!(fires(&mut f, 1));
+}

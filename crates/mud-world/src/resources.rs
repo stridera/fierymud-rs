@@ -1139,6 +1139,11 @@ pub struct ObjectProto {
     /// from `Objects.weapon_damage_type` typed column. `None` for
     /// non-weapons or weapons without an authored type.
     pub weapon_damage_type: Option<String>,
+    /// Element label (`FIRE` / `COLD` / ...) from `Objects.weapon_element`: what the
+    /// weapon deals (resistance check, swing verb), separate from the physical
+    /// `weapon_damage_type` that drives the weapon family. `None` for physical
+    /// weapons and on a database without the column.
+    pub weapon_element: Option<String>,
     /// Armor mitigation percent (already pre-scaled at fierylib
     /// import time via legacy `Objects.values.AC` × 2). Read
     /// directly from the typed `Objects.armor_pct` column.

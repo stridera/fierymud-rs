@@ -127,11 +127,13 @@ pub(crate) fn render_object_stat(
             std::cmp::Ordering::Equal => String::new(),
             _ => signed(p.weapon_dice_bonus),
         };
-        let dtype = p
-            .weapon_damage_type
-            .as_deref()
-            .map(|t| format!(" ({t})"))
-            .unwrap_or_default();
+        // Physical type (weapon family), then the element it deals when that differs.
+        let dtype = match (p.weapon_damage_type.as_deref(), p.weapon_element.as_deref()) {
+            (Some(t), Some(e)) if !t.eq_ignore_ascii_case(e) => format!(" ({t}, deals {e})"),
+            (Some(t), _) => format!(" ({t})"),
+            (None, Some(e)) => format!(" (deals {e})"),
+            (None, None) => String::new(),
+        };
         // A curse spell shrinks the die on this instance only.
         let adjust = item
             .and_then(|e| world.get::<WeaponDiceSizeAdjust>(e))

@@ -175,6 +175,25 @@ async fn load_class_rows(pool: &PgPool) -> sqlx::Result<Vec<classes::ClassRow>> 
     })
 }
 
+/// `Objects` rows. `Objects.weapon_element` comes from the muditor schema plus
+/// `2026-10-13-object-effect-mapping.sql`; when it is missing (42703) retry without it
+/// (an elemental `weapon_damage_type` is then read as the element, as before the column
+/// existed) and log an ERROR, rather than aborting the whole world load.
+async fn load_object_rows(pool: &PgPool) -> sqlx::Result<Vec<objects::Object>> {
+    let res = objects::list_objects(pool).await;
+    if res.as_ref().err().is_some_and(is_missing_column) {
+        let rows = objects::list_objects_without_weapon_element(pool).await?;
+        error!(
+            "column \"Objects\".\"weapon_element\" is missing; elemental weapons are read from \
+             an elemental weapon_damage_type (the physical type of e.g. the dagger of ice is \
+             unavailable, so it loses its piercing family) until the muditor schema is pushed \
+             (prisma db push) and fierylib/data/sql/2026-10-13-object-effect-mapping.sql is applied"
+        );
+        return Ok(rows);
+    }
+    res
+}
+
 /// `Liquids` rows. `legacy_index` / `legacy_code` come from the muditor schema plus
 /// `2026-10-12-liquid-index.sql`; when they are missing (42703) retry without them
 /// (scripts then number the legacy liquids from the built-in table) and log an ERROR,
@@ -2130,7 +2149,7 @@ pub async fn load_mob_prototypes(pool: &PgPool) -> sqlx::Result<MobPrototypes> {
 /// reload admin paths.
 #[allow(clippy::too_many_lines)]
 pub async fn load_object_prototypes(pool: &PgPool) -> sqlx::Result<ObjectPrototypes> {
-    let object_rows = objects::list_objects(pool).await?;
+    let object_rows = load_object_rows(pool).await?;
     // Extras are loaded once and bucketed by (zone_id, object_id)
     // so each proto can claim its rows in O(1).
     let object_extra_rows = mud_db::object_extra_descriptions::list_extras(pool).await?;
@@ -2182,6 +2201,7 @@ pub async fn load_object_prototypes(pool: &PgPool) -> sqlx::Result<ObjectPrototy
             .weapon_damage_type
             .as_ref()
             .map(|d| d.label().to_string());
+        let weapon_element = row.weapon_element.as_ref().map(|d| d.label().to_string());
         let portal_destination_vnum = if matches!(row.r#type, mud_db::enums::ObjectType::Portal) {
             parse_portal_destination(&row.values)
         } else {
@@ -2228,6 +2248,7 @@ pub async fn load_object_prototypes(pool: &PgPool) -> sqlx::Result<ObjectPrototy
                 weapon_dice_size: row.weapon_dice_size,
                 weapon_dice_bonus: row.weapon_dice_bonus,
                 weapon_damage_type,
+                weapon_element,
                 armor_pct: row.armor_pct,
                 cost: row.cost,
                 portal_destination_vnum,

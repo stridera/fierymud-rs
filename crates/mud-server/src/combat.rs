@@ -432,11 +432,12 @@ pub(crate) fn weapon_family(damage_type: &str) -> Option<&'static str> {
     }
 }
 
-/// Elemental damage type of a weapon whose `weapon_damage_type` is an element
-/// (fire / cold / acid / shock / poison / align). Legacy `convert_weapon_damage`
-/// swaps a weapon's damage type for its `EFF_*_WEAPON` element, and fierylib now
-/// imports that bit as the element itself, so the prototype's type column is the
-/// single source. `None` for physical, untyped or unrecognised types.
+/// Elemental damage type named by a label (fire / cold / acid / shock / poison /
+/// align). `None` for physical, untyped or unrecognised types. Legacy
+/// `convert_weapon_damage` swaps a weapon's damage for its `EFF_*_WEAPON` element
+/// (or an elemental raw type) while `weapon_proficiency` keeps reading the raw
+/// physical type, so the element lives in its own column
+/// ([`proto_weapon_element`]) and `weapon_damage_type` stays the weapon family.
 pub(crate) fn weapon_element(damage_type: &str) -> Option<mud_db::enums::DamageType> {
     use mud_db::enums::DamageType as D;
     match damage_type.to_ascii_lowercase().as_str() {
@@ -450,18 +451,35 @@ pub(crate) fn weapon_element(damage_type: &str) -> Option<mud_db::enums::DamageT
     }
 }
 
-/// The resistance element an elemental weapon swing is checked against
-/// (legacy `ALIGN` damage is the modern `RADIANT`).
-fn weapon_element_resistance(element: mud_db::enums::DamageType) -> mud_db::enums::ElementType {
+/// Element an object prototype's weapon deals: its `weapon_element` column, else
+/// an elemental `weapon_damage_type` (a database without the column, or a builder
+/// who typed the weapon with an element only). `None` for a physical weapon.
+pub(crate) fn proto_weapon_element(
+    proto: &mud_world::ObjectProto,
+) -> Option<mud_db::enums::DamageType> {
+    proto
+        .weapon_element
+        .as_deref()
+        .and_then(weapon_element)
+        .or_else(|| proto.weapon_damage_type.as_deref().and_then(weapon_element))
+}
+
+/// The resistance element an elemental weapon swing is checked against, or
+/// `None` when the defender cannot resist it: legacy `ALIGN` (holy) damage has
+/// flat susceptibility 100 (`chars.cpp` `susceptibility(DAM_ALIGN)`), so it never
+/// reads a resistance.
+fn weapon_element_resistance(
+    element: mud_db::enums::DamageType,
+) -> Option<mud_db::enums::ElementType> {
     use mud_db::enums::{DamageType as D, ElementType as E};
     match element {
-        D::Fire => E::Fire,
-        D::Cold => E::Cold,
-        D::Acid => E::Acid,
-        D::Shock => E::Shock,
-        D::Poison => E::Poison,
-        D::Align => E::Radiant,
-        _ => E::Physical,
+        D::Fire => Some(E::Fire),
+        D::Cold => Some(E::Cold),
+        D::Acid => Some(E::Acid),
+        D::Shock => Some(E::Shock),
+        D::Poison => Some(E::Poison),
+        D::Align => None,
+        _ => Some(E::Physical),
     }
 }
 
@@ -497,11 +515,12 @@ fn wielded_weapon_element(
     if proto.weapon_dice_num <= 0 || proto.weapon_dice_size <= 0 {
         return None;
     }
-    weapon_element(proto.weapon_damage_type.as_deref()?)
+    proto_weapon_element(proto)
 }
 
-/// Weapon-skill family label (`weapon_type` param of the passives); `None` for
-/// an untyped or elemental weapon.
+/// Weapon-skill family label (`weapon_type` param of the passives), from the
+/// weapon's physical damage type; `None` for an untyped weapon or one whose raw
+/// type is an element (legacy `weapon_proficiency` returns -1 for those).
 type WeaponFamily = Option<&'static str>;
 
 /// Per-wielder dice / family snapshots built once per `combat_tick`.
@@ -1959,15 +1978,19 @@ fn apply_swing(world: &mut World, s: &Swing) {
     // routes magical abilities through a separate path that
     // engages it).
     // Step 6: type resistance. A physical swing checks PHYSICAL; an
-    // elemental weapon (fire / cold / acid / shock / poison / align damage
-    // type, e.g. a staff of tremors or the conjured dagger of ice) checks the
+    // elemental weapon (its `weapon_element`: fire / cold / acid / shock /
+    // poison / align, e.g. a staff of tremors or the dagger of ice) checks the
     // defender's resistance to that element instead, like legacy
-    // `susceptibility(victim, convert_weapon_damage(weapon))`.
+    // `susceptibility(victim, convert_weapon_damage(weapon))`. Align (holy)
+    // damage has flat susceptibility 100 and checks nothing.
     let resist_element = weapon_element.map_or(
-        mud_db::enums::ElementType::Physical,
+        Some(mud_db::enums::ElementType::Physical),
         weapon_element_resistance,
     );
-    if let Some(res) = world.get::<mud_world::Resistances>(s.target) {
+    if let (Some(resist_element), Some(res)) = (
+        resist_element,
+        world.get::<mud_world::Resistances>(s.target),
+    ) {
         let pct = res.0.get(&resist_element).copied().unwrap_or(0);
         // capped at +100 immunity; negative is unbounded vulnerability per docs.
         let pct = pct.min(100);
@@ -7757,6 +7780,24 @@ end
         wield_with_flags(world, wielder, bonus, damage_type, &[]);
     }
 
+    /// [`wield`] a weapon with a physical `damage_type` and a separate
+    /// `weapon_element` column value.
+    fn wield_element(
+        world: &mut World,
+        wielder: Entity,
+        bonus: i32,
+        damage_type: Option<&str>,
+        element: Option<&str>,
+    ) {
+        wield(world, wielder, bonus, damage_type);
+        world
+            .resource_mut::<ObjectPrototypes>()
+            .by_key
+            .get_mut(&(1, 1))
+            .expect("wielded proto")
+            .weapon_element = element.map(str::to_string);
+    }
+
     /// [`wield`] with explicit wear flags (`Twohand` makes a two-hander).
     fn wield_with_flags(
         world: &mut World,
@@ -8058,9 +8099,8 @@ end
             (D::Acid, "ACID", E::Acid),
             (D::Shock, "SHOCK", E::Shock),
             (D::Poison, "POISON", E::Poison),
-            (D::Align, "ALIGN", E::Radiant),
         ] {
-            assert_eq!(weapon_element_resistance(dmg), element);
+            assert_eq!(weapon_element_resistance(dmg), Some(element));
             let (mut world, attacker, target) = duel();
             wield(&mut world, attacker, 9, Some(name));
             resistant_to(&mut world, target, element);
@@ -8072,11 +8112,95 @@ end
         }
     }
 
+    /// Legacy `susceptibility(DAM_ALIGN)` is a flat 100: no resistance, not even
+    /// Radiant, reduces an alignment (holy) weapon.
+    #[test]
+    fn align_weapons_ignore_resistances() {
+        use mud_db::enums::{DamageType as D, ElementType as E};
+        assert_eq!(weapon_element_resistance(D::Align), None);
+        for element in [E::Radiant, E::Physical, E::Fire] {
+            let (mut world, attacker, target) = duel();
+            wield_element(&mut world, attacker, 9, Some("SLASH"), Some("ALIGN"));
+            resistant_to(&mut world, target, element);
+            assert_eq!(
+                damage_of_one_round(&mut world, attacker, target),
+                10,
+                "{element:?}"
+            );
+        }
+    }
+
+    /// The dagger of ice: pierces for proficiency (family, mob AI) but deals COLD,
+    /// so cold resistance stops it and physical resistance does not.
+    #[test]
+    fn element_column_deals_the_element_while_the_physical_type_keeps_the_family() {
+        use mud_db::enums::ElementType as E;
+        let (mut world, attacker, target) = duel();
+        wield_element(&mut world, attacker, 9, Some("PIERCE"), Some("COLD"));
+        resistant_to(&mut world, target, E::Cold);
+        assert_eq!(damage_of_one_round(&mut world, attacker, target), 0);
+
+        let (mut world, attacker, target) = duel();
+        wield_element(&mut world, attacker, 9, Some("PIERCE"), Some("COLD"));
+        resistant_to(&mut world, target, E::Physical);
+        assert_eq!(damage_of_one_round(&mut world, attacker, target), 10);
+
+        let (mut world, attacker, _) = duel();
+        wield_element(&mut world, attacker, 9, Some("PIERCE"), Some("COLD"));
+        let proto = &world.resource::<ObjectPrototypes>().by_key[&(1, 1)];
+        assert_eq!(proto_weapon_family(proto), Some("piercing"));
+        assert_eq!(
+            proto_weapon_element(proto),
+            Some(mud_db::enums::DamageType::Cold)
+        );
+    }
+
+    /// A phase staff: the raw legacy type is the element (no family, as in legacy)
+    /// and `weapon_element` repeats it.
+    #[test]
+    fn phase_staff_deals_its_element_and_has_no_family() {
+        use mud_db::enums::ElementType as E;
+        let (mut world, attacker, target) = duel();
+        wield_element(&mut world, attacker, 9, Some("SHOCK"), Some("SHOCK"));
+        resistant_to(&mut world, target, E::Shock);
+        assert_eq!(damage_of_one_round(&mut world, attacker, target), 0);
+        let proto = &world.resource::<ObjectPrototypes>().by_key[&(1, 1)];
+        assert_eq!(proto_weapon_family(proto), None);
+    }
+
+    /// A database without `Objects.weapon_element` (or a row whose element is
+    /// unset) reads an elemental `weapon_damage_type` as the element, as before
+    /// the column existed; a physical type stays physical.
+    #[test]
+    fn missing_element_column_falls_back_to_an_elemental_damage_type() {
+        use mud_db::enums::{DamageType as D, ElementType as E};
+        let (mut world, attacker, target) = duel();
+        wield_element(&mut world, attacker, 9, Some("FIRE"), None);
+        resistant_to(&mut world, target, E::Fire);
+        assert_eq!(damage_of_one_round(&mut world, attacker, target), 0);
+        let proto = &world.resource::<ObjectPrototypes>().by_key[&(1, 1)];
+        assert_eq!(proto_weapon_element(proto), Some(D::Fire));
+
+        let (mut world, attacker, _) = duel();
+        wield_element(&mut world, attacker, 9, Some("PIERCE"), None);
+        let proto = &world.resource::<ObjectPrototypes>().by_key[&(1, 1)];
+        assert_eq!(proto_weapon_element(proto), None);
+        // A non-elemental label in the element column is ignored.
+        wield_element(&mut world, attacker, 9, Some("PIERCE"), Some("SLASH"));
+        let proto = &world.resource::<ObjectPrototypes>().by_key[&(1, 1)];
+        assert_eq!(proto_weapon_element(proto), None);
+    }
+
     /// Output a player wielding a `damage_type` weapon and the player it
     /// hits are sent for one swing, as `(attacker, target)`.
     fn swing_messages(damage_type: &str) -> (String, String) {
+        swing_messages_with(damage_type, None)
+    }
+
+    /// [`swing_messages`] for a weapon with a separate `weapon_element`.
+    fn swing_messages_with(damage_type: &str, element: Option<&str>) -> (String, String) {
         let (mut world, attacker, target) = duel();
-        wield(&mut world, attacker, 9, Some(damage_type));
+        wield_element(&mut world, attacker, 9, Some(damage_type), element);
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
         let (ttx, mut trx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
         world
@@ -8116,6 +8240,17 @@ end
                 "{damage_type}: {theirs}"
             );
         }
+    }
+
+    /// The dagger of ice (PIERCE + COLD) narrates "freeze", not "hit".
+    #[test]
+    fn element_column_picks_the_swing_verb() {
+        let (mine, theirs) = swing_messages_with("PIERCE", Some("COLD"));
+        assert!(
+            mine.contains("freeze") && !mine.contains("You hit"),
+            "{mine}"
+        );
+        assert!(theirs.contains("freezes"), "{theirs}");
     }
 
     #[test]

@@ -1055,6 +1055,7 @@ mod tests {
             weapon_dice_size: 0,
             weapon_dice_bonus: 0,
             weapon_damage_type: None,
+            weapon_element: None,
             cost: 0,
             portal_destination_vnum: None,
             board_id: None,
