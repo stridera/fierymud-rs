@@ -22521,7 +22521,8 @@ pub(crate) fn resolve_dispel_scope(
 
 /// Remove `EffectInstance`s on `target` whose source `EffectDef`
 /// carries `tag` in its `tags` list. Returns the number despawned.
-/// With `scope = First`, stops after one removal. Race innates
+/// With `scope = First`, removes only the newest match (legacy lists
+/// newest first). Race innates
 /// (`RaceEffects`) are permanent and never removed; removals unwind
 /// markers the same way expiry does.
 pub(crate) fn remove_effects_by_tag(
@@ -22577,7 +22578,11 @@ pub(crate) fn remove_effects_by_tag(
         })
         .collect();
     if matches!(scope, DispelScope::First) {
-        to_remove.truncate(1);
+        // `effects_on` lists oldest first; legacy `effect_to_char` prepends,
+        // so legacy "first" (douse, extinguish) took the newest match.
+        let newest = to_remove.pop();
+        to_remove.clear();
+        to_remove.extend(newest);
     }
     despawn_effects_on(world, target, to_remove)
 }

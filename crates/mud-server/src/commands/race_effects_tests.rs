@@ -237,6 +237,32 @@ fn douse_style_first_buff_dispel_keeps_race_fly() {
 }
 
 #[test]
+fn first_scope_dispel_removes_the_newest_matching_effect() {
+    let mut world = world_with_races(&[]);
+    let (player, _rx) = player_of(&mut world, "HUMAN");
+    for name in ["older", "newer"] {
+        world.spawn((
+            EffectInstance {
+                kind: 4,
+                name: name.into(),
+                strength: 1,
+                remaining_secs: 300,
+                source: EffectSource::Spell,
+                ability_id: None,
+            },
+            AppliedTo(player),
+        ));
+    }
+    let removed = remove_effects_by_tag(&mut world, player, "buff", DispelScope::First);
+    assert_eq!(removed, 1);
+    let names: Vec<String> = instances(&mut world, player)
+        .into_iter()
+        .map(|(n, ..)| n)
+        .collect();
+    assert_eq!(names, vec!["older"], "legacy first = newest");
+}
+
+#[test]
 fn dispelled_spell_fly_clears_the_flying_marker() {
     let mut world = world_with_races(&[]);
     let (player, _rx) = player_of(&mut world, "HUMAN");
