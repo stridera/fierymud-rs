@@ -276,7 +276,7 @@ fn persisted_mount_is_rideable_after_relog() {
     let persisted: crate::login::PersistedPets = serde_json::from_value(serde_json::json!({
         "saved_at_unix": now,
         "pets": [{
-            "proto_zone_id": 30, "proto_id": 81,
+            "proto_zone_id": 30, "proto_id": 81, "bought": true,
             "name": "Tester's a stout mare", "hp": 10, "max_hp": 10
         }]
     }))
@@ -301,7 +301,7 @@ fn restored_pet_gets_its_protos_default_effects_and_keeps_following() {
     let persisted: crate::login::PersistedPets = serde_json::from_value(serde_json::json!({
         "saved_at_unix": now,
         "pets": [{
-            "proto_zone_id": 30, "proto_id": 81,
+            "proto_zone_id": 30, "proto_id": 81, "bought": true,
             "name": "Tester's a stout mare", "hp": 4, "max_hp": 10
         }]
     }))
@@ -1092,6 +1092,31 @@ fn pets_survive_a_long_logout_and_a_server_restart() {
     assert!(drain(&mut rx).contains("You mount"));
 }
 
+/// Rows an older build saved carry no `bought` flag and may be a charmed mob
+/// (legacy `save_pets` saved pet-shop pets only): restored only when the
+/// prototype is pet-shop stock.
+#[test]
+fn legacy_format_pet_rows_restore_only_for_pet_shop_stock() {
+    let (mut world, player, _rx) = world_with_shop(mare_shop(), 0);
+    let persisted: crate::login::PersistedPets = serde_json::from_value(serde_json::json!({
+        "saved_at_unix": 1,
+        "pets": [
+            { "proto_zone_id": 30, "proto_id": 81,
+              "name": "Tester's stout mare", "hp": 10, "max_hp": 10 },
+            { "proto_zone_id": 30, "proto_id": 90,
+              "name": "a kitten", "hp": 10, "max_hp": 10 }
+        ]
+    }))
+    .unwrap();
+    crate::login::restore_persisted_pets(&mut world, player, persisted);
+    let pets = followers_of(&mut world, player);
+    assert_eq!(pets.len(), 1, "the charmed kitten is not restored");
+    assert_eq!(
+        world.get::<mud_world::Named>(pets[0]).unwrap().name,
+        "Tester's stout mare"
+    );
+}
+
 /// Rows saved before the pool was recorded get the pet-shop pool of the
 /// prototype, not the wild one.
 #[test]
@@ -1100,7 +1125,7 @@ fn pet_saved_without_a_pool_gets_the_shop_pool_on_restore() {
     let persisted: crate::login::PersistedPets = serde_json::from_value(serde_json::json!({
         "saved_at_unix": 1,
         "pets": [{
-            "proto_zone_id": 30, "proto_id": 81,
+            "proto_zone_id": 30, "proto_id": 81, "bought": true,
             "name": "Tester's stout mare", "hp": 10, "max_hp": 10
         }]
     }))

@@ -2549,15 +2549,21 @@ pub const fn innate_cooldown_key(ability_id: i32) -> i32 {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Follower(pub Entity);
 
-/// Marker on a follower mob that should round-trip across the
-/// player's reconnect window. Attached at hire / charm sites where
-/// the player invested resources (gold or spell-effort) — the design
-/// matches the buff-persistence rule: hired and charmed pets survive
-/// disconnects up to ~1 hour, then despawn when the player goes
-/// offline overnight. Random tagalong followers (group walk-ins,
-/// ephemeral summons) don't get this marker and are session-only.
+/// Marker on a follower mob a player owns: a pet-shop purchase (saved with
+/// the character and respawned at every login, like legacy `save_pets`) or a
+/// charmed follower (also tagged [`CharmedFollower`], never saved). Random
+/// tagalong followers (group walk-ins, ephemeral summons) don't get this
+/// marker and are session-only.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct PersistentPet;
+
+/// Marks a [`PersistentPet`] that is a charmed / tamed / conjured follower
+/// rather than a pet-shop purchase. Legacy `save_pets` saved only `IS_PET`
+/// followers (`MOB_PET`, set by the pet shop alone): a charmed mob's charm
+/// ended when its owner left (`die_follower` -> `stop_follower`) and the mob
+/// quit the game three seconds later, so it is never saved or restored.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct CharmedFollower;
 
 /// Marker on a mount conjured by the `summon` command (legacy
 /// `MOB_SUMMONED_MOUNT`). It is not a [`PersistentPet`]: legacy removes the

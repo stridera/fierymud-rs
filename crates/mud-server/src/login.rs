@@ -671,6 +671,11 @@ pub(crate) struct PersistedPet {
     /// brings a pet back fully rested.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     max_move: Option<i32>,
+    /// Written for every pet-shop pet. Rows without it predate the field and
+    /// may be a charmed mob an older build saved (legacy never did): those are
+    /// restored only when the prototype is pet-shop stock.
+    #[serde(default)]
+    bought: bool,
 }
 
 /// Persisted active-pets envelope. Unlike `PersistedEffects` there is no
@@ -742,6 +747,20 @@ pub(crate) fn insert_loaded_script_vars(
     }
 }
 
+/// True when some shop sells mob `(zone, id)` as a pet (legacy `MOB_PET` is set
+/// by the pet shop only).
+fn is_pet_shop_stock(world: &World, zone: i32, id: i32) -> bool {
+    world
+        .get_resource::<mud_world::ShopCatalog>()
+        .is_some_and(|c| {
+            c.by_key.values().any(|shop| {
+                shop.pets
+                    .iter()
+                    .any(|o| o.mob_zone_id == zone && o.mob_id == id)
+            })
+        })
+}
+
 /// Shared restore logic: spawn one mob entity per persisted pet
 /// entry, however long the owner was away (legacy `load_pets` has no
 /// time limit; they are player-owned investments). Located next to the
@@ -754,6 +773,13 @@ pub(crate) fn restore_persisted_pets(world: &mut World, player: Entity, persiste
         None => return,
     };
     for pet in persisted.pets {
+        if !pet.bought && !is_pet_shop_stock(world, pet.proto_zone_id, pet.proto_id) {
+            info!(
+                proto = ?(pet.proto_zone_id, pet.proto_id),
+                "legacy-format saved pet is not pet-shop stock (a charmed mob); skipping"
+            );
+            continue;
+        }
         let proto = world
             .resource::<MobPrototypes>()
             .by_key
@@ -1370,7 +1396,7 @@ fn go_linkdead(world: &mut World, entity: Entity) {
 }
 
 /// Every `PersistentPet` (paid pet, charmed mob, saved mount) following
-/// `owner`.
+/// `owner`; charmed ones are not saved ([`mud_world::CharmedFollower`]).
 fn persistent_pets(world: &mut World, owner: Entity) -> Vec<Entity> {
     let mut q =
         world.query_filtered::<(Entity, &Follower), (With<Mob>, With<mud_world::PersistentPet>)>();
@@ -4758,7 +4784,7 @@ impl ConnRouter {
         // Logging in mid-air without wings: the gravity tick re-checks
         // flight next tick, once worn items have re-applied their effects.
         mud_world::movement::begin_fall_if_unsupported(world, entity);
-        // Hired / charmed pets: legacy `load_pets`, no time limit. Spawns
+        // Pet-shop pets: legacy `load_pets`, no time limit. Spawns
         // each pet next to the player with HP restored.
         if let Some(json) = pets_json
             && let Ok(persisted) = serde_json::from_value::<PersistedPets>(json)
@@ -5444,9 +5470,16 @@ pub(crate) fn snapshot_player(
             base_progression.map_or(s.max.saturating_sub(gear.max_stamina), |b| b.max_stamina);
         crate::equip_apply::base_current(s.current, cap, 0)
     });
-    let (zone_id, room_id) = world
-        .get::<Located>(entity)
-        .and_then(|l| world.get::<WorldKey>(l.0).copied())
+    // A player parked in the void by the idle scan is saved in the room they
+    // were pulled from (legacy `GET_WAS_IN`), never in the void: an autosave, a
+    // shutdown save or a crash while idle must not strand them there.
+    let save_room = world
+        .get::<crate::idle::IdleVoided>(entity)
+        .map(|v| v.was_in)
+        .filter(|r| world.get::<WorldKey>(*r).is_some())
+        .or_else(|| world.get::<Located>(entity).map(|l| l.0));
+    let (zone_id, room_id) = save_room
+        .and_then(|r| world.get::<WorldKey>(r).copied())
         .map_or((None, None), |wk| (Some(wk.zone), Some(wk.id)));
     let flags = world
         .get::<PlayerFlags>(entity)
@@ -5760,8 +5793,9 @@ pub(crate) fn snapshot_player(
         }
     };
     // Pets — query mob entities with `Follower(player)` AND
-    // `PersistentPet` (the durability marker attached at hire / charm
-    // sites). Other followers (random tagalong, ephemeral summons)
+    // `PersistentPet` (the durability marker attached at hire sites), minus
+    // charmed followers (legacy `save_pets` saved `IS_PET` only, the pet shop's
+    // `MOB_PET`). Other followers (random tagalong, ephemeral summons)
     // are session-only by intentionally lacking the marker.
     let pets_json: Option<serde_json::Value> = {
         let mut q = world.query_filtered::<(
@@ -5770,7 +5804,11 @@ pub(crate) fn snapshot_player(
             &Health,
             &Follower,
             Option<&mud_world::MovementPoints>,
-        ), (With<Mob>, With<mud_world::PersistentPet>)>();
+        ), (
+            With<Mob>,
+            With<mud_world::PersistentPet>,
+            Without<mud_world::CharmedFollower>,
+        )>();
         let pets: Vec<PersistedPet> = q
             .iter(world)
             .filter(|(_, _, _, follower, _)| follower.0 == entity)
@@ -5781,6 +5819,7 @@ pub(crate) fn snapshot_player(
                 hp: health.hp,
                 max_hp: health.max,
                 max_move: mv.map(|m| m.max),
+                bought: true,
             })
             .collect();
         if pets.is_empty() {
@@ -12319,6 +12358,12 @@ pub(crate) mod tests {
         world
             .entity_mut(wolf)
             .insert((Follower(me), mud_world::PersistentPet));
+        let charmed = mob(&mut world, "a charmed bear");
+        world.entity_mut(charmed).insert((
+            Follower(me),
+            mud_world::PersistentPet,
+            mud_world::CharmedFollower,
+        ));
         let tagalong = mob(&mut world, "a tagalong");
         world.entity_mut(tagalong).insert(Follower(me));
         let others_pet = mob(&mut world, "another's cat");
@@ -12330,6 +12375,10 @@ pub(crate) mod tests {
         let saved: PersistedPets =
             serde_json::from_value(snap.pets_json.expect("pets recorded")).unwrap();
         assert_eq!(saved.pets.len(), 2, "mount and wolf are saved");
+        assert!(
+            saved.pets.iter().all(|p| p.name != "a charmed bear"),
+            "a charmed follower is not saved (legacy save_pets: IS_PET only)"
+        );
 
         let pool = failing_pool();
         let mut router = ConnRouter::new();
@@ -12338,8 +12387,38 @@ pub(crate) mod tests {
         assert!(world.get_entity(me).is_err());
         assert!(world.get_entity(mount).is_err(), "saved mount despawned");
         assert!(world.get_entity(wolf).is_err(), "saved pet despawned");
+        assert!(
+            world.get_entity(charmed).is_err(),
+            "the charm ends and the mob leaves with its owner (legacy mobquit)"
+        );
         assert!(world.get_entity(tagalong).is_ok(), "unsaved follower stays");
         assert!(world.get_entity(others_pet).is_ok(), "other's pet stays");
+    }
+
+    /// Every save path snapshots through `snapshot_player`: a player the idle
+    /// scan parked in the void is written out in the room they were pulled
+    /// from (autosave, shutdown save, crash), never at the void.
+    #[test]
+    fn a_voided_player_is_saved_in_the_room_they_were_pulled_from() {
+        let mut world = World::new();
+        let real = world
+            .spawn((mud_world::Room, WorldKey { zone: 30, id: 5 }))
+            .id();
+        let void = world
+            .spawn((mud_world::Room, WorldKey { zone: 0, id: 0 }))
+            .id();
+        let me = spawn_player_for(&mut world, "void-me", void);
+        let snap = snapshot_player(&mut world, me, 1).expect("snapshot");
+        assert_eq!((snap.zone_id, snap.room_id), (Some(0), Some(0)));
+        world
+            .entity_mut(me)
+            .insert(crate::idle::IdleVoided { was_in: real });
+        let snap = snapshot_player(&mut world, me, 2).expect("snapshot");
+        assert_eq!((snap.zone_id, snap.room_id), (Some(30), Some(5)));
+        // The remembered room is gone: fall back to where they stand.
+        world.despawn(real);
+        let snap = snapshot_player(&mut world, me, 3).expect("snapshot");
+        assert_eq!((snap.zone_id, snap.room_id), (Some(0), Some(0)));
     }
 
     /// A summoned mount is not a saved pet: legacy removes it when its owner

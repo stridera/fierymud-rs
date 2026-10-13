@@ -512,8 +512,8 @@ fn swing_damage_element(
     }
     if armed {
         return match weapon_family {
-            Some("slashing") => E::Slash,
-            Some("piercing") => E::Pierce,
+            Some("slashing" | "two_hand_slashing") => E::Slash,
+            Some("piercing" | "two_hand_piercing") => E::Pierce,
             _ => E::Crush,
         };
     }
@@ -8329,6 +8329,44 @@ end
             proto_weapon_element(proto),
             Some(mud_db::enums::DamageType::Cold)
         );
+    }
+
+    /// Legacy `skill_to_dtype` judges a swing by the weapon's own damage type, so a
+    /// two-handed sword slashes (PLANT and WATER 120%, BONE 80%) rather than
+    /// reading as crush; every family, one- and two-handed, maps to its type.
+    #[test]
+    fn two_handed_weapons_keep_their_damage_type_for_susceptibility() {
+        use mud_db::enums::{Composition as C, ElementType as E, WearFlag};
+        let cases: [(&str, &[WearFlag], E); 8] = [
+            ("SLASH", &[], E::Slash),
+            ("PIERCE", &[], E::Pierce),
+            ("CRUSH", &[], E::Crush),
+            ("BLUDGEON", &[], E::Crush),
+            ("SLASH", &[WearFlag::Twohand], E::Slash),
+            ("STAB", &[WearFlag::Twohand], E::Pierce),
+            ("CRUSH", &[WearFlag::Twohand], E::Crush),
+            ("MAUL", &[WearFlag::Twohand], E::Crush),
+        ];
+        for (dtype, flags, want) in cases {
+            let (mut world, attacker, _) = duel();
+            wield_with_flags(&mut world, attacker, 0, Some(dtype), flags);
+            let family = {
+                let proto = &world.resource::<ObjectPrototypes>().by_key[&(1, 1)];
+                proto_weapon_family(proto)
+            };
+            assert_eq!(
+                swing_damage_element(&world, attacker, true, family, None),
+                want,
+                "{dtype} {flags:?} family {family:?}"
+            );
+        }
+        let (mut world, attacker, _) = duel();
+        wield_with_flags(&mut world, attacker, 0, Some("SLASH"), &[WearFlag::Twohand]);
+        let family = proto_weapon_family(&world.resource::<ObjectPrototypes>().by_key[&(1, 1)]);
+        let element = swing_damage_element(&world, attacker, true, family, None);
+        assert_eq!(C::Plant.susceptibility(element), 120);
+        assert_eq!(C::Water.susceptibility(element), 120);
+        assert_eq!(C::Bone.susceptibility(element), 80);
     }
 
     /// A phase staff: the raw legacy type is the element (no family, as in legacy)

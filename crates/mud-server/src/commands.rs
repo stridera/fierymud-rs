@@ -21419,9 +21419,11 @@ pub(crate) fn invoke_ability_core(
                     // put the master straight back into the fight.
                     crate::bookkeeping::reset::<crate::combat::HateList>(world, target_entity);
                     crate::bookkeeping::reset::<crate::combat::MobMemory>(world, target_entity);
-                    // Spell-effort spent → tag as durable so the
-                    // disconnect-save snapshots it and respawns it at login.
+                    // Player-owned for gear hand-off and no-XP death, but not
+                    // saved: legacy charm ends when the owner leaves and the
+                    // mob quits the game (`CharmedFollower`).
                     try_insert(world, target_entity, mud_world::PersistentPet);
+                    try_insert(world, target_entity, mud_world::CharmedFollower);
                 }
                 push_ability_label(&mut applied_msgs, &ability_label);
             }
