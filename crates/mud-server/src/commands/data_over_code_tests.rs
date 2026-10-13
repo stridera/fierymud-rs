@@ -8,10 +8,13 @@ use mud_world::{
     AppliedTo, ClassCatalog, ClassDef, ClassSkillsData, CoreAbilities, CoreClasses, EffectCatalog,
     EffectDef, EffectInstance, EffectSource, Fighting, KnownAbilities, Profile, Room, Stunned,
 };
+use mud_world::{
+    CombatStats, Cooldowns, Follower, Located, Mob, MobPrototypes, RoomSector, SummonedMount,
+};
 
 use super::combat_commands::{cmd_claw, cmd_electrify, cmd_steal};
 use super::info::cmd_summonmount;
-use super::test_support::{Rx, drain, install_core_abilities, player_in};
+use super::test_support::{Rx, drain, install_core_abilities, mob_proto, player_in};
 use super::{Prevent, SkillAccess, check_ability_restrictions, effect_prevents, skill_access};
 
 // Class ids differ per database; these mimic a prod-like numbering that
@@ -20,6 +23,7 @@ const THIEF: i32 = 31;
 const ASSASSIN: i32 = 7;
 const BARD: i32 = 44;
 const PALADIN: i32 = 52;
+const ANTI_PALADIN: i32 = 53;
 const MONK: i32 = 9;
 
 // Ability ids from `core_ability_catalog`.
@@ -55,6 +59,7 @@ fn class_catalog() -> ClassCatalog {
         (ASSASSIN, "Assassin"),
         (BARD, "Bard"),
         (PALADIN, "Paladin"),
+        (ANTI_PALADIN, "Anti-Paladin"),
         (MONK, "Monk"),
     ] {
         catalog.by_id.insert(id, class(id, name));
@@ -70,6 +75,7 @@ fn class_skills() -> ClassSkillsData {
         (THIEF, STEAL, 10),
         (BARD, STEAL, 10),
         (PALADIN, SUMMON_MOUNT, 15),
+        (ANTI_PALADIN, SUMMON_MOUNT, 15),
         // Rows so the Assassin has a kit, just not Steal.
         (ASSASSIN, 999, 1),
     ] {
@@ -236,6 +242,159 @@ fn summon_mount_follows_class_skills() {
         !out.contains("no idea") && !out.contains("worthy"),
         "paladin 15 passes the skill gate: {out}"
     );
+}
+
+// ---- summon mount: alignment, cooldown, ownership ----
+
+fn set_alignment(world: &mut World, p: Entity, alignment: i32) {
+    let mut stats = world.get::<CombatStats>(p).copied().unwrap_or_default();
+    stats.alignment = alignment;
+    world.entity_mut(p).insert(stats);
+}
+
+/// A summoning-ready world: outdoor room, the mount protos for both
+/// factions, a level 15 `class` with `alignment`.
+fn mount_world(class_id: i32, alignment: i32) -> (World, Entity, Rx) {
+    let (mut world, p, rx) = world();
+    let room = world.get::<Located>(p).map(|l| l.0);
+    let room = room.unwrap_or_else(|| world.spawn(Room).id());
+    world
+        .entity_mut(room)
+        .insert(RoomSector(mud_db::enums::Sector::Field));
+    world.entity_mut(p).insert(Located(room));
+    let mut protos = MobPrototypes::default();
+    for key in [(0, 48), (0, 47)] {
+        let mut proto = mob_proto(key.0, key.1, mud_db::enums::MobProfession::Trainer);
+        proto.professions.clear();
+        protos.by_key.insert(key, proto);
+    }
+    world.insert_resource(protos);
+    world.insert_resource(mud_world::WorldKeyIndex::default());
+    set_class(&mut world, p, class_id, 15);
+    set_alignment(&mut world, p, alignment);
+    (world, p, rx)
+}
+
+fn mounts_of(world: &mut World, owner: Entity) -> Vec<Entity> {
+    let mut q = world.query_filtered::<(Entity, &Follower), (With<Mob>, With<SummonedMount>)>();
+    q.iter(world)
+        .filter(|(_, f)| f.0 == owner)
+        .map(|(e, _)| e)
+        .collect()
+}
+
+#[test]
+fn a_paladin_must_be_good_to_summon_a_mount() {
+    let (mut world, p, mut rx) = mount_world(PALADIN, 349);
+    cmd_summonmount(&mut world, p, "");
+    let out = drain(&mut rx);
+    assert!(
+        out.contains("Not even horses can stand your offensive presence!"),
+        "{out}"
+    );
+    assert!(mounts_of(&mut world, p).is_empty());
+
+    set_alignment(&mut world, p, 350);
+    cmd_summonmount(&mut world, p, "");
+    let out = drain(&mut rx);
+    assert!(!out.contains("offensive presence"), "{out}");
+    assert_eq!(mounts_of(&mut world, p).len(), 1, "{out}");
+}
+
+#[test]
+fn an_anti_paladin_has_no_goodness_gate() {
+    let (mut world, p, mut rx) = mount_world(ANTI_PALADIN, -900);
+    cmd_summonmount(&mut world, p, "");
+    let out = drain(&mut rx);
+    assert!(!out.contains("offensive presence"), "{out}");
+    assert_eq!(mounts_of(&mut world, p).len(), 1, "{out}");
+}
+
+#[test]
+fn losing_a_summoned_mount_starts_the_summon_cooldown() {
+    let (mut world, p, mut rx) = mount_world(PALADIN, 500);
+    cmd_summonmount(&mut world, p, "");
+    drain(&mut rx);
+    let mount = mounts_of(&mut world, p)[0];
+    cmd_summonmount(&mut world, p, "");
+    assert!(drain(&mut rx).contains("You already have a mount."));
+
+    // The mount stops following (legacy `stop_follower`): it leaves the
+    // game and the owner must wait 12 MUD hours.
+    super::release_from(&mut world, mount, p);
+    assert!(world.get_entity(mount).is_err(), "released mount is gone");
+    let ready = world.get::<Cooldowns>(p).expect("cooldown").ready_at[&SUMMON_MOUNT];
+    let left = ready.saturating_duration_since(std::time::Instant::now());
+    assert!(left.as_secs() > 890 && left.as_secs() <= 900, "{left:?}");
+
+    cmd_summonmount(&mut world, p, "");
+    let out = drain(&mut rx);
+    assert!(
+        out.contains("You must wait another 900 seconds before you can summon a mount again."),
+        "{out}"
+    );
+    assert!(mounts_of(&mut world, p).is_empty());
+
+    // The cooldown runs out.
+    world
+        .get_mut::<Cooldowns>(p)
+        .unwrap()
+        .ready_at
+        .insert(SUMMON_MOUNT, std::time::Instant::now());
+    cmd_summonmount(&mut world, p, "");
+    assert_eq!(mounts_of(&mut world, p).len(), 1);
+}
+
+#[test]
+fn a_summoned_mount_that_dies_starts_the_cooldown() {
+    let (mut world, p, mut rx) = mount_world(PALADIN, 500);
+    cmd_summonmount(&mut world, p, "");
+    drain(&mut rx);
+    let mount = mounts_of(&mut world, p)[0];
+    super::die_follower(&mut world, mount, false);
+    assert!(
+        world
+            .get::<Cooldowns>(p)
+            .is_some_and(|c| c.ready_at.contains_key(&SUMMON_MOUNT)),
+        "mount lost, cooldown on"
+    );
+}
+
+#[test]
+fn the_sweep_removes_mounts_and_pets_whose_owner_is_gone() {
+    let (mut world, p, mut rx) = mount_world(PALADIN, 500);
+    cmd_summonmount(&mut world, p, "");
+    drain(&mut rx);
+    let mount = mounts_of(&mut world, p)[0];
+    let room = world.get::<Located>(p).unwrap().0;
+    let gone = world.spawn_empty().id();
+    world.despawn(gone);
+    let pet = world
+        .spawn((Mob, Located(room), Follower(gone), mud_world::PersistentPet))
+        .id();
+    let tagalong = world.spawn((Mob, Located(room), Follower(gone))).id();
+    let loose_mount = world.spawn((Mob, Located(room), SummonedMount)).id();
+    let kept_pet = world
+        .spawn((Mob, Located(room), Follower(p), mud_world::PersistentPet))
+        .id();
+
+    super::info::orphan_follower_sweep(&mut world);
+    assert!(world.get_entity(mount).is_ok(), "owner online: kept");
+    assert!(world.get_entity(kept_pet).is_ok());
+    assert!(world.get_entity(pet).is_err(), "orphaned pet removed");
+    assert!(world.get_entity(loose_mount).is_err(), "unattached mount");
+    assert!(world.get_entity(tagalong).is_ok());
+    assert!(
+        world.get::<Follower>(tagalong).is_none(),
+        "tagalong just stops following"
+    );
+
+    // The owner leaves without the logout path: the next sweep takes the
+    // mount.
+    world.despawn(p);
+    super::info::orphan_follower_sweep(&mut world);
+    assert!(world.get_entity(mount).is_err());
+    assert!(world.get_entity(kept_pet).is_err());
 }
 
 // ---- Monk / Thief by core tag (name fallback) ----

@@ -2559,6 +2559,14 @@ pub struct Follower(pub Entity);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct PersistentPet;
 
+/// Marker on a mount conjured by the `summon` command (legacy
+/// `MOB_SUMMONED_MOUNT`). It is not a [`PersistentPet`]: legacy removes the
+/// mount from the game the moment it stops following its owner (the owner
+/// quitting, the link breaking, the mount being released) and starts the
+/// owner's summon-mount cooldown; the sweep and the logout path do the same.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct SummonedMount;
+
 /// Bodyguard pairing: this entity intercepts incoming swings that
 /// were aimed at the target. Combat snapshots redirect swing.target
 /// from `Guarding.0` onto the guarder when both are in the same

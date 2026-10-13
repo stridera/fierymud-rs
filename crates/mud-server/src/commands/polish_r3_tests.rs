@@ -326,6 +326,44 @@ fn group_roster_shows_movement() {
     assert!(out.contains("MV 12/44"), "{out}");
 }
 
+/// A mount or pet in the group carries `MovementPoints`, not `Stamina`;
+/// the roster reads it like `report` does.
+#[test]
+fn group_roster_shows_a_mounts_movement_points() {
+    let mut world = world();
+    let room = world.spawn_empty().id();
+    let (leader, mut lrx) = player(&mut world, "Boss", 10, None);
+    world.entity_mut(leader).insert((
+        Located(room),
+        Health { hp: 90, max: 100 },
+        mud_world::Stamina {
+            current: 33,
+            max: 60,
+        },
+    ));
+    let horse = world
+        .spawn((
+            mud_world::Mob,
+            Named {
+                name: "a gelding".into(),
+            },
+            Located(room),
+            GroupMember(leader),
+            mud_world::Follower(leader),
+            Health { hp: 70, max: 80 },
+            mud_world::MovementPoints {
+                current: 21,
+                max: 90,
+            },
+        ))
+        .id();
+    assert_ne!(horse, leader);
+    dispatch(&mut world, leader, "group");
+    let out = plain(&drain(&mut lrx));
+    assert!(out.contains("MV 33/60"), "{out}");
+    assert!(out.contains("MV 21/90"), "{out}");
+}
+
 // ----------------------------------------------------------- who legend
 
 #[test]

@@ -1495,6 +1495,12 @@ fn retire_player(world: &mut World, entity: Entity, pool: &PgPool) -> bool {
             &commands::cap_sentence_start(&departure),
         );
     }
+    // Legacy: a summoned mount is removed from the game when its owner
+    // leaves, and the summon-mount cooldown starts. Before the snapshot, so
+    // the cooldown is saved with the character.
+    for mount in commands::info::summoned_mounts_of(world, entity) {
+        commands::info::dismiss_summoned_mount(world, mount, Some(entity));
+    }
     // Gear on the owner's pets rides in the owner's pack: a pet is saved
     // without its items, so this must precede the save snapshot.
     hand_pet_gear_to_owner(world, entity);
@@ -12324,6 +12330,60 @@ pub(crate) mod tests {
         assert!(world.get_entity(wolf).is_err(), "saved pet despawned");
         assert!(world.get_entity(tagalong).is_ok(), "unsaved follower stays");
         assert!(world.get_entity(others_pet).is_ok(), "other's pet stays");
+    }
+
+    /// A summoned mount is not a saved pet: legacy removes it when its owner
+    /// leaves and starts the summon-mount cooldown. Nothing may be left
+    /// standing to be shared or to pile up across relogs.
+    #[tokio::test(flavor = "current_thread")]
+    async fn quitting_removes_a_summoned_mount_and_starts_the_cooldown() {
+        let mut world = World::new();
+        world.insert_resource(SaveCoordinator::default());
+        world.insert_resource(mud_world::CoreAbilities {
+            summon_mount: Some(355),
+            ..mud_world::CoreAbilities::default()
+        });
+        let room = world.spawn_empty().id();
+        let me = spawn_player_for(&mut world, "mnt-me", room);
+        let other = spawn_player_for(&mut world, "mnt-other", room);
+        let mount = world
+            .spawn((
+                Mob,
+                Named {
+                    name: "a mare".into(),
+                },
+                Health { hp: 20, max: 20 },
+                Located(room),
+                Follower(me),
+                mud_world::Mountable,
+                mud_world::SummonedMount,
+                mud_world::RiddenBy(me),
+            ))
+            .id();
+        world.entity_mut(me).insert(mud_world::Mounted(mount));
+        let others_mount = world
+            .spawn((
+                Mob,
+                Located(room),
+                Follower(other),
+                mud_world::SummonedMount,
+            ))
+            .id();
+
+        let pool = failing_pool();
+        let mut router = ConnRouter::new();
+        router.playing.insert(1, me);
+        router.on_disconnect(&mut world, 1, &pool);
+        assert!(world.get_entity(me).is_err());
+        assert!(world.get_entity(mount).is_err(), "summoned mount removed");
+        assert!(
+            world.get_entity(others_mount).is_ok(),
+            "other's mount stays"
+        );
+        assert!(
+            world.get::<mud_world::Mounted>(me).is_none(),
+            "no stale rider link"
+        );
     }
 
     /// Gear handed to a pet (carried or worn) must not die with the pet when

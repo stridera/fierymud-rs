@@ -26032,6 +26032,12 @@ pub(crate) fn release_from(world: &mut World, member: Entity, leader: Entity) {
         try_remove::<Follower>(world, member);
         // A dismissed pet is no longer the master's paid follower.
         try_remove::<mud_world::PersistentPet>(world, member);
+        // Legacy `stop_follower`: a summoned mount that stops following
+        // leaves the game and starts the owner's summon-mount cooldown.
+        if world.get::<mud_world::SummonedMount>(member).is_some() {
+            info::dismiss_summoned_mount(world, member, Some(leader));
+            return;
+        }
     }
     if world
         .get::<mud_world::GroupMember>(member)
@@ -26155,6 +26161,11 @@ pub(crate) fn die_follower(world: &mut World, dead: Entity, keep_mob_followers: 
     let mut links: Vec<(Entity, Entity)> = Vec::new(); // (follower, leader)
     if let Some(Follower(master)) = world.get::<Follower>(dead).copied() {
         links.push((dead, master));
+        // Legacy `stop_follower`: losing a summoned mount starts the
+        // owner's summon-mount cooldown.
+        if world.get::<mud_world::SummonedMount>(dead).is_some() {
+            info::start_summon_mount_cooldown(world, master);
+        }
     }
     {
         let mut q = world.query::<(Entity, &Follower)>();

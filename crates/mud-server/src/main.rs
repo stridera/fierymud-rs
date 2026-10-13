@@ -114,6 +114,14 @@ fn advance_tick(mut tick: ResMut<TickCount>) {
     tick.0 += 1;
 }
 
+/// About once a second, remove followers whose leader left the world
+/// (see [`commands::info::orphan_follower_sweep`]).
+fn orphan_follower_tick(world: &mut World) {
+    if world.resource::<TickCount>().0.is_multiple_of(TICK_HZ) {
+        commands::info::orphan_follower_sweep(world);
+    }
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn log_heartbeat(tick: Res<TickCount>) {
     if tick.0.is_multiple_of(600) {
@@ -654,6 +662,7 @@ async fn main() {
                 timed!(weather::weather_tick),
                 timed!(sleep::mob_sleep_tick),
                 timed!(triggers::random_trigger_tick),
+                timed!(orphan_follower_tick),
             )
                 .chain(),
             (

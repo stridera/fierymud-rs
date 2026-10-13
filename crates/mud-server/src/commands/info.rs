@@ -7625,6 +7625,107 @@ fn summon_mount_plan(anti: bool, level: i32, alignment: i32) -> SummonMountPlan 
     }
 }
 
+/// Legacy `IS_GOOD`: alignment +350 or better.
+const SUMMON_MOUNT_GOOD_ALIGNMENT: i32 = 350;
+
+/// Legacy `SET_COOLDOWN(CD_SUMMON_MOUNT, 12 MUD_HR)`: a MUD hour is 75
+/// seconds.
+const SUMMON_MOUNT_COOLDOWN_SECS: u64 = 12 * 75;
+
+/// How long until `player` may summon another mount, if the cooldown runs.
+fn summon_mount_cooldown_left(world: &World, player: Entity) -> Option<std::time::Duration> {
+    let ability = world
+        .get_resource::<mud_world::CoreAbilities>()
+        .and_then(|c| c.summon_mount)?;
+    let ready = *world
+        .get::<mud_world::Cooldowns>(player)?
+        .ready_at
+        .get(&ability)?;
+    let left = ready.saturating_duration_since(std::time::Instant::now());
+    (!left.is_zero()).then_some(left)
+}
+
+/// Start the summon-mount cooldown on `owner` (it rides the Summon Mount
+/// ability id in `Cooldowns`, so `cooldowns` lists it and a save keeps it).
+pub(crate) fn start_summon_mount_cooldown(world: &mut World, owner: Entity) {
+    let Some(ability) = world
+        .get_resource::<mud_world::CoreAbilities>()
+        .and_then(|c| c.summon_mount)
+    else {
+        return;
+    };
+    if world.get::<Player>(owner).is_none() {
+        return;
+    }
+    let ready =
+        std::time::Instant::now() + std::time::Duration::from_secs(SUMMON_MOUNT_COOLDOWN_SECS);
+    let mut cd = world
+        .get_mut::<mud_world::Cooldowns>(owner)
+        .map(|mut c| std::mem::take(&mut *c))
+        .unwrap_or_default();
+    cd.ready_at.insert(ability, ready);
+    try_insert(world, owner, cd);
+}
+
+/// A summoned mount stopped following `owner`: legacy `stop_follower`
+/// removes it from the game and starts the owner's summon-mount cooldown.
+/// Its gear is left on the floor.
+pub(crate) fn dismiss_summoned_mount(world: &mut World, mount: Entity, owner: Option<Entity>) {
+    if let Some(owner) = owner {
+        start_summon_mount_cooldown(world, owner);
+    }
+    let room = world.get::<Located>(mount).map(|l| l.0);
+    crate::commands::extract_mob(world, mount, room, false);
+}
+
+/// Every mount `owner` summoned and still has.
+pub(crate) fn summoned_mounts_of(world: &mut World, owner: Entity) -> Vec<Entity> {
+    let mut q = world.query_filtered::<(Entity, &Follower), With<mud_world::SummonedMount>>();
+    q.iter(world)
+        .filter(|(_, f)| f.0 == owner)
+        .map(|(e, _)| e)
+        .collect()
+}
+
+/// Clean up mob followers that lost their leader: a summoned mount or
+/// persistent pet whose owner left the world is removed (the owner's logout
+/// normally does this first; this catches any other exit), a summoned mount
+/// that no longer follows anyone goes too, and other mobs just stop
+/// following the vanished leader. Walks only entities carrying `Follower` or
+/// `SummonedMount`, so it is cheap; run about once a second.
+pub(crate) fn orphan_follower_sweep(world: &mut World) {
+    let mut doomed: Vec<Entity> = Vec::new();
+    let mut freed: Vec<Entity> = Vec::new();
+    {
+        let mut q = world.query_filtered::<(
+            Entity,
+            &Follower,
+            Has<mud_world::SummonedMount>,
+            Has<mud_world::PersistentPet>,
+        ), With<Mob>>();
+        for (e, f, mount, pet) in q.iter(world) {
+            if world.get_entity(f.0).is_ok() {
+                continue;
+            }
+            if mount || pet {
+                doomed.push(e);
+            } else {
+                freed.push(e);
+            }
+        }
+        let mut loose =
+            world.query_filtered::<Entity, (With<mud_world::SummonedMount>, Without<Follower>)>();
+        doomed.extend(loose.iter(world));
+    }
+    for e in freed {
+        try_remove::<Follower>(world, e);
+    }
+    for e in doomed {
+        let room = world.get::<Located>(e).map(|l| l.0);
+        crate::commands::extract_mob(world, e, room, false);
+    }
+}
+
 pub(crate) fn cmd_summonmount(world: &mut World, player: Entity, _args: &str) {
     if world.get::<Fighting>(player).is_some() {
         send_to(
@@ -7661,6 +7762,30 @@ pub(crate) fn cmd_summonmount(world: &mut World, player: Entity, _args: &str) {
             return;
         }
     }
+    // Mount tier by level and alignment, per the legacy `mount_types` table.
+    let class_name = world
+        .get::<Profile>(player)
+        .and_then(|p| p.class_id)
+        .and_then(|id| {
+            world
+                .get_resource::<mud_world::ClassCatalog>()
+                .and_then(|c| c.by_id.get(&id).map(|d| d.name.clone()))
+        })
+        .unwrap_or_default();
+    let anti = summon_mount_is_anti(&class_name);
+    let level = world.get::<Profile>(player).map_or(0, |p| p.level);
+    let alignment = world.get::<CombatStats>(player).map_or(0, |s| s.alignment);
+    let staff = mud_db::enums::is_staff_level(level);
+    // Legacy: a Paladin must be good (`IS_GOOD`); the Anti-Paladin has no
+    // alignment gate beyond the mount tiers. Staff skip the checks.
+    if !staff && !anti && alignment < SUMMON_MOUNT_GOOD_ALIGNMENT {
+        send_to(
+            world,
+            player,
+            "Not even horses can stand your offensive presence!\r\n",
+        );
+        return;
+    }
     let Some(located) = world.get::<Located>(player).copied() else {
         return;
     };
@@ -7680,20 +7805,23 @@ pub(crate) fn cmd_summonmount(world: &mut World, player: Entity, _args: &str) {
         send_to(world, player, "You already have a mount.\r\n");
         return;
     }
+    // Legacy `CD_SUMMON_MOUNT`, started whenever a summoned mount stops
+    // following its owner; kept in the saved cooldown table.
+    if !staff && let Some(left) = summon_mount_cooldown_left(world, player) {
+        let secs = left.as_secs() + u64::from(left.subsec_nanos() > 0);
+        let span = if secs == 1 {
+            "second".to_string()
+        } else {
+            format!("{secs} seconds")
+        };
+        send_to(
+            world,
+            player,
+            format!("You must wait another {span} before you can summon a mount again.\r\n"),
+        );
+        return;
+    }
 
-    // Mount tier by level and alignment, per the legacy `mount_types` table.
-    let class_name = world
-        .get::<Profile>(player)
-        .and_then(|p| p.class_id)
-        .and_then(|id| {
-            world
-                .get_resource::<mud_world::ClassCatalog>()
-                .and_then(|c| c.by_id.get(&id).map(|d| d.name.clone()))
-        })
-        .unwrap_or_default();
-    let anti = summon_mount_is_anti(&class_name);
-    let level = world.get::<Profile>(player).map_or(0, |p| p.level);
-    let alignment = world.get::<CombatStats>(player).map_or(0, |s| s.alignment);
     let plan = summon_mount_plan(anti, level, alignment);
     let (zone, id) = plan.proto;
     if !world
@@ -7725,6 +7853,7 @@ pub(crate) fn cmd_summonmount(world: &mut World, player: Entity, _args: &str) {
         em.insert((
             Posture(PostureKind::Standing),
             mud_world::Mountable,
+            mud_world::SummonedMount,
             Follower(player),
         ));
         // Summoned mounts carry their own pools (legacy `summon_mount`):
@@ -15637,13 +15766,14 @@ pub(crate) fn cmd_group(world: &mut World, player: Entity, args: &str) {
             .and_then(|h| vital_color_tag(h.hp, h.max));
         let hp_text = hp_open.map_or(hp_padded.clone(), |open| format!("{open}{hp_padded}</>"));
         // Movement (legacy `make_group_report_line` shows `NNNv/NNNV`).
-        let mv_inner = world
-            .get::<Stamina>(*m)
-            .map_or(String::new(), |s| format!("MV {}/{}", s.current, s.max));
+        // Mounts and pets carry `MovementPoints`; players carry `Stamina`.
+        let mv_pool = world
+            .get::<mud_world::MovementPoints>(*m)
+            .map(|p| (p.current, p.max))
+            .or_else(|| world.get::<Stamina>(*m).map(|s| (s.current, s.max)));
+        let mv_inner = mv_pool.map_or(String::new(), |(c, x)| format!("MV {c}/{x}"));
         let mv_padded = format!("{mv_inner:<12}");
-        let mv_open = world
-            .get::<Stamina>(*m)
-            .and_then(|s| vital_color_tag(s.current, s.max));
+        let mv_open = mv_pool.and_then(|(c, x)| vital_color_tag(c, x));
         let mv_text = mv_open.map_or(mv_padded.clone(), |open| format!("{open}{mv_padded}</>"));
         let here_text = match (my_room, world.get::<Located>(*m).map(|l| l.0)) {
             (Some(mine), Some(theirs)) if mine == theirs => "<green>here</>",
