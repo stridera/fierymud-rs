@@ -46,7 +46,7 @@ pub struct YieldedThread {
     /// time so `tick_yielded` can apply it on resume.
     gate: ScriptGate,
     /// Tick value at which this thread becomes due to resume. Computed
-    /// at park time as `host.current_tick + wait_secs * TICK_HZ`.
+    /// at park time as `host.current_tick + wait ticks`.
     resume_at_tick: u64,
     /// Which trigger spawned the thread (set by the dispatcher via
     /// [`LuaHost::set_origin`]); lets a failure after `wait()` be recorded
@@ -179,6 +179,30 @@ pub struct LuaHost {
 /// a Lua `wait(seconds)` into ticks. Kept here as a const so mud-script
 /// doesn't need to depend on mud-server.
 const TICK_HZ: u64 = 10;
+
+/// Ticks a script's `coroutine.yield(n)` asks to sleep. `n` is seconds and may be
+/// fractional: legacy DG `wait 2` is 2 pulses, 0.2s, and the converter emits
+/// `wait(0.2)`. Rounded to whole ticks, never less than one tick; a missing or
+/// non-numeric yield sleeps one second.
+fn yield_wait_ticks(value: Option<&Value>) -> u64 {
+    let secs = match value {
+        #[allow(clippy::cast_precision_loss)]
+        Some(Value::Integer(i)) => *i as f64,
+        Some(Value::Number(n)) => *n,
+        _ => 1.0,
+    };
+    if !secs.is_finite() {
+        return TICK_HZ;
+    }
+    // Clamped to [1 tick, ~10 years], so the cast cannot truncate or go negative.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    let ticks = (secs * TICK_HZ as f64).round().clamp(1.0, 3_153_600_000.0) as u64;
+    ticks
+}
 
 /// Function-pointer resource installed by mud-server at boot. The Lua
 /// `skills.execute(caster, "name", target)` binding looks this up and
@@ -909,7 +933,7 @@ impl LuaHost {
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
 
-        let result = (|| -> mlua::Result<Option<i64>> {
+        let result = (|| -> mlua::Result<Option<u64>> {
             self.bind_globals(
                 &yielded.env,
                 world,
@@ -920,21 +944,8 @@ impl LuaHost {
             )?;
             let values: MultiValue = yielded.thread.resume(())?;
             if matches!(yielded.thread.status(), ThreadStatus::Resumable) {
-                let wait_secs = values
-                    .into_iter()
-                    .next()
-                    .and_then(|v| match v {
-                        Value::Integer(i) => Some(i),
-                        Value::Number(n) =>
-                        {
-                            #[allow(clippy::cast_possible_truncation)]
-                            Some(n as i64)
-                        }
-                        _ => None,
-                    })
-                    .unwrap_or(1)
-                    .max(1);
-                Ok(Some(wait_secs))
+                let wait_ticks = yield_wait_ticks(values.iter().next());
+                Ok(Some(wait_ticks))
             } else {
                 Ok(None)
             }
@@ -946,11 +957,8 @@ impl LuaHost {
         world.remove_resource::<ScriptRunning>();
 
         match result {
-            Ok(Some(wait_secs)) => {
-                #[allow(clippy::cast_sign_loss)]
-                let resume_at_tick = self
-                    .current_tick
-                    .saturating_add((wait_secs as u64).saturating_mul(TICK_HZ));
+            Ok(Some(wait_ticks)) => {
+                let resume_at_tick = self.current_tick.saturating_add(wait_ticks);
                 self.yielded.push(YieldedThread {
                     thread: yielded.thread,
                     env: yielded.env,
@@ -1150,10 +1158,10 @@ impl LuaHost {
 
         // Result is one of:
         //   - Ok(None): body finished normally (with optional bool return)
-        //   - Ok(Some((thread, wait_secs))): body yielded; park it
+        //   - Ok(Some((thread, wait_ticks))): body yielded; park it
         //   - Err: lua compile/exec error
         #[allow(clippy::type_complexity)]
-        let result: Result<(Option<bool>, Option<(Thread, i64, Table)>), mlua::Error> = (|| {
+        let result: Result<(Option<bool>, Option<(Thread, u64, Table)>), mlua::Error> = (|| {
             // Private environment: bindings below and anything the body
             // assigns land here, never in the shared sandbox globals.
             let globals = self.new_trigger_env()?;
@@ -1191,7 +1199,7 @@ impl LuaHost {
             // Casting mob: park the not-yet-started thread; it begins
             // once the cast ends (legacy `pause_while_casting`).
             if block == Some(MobBlock::Casting) {
-                return Ok((None, Some((thread, 1, globals.clone()))));
+                return Ok((None, Some((thread, TICK_HZ, globals.clone()))));
             }
             let values: MultiValue = thread.resume(())?;
             let allowed = self
@@ -1199,23 +1207,10 @@ impl LuaHost {
                 .app_data_ref::<LuaCapture>()
                 .is_some_and(|c| c.allow_command);
             if matches!(thread.status(), ThreadStatus::Resumable) {
-                let wait_secs = values
-                    .into_iter()
-                    .next()
-                    .and_then(|v| match v {
-                        Value::Integer(i) => Some(i),
-                        Value::Number(n) =>
-                        {
-                            #[allow(clippy::cast_possible_truncation)]
-                            Some(n as i64)
-                        }
-                        _ => None,
-                    })
-                    .unwrap_or(1)
-                    .max(1);
-                Ok::<(Option<bool>, Option<(Thread, i64, Table)>), mlua::Error>((
+                let wait_ticks = yield_wait_ticks(values.iter().next());
+                Ok::<(Option<bool>, Option<(Thread, u64, Table)>), mlua::Error>((
                     allowed.then_some(true),
-                    Some((thread, wait_secs, globals.clone())),
+                    Some((thread, wait_ticks, globals.clone())),
                 ))
             } else {
                 let return_bool = values
@@ -1250,11 +1245,8 @@ impl LuaHost {
                     out.push_str(&line);
                     out.push_str("\r\n");
                 }
-                if let Some((thread, wait_secs, env)) = yield_info {
-                    #[allow(clippy::cast_sign_loss)]
-                    let resume_at_tick = self
-                        .current_tick
-                        .saturating_add((wait_secs as u64).saturating_mul(TICK_HZ));
+                if let Some((thread, wait_ticks, env)) = yield_info {
+                    let resume_at_tick = self.current_tick.saturating_add(wait_ticks);
                     self.yielded.push(YieldedThread {
                         thread,
                         env,
@@ -1612,7 +1604,8 @@ impl LuaHost {
         )?;
         globals.set("combat", combat_tbl)?;
 
-        // `wait(seconds)` is the legacy DG coroutine sleep. The
+        // `wait(seconds)` is the legacy DG coroutine sleep (seconds may be
+        // fractional; the clock is 10 Hz). The
         // body runs inside a coroutine thread (see below), so
         // `coroutine.yield(N)` parks it. The dispatcher
         // (`tick_yielded`) resumes due threads each tick. Pure
@@ -5675,6 +5668,31 @@ mod tests {
         let resumed = host.tick_yielded(&mut world);
         assert_eq!(resumed, 1);
         assert_eq!(host.yielded_count(), 0, "finished, no longer parked");
+    }
+
+    #[test]
+    fn wait_takes_fractional_seconds() {
+        // Legacy `wait 2` is 2 pulses (0.2s) and `wait 15` is 1.5s; the
+        // converter emits `wait(0.2)` / `wait(1.5)`. At 10 Hz that is 2 and
+        // 15 ticks, not the 1 and 2 whole seconds integer truncation gave.
+        for (secs, ticks) in [("0.1", 1), ("0.2", 2), ("1.5", 15), ("0", 1), ("2", 20)] {
+            let (mut world, actor) = make_world_with_actor();
+            let mut host = LuaHost::new();
+            host.set_current_tick(100);
+            let body = format!("wait({secs})\nprint('after')");
+            host.exec_for_actor(&mut world, actor, &body).expect("ok");
+            assert_eq!(host.yielded_count(), 1, "wait({secs}) parks");
+
+            host.set_current_tick(100 + ticks - 1);
+            assert_eq!(host.tick_yielded(&mut world), 0, "wait({secs}) too early");
+            host.set_current_tick(100 + ticks);
+            assert_eq!(
+                host.tick_yielded(&mut world),
+                1,
+                "wait({secs}) due at +{ticks}"
+            );
+            assert_eq!(host.yielded_count(), 0);
+        }
     }
 
     #[test]
