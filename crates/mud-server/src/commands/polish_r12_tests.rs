@@ -201,3 +201,91 @@ fn give_coins_states_the_denominations_the_player_typed() {
         500 + 234 + 107
     );
 }
+
+#[test]
+fn give_coins_rejects_a_non_positive_count_in_any_pair() {
+    let (mut fx, room, p, mut rx) = scene();
+    fx.world
+        .insert_resource(mud_world::ObjectPrototypes::default());
+    fx.world.entity_mut(p).insert(mud_world::Wealth(20_000));
+    let (bob, mut bob_rx) = fx.person("Bob", 30, room);
+    for line in [
+        "give 10 plat -9999 copper bob",
+        "give -5 copper bob",
+        "give 0 copper bob",
+        "give 3 gold -1 silver bob",
+    ] {
+        dispatch(&mut fx.world, p, line);
+        let out = plain(&drain(&mut rx));
+        assert!(
+            out.contains("Give a positive number of coins."),
+            "{line}: {out}"
+        );
+        assert!(!out.contains("-9999"), "{line}: {out}");
+    }
+    assert_eq!(fx.world.get::<mud_world::Wealth>(p).unwrap().0, 20_000);
+    assert!(
+        fx.world
+            .get::<mud_world::Wealth>(bob)
+            .is_none_or(|w| w.0 == 0)
+    );
+    assert!(drain(&mut bob_rx).is_empty());
+}
+
+#[test]
+fn counted_get_leaves_npc_corpses_to_mobs_but_players_still_take_them() {
+    let (mut fx, room, p, mut rx) = scene();
+    let corpses: Vec<Entity> = (0..2)
+        .map(|_| {
+            let c = item_at(&mut fx.world, room, 7, "the corpse of a rat", "corpse");
+            fx.world.entity_mut(c).insert(mud_world::Corpse);
+            c
+        })
+        .collect();
+    let mob = fx
+        .world
+        .spawn((
+            mud_world::Mob,
+            mud_world::Named {
+                name: "Ghoul".into(),
+            },
+            mud_world::Keywords(vec!["ghoul".into()]),
+            Located(room),
+        ))
+        .id();
+    dispatch(&mut fx.world, mob, "get 2 corpse");
+    for &c in &corpses {
+        assert_eq!(fx.world.get::<Located>(c).unwrap().0, room);
+    }
+    dispatch(&mut fx.world, p, "get 2 corpse");
+    let out = drain(&mut rx);
+    for &c in &corpses {
+        assert_eq!(fx.world.get::<Located>(c).unwrap().0, p, "{out}");
+    }
+}
+
+#[test]
+fn counted_get_keeps_the_k_dot_index() {
+    let (mut fx, room, p, mut rx) = scene();
+    let sticks: Vec<Entity> = (0..3)
+        .map(|_| item_at(&mut fx.world, room, 7, "a small stick", "stick"))
+        .collect();
+    let apple = item_at(&mut fx.world, room, 8, "a red apple", "apple");
+    dispatch(&mut fx.world, p, "get 2 2.stick");
+    let out = drain(&mut rx);
+    let taken = sticks
+        .iter()
+        .filter(|&&s| fx.world.get::<Located>(s).unwrap().0 == p)
+        .count();
+    assert_eq!(taken, 2, "{out}");
+    assert_eq!(fx.world.get::<Located>(apple).unwrap().0, room, "{out}");
+    // The 2nd match is taken each time, so the 1st match (newest stick) is
+    // never touched.
+    let remaining: Vec<Entity> = sticks
+        .iter()
+        .copied()
+        .filter(|&s| fx.world.get::<Located>(s).unwrap().0 == room)
+        .collect();
+    assert_eq!(remaining.len(), 1, "{out}");
+    assert_eq!(remaining, vec![sticks[2]], "{out}");
+}

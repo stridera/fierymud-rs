@@ -11312,10 +11312,17 @@ pub(crate) fn cmd_get(world: &mut World, player: Entity, args: &str) {
     };
     // `get 3 stick` off the floor: more than one match goes through the
     // same grouped path as `get all.stick`, so the lines read "(x3)".
-    if container.is_none() && n > 1 {
+    // `get 3 2.stick` keeps its index: the per-item loop below takes the
+    // 2nd match each time. Mobs never take corpses, as in the single path.
+    let indexed = crate::commands::parse_indexed_needle(needle).0 != 1;
+    if container.is_none() && n > 1 && !indexed {
         let mut items =
             crate::commands::item_target::find_items_all(world, player, needle, ItemClass::Room);
-        items.retain(|&e| crate::commands::senses::item_visible_to(world, player, e));
+        let actor_is_mob = world.get::<Mob>(player).is_some();
+        items.retain(|&e| {
+            !(actor_is_mob && world.get::<Corpse>(e).is_some())
+                && crate::commands::senses::item_visible_to(world, player, e)
+        });
         items.truncate(n);
         if items.len() > 1 {
             if crate::commands::composition::refuse_get_from_room(world, player) {
@@ -11510,7 +11517,7 @@ fn give_counted(
             GiveResult::Given(name) => note_given(given, name),
             GiveResult::Busy => return true,
             // The same item would meet the same refusal again.
-            GiveResult::Refused | GiveResult::Declined | GiveResult::Blocked => break,
+            GiveResult::Refused | GiveResult::Blocked => break,
         }
     }
     false
@@ -11581,10 +11588,9 @@ fn resolve_give_target(world: &mut World, player: Entity, target_word: &str) -> 
 /// (soulbound, no-drop, a GIVE trigger) is skipped; a recipient who cannot
 /// take more (too laden, a body that cannot hold things) ends the run, as
 /// in legacy where the rest would meet the same wall. A RECEIVE script that
-/// refuses an item (returns false) hands that one back and ends the run, like
-/// `give N`, so the rest stay with the giver; a recipient whose RECEIVE
-/// trigger is still waiting ends the run too, and the function returns true
-/// so the caller can say so.
+/// refuses an item (returns false) hands just that one back; a recipient whose
+/// RECEIVE trigger is still waiting ends the run, and the function returns
+/// true so the caller can say so.
 fn give_all(
     world: &mut World,
     player: Entity,
@@ -11634,11 +11640,11 @@ fn give_all(
         }
         match give_one(world, player, target, item, true) {
             GiveResult::Given(name) => note_given(given, name),
+            // Skip the refused item and keep offering the rest (legacy DG
+            // does too); quest turn-ins like `give all.gem shaman` rely on it.
             GiveResult::Refused => {}
             GiveResult::Busy => return true,
-            // The recipient turned one item down; offering it the rest
-            // would only repeat the refusal for each.
-            GiveResult::Declined | GiveResult::Blocked => break,
+            GiveResult::Blocked => break,
         }
     }
     false
@@ -11747,12 +11753,10 @@ fn give_coins(world: &mut World, player: Entity, coins: [i64; 4], rest: &str) {
         send_to(world, player, "Give it to whom?\r\n");
         return;
     }
-    if copper <= 0 {
-        send_to(
-            world,
-            player,
-            "Heh heh heh ... we are jolly funny today, eh?\r\n",
-        );
+    // A negative count in any pair would move less than the message states
+    // (untyped denominations are 0, so only negatives are rejected per pair).
+    if copper <= 0 || coins.iter().any(|&n| n < 0) {
+        send_to(world, player, "Give a positive number of coins.\r\n");
         return;
     }
     let Some(located) = world.get::<Located>(player).copied() else {
@@ -13322,10 +13326,6 @@ enum GiveResult {
     /// This item was refused (soulbound, no-drop, a GIVE or RECEIVE
     /// trigger); the reason was sent or the refusing script spoke.
     Refused,
-    /// The recipient's RECEIVE trigger refused this item (it is back with
-    /// the giver); a bulk give stops offering instead of repeating the
-    /// refusal for every remaining item.
-    Declined,
     /// The recipient's RECEIVE trigger is still waiting on an earlier give,
     /// so it cannot look at this item; it stays with the giver and the
     /// recipient was said to be busy.
@@ -13407,7 +13407,7 @@ fn give_one(
             if !silent {
                 crate::commands::drain_lua_outbox(world);
             }
-            return GiveResult::Declined;
+            return GiveResult::Refused;
         }
         crate::triggers::ReceiveOutcome::Busy => {
             // A bulk give says so once, after its summary.

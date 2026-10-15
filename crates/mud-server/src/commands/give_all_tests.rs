@@ -415,40 +415,31 @@ fn a_receive_trigger_returning_true_nil_or_nothing_accepts() {
     }
 }
 
-/// Once a recipient refuses an item, `give all` stops offering it more
-/// (like `give N`): the refusal is not repeated for every item, and what
-/// was not offered stays with the giver.
 #[test]
-fn give_all_stops_at_the_first_receive_refusal() {
+fn give_all_refuses_per_item_and_keeps_going() {
     let mut s = scene();
-    let keeper = keeper_with(
-        &mut s,
-        "actor:send('Keeper refuses.') if object.id == 7 then return false end",
-    );
-    // Newest first: the apple (offered last) would have been accepted, but
-    // the run ends at the first sword.
-    let apple = item_at(&mut s.fx.world, s.giver, 8, "a red apple", "apple");
+    let keeper = keeper_with(&mut s, "if object.id == 7 then return false end");
     let a = item_at(&mut s.fx.world, s.giver, 7, "a steel sword", "sword");
     let b = item_at(&mut s.fx.world, s.giver, 7, "a steel sword", "sword");
+    let c = item_at(&mut s.fx.world, s.giver, 8, "a red apple", "apple");
     let out = s.cmd("give all keeper");
-    assert_eq!(out.matches("Keeper refuses.").count(), 1, "{out}");
-    for item in [a, b, apple] {
-        assert_eq!(s.holder(item), s.giver, "{out}");
-    }
-    assert!(!out.contains("You give"), "{out}");
-    let _ = keeper;
+    assert_eq!(s.holder(a), s.giver, "{out}");
+    assert_eq!(s.holder(b), s.giver, "{out}");
+    assert_eq!(s.holder(c), keeper, "{out}");
+    assert!(out.contains("You give a red apple to Keeper."), "{out}");
+    assert!(!out.contains("steel sword to Keeper"), "{out}");
 }
 
+/// Quest turn-in: a refused gem does not hide the quest gem behind it.
 #[test]
-fn give_all_dot_name_refusal_is_said_once_too() {
+fn give_all_dot_name_skips_a_refused_item_and_reaches_the_quest_item() {
     let mut s = scene();
-    keeper_with(&mut s, "actor:send('Keeper refuses.') return false");
-    let items = swords(&mut s, 4);
-    let out = s.cmd("give all.sword keeper");
-    assert_eq!(out.matches("Keeper refuses.").count(), 1, "{out}");
-    for item in items {
-        assert_eq!(s.holder(item), s.giver, "{out}");
-    }
+    let keeper = keeper_with(&mut s, "if object.id ~= 9 then return false end");
+    let quest = item_at(&mut s.fx.world, s.giver, 9, "a blue gem", "gem");
+    let dull = item_at(&mut s.fx.world, s.giver, 8, "a dull gem", "gem");
+    let out = s.cmd("give all.gem keeper");
+    assert_eq!(s.holder(dull), s.giver, "{out}");
+    assert_eq!(s.holder(quest), keeper, "{out}");
 }
 
 /// Script output reaches each recipient in the order the script made the
