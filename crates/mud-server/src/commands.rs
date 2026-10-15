@@ -618,6 +618,9 @@ pub(crate) mod containers;
 #[path = "commands/containers_tests.rs"]
 mod containers_tests;
 #[cfg(test)]
+#[path = "commands/give_all_tests.rs"]
+mod give_all_tests;
+#[cfg(test)]
 #[path = "commands/item_spawn_sites_tests.rs"]
 mod item_spawn_sites_tests;
 #[cfg(test)]

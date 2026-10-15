@@ -11368,7 +11368,10 @@ pub(crate) fn cmd_put(world: &mut World, player: Entity, args: &str) {
     repeat_carried(world, player, item_word, n, |w, p| put_plain(w, p, rest));
 }
 
-/// `give [N] <item> [to] <target>`.
+/// `give <item> [to] <target>`, `give N <item> <target>`, `give all <target>`,
+/// `give all.<name> <target>` (legacy `do_give`). The bulk forms hand over
+/// carried, unworn items one by one through the same per-item gates as a
+/// single give and then print one grouped summary (`(x3)` for repeats).
 pub(crate) fn cmd_give(world: &mut World, player: Entity, args: &str) {
     // `give 5 gold bob`, `give 2 silver 3 copper to bob` (legacy
     // `parse_money`): coins are not carried items.
@@ -11377,12 +11380,165 @@ pub(crate) fn cmd_give(world: &mut World, player: Entity, args: &str) {
         return;
     }
     let (count, rest) = parse_count_prefix(args.trim());
-    let Some(n) = count else {
+    let Some((item_word, target_word)) = split_give_args(rest) else {
         give_plain(world, player, rest);
         return;
     };
-    let (item_word, _) = split_give_args(rest).unwrap_or((rest, ""));
-    repeat_carried(world, player, item_word, n, |w, p| give_plain(w, p, rest));
+    let filter = parse_all_filter(item_word);
+    if filter.is_none() && count.is_none() {
+        give_plain(world, player, rest);
+        return;
+    }
+    if let (Some(n), Some(_)) = (count, &filter)
+        && n > 1
+    {
+        send_to(
+            world,
+            player,
+            format!("Do you want to give '{n}' or 'all'?  Make up your mind!\r\n"),
+        );
+        return;
+    }
+    let Some(target) = resolve_give_target(world, player, target_word) else {
+        return;
+    };
+    let mut given: Vec<(String, usize)> = Vec::new();
+    match filter {
+        Some(filter) => give_all(world, player, target, &filter, &mut given),
+        None => {
+            for i in 0..count.unwrap_or(1) {
+                let Some(item) = find_item(world, player, item_word, ItemClass::Inventory) else {
+                    if i == 0 {
+                        send_rendered(
+                            world,
+                            player,
+                            &format!("You aren't carrying '{item_word}'.\r\n"),
+                        );
+                    }
+                    break;
+                };
+                match give_one(world, player, target, item, true) {
+                    GiveResult::Given(name) => note_given(&mut given, name),
+                    // The same item would meet the same refusal again.
+                    GiveResult::Refused | GiveResult::Blocked => break,
+                }
+            }
+        }
+    }
+    announce_gives(world, player, target, &given);
+}
+
+/// The recipient of a `give`: a visible actor in the room other than the giver.
+fn resolve_give_target(world: &mut World, player: Entity, target_word: &str) -> Option<Entity> {
+    let room = world.get::<Located>(player).map(|l| l.0)?;
+    let Some(target) = find_actor_in_room(world, target_word, room, player) else {
+        send_rendered(
+            world,
+            player,
+            &format!("You don't see '{target_word}' here.\r\n"),
+        );
+        return None;
+    };
+    Some(target)
+}
+
+/// `give all[.<name>] <target>`: hand over each matching carried, unworn,
+/// visible item in inventory order. An item that refuses on its own account
+/// (soulbound, no-drop, a GIVE trigger) is skipped; a recipient who cannot
+/// take more (too laden, a body that cannot hold things) ends the run, as
+/// in legacy where the rest would meet the same wall.
+fn give_all(
+    world: &mut World,
+    player: Entity,
+    target: Entity,
+    filter: &str,
+    given: &mut Vec<(String, usize)>,
+) {
+    let mut items: Vec<Entity> = with_query::<
+        (
+            Entity,
+            &Located,
+            &Named,
+            Option<&Keywords>,
+            Option<&EquippedSlot>,
+        ),
+        With<Item>,
+        _,
+    >(world, |world, q| {
+        q.iter(world)
+            .filter(|(_, l, n, kw, eq)| {
+                l.0 == player && eq.is_none() && (filter.is_empty() || matches(filter, n, *kw))
+            })
+            .map(|(e, _, _, _, _)| e)
+            .collect()
+    });
+    items.retain(|&e| crate::commands::senses::item_visible_to(world, player, e));
+    crate::commands::sort_newest_first(world, player, &mut items, |e| *e);
+    if items.is_empty() {
+        if filter.is_empty() {
+            send_to(world, player, "You don't seem to be holding anything.\r\n");
+        } else {
+            send_to(
+                world,
+                player,
+                format!("You don't even have one {filter}!\r\n"),
+            );
+        }
+        return;
+    }
+    for item in items {
+        // An earlier trigger in the run may have purged or moved it.
+        if world.get::<Located>(item).map(|l| l.0) != Some(player) {
+            continue;
+        }
+        match give_one(world, player, target, item, true) {
+            GiveResult::Given(name) => note_given(given, name),
+            GiveResult::Refused => {}
+            GiveResult::Blocked => break,
+        }
+    }
+}
+
+/// Tally a handed-over item by its short description, first-seen order.
+fn note_given(given: &mut Vec<(String, usize)>, name: String) {
+    if let Some(entry) = given.iter_mut().find(|(n, _)| *n == name) {
+        entry.1 += 1;
+    } else {
+        given.push((name, 1));
+    }
+}
+
+/// The grouped `give` summary (legacy: one `You give $p to $N. (xN)` set of
+/// lines per distinct item).
+fn announce_gives(world: &mut World, player: Entity, target: Entity, given: &[(String, usize)]) {
+    let Some(room) = world.get::<Located>(player).map(|l| l.0) else {
+        return;
+    };
+    let target_name = name_of(world, target);
+    let player_name = name_of(world, player);
+    for (item_name, qty) in given {
+        let tag = if *qty > 1 {
+            format!(" (x{qty})")
+        } else {
+            String::new()
+        };
+        send_to(
+            world,
+            player,
+            format!("You give {item_name} to {target_name}.{tag}\r\n"),
+        );
+        send_msg(
+            world,
+            target,
+            format!("{player_name} gives you {item_name}.{tag}\r\n"),
+        );
+        broadcast_room_except_rendered(
+            world,
+            room,
+            &[player, target],
+            &format!("{player_name} gives {item_name} to {target_name}.{tag}\r\n"),
+        );
+    }
 }
 
 /// Leading run of `<N> <platinum|gold|silver|copper>` pairs (legacy
@@ -12883,11 +13039,6 @@ fn give_plain(world: &mut World, player: Entity, args: &str) {
         (parts[0].trim(), parts[1].trim())
     };
 
-    let Some(located) = world.get::<Located>(player).copied() else {
-        return;
-    };
-    let room = located.0;
-
     let item = find_item(world, player, item_word, ItemClass::Inventory);
     let Some(item) = item else {
         send_rendered(
@@ -12897,39 +13048,68 @@ fn give_plain(world: &mut World, player: Entity, args: &str) {
         );
         return;
     };
-    // SOULBOUND blocks trade. Bound gear cannot change hands; the
-    // bond is on the person, not the room. NO_DROP also implies
-    // "won't leave your grasp" so block trade too — consistent
-    // with the legacy MUD semantics where an !NODROP gate covered
-    // both drop and give.
-    let item_name_pre = name_of(world, item);
-    if has_object_flag(world, item, mud_db::enums::ObjectFlag::Soulbound) {
-        send_msg(
-            world,
-            player,
-            format!("{item_name_pre} is soulbound — it cannot change hands.\r\n"),
-        );
+    // The item's own refusals (soulbound, no-drop) come before the
+    // target lookup, as they always have for a single give.
+    if let Some(msg) = give_hold_refusal(world, player, item) {
+        send_rendered(world, player, &msg);
         return;
+    }
+    let Some(target) = resolve_give_target(world, player, target_word) else {
+        return;
+    };
+    give_one(world, player, target, item, false);
+}
+
+/// Why `player` cannot let go of `item`, if they cannot. SOULBOUND blocks
+/// trade (the bond is on the person, not the room); NO_DROP also implies
+/// "won't leave your grasp", as in legacy where `!NODROP` covered both drop
+/// and give.
+fn give_hold_refusal(world: &World, player: Entity, item: Entity) -> Option<String> {
+    let item_name = name_of(world, item);
+    if has_object_flag(world, item, mud_db::enums::ObjectFlag::Soulbound) {
+        return Some(format!(
+            "{item_name} is soulbound — it cannot change hands.\r\n"
+        ));
     }
     if has_restriction(world, item, mud_db::enums::ObjectRestriction::NoDrop)
         && !mud_world::bypasses_restrictions(world, player)
     {
-        send_rendered(
-            world,
-            player,
-            &format!("You can't seem to let go of {item_name_pre}.\r\n"),
-        );
-        return;
+        return Some(format!("You can't seem to let go of {item_name}.\r\n"));
     }
-    let target = find_actor_in_room(world, target_word, room, player);
-    let Some(target) = target else {
-        send_rendered(
-            world,
-            player,
-            &format!("You don't see '{target_word}' here.\r\n"),
-        );
-        return;
+    None
+}
+
+/// What became of one item offered by `give_one`.
+enum GiveResult {
+    /// It changed hands; carries the name the summary should list it under.
+    Given(String),
+    /// This item was refused (soulbound, no-drop, a GIVE trigger); the
+    /// reason was sent.
+    Refused,
+    /// The recipient cannot take this or anything else (too laden, a body
+    /// that cannot hold things); the reason was sent.
+    Blocked,
+}
+
+/// Hand one carried `item` to `target` (legacy `perform_give`): the item's
+/// own refusals, the recipient's load, GIVE and RECEIVE triggers, the fluid
+/// body rules, and quest delivery. With `silent` the success lines are left
+/// to the caller's grouped summary; refusals always speak.
+fn give_one(
+    world: &mut World,
+    player: Entity,
+    target: Entity,
+    item: Entity,
+    silent: bool,
+) -> GiveResult {
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return GiveResult::Refused;
     };
+    let room = located.0;
+    if let Some(msg) = give_hold_refusal(world, player, item) {
+        send_rendered(world, player, &msg);
+        return GiveResult::Refused;
+    }
 
     let item_name = name_of(world, item);
     let target_name = name_of(world, target);
@@ -12951,43 +13131,45 @@ fn give_plain(world: &mut World, player: Entity, args: &str) {
                 crate::commands::cap_sentence_start(&target_name)
             ),
         );
-        return;
+        return GiveResult::Blocked;
     }
 
     // GIVE triggers on the item (legacy `give_otrigger`, before the item
     // changes hands). A script that takes the item away ends the give.
     crate::triggers::fire_give(world, item, player, target);
     if world.get::<Located>(item).map(|l| l.0) != Some(player) {
-        return;
+        return GiveResult::Refused;
     }
     // Fluid giver or receiver (legacy `perform_give`): the item turns solid
     // as it leaves a fluid hand, and slips from a solid hand into a fluid one.
     if crate::commands::composition::give_item_fate(world, player, target, item)
         == crate::commands::composition::GiveFate::Fell
     {
-        return;
+        return GiveResult::Blocked;
     }
     if world.get::<Located>(item).is_some() {
         world.entity_mut(item).insert(Located(target));
         crate::hiding::set_hiddenness(world, item, 0);
     }
 
-    send_to(
-        world,
-        player,
-        format!("You give {item_name} to {target_name}.\r\n"),
-    );
-    send_msg(
-        world,
-        target,
-        format!("{player_name} gives you {item_name}.\r\n"),
-    );
-    broadcast_room_except_rendered(
-        world,
-        room,
-        &[player, target],
-        &format!("{player_name} gives {item_name} to {target_name}.\r\n"),
-    );
+    if !silent {
+        send_to(
+            world,
+            player,
+            format!("You give {item_name} to {target_name}.\r\n"),
+        );
+        send_msg(
+            world,
+            target,
+            format!("{player_name} gives you {item_name}.\r\n"),
+        );
+        broadcast_room_except_rendered(
+            world,
+            room,
+            &[player, target],
+            &format!("{player_name} gives {item_name} to {target_name}.\r\n"),
+        );
+    }
     // A flying recipient may now be too heavy to stay up.
     crate::flight::check_overweight(world, target);
 
@@ -13010,6 +13192,7 @@ fn give_plain(world: &mut World, player: Entity, args: &str) {
             mob_key.id,
         );
     }
+    GiveResult::Given(item_name)
 }
 
 /// Try to equip `item` for `wear all`: its highest-priority position
