@@ -267,3 +267,105 @@ fn coins_still_take_the_bribe_path() {
     assert_eq!(s.fx.world.get::<mud_world::Wealth>(s.giver).unwrap().0, 500);
     assert_eq!(s.fx.world.get::<mud_world::Wealth>(bob).unwrap().0, 500);
 }
+
+/// A keeper mob with one RECEIVE trigger running `body`.
+fn keeper_with(s: &mut Scene, body: &str) -> Entity {
+    let mut catalog = TriggerCatalog::default();
+    catalog.by_key.insert(
+        (99, 1),
+        TriggerDef {
+            zone_id: 99,
+            id: 1,
+            name: "t1".into(),
+            attach_type: TriggerAttach::Mob,
+            commands: body.into(),
+            flags: vec![TriggerEvent::Receive],
+            arg_list: vec![],
+            num_args: 0,
+        },
+    );
+    s.fx.world.insert_resource(catalog);
+    s.fx.world
+        .spawn((
+            Mob,
+            Named {
+                name: "Keeper".into(),
+            },
+            Keywords(vec!["keeper".into()]),
+            WorldKey { zone: 99, id: 5 },
+            Located(s.room),
+            AttachedTriggers(vec![(99, 1)]),
+        ))
+        .id()
+}
+
+fn swords(s: &mut Scene, n: usize) -> Vec<Entity> {
+    (0..n)
+        .map(|_| item_at(&mut s.fx.world, s.giver, 7, "a sword", "sword"))
+        .collect()
+}
+
+#[test]
+fn give_all_stops_when_a_receive_trigger_destroys_the_recipient() {
+    let mut s = scene();
+    let keeper = keeper_with(&mut s, "world.destroy(self)");
+    let items = swords(&mut s, 3);
+    let out = s.cmd("give all keeper");
+    assert!(s.fx.world.get_entity(keeper).is_err(), "{out}");
+    // The first item went down with the keeper; the others stay with the
+    // giver instead of being parked on a dead entity.
+    let kept = items
+        .iter()
+        .filter(|&&i| s.fx.world.get::<Located>(i).map(|l| l.0) == Some(s.giver))
+        .count();
+    assert_eq!(kept, 2, "{out}");
+    assert!(out.contains("You don't see that person here."), "{out}");
+    assert!(out.contains("You give a sword to Keeper."), "{out}");
+}
+
+#[test]
+fn give_count_stops_when_a_receive_trigger_destroys_the_recipient() {
+    let mut s = scene();
+    let keeper = keeper_with(&mut s, "world.destroy(self)");
+    let items = swords(&mut s, 3);
+    let out = s.cmd("give 3 sword keeper");
+    assert!(s.fx.world.get_entity(keeper).is_err(), "{out}");
+    let kept = items
+        .iter()
+        .filter(|&&i| s.fx.world.get::<Located>(i).map(|l| l.0) == Some(s.giver))
+        .count();
+    assert_eq!(kept, 2, "{out}");
+    assert!(out.contains("You don't see that person here."), "{out}");
+}
+
+#[test]
+fn give_all_stops_when_a_receive_trigger_moves_the_giver() {
+    let mut s = scene();
+    let zone = s.fx.room_of(s.room);
+    let elsewhere = s.fx.room(zone, 30, 2);
+    let keeper = keeper_with(&mut s, "actor:teleport(get_room(30, 2))");
+    let items = swords(&mut s, 3);
+    let out = s.cmd("give all keeper");
+    assert_eq!(s.fx.room_of(s.giver), elsewhere, "{out}");
+    let kept = items.iter().filter(|&&i| s.holder(i) == s.giver).count();
+    assert_eq!(kept, 2, "{out}");
+    assert_eq!(items.iter().filter(|&&i| s.holder(i) == keeper).count(), 1);
+    assert!(out.contains("You don't see that person here."), "{out}");
+}
+
+#[test]
+fn give_count_never_offers_the_same_item_twice() {
+    let mut s = scene();
+    // The keeper hands every item straight back.
+    keeper_with(
+        &mut s,
+        "self:setvar('n', (self:getvar('n') or 0) + 1); self:command('give sword tester')",
+    );
+    swords(&mut s, 1);
+    let out = s.cmd("give 3 sword keeper");
+    let n =
+        s.fx.world
+            .get_resource::<EntityVariableCache>()
+            .and_then(|c| c.get(EntityType::Mob, 99, 5, "n").cloned());
+    assert_eq!(n, Some(1.into()), "{out}");
+}

@@ -11402,12 +11402,38 @@ pub(crate) fn cmd_give(world: &mut World, player: Entity, args: &str) {
     let Some(target) = resolve_give_target(world, player, target_word) else {
         return;
     };
+    let Some(room) = world.get::<Located>(player).map(|l| l.0) else {
+        return;
+    };
+    // The summary names the recipient and the room as they were when the
+    // run began: a RECEIVE trigger may destroy the one or move the other.
+    let target_name = name_of(world, target);
     let mut given: Vec<(String, usize)> = Vec::new();
     match filter {
         Some(filter) => give_all(world, player, target, &filter, &mut given),
         None => {
+            // Items already offered in this command: a RECEIVE trigger that
+            // hands one back must not be given (and counted) again.
+            let mut offered: Vec<Entity> = Vec::new();
             for i in 0..count.unwrap_or(1) {
-                let Some(item) = find_item(world, player, item_word, ItemClass::Inventory) else {
+                if !give_target_present(world, player, target) {
+                    break;
+                }
+                let found = find_item(world, player, item_word, ItemClass::Inventory);
+                let item = match found {
+                    Some(e) if offered.contains(&e) => {
+                        crate::commands::item_target::find_items_all(
+                            world,
+                            player,
+                            item_word,
+                            ItemClass::Inventory,
+                        )
+                        .into_iter()
+                        .find(|c| !offered.contains(c))
+                    }
+                    other => other,
+                };
+                let Some(item) = item else {
                     if i == 0 {
                         send_rendered(
                             world,
@@ -11417,6 +11443,7 @@ pub(crate) fn cmd_give(world: &mut World, player: Entity, args: &str) {
                     }
                     break;
                 };
+                offered.push(item);
                 match give_one(world, player, target, item, true) {
                     GiveResult::Given(name) => note_given(&mut given, name),
                     // The same item would meet the same refusal again.
@@ -11425,7 +11452,21 @@ pub(crate) fn cmd_give(world: &mut World, player: Entity, args: &str) {
             }
         }
     }
-    announce_gives(world, player, target, &given);
+    announce_gives(world, player, target, room, &target_name, &given);
+}
+
+/// Whether `target` still stands in the giver's room and the giver is still
+/// there to give. A RECEIVE trigger can destroy the recipient (`extract_mob`
+/// is synchronous) or move either party mid-run; the rest of a bulk give
+/// must not follow the items into a despawned entity or another room. Says
+/// so (legacy wording) when not.
+fn give_target_present(world: &World, player: Entity, target: Entity) -> bool {
+    let room = world.get::<Located>(player).map(|l| l.0);
+    let present = room.is_some() && world.get::<Located>(target).map(|l| l.0) == room;
+    if !present {
+        send_to(world, player, "You don't see that person here.\r\n");
+    }
+    present
 }
 
 /// The recipient of a `give`: a visible actor in the room other than the giver.
@@ -11491,6 +11532,9 @@ fn give_all(
         if world.get::<Located>(item).map(|l| l.0) != Some(player) {
             continue;
         }
+        if !give_target_present(world, player, target) {
+            break;
+        }
         match give_one(world, player, target, item, true) {
             GiveResult::Given(name) => note_given(given, name),
             GiveResult::Refused => {}
@@ -11510,11 +11554,14 @@ fn note_given(given: &mut Vec<(String, usize)>, name: String) {
 
 /// The grouped `give` summary (legacy: one `You give $p to $N. (xN)` set of
 /// lines per distinct item).
-fn announce_gives(world: &mut World, player: Entity, target: Entity, given: &[(String, usize)]) {
-    let Some(room) = world.get::<Located>(player).map(|l| l.0) else {
-        return;
-    };
-    let target_name = name_of(world, target);
+fn announce_gives(
+    world: &mut World,
+    player: Entity,
+    target: Entity,
+    room: Entity,
+    target_name: &str,
+    given: &[(String, usize)],
+) {
     let player_name = name_of(world, player);
     for (item_name, qty) in given {
         let tag = if *qty > 1 {
