@@ -140,7 +140,7 @@ pub(crate) fn cast_lag_active(world: &World, caster: Entity) -> bool {
 /// post-`STOP_CASTING` wait state. Staff have no wait states (`WAIT_STATE`
 /// clears theirs).
 pub(crate) fn impose_cast_lag(world: &mut World, caster: Entity) {
-    if is_staff(world, caster) {
+    if is_staff(world, caster) && !mud_world::is_mortal_mode(world, caster) {
         return;
     }
     let lag = CastLag {
@@ -2605,5 +2605,125 @@ mod tests {
         let known = mud_world::known_abilities_of(&world, god).unwrap();
         assert!(known.entries.iter().all(|(_, p, k)| *p == 1000 && *k));
         assert!(known.has_any(ZAP) && known.has_any(MEND));
+    }
+    /// `evil_only_zap` caster with a class, level 50 and a 2-slot circle 3,
+    /// knowing `zap`, ready to cast.
+    fn slotted_zap(role: mud_db::enums::UserRole) -> (World, Entity, Rx) {
+        let (mut world, caster, _goblin, rx) = evil_only_zap(role, true);
+        // The alignment rule is not what these tests are about.
+        world
+            .resource_mut::<AbilityCatalog>()
+            .restriction_rules
+            .remove(&ZAP);
+        world.entity_mut(caster).insert(mud_world::Profile {
+            level: 50,
+            class_id: Some(1),
+            race: "HUMAN".into(),
+            experience: 0,
+            gender: "neutral".into(),
+        });
+        let mut data = world.resource_mut::<SpellSlotData>();
+        data.ability_circle.insert((1, ZAP), 3);
+        data.progression.insert((50, 3), 2);
+        (world, caster, rx)
+    }
+
+    /// A typed `cast zap goblin` that goes through the wind-up path.
+    fn windup_zap(world: &mut World, caster: Entity) {
+        crate::commands::invoke_ability(world, caster, "'zap' goblin", AbilityKind::Spell, "cast");
+    }
+
+    fn slots_in_use(world: &World, caster: Entity) -> i32 {
+        world
+            .get::<mud_world::SpellSlots>(caster)
+            .map_or(0, |s| s.used_in_circle(3))
+    }
+
+    #[test]
+    fn mortal_toggle_makes_an_immortal_spend_spell_slots() {
+        // Mortal mode off: an immortal casts without touching a slot.
+        let (mut world, caster, mut rx) = slotted_zap(mud_db::enums::UserRole::Immortal);
+        windup_zap(&mut world, caster);
+        let _ = drain(&mut rx);
+        assert_eq!(slots_in_use(&world, caster), 0);
+
+        // Toggle on: the same cast now takes a slot.
+        let (mut world, caster, mut rx) = slotted_zap(mud_db::enums::UserRole::Immortal);
+        dispatch(&mut world, caster, "mortal");
+        let out = strip_escapes(&drain(&mut rx));
+        assert!(out.contains("Mortal mode on"), "{out}");
+        assert!(mud_world::is_mortal_mode(&world, caster));
+        windup_zap(&mut world, caster);
+        let out = strip_escapes(&drain(&mut rx));
+        assert_eq!(slots_in_use(&world, caster), 1, "{out}");
+        assert_eq!(
+            world.get::<mud_world::Account>(caster).map(|a| a.role),
+            Some(mud_db::enums::UserRole::Immortal),
+            "role is untouched"
+        );
+
+        // Toggle off again: back to no slot use.
+        dispatch(&mut world, caster, "mortal");
+        let out = strip_escapes(&drain(&mut rx));
+        assert!(out.contains("Mortal mode off"), "{out}");
+        assert!(!mud_world::is_mortal_mode(&world, caster));
+        assert!(crate::commands::spell_slot_open(&world, caster, ZAP));
+        assert!(mud_world::bypasses_restrictions(&world, caster));
+    }
+
+    #[test]
+    fn mortal_mode_keeps_admin_commands_and_restores_staff_gates() {
+        let (mut world, caster, mut rx) = slotted_zap(mud_db::enums::UserRole::Immortal);
+        dispatch(&mut world, caster, "mortal");
+        let _ = drain(&mut rx);
+        // `users` is an Immortal-gated admin command: still available.
+        dispatch(&mut world, caster, "users");
+        let out = strip_escapes(&drain(&mut rx));
+        assert!(!out.contains("You can't do that"), "{out}");
+        // Gameplay bypasses are off while the permission gate is not.
+        assert!(!mud_world::bypasses_restrictions(&world, caster));
+        assert!(!crate::commands::is_staff_gameplay(&world, caster));
+        // A Builder is staff for gear and encumbrance until the toggle is on.
+        world.get_mut::<mud_world::Account>(caster).unwrap().role =
+            mud_db::enums::UserRole::Builder;
+        assert!(crate::commands::is_staff(&world, caster));
+        assert!(!crate::commands::is_staff_gameplay(&world, caster));
+        dispatch(&mut world, caster, "mortal");
+        assert!(crate::commands::is_staff_gameplay(&world, caster));
+        dispatch(&mut world, caster, "mortal");
+        // The post-cast lag staff skip applies again.
+        impose_cast_lag(&mut world, caster);
+        assert!(world.get::<CastLag>(caster).is_some());
+    }
+
+    #[test]
+    fn mortal_mode_gives_a_god_the_cast_wind_up_back() {
+        for (mortal, winds_up) in [(false, false), (true, true)] {
+            let (mut world, caster, _rx) = slotted_zap(mud_db::enums::UserRole::Builder);
+            world.get_mut::<mud_world::Profile>(caster).unwrap().level = 105;
+            world
+                .resource_mut::<SpellSlotData>()
+                .progression
+                .insert((105, 3), 2);
+            if mortal {
+                dispatch(&mut world, caster, "mortal");
+            }
+            windup_zap(&mut world, caster);
+            assert_eq!(
+                world.get::<Casting>(caster).is_some(),
+                winds_up,
+                "mortal mode {mortal}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mortal_cannot_use_mortal() {
+        let (mut world, caster, _goblin, mut rx) =
+            evil_only_zap(mud_db::enums::UserRole::Player, true);
+        dispatch(&mut world, caster, "mortal");
+        let out = strip_escapes(&drain(&mut rx));
+        assert!(out.contains("You can't do that"), "{out}");
+        assert!(!mud_world::is_mortal_mode(&world, caster));
     }
 }

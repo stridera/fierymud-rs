@@ -14642,7 +14642,8 @@ pub(crate) fn wear_refusal(
     // restriction — typing or test-spawning items shouldn't get
     // blocked by alignment / class / race the world authors set
     // for normal players.
-    let staff_bypass = is_staff(world, player) || mud_world::bypasses_restrictions(world, player);
+    let staff_bypass =
+        is_staff_gameplay(world, player) || mud_world::bypasses_restrictions(world, player);
     let (mut alignment_restriction, class_restriction, race_restriction) = if staff_bypass {
         Default::default()
     } else {
@@ -14747,7 +14748,7 @@ pub(crate) fn proto_unusable_by(
     player: Entity,
     proto: &mud_world::ObjectProto,
 ) -> bool {
-    if is_staff(world, player) || mud_world::bypasses_restrictions(world, player) {
+    if is_staff_gameplay(world, player) || mud_world::bypasses_restrictions(world, player) {
         return false;
     }
     let profile = world.get::<Profile>(player);
@@ -17416,7 +17417,8 @@ pub(crate) fn invoke_ability_core(
     // (`STOP_CASTING` + `complete_spell` right after the chant starts), so
     // for them nothing is queued and the spell resolves at once. Only a
     // line the god typed counts (`is_god_level_character`).
-    let god_instant_cast = crate::room_access::is_god_level_character(world, player);
+    let god_instant_cast = crate::room_access::is_god_level_character(world, player)
+        && !mud_world::is_mortal_mode(world, player);
     let queue_wind_up = !skip_queue
         && !from_item
         && !aoe_repeat
@@ -25043,6 +25045,14 @@ pub fn audit_dead_spells(world: &World) {
             "dead-spell audit: clean — every SPELL has authored effects and a dispatcher arm"
         );
     }
+}
+
+/// `is_staff` for game-rule bypasses (encumbrance, gear restrictions, fixed
+/// items): false while the staffer has the `mortal` toggle on. Permission and
+/// admin-tool checks keep using [`is_staff`].
+#[must_use]
+pub(crate) fn is_staff_gameplay(world: &World, entity: Entity) -> bool {
+    !mud_world::is_mortal_mode(world, entity) && is_staff(world, entity)
 }
 
 #[must_use]

@@ -123,6 +123,8 @@ pub(crate) struct PromptCtx {
     pub wizinvis: i32,
     pub roomvis: bool,
     pub afk: bool,
+    /// Staffer playing under mortal rules (`mortal` toggle).
+    pub mortal: bool,
     /// In-game hour 0..=23 for `%y`.
     pub hour: Option<i32>,
     pub season: Option<String>,
@@ -419,6 +421,9 @@ pub(crate) fn render_prompt(template: &str, ctx: &PromptCtx) -> String {
     }
     if ctx.afk {
         flags.push("<AFK>".to_string());
+    }
+    if ctx.mortal {
+        flags.push("<mortal>".to_string());
     }
     let flag_text = flags.join(" ");
 
@@ -773,6 +778,7 @@ pub(crate) fn build_prompt_ctx(world: &mut World, target: Entity) -> PromptCtx {
         afk: world
             .get::<PlayerFlags>(target)
             .is_some_and(|f| f.has(mud_db::enums::PlayerFlag::Afk)),
+        mortal: mud_world::is_mortal_mode(world, target),
         hour,
         season: clock.map(|c| c.season().label().to_string()),
         day_night: hour.map(|h| {
@@ -882,6 +888,7 @@ mod tests {
             wizinvis: 0,
             roomvis: false,
             afk: false,
+            mortal: false,
             hour: Some(7),
             season: Some("Winter".into()),
             day_night: Some("day"),

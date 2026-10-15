@@ -83,6 +83,7 @@ const MORTAL_DENIED: &[&str] = &[
     "purge",
     "freeze",
     "mute",
+    "mortal",
 ];
 
 /// Whether a mortal may ever hold a grant for `cmd`, before the allowlist.

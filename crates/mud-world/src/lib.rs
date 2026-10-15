@@ -24,7 +24,9 @@ pub mod weather_text;
 pub use class_skills::{STARTING_SKILL_PROFICIENCY, grant_class_skills};
 pub use command_help::CommandHelp;
 pub use command_policy::{CommandPolicy, PolicyFlag, PolicyFlags};
-pub use god::{GOD_PROFICIENCY, bypasses_restrictions, known_abilities_of, proficiency_of};
+pub use god::{
+    GOD_PROFICIENCY, bypasses_restrictions, is_mortal_mode, known_abilities_of, proficiency_of,
+};
 pub use liquid_legacy::{BUILTIN_CODES as LEGACY_LIQUID_CODES, LegacyLiquidRow, LiquidLegacyIndex};
 pub use mount_type::{MountPlan, MountTypes};
 pub use script_library::ScriptLibraries;
@@ -52,7 +54,7 @@ pub use components::{
     KillStats, KnownAbilities, LastInputAt, LastPersistedAt, LastTeller, LifeForceTag, LightFuel,
     LiquidContainer, Lit, Located, LoggedInAt, LooseCoins, LootClaim, MAX_HIDDENNESS, MailDraft,
     MaxAbsorbCircle, Meditating, Misdirecting, Misdirection, Mob, MobBehaviors, MobTraits,
-    MobsSleepAtNight, ModifyDelta, Mountable, Mounted, MovementModeTag, MovementPoints,
+    MobsSleepAtNight, ModifyDelta, MortalMode, Mountable, Mounted, MovementModeTag, MovementPoints,
     NameApprovalPending, Named, NaturalAttackType, NaturalDamage, NoMagicRoom, NoMobsRoom,
     NoPortalsRoom, NoRecallRoom, NoScanningRoom, NoSummonRoom, NoTeleportRoom, NoTrackingRoom,
     ObjectFlags, ObjectRestrictions, Online, PENDING_WAKE_KIT_KEY, PREF_CHARSET_KEY,

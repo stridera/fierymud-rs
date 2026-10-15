@@ -149,6 +149,14 @@ pub struct Account {
     pub perms: Vec<mud_db::enums::Permission>,
 }
 
+/// Marker: an immortal who has turned on `mortal` plays under mortal rules
+/// (spell slots, gear restrictions, encumbrance, cast lag and wind-up) so
+/// staff can retest mortal mechanics. Only the game-rule bypasses change;
+/// `Account.role` and every command permission stay as they were. Not
+/// persisted: a relog starts back in normal imm mode.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct MortalMode;
+
 impl Account {
     /// Recompute the cached effective rank after a level change.
     pub fn refresh_rank(&mut self, level: i32) {

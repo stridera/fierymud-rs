@@ -9,7 +9,7 @@ use std::borrow::Cow;
 
 use bevy_ecs::prelude::{Entity, World};
 
-use crate::components::{Account, KnownAbilities};
+use crate::components::{Account, KnownAbilities, MortalMode};
 use crate::resources::AbilityCatalog;
 
 /// Proficiency a god has in every ability (full mastery).
@@ -20,11 +20,20 @@ pub const GOD_PROFICIENCY: i32 = 1000;
 /// effective rank (the higher of the website role and the level-implied
 /// role), so a level-100+ character counts even without a linked account.
 /// `DevMode` deliberately does not count: this is about who the character is.
+/// A god who turned on `mortal` ([`MortalMode`]) is treated as a mortal here;
+/// their role and command permissions are untouched.
 #[must_use]
 pub fn bypasses_restrictions(world: &World, entity: Entity) -> bool {
-    world
-        .get::<Account>(entity)
-        .is_some_and(|a| a.role.at_least(mud_db::enums::UserRole::Immortal))
+    !is_mortal_mode(world, entity)
+        && world
+            .get::<Account>(entity)
+            .is_some_and(|a| a.role.at_least(mud_db::enums::UserRole::Immortal))
+}
+
+/// True while `entity` has the `mortal` toggle on.
+#[must_use]
+pub fn is_mortal_mode(world: &World, entity: Entity) -> bool {
+    world.get::<MortalMode>(entity).is_some()
 }
 
 /// The abilities `entity` knows, as the lookup layer sees them. Mortals get

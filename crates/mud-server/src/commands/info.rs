@@ -2105,6 +2105,25 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
+        names: &["mortal"],
+        min_role: UserRole::Immortal,
+        required_perm: None,
+        category: Category::Settings,
+        help: Help {
+            usage: "mortal",
+            summary: "Toggle playing under mortal rules (immortal only).",
+            long: "While on, spell slots, gear restrictions, encumbrance, \
+                   cast wind-up and post-cast lag apply to you as they do \
+                   to a mortal, and you must actually know what you cast. \
+                   Your commands and permissions are unchanged. Not saved: \
+                   a fresh login starts with it off.",
+        },
+        run: cmd_mortal,
+    }
+}
+
+inventory::submit! {
+    Command {
         names: &["showids"],
         min_role: UserRole::Builder,
         required_perm: None,
@@ -9752,6 +9771,24 @@ pub(crate) fn cmd_holylight(world: &mut World, player: Entity, _args: &str) {
     );
 }
 
+pub(crate) fn cmd_mortal(world: &mut World, player: Entity, _args: &str) {
+    if world.get::<mud_world::MortalMode>(player).is_some() {
+        world.entity_mut(player).remove::<mud_world::MortalMode>();
+        send_to(
+            world,
+            player,
+            "Mortal mode off: your immortal privileges apply again.\r\n",
+        );
+    } else {
+        world.entity_mut(player).insert(mud_world::MortalMode);
+        send_to(
+            world,
+            player,
+            "Mortal mode on: spell slots, gear limits, encumbrance and cast lag now apply to you. Type mortal again to return.\r\n",
+        );
+    }
+}
+
 pub(crate) fn cmd_showids(world: &mut World, player: Entity, _args: &str) {
     toggle_player_flag(
         world,
@@ -11983,14 +12020,14 @@ fn get_plain(world: &mut World, player: Entity, args: &str) {
     // NO_TAKE — the item is bolted to the room (fixture, prop,
     // scenery in container shape). Skip staff: builders sometimes
     // need to relocate fixtures via the loadobj-and-get path.
-    if !crate::commands::is_staff(world, player)
+    if !crate::commands::is_staff_gameplay(world, player)
         && has_restriction(world, item, mud_db::enums::ObjectRestriction::NoTake)
     {
         send_msg(world, player, format!("{item_name} is fixed in place.\r\n"));
         return;
     }
 
-    if !crate::commands::is_staff(world, player)
+    if !crate::commands::is_staff_gameplay(world, player)
         && carried_weight(world, player) + item_weight(world, item) > carry_capacity(world, player)
     {
         send_rendered(
@@ -12203,7 +12240,7 @@ fn get_from_container_inner(
         // Staff bypass — gods don't get encumbered. The cap +
         // running tally still update so the score sheet stays
         // honest, but the gate doesn't reject.
-        let bypass_encumbrance = crate::commands::is_staff(world, player);
+        let bypass_encumbrance = crate::commands::is_staff_gameplay(world, player);
         for (item, item_name) in &items {
             // NO_TAKE items inside containers also stay put.
             // Plausible: a fixed lectern inside a shrine, a
@@ -12280,13 +12317,13 @@ fn get_from_container_inner(
     };
     let item_name = name_of(world, item);
     // NO_TAKE — same fixture gate as the floor path.
-    if !crate::commands::is_staff(world, player)
+    if !crate::commands::is_staff_gameplay(world, player)
         && has_restriction(world, item, mud_db::enums::ObjectRestriction::NoTake)
     {
         send_msg(world, player, format!("{item_name} is fixed in place.\r\n"));
         return;
     }
-    if !crate::commands::is_staff(world, player)
+    if !crate::commands::is_staff_gameplay(world, player)
         && carried_weight(world, player) + net_weight_gain(world, player, item)
             > carry_capacity(world, player)
     {
@@ -12394,7 +12431,7 @@ fn get_batch_from_floor(
     let mut skipped = 0usize;
     let mut blocked = 0usize;
     let mut picked: Vec<(String, usize)> = Vec::new();
-    let bypass_encumbrance = crate::commands::is_staff(world, player);
+    let bypass_encumbrance = crate::commands::is_staff_gameplay(world, player);
     // Get-trigger output waits until the grouped "You pick up" lines are out.
     let hold = crate::commands::OutboxHold::new();
     for (item, item_name) in items {
