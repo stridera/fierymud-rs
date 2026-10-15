@@ -314,6 +314,11 @@ keep waits short; a script that errors between setting and clearing leaves it se
 the instance. The old `globals.x = globals.x or true` converter artefact is wrong here: assign
 the real value.
 
+Store data, not functions, in `globals`. A function stored there keeps the `actor` / `self` of
+the fire that wrote it (its upvalues are captured at write time), so a later trigger calling it
+sees stale handles. Store plain values (numbers, strings, booleans, plain tables, or the actor's
+name) and look the entity up again in the reading trigger.
+
 ## Quest variables and stages
 
 Per-player progress lives in the player's script variables. Quest names are free-form strings.
