@@ -12,7 +12,7 @@ they disagree with this page, this page follows the code. The C++ server's docs
 Contents: [Concepts](#concepts) - [Trigger types](#trigger-types-and-when-they-fire) -
 [Arguments and numeric values](#numeric-arguments-and-the-leading-gate) -
 [Return values](#return-values) - [wait()](#wait-and-the-busy-guard) - [API](#the-lua-api) -
-[Quests](#quest-variables-and-stages) - [Libraries and require()](#libraries-and-require) -
+[Script variables](#script-variables-globals-setvar-quest-variables) - [Quests](#quest-variables-and-stages) - [Libraries and require()](#libraries-and-require) -
 [Errors](#errors-and-debugging) - [Sandbox](#sandbox-and-limits) - [Pitfalls](#pitfalls) -
 [Workflow](#workflow)
 
@@ -42,8 +42,10 @@ committed sources and is what a full import loads.
   not one of those raises an error naming the accepted forms. Strings such as `"30:45"` are not
   keys.
 * A body runs once per fire in a **private environment**: globals you assign are visible only to
-  that run (they survive a `wait()` of the same run, nothing else). Use `setvar` or quest
-  variables to remember anything between runs.
+  that run (they survive a `wait()` of the same run, nothing else). To remember something between
+  runs use the entity's [`globals` table](#script-variables-globals-setvar-quest-variables)
+  (same mob/item/room instance, gone when it despawns), `setvar` (per prototype, saved) or quest
+  variables (per player).
 * Scripts run on the game thread, one at a time, with the world locked: a body can never see a
   half-applied change, and a script that calls something that would start another script (a
   kill, a spell, a spawn) has that second fire **queued until the first body returns**.
@@ -201,7 +203,7 @@ Messages sent from Lua already end with a newline; do not add `\r\n`. `print()` 
 | `spells.cast(caster, name, target?, level?)` | Cast a spell. The level is accepted but ignored; the caster's own level is used. |
 | `Effect.Name` | Effect-name constant, e.g. `actor:has_effect(Effect.Sanctuary)` (just the lowercased name). |
 | `time.*` | Clock snapshot: `stamp` (unix seconds), `hour` 0-23, `minute`, `day`, `month`, `year`, `month_name`, `season`, `is_night`, `is_day`. Fresh at every fire and resume. |
-| `globals` | A scratch table, empty on every fire (kept across `wait` within the run). |
+| `globals` | The script-variable table of the entity the trigger is attached to (`self`): shared by all its triggers, kept between fires, dropped with the entity. See [Script variables](#script-variables-globals-setvar-quest-variables). |
 | `event` | Name of the firing event. |
 | `print(...)` | Captured to the run's output buffer. |
 
@@ -275,6 +277,42 @@ the room), `teleport_all(room)`, `weather()`, `temp()`, `sector()`, `is_outdoor(
 `room:exit(direction)` returns an exit handle (or nil) with `state()`, `hidden()`,
 `set_state{ open=, locked=, hidden=, description=, keywords={...} }`, `set_key(zone, id)`
 (nil clears) and `set_destination(room)`.
+
+## Script variables: `globals`, `setvar`, quest variables
+
+Three stores, by lifetime and owner:
+
+| Store | Owner | Lives until | Use for |
+| --- | --- | --- | --- |
+| `globals.name` | the mob/item/room **instance** the trigger is attached to | that instance despawns (or the server restarts) | DG `global` variables: state shared by the triggers of one mob/item/room |
+| `self:setvar(name, v)` | the **prototype** (every instance shares it) | cleared explicitly; saved to the database | settings and counters that must outlive a respawn or reboot |
+| `actor:set_quest_var(...)` | one player | quest reset | per-player progress |
+
+`globals` is the legacy DG `global <var>` store (`ScriptData::global_vars`, one per mob, item or
+room, freed with it). Every trigger that fires on the same instance sees the same Lua table, in
+any later fire; a `wait()` resume sees it too. Nothing else is shared: two mobs of the same
+prototype have separate tables, a mob that dies and respawns starts with an empty one (a zone
+reset does not touch a mob that is still alive, exactly like legacy), and the table is never
+written to the database. Legacy also saved an item's globals with the item in a player's rent
+file; here an item's table is not saved. Values may be anything Lua holds, including tables and
+actor handles (a handle to a despawned entity reads as nothing, as everywhere else).
+
+The owner is `self`, not `actor`: a GREET trigger on a mob stores into the mob's table, not the
+arriving player's. A room trigger stores into the room. Triggers on different entities do not see
+each other's table; an item's trigger cannot read the mob that carries it.
+
+How DG maps: `global x` becomes `globals.x = x`; a read of a variable some other trigger on the
+same entity declared `global` is `globals.x` (a bare `x` is a local or an undefined global, which
+reads nil); `unset x` is `globals.x = nil`. DG looked a name up in the trigger's own variables
+first, then the global store, and `set`/`eval` always wrote the trigger's own variable: write
+`globals.x = ...` explicitly wherever the DG ran `global x` afterwards. The `remote` and
+`context` commands never existed in this server's DG dialect.
+
+Because the table outlives the fire, a guard such as `if globals.running then return end`
+latches until something clears it. Clear it on every exit path (including early `return`s) and
+keep waits short; a script that errors between setting and clearing leaves it set for the life of
+the instance. The old `globals.x = globals.x or true` converter artefact is wrong here: assign
+the real value.
 
 ## Quest variables and stages
 

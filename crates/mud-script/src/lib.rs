@@ -175,6 +175,16 @@ pub struct LuaHost {
     env_kit: EnvKit,
 }
 
+/// Registry slot holding the per-entity `globals` tables; see
+/// [`LuaHost::entity_globals`].
+const ENTITY_GLOBALS_KEY: &str = "fierymud_entity_globals";
+
+/// New `globals` tables created between sweeps for despawned owners.
+const ENTITY_GLOBALS_SWEEP: usize = 64;
+
+/// Tables created since the last sweep (Lua app data).
+struct EntityGlobalsInserts(usize);
+
 /// Real-tick rate, mirrored from mud-server's `TICK_HZ`. Used to convert
 /// a Lua `wait(seconds)` into ticks. Kept here as a const so mud-script
 /// doesn't need to depend on mud-server.
@@ -1273,6 +1283,53 @@ impl LuaHost {
         }
     }
 
+    /// The script-variable table (`globals`) of `owner`: created empty on
+    /// the entity's first fire, then shared by every later fire of every
+    /// trigger on that entity. Tables live in the Lua registry keyed by the
+    /// entity's bits (index plus generation, so a recycled slot never
+    /// inherits a dead entity's table); entries of despawned entities are
+    /// swept every [`ENTITY_GLOBALS_SWEEP`] new tables.
+    fn entity_globals(&self, world: &World, owner: Entity) -> mlua::Result<Table> {
+        let store =
+            if let Value::Table(t) = self.lua.named_registry_value::<Value>(ENTITY_GLOBALS_KEY)? {
+                t
+            } else {
+                let t = self.lua.create_table()?;
+                self.lua
+                    .set_named_registry_value(ENTITY_GLOBALS_KEY, t.clone())?;
+                t
+            };
+        let key = owner.to_bits().cast_signed();
+        if let Value::Table(existing) = store.raw_get::<Value>(key)? {
+            return Ok(existing);
+        }
+        let inserts = self
+            .lua
+            .app_data_ref::<EntityGlobalsInserts>()
+            .map_or(0, |c| c.0)
+            + 1;
+        if inserts >= ENTITY_GLOBALS_SWEEP {
+            self.lua.set_app_data(EntityGlobalsInserts(0));
+            let mut dead = Vec::new();
+            for pair in store.pairs::<i64, Value>() {
+                let (bits, _) = pair?;
+                let alive = Entity::try_from_bits(bits.cast_unsigned())
+                    .is_some_and(|e| world.get_entity(e).is_ok());
+                if !alive {
+                    dead.push(bits);
+                }
+            }
+            for bits in dead {
+                store.raw_set(bits, Value::Nil)?;
+            }
+        } else {
+            self.lua.set_app_data(EntityGlobalsInserts(inserts));
+        }
+        let table = self.lua.create_table()?;
+        store.raw_set(key, table.clone())?;
+        Ok(table)
+    }
+
     /// Bind every host-supplied global the trigger body can see —
     /// `actor` / `self` / `object`, `print`, `wait`, `world`,
     /// `combat`, `skills`, `Effect`, `mobiles`, `objects`, `time`,
@@ -1309,15 +1366,15 @@ impl LuaHost {
 
         Self::bind_api(&self.lua, globals, world)?;
 
-        // `globals` is a script-scoped scratchpad table. The
-        // DG-Script-converted corpus uses the
-        // `globals.x = globals.x or true` pattern as a "first-time
-        // only" guard. v1: per-call empty table — writes/reads are
-        // consistent within the body. Persistence (round-trip via
-        // `Triggers.variables` jsonb) is a follow-up. On resume the
-        // body's own table is kept so state survives a `wait`.
+        // `globals` is the owning entity's script-variable table: the
+        // DG `global <var>` store. Every trigger that fires on the same
+        // mob / item / room instance sees the same table, it survives
+        // between fires, and it is dropped with the entity (a respawn is
+        // a new instance with an empty table). Nothing is persisted:
+        // legacy kept these in memory too. A resumed body keeps the table
+        // its env already holds.
         if globals.raw_get::<Value>("globals")?.is_nil() {
-            globals.set("globals", self.lua.create_table()?)?;
+            globals.set("globals", self.entity_globals(world, listener)?)?;
         }
 
         // `speech` is the SPEECH event's text. A trigger flagged for both
@@ -5951,9 +6008,7 @@ mod tests {
     fn globals_table_is_writable_within_call() {
         let (mut world, actor) = make_world_with_actor();
         let mut host = LuaHost::new();
-        // The trigger corpus uses `globals.x = globals.x or true` patterns.
-        // v1 is a per-call empty table — within the body, reads after writes
-        // should round-trip.
+        // Within the body, reads after writes round-trip.
         let out = host
             .exec_for_actor(
                 &mut world,
@@ -5965,7 +6020,7 @@ mod tests {
     }
 
     #[test]
-    fn globals_does_not_persist_across_calls() {
+    fn globals_persist_across_calls_on_the_same_entity() {
         let (mut world, actor) = make_world_with_actor();
         let mut host = LuaHost::new();
         let _ = host
@@ -5974,8 +6029,8 @@ mod tests {
         let out = host
             .exec_for_actor(&mut world, actor, "print(tostring(globals.flag))")
             .expect("ok");
-        // Per-call table → fresh empty table → field is nil.
-        assert_eq!(out, "nil\r\n");
+        // The table belongs to the entity (the DG `global` store), not the call.
+        assert_eq!(out, "set-once\r\n");
     }
 
     #[test]
@@ -6866,6 +6921,9 @@ mod tests {
 
 #[cfg(test)]
 mod despawn_tests;
+
+#[cfg(test)]
+mod globals_tests;
 
 #[cfg(test)]
 mod script_hooks_tests;
