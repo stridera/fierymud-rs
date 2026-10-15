@@ -366,7 +366,8 @@ A body that raises is recorded against its trigger:
 * **Throttling**: at most 5 warnings/database rows per trigger per 10 minutes; further failures
   are only counted, and a `suppressed N further errors` summary row is written when the window
   closes. The in-memory ring and the stats counters are not throttled.
-* `GET /api/admin/triggers/stats`: fires, successes, failures and `skipped_busy` per event.
+* `GET /api/admin/triggers/stats`: fires, successes, failures and `skipped_busy` per event. A body
+  that errors after a `wait()` counts as failed (it was a success until the resume raised).
 * `GET /api/admin/triggers/validate[?zone=N]`: compile-checks bodies.
 * `GET /api/admin/triggers` (and `/{zone}/{id}`): the catalog without bodies.
 * Commands for staff: `tstat <zone> <id>`, `trighistory <target>`, `firetrig`, `lua <code>`,
@@ -407,8 +408,10 @@ Mistakes that have shipped, most recent first:
 7. **Typos are silent**: `actor.levl` is nil. Fields are read-only: `self.hp = 5` raises; use
    `damage()` / `heal()`.
 8. **`local` in a branch** is scoped to that branch; declare it before the `if`.
-9. **SPEECH from `say`: `actor` is the speaker; `speech` is lowercased** and the body must test
-   keywords itself (the server does not filter).
+9. **SPEECH from `say`: `actor` is the speaker; `speech` is lowercased** (ASCII) and the body must
+   test keywords itself (the server does not filter). So every needle compared with `speech`
+   (`string.find(speech, "2h")`, `speech == "yes"`, `string.match(speech, "t(%d+)t")`) must be
+   lowercase: a capital letter in the needle can never match.
 10. **`object` is nil** except in `RECEIVE`; in item events `self` is the item.
 11. **A body that waits blocks itself**: the busy guard skips fires of the same trigger on the same
     entity while it is parked.
@@ -419,6 +422,10 @@ Mistakes that have shipped, most recent first:
     `RANDOM` / `HIT_PERCENT`.
 16. The DG `%get.*%` / `%time.stamp%` forms have no Lua equivalent under those names: write
     `time.stamp`, `objects.template(zone, id).name`, etc.
+17. **`room.actors` / `room.people` is always a table**, so `if not room.people then` never
+    fires for an empty room. Test the length: `if #room.people == 0 then`.
+18. **Handles compare by what they wrap**: `actor.room == self.room` and `a == b` are true for the
+    same room or actor (each access creates a new handle, which used to compare unequal).
 
 ## Workflow
 

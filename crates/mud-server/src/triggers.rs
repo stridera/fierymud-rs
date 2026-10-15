@@ -1445,6 +1445,33 @@ pub fn drain_deferred_room_triggers(world: &mut World) {
     }
 }
 
+/// `TriggerEvent::name()` (`GREET_ALL`) back to the `Debug` key `by_event` uses (`GreetAll`).
+fn event_key(name: &str) -> String {
+    name.split('_')
+        .map(|part| {
+            let mut chars = part.chars();
+            chars.next().map_or_else(String::new, |first| {
+                first.to_ascii_uppercase().to_string() + &chars.as_str().to_ascii_lowercase()
+            })
+        })
+        .collect()
+}
+
+/// A thread that errors after a `wait()` was counted as a success when its first slice
+/// parked cleanly (`record_fire(.., ok = true)`). Move that fire from succeeded to failed so
+/// `/api/admin/triggers/stats` agrees with the error log.
+fn count_resume_failure(world: &mut World, event_name: &str) {
+    if !world.contains_resource::<TriggerStats>() {
+        world.insert_resource(TriggerStats::default());
+    }
+    let mut stats = world.resource_mut::<TriggerStats>();
+    stats.total_failed += 1;
+    stats.total_succeeded = stats.total_succeeded.saturating_sub(1);
+    let counter = stats.by_event.entry(event_key(event_name)).or_default();
+    counter.failed += 1;
+    counter.succeeded = counter.succeeded.saturating_sub(1);
+}
+
 /// Tick system: advance the `LuaHost`'s view of the current tick, then
 /// resume any parked threads whose `wait(N)` deadline has passed.
 /// `LuaOutbox` is drained inline after the resume pass since
@@ -1464,6 +1491,7 @@ pub fn lua_coroutine_tick(world: &mut World) {
     // A script that errors after a `wait()` goes through the same recording
     // as one that errors in its first slice.
     for f in failures {
+        count_resume_failure(world, &f.event);
         record_failure(world, f.zone, f.id, &f.name, &f.event, &f.message);
     }
     flush_error_throttle(world);
@@ -3296,10 +3324,31 @@ mod resume_error_tests {
         assert_eq!(e.trigger_name, "Phase Armor - Where");
         assert_eq!(e.event, "SPEECH");
         assert!(e.message.contains("lua resume error"), "{}", e.message);
+        // The stats agree with the log: the fire that parked cleanly is now a failure.
+        let stats = world.resource::<TriggerStats>();
+        assert_eq!(
+            (stats.total_fired, stats.total_succeeded, stats.total_failed),
+            (1, 0, 1)
+        );
+        let speech = stats.by_event["Speech"];
+        assert_eq!((speech.fired, speech.succeeded, speech.failed), (1, 0, 1));
         // Only once: the thread is finished.
         world.resource_mut::<crate::TickCount>().0 = 40;
         lua_coroutine_tick(&mut world);
         assert_eq!(error_count(&world), 1);
+    }
+
+    #[test]
+    fn event_key_matches_the_debug_names() {
+        for ev in [
+            TriggerEvent::Speech,
+            TriggerEvent::GreetAll,
+            TriggerEvent::HitPercent,
+            TriggerEvent::SpeechTo,
+            TriggerEvent::Preentry,
+        ] {
+            assert_eq!(event_key(ev.name()), format!("{ev:?}"));
+        }
     }
 
     #[test]

@@ -2826,6 +2826,16 @@ impl UserData for LuaActor {
                 })
             },
         );
+        // `person.room == self.room`, `actor == other`: every access builds a fresh userdata, so
+        // without __eq the comparison is never true. Equal when both wrap the same entity.
+        methods.add_meta_method(MetaMethod::Eq, |_, this, other: Value| {
+            Ok(match other {
+                Value::UserData(ud) => ud
+                    .borrow::<LuaActor>()
+                    .is_ok_and(|o| o.entity == this.entity),
+                _ => false,
+            })
+        });
         methods.add_meta_method(MetaMethod::ToString, |lua, this, ()| {
             // The bare name: scripts splice `tostring(actor)` into command
             // lines (`give bag " .. tostring(actor)`), as DG `%actor%` does.
@@ -4791,6 +4801,16 @@ impl UserData for LuaRoom {
             })
         });
 
+        // `person.room == self.room`: every `.room` access builds a fresh userdata, so without __eq
+        // the comparison is never true. Equal when both wrap the same room.
+        methods.add_meta_method(MetaMethod::Eq, |_, this, other: Value| {
+            Ok(match other {
+                Value::UserData(ud) => ud
+                    .borrow::<LuaRoom>()
+                    .is_ok_and(|o| o.entity == this.entity),
+                _ => false,
+            })
+        });
         methods.add_meta_method(MetaMethod::ToString, |lua, this, ()| {
             world_from_lua(lua, |w| {
                 let name = w
@@ -5872,6 +5892,49 @@ mod tests {
             .exec_for_actor(&mut world, actor, "print(actor:room_name())")
             .expect("ok");
         assert_eq!(out, "Town Center\r\n");
+    }
+
+    #[test]
+    fn rooms_and_actors_compare_by_entity() {
+        let mut world = World::new();
+        let room = world
+            .spawn(Named {
+                name: "A".to_string(),
+            })
+            .id();
+        let other_room = world
+            .spawn(Named {
+                name: "B".to_string(),
+            })
+            .id();
+        let actor = world
+            .spawn((
+                Named {
+                    name: "x".to_string(),
+                },
+                Health { hp: 1, max: 1 },
+                Located(room),
+            ))
+            .id();
+        world.spawn((
+            Named {
+                name: "y".to_string(),
+            },
+            Health { hp: 1, max: 1 },
+            Located(room),
+        ));
+        world.spawn((
+            Named {
+                name: "z".to_string(),
+            },
+            Health { hp: 1, max: 1 },
+            Located(other_room),
+        ));
+        let mut host = LuaHost::new();
+        let body = "local a = actor.room.actors\n\
+                    print(actor.room == actor.room, a[1] == a[1], a[1] == a[2], actor.room == 3)";
+        let out = host.exec_for_actor(&mut world, actor, body).expect("ok");
+        assert_eq!(out, "true\ttrue\tfalse\tfalse\r\n");
     }
 
     #[test]
