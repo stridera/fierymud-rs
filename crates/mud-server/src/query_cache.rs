@@ -24,9 +24,11 @@ struct Cached<D: QueryData + 'static, F: QueryFilter + 'static>(QueryState<D, F>
 /// `QueryState::iter` / `get` bring the state up to date with archetypes
 /// created since the previous call.
 ///
-/// The state is lent out of the world for the call: a nested `with_query`
-/// of the same `D, F` inside `f` builds and discards a second state, which
-/// is correct, just not cached.
+/// The state is lent out of the world for the call, so a nested `with_query`
+/// of the same `D, F` inside `f` finds none and builds its own. Whichever
+/// scope finishes first stores its state; a scope that finishes to find one
+/// already stored drops its own, so the world never gets a second insert.
+/// The nested call is correct, just not cached for that call.
 pub(crate) fn with_query<D, F, R>(
     world: &mut World,
     f: impl FnOnce(&mut World, &mut QueryState<D, F>) -> R,
@@ -35,11 +37,17 @@ where
     D: QueryData + 'static,
     F: QueryFilter + 'static,
 {
+    let mut cached = match world.remove_resource::<Cached<D, F>>() {
+        Some(cached) => cached,
+        None => Cached(world.query_filtered::<D, F>()),
+    };
+    let out = f(world, &mut cached.0);
+    // A nested call of the same type may have stored its state meanwhile;
+    // keep that one (inserting again would panic in debug builds).
     if !world.contains_resource::<Cached<D, F>>() {
-        let state = world.query_filtered::<D, F>();
-        world.insert_resource(Cached(state));
+        world.insert_resource(cached);
     }
-    world.resource_scope(|world, mut cached: Mut<Cached<D, F>>| f(world, &mut cached.0))
+    out
 }
 
 /// The entities matching `F`, in query order, through a cached state.
@@ -93,6 +101,33 @@ mod tests {
         });
         assert_eq!(n, 2);
         assert_eq!(entities::<With<A>>(&mut world).len(), 1);
+    }
+
+    #[test]
+    fn nested_use_of_the_same_query_type_leaves_one_stored_state() {
+        let mut world = World::new();
+        world.spawn(A(1));
+        // Cold: the inner call builds the state the outer would have built.
+        let n = with_query::<&A, (), _>(&mut world, |world, q| {
+            let inner = with_query::<&A, (), _>(world, |world, q2| {
+                q2.iter(world).map(|x| x.0).sum::<u32>()
+            });
+            // Spawning in between adds an archetype the outer state must catch up on.
+            world.spawn((A(10), B));
+            inner + q.iter(world).map(|x| x.0).sum::<u32>()
+        });
+        assert_eq!(n, 1 + 11);
+        assert!(world.contains_resource::<Cached<&A, ()>>());
+        // Warm: both scopes borrow around a stored state.
+        let n = with_query::<&A, (), _>(&mut world, |world, q| {
+            let inner = with_query::<&A, (), _>(world, |world, q2| q2.iter(world).count());
+            inner + q.iter(world).count()
+        });
+        assert_eq!(n, 4);
+        assert_eq!(
+            with_query::<&A, (), _>(&mut world, |w, q| q.iter(w).count()),
+            2
+        );
     }
 
     #[test]
