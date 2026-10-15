@@ -11409,50 +11409,67 @@ pub(crate) fn cmd_give(world: &mut World, player: Entity, args: &str) {
     // run began: a RECEIVE trigger may destroy the one or move the other.
     let target_name = name_of(world, target);
     let mut given: Vec<(String, usize)> = Vec::new();
-    match filter {
-        Some(filter) => give_all(world, player, target, &filter, &mut given),
-        None => {
-            // Items already offered in this command: a RECEIVE trigger that
-            // hands one back must not be given (and counted) again.
-            let mut offered: Vec<Entity> = Vec::new();
-            for i in 0..count.unwrap_or(1) {
-                if !give_target_present(world, player, target) {
-                    break;
-                }
-                let found = find_item(world, player, item_word, ItemClass::Inventory);
-                let item = match found {
-                    Some(e) if offered.contains(&e) => {
-                        crate::commands::item_target::find_items_all(
-                            world,
-                            player,
-                            item_word,
-                            ItemClass::Inventory,
-                        )
-                        .into_iter()
-                        .find(|c| !offered.contains(c))
-                    }
-                    other => other,
-                };
-                let Some(item) = item else {
-                    if i == 0 {
-                        send_rendered(
-                            world,
-                            player,
-                            &format!("You aren't carrying '{item_word}'.\r\n"),
-                        );
-                    }
-                    break;
-                };
-                offered.push(item);
-                match give_one(world, player, target, item, true) {
-                    GiveResult::Given(name) => note_given(&mut given, name),
-                    // The same item would meet the same refusal again.
-                    GiveResult::Refused | GiveResult::Blocked => break,
-                }
-            }
-        }
+    if let Some(filter) = filter {
+        give_all(world, player, target, &filter, &mut given);
+    } else {
+        give_counted(
+            world,
+            player,
+            target,
+            item_word,
+            count.unwrap_or(1),
+            &mut given,
+        );
     }
     announce_gives(world, player, target, room, &target_name, &given);
+}
+
+/// `give N <item> <target>`: up to `count` matching carried items, one by
+/// one, stopping at the first refusal or when the recipient is gone.
+fn give_counted(
+    world: &mut World,
+    player: Entity,
+    target: Entity,
+    item_word: &str,
+    count: usize,
+    given: &mut Vec<(String, usize)>,
+) {
+    // Items already offered in this command: a RECEIVE trigger that
+    // hands one back must not be given (and counted) again.
+    let mut offered: Vec<Entity> = Vec::new();
+    for i in 0..count {
+        if !give_target_present(world, player, target) {
+            break;
+        }
+        let found = find_item(world, player, item_word, ItemClass::Inventory);
+        let item = match found {
+            Some(e) if offered.contains(&e) => crate::commands::item_target::find_items_all(
+                world,
+                player,
+                item_word,
+                ItemClass::Inventory,
+            )
+            .into_iter()
+            .find(|c| !offered.contains(c)),
+            other => other,
+        };
+        let Some(item) = item else {
+            if i == 0 {
+                send_rendered(
+                    world,
+                    player,
+                    &format!("You aren't carrying '{item_word}'.\r\n"),
+                );
+            }
+            break;
+        };
+        offered.push(item);
+        match give_one(world, player, target, item, true) {
+            GiveResult::Given(name) => note_given(given, name),
+            // The same item would meet the same refusal again.
+            GiveResult::Refused | GiveResult::Blocked => break,
+        }
+    }
 }
 
 /// Whether `target` still stands in the giver's room and the giver is still
