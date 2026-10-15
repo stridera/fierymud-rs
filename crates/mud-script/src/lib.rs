@@ -2895,11 +2895,11 @@ impl UserData for LuaActor {
                     let mut out = world.resource_mut::<LuaOutbox>();
                     out.direct.push((
                         this.entity,
-                        format!("You whisper to {resolved_name}, \"{msg}\""),
+                        format!("You whisper to {resolved_name}, '{msg}'"),
                     ));
                     out.direct.push((
                         target_entity,
-                        format!("{speaker_name} whispers to you, \"{msg}\""),
+                        format!("{speaker_name} whispers to you, '{msg}'"),
                     ));
                     let bystander_line =
                         format!("{speaker_name} whispers something to {resolved_name}.");
@@ -3435,7 +3435,7 @@ impl UserData for LuaActor {
                 if !world.contains_resource::<LuaOutbox>() {
                     world.insert_resource(LuaOutbox::default());
                 }
-                let line = format!("{speaker_name} shouts, \"{msg}\"");
+                let line = format!("{speaker_name} shouts, '{msg}'");
                 let mut out = world.resource_mut::<LuaOutbox>();
                 for t in audience {
                     out.direct.push((t, line.clone()));

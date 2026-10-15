@@ -313,7 +313,7 @@ pub(crate) fn try_advance_active_tree(
 
 /// Show the NPC's line (and any reply hints) to the player.
 pub(crate) fn say_reply(world: &World, player: Entity, mob_name: &str, open: &DialogueOpen) {
-    let mut text = format!("{mob_name} says, \"{}\"\r\n", open.message);
+    let mut text = format!("{mob_name} says, '{}'\r\n", open.message);
     for hint in &open.hints {
         text.push_str(&format!("  - {hint}\r\n"));
     }

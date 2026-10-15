@@ -15,6 +15,7 @@ pub mod reset_gear;
 pub mod resources;
 pub mod script_library;
 pub mod sphere_style;
+pub mod start_room;
 pub mod stat_roll;
 pub mod targeting;
 pub mod wake_effects;
@@ -28,6 +29,7 @@ pub use liquid_legacy::{BUILTIN_CODES as LEGACY_LIQUID_CODES, LegacyLiquidRow, L
 pub use mount_type::{MountPlan, MountTypes};
 pub use script_library::ScriptLibraries;
 pub use sphere_style::SphereStyles;
+pub use start_room::{DEFAULT_START_ROOM, race_start_room};
 pub use stat_roll::{STAT_SCALE_MAX, roll_starting_stats};
 pub use wake_effects::{RoomWakeRow, WakeEffectCatalog, WakeRow, load_wake_effect_catalog};
 pub use weather_text::{Daypart, WeatherText};

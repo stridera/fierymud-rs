@@ -22,8 +22,7 @@
 use bevy_ecs::prelude::*;
 use mud_world::{
     Contents, EquippedSlot, Fighting, Follower, FromMobReset, Item, Located, Mob, MobBehaviors,
-    MobPrototypes, Mounted, Player, Profile, RaceDefaults, RecallPoint, RiddenBy, WorldKey,
-    WorldKeyIndex,
+    MobPrototypes, Mounted, Player, Profile, RecallPoint, RiddenBy, WorldKey, WorldKeyIndex,
 };
 
 use super::attack_ok::{attack_ok, is_charmed};
@@ -361,9 +360,7 @@ fn home_candidates(world: &World, player: Entity) -> Vec<Entity> {
     }
     if let Some(index) = world.get_resource::<WorldKeyIndex>() {
         if let Some(race) = world.get::<Profile>(player).map(|p| p.race.clone())
-            && let Some(key) = world
-                .get_resource::<RaceDefaults>()
-                .and_then(|d| d.start_room_by_race.get(&race).copied())
+            && let Some(key) = mud_world::race_start_room(world, &race)
             && let Some(r) = index.rooms.get(&key)
         {
             out.push(*r);

@@ -203,7 +203,7 @@ fn deliver_tell(world: &mut World, player: Entity, target_name: &str, message: &
         send_rendered(
             world,
             player,
-            &format!("<cyan>You tell <b:cyan>{target_name}</>, \"{message}\"</>\r\n"),
+            &format!("<cyan>You tell <b:cyan>{target_name}</>, '{message}'</>\r\n"),
         );
     }
     if has_flag(world, target, PlayerFlag::Afk) {
@@ -216,14 +216,14 @@ fn deliver_tell(world: &mut World, player: Entity, target_name: &str, message: &
     send_msg(
         world,
         target,
-        format!("<cyan><b:cyan>{player_name}</> tells you, \"{message}\"</>\r\n"),
+        format!("<cyan><b:cyan>{player_name}</> tells you, '{message}'</>\r\n"),
     );
 
     // GMCP companion frame for both ends of the conversation —
     // sender and receiver land in the Tells tab via the same
     // third-person body. Bystanders don't exist for a tell, so
     // there's no information leak to worry about.
-    let gmcp_text = format!("{player_name} tells {target_name}, \"{message}\"");
+    let gmcp_text = format!("{player_name} tells {target_name}, '{message}'");
     send_comm_channel_text(world, player, "tells", &player_name, &gmcp_text);
     send_comm_channel_text(world, target, "tells", &player_name, &gmcp_text);
 
@@ -262,10 +262,10 @@ fn tell_mob(world: &mut World, player: Entity, mob: Entity, message: &str) {
         send_rendered(
             world,
             player,
-            &format!("<cyan>You tell <b:cyan>{mob_name}</>, \"{message}\"</>\r\n"),
+            &format!("<cyan>You tell <b:cyan>{mob_name}</>, '{message}'</>\r\n"),
         );
     }
-    let gmcp_text = format!("{player_name} tells {mob_name}, \"{message}\"");
+    let gmcp_text = format!("{player_name} tells {mob_name}, '{message}'");
     send_comm_channel_text(world, player, "tells", &player_name, &gmcp_text);
     crate::triggers::fire_speech_at(world, mob, player, message);
 }

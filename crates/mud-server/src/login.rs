@@ -1106,7 +1106,7 @@ pub enum Stage {
     /// Show the freshly-rolled stat block and ask the player
     /// whether to keep it or roll again. `accept` advances
     /// (today: terminator with the "DB INSERT comes next" line);
-    /// `reroll` (or `r`) generates a fresh 3d6×6 spread without
+    /// `reroll`, `r` or a blank line generates a fresh 3d6×6 spread without
     /// resetting earlier draft fields.
     ReviewStatRoll {
         email: Option<String>,
@@ -2693,7 +2693,7 @@ impl ConnRouter {
                 let Some(gender) = match_playable_gender(trimmed) else {
                     let _ = ctx.outbound.try_send(
                         format!(
-                            "'{trimmed}' isn't a recognized gender — pick one of the listed values.\r\n"
+                            "'{trimmed}' isn't one of the available genders. Type a name, its first letter or its number.\r\n"
                         )
                         .into_bytes(),
                     );
@@ -2735,9 +2735,9 @@ impl ConnRouter {
                 gender,
                 stats,
             } => {
-                let answer = trimmed.to_ascii_lowercase();
-                let accepted = matches!(answer.as_str(), "a" | "accept" | "y" | "yes" | "");
-                let rerolled = matches!(answer.as_str(), "r" | "reroll" | "n" | "no");
+                let answer = stat_review_answer(trimmed);
+                let accepted = answer == StatReviewAnswer::Accept;
+                let rerolled = answer == StatReviewAnswer::Reroll;
                 if rerolled {
                     let new_stats = mud_world::roll_starting_stats(
                         world.resource::<mud_world::RaceCatalog>(),
@@ -2764,7 +2764,7 @@ impl ConnRouter {
                 }
                 if !accepted {
                     let _ = ctx.outbound.try_send(
-                        "Please answer 'accept' or 'reroll'.\r\n"
+                        "Type 'accept' to keep these stats, or press Enter to reroll.\r\n"
                             .as_bytes()
                             .to_vec(),
                     );
@@ -5070,11 +5070,9 @@ pub(crate) fn spawn_player(
     c: &CharacterRow,
     outbound: Outbound,
 ) -> Entity {
-    let race_start = world
-        .resource::<mud_world::RaceDefaults>()
-        .start_room_by_race
-        .get(&c.race)
-        .copied();
+    // The race's start room, or the default start when that room is airborne,
+    // dark, restricted or missing (a new character must not land in the sky).
+    let race_start = mud_world::race_start_room(world, &c.race);
     // Everyone logs back in where they left, however they left and however
     // long they were gone (issue #58: no penalty for quitting, camping or
     // dropping link).
@@ -7108,19 +7106,52 @@ fn reject_menu_pick<T>(
 /// values from `PLAYABLE_GENDERS` — neutral is the schema
 /// default and stays in the picker for nonbinary characters.
 fn send_gender_prompt(outbound: &Outbound) {
-    let mut msg = String::from("Available genders: ");
-    msg.push_str(&PLAYABLE_GENDERS.join(", "));
-    msg.push_str("\r\nGender: ");
+    let list = PLAYABLE_GENDERS
+        .iter()
+        .enumerate()
+        .map(|(i, g)| format!("{}) {g}", i + 1))
+        .collect::<Vec<_>>()
+        .join("  ");
+    let msg = format!("Available genders: {list}\r\nGender (name, first letter or number): ");
     send_prompt(outbound, msg.into_bytes());
 }
 
 /// Match a freshly-typed gender against the accepted list.
-/// Case-insensitive equality; returns the canonical lowercase
-/// form so the persisted `Characters.gender` value is consistent
-/// regardless of how the player typed it.
+/// Like the race and class menus: the row number, the full name or the
+/// start of the name (so `m` works), case-insensitive. Returns the
+/// canonical lowercase form so the persisted `Characters.gender` value is
+/// consistent regardless of how the player typed it.
 fn match_playable_gender(input: &str) -> Option<&'static str> {
-    let needle = input.trim().to_ascii_lowercase();
-    PLAYABLE_GENDERS.iter().copied().find(|g| *g == needle)
+    let options: Vec<crate::login_menu::MenuOption<&'static str>> = PLAYABLE_GENDERS
+        .iter()
+        .map(|g| crate::login_menu::MenuOption {
+            value: *g,
+            label: (*g).to_string(),
+            keys: vec![crate::login_menu::normalize(g)],
+        })
+        .collect();
+    match crate::login_menu::pick(&options, input) {
+        crate::login_menu::Pick::Found(g) => Some(g),
+        _ => None,
+    }
+}
+
+/// What the player typed at the stat-roll prompt.
+#[derive(Debug, PartialEq, Eq)]
+enum StatReviewAnswer {
+    Accept,
+    Reroll,
+    Unknown,
+}
+
+/// Legacy parity: a blank line rerolls (legacy's default branch), keeping
+/// the stats takes an explicit answer (`1` in legacy).
+fn stat_review_answer(input: &str) -> StatReviewAnswer {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "a" | "accept" | "1" | "y" | "yes" | "k" | "keep" => StatReviewAnswer::Accept,
+        "" | "r" | "reroll" | "3" | "n" | "no" => StatReviewAnswer::Reroll,
+        _ => StatReviewAnswer::Unknown,
+    }
 }
 
 /// Render the freshly-rolled stat block + accept/reroll prompt.
@@ -7138,8 +7169,7 @@ fn send_stat_review(
     let key_stat = crate::login_menu::class_key_stat(world, class_id);
     let line = format!(
         "Rolled stats:\r\n  STR {:>3} ({:+})  INT {:>3} ({:+})  WIS {:>3} ({:+})\r\n  \
-         DEX {:>3} ({:+})  CON {:>3} ({:+})  CHA {:>3} ({:+})\r\n{}Accept or reroll? \
-         (accept/reroll): ",
+         DEX {:>3} ({:+})  CON {:>3} ({:+})  CHA {:>3} ({:+})\r\n{}Type 'accept' to keep these stats, or press Enter to reroll: ",
         stats.strength,
         CoreStats::bonus(stats.strength),
         stats.intelligence,
@@ -7741,6 +7771,27 @@ pub(crate) mod tests {
     fn gender_match_rejects_unknown() {
         assert_eq!(match_playable_gender("nonbinary"), None);
         assert_eq!(match_playable_gender(""), None);
+        assert_eq!(match_playable_gender("4"), None);
+    }
+
+    #[test]
+    fn gender_match_takes_number_or_first_letter() {
+        assert_eq!(match_playable_gender("1"), Some("male"));
+        assert_eq!(match_playable_gender("2"), Some("female"));
+        assert_eq!(match_playable_gender("3"), Some("neutral"));
+        assert_eq!(match_playable_gender("m"), Some("male"));
+        assert_eq!(match_playable_gender("F"), Some("female"));
+        assert_eq!(match_playable_gender("n"), Some("neutral"));
+    }
+
+    #[test]
+    fn blank_line_at_stat_review_rerolls() {
+        assert_eq!(stat_review_answer(""), StatReviewAnswer::Reroll);
+        assert_eq!(stat_review_answer("   "), StatReviewAnswer::Reroll);
+        assert_eq!(stat_review_answer("r"), StatReviewAnswer::Reroll);
+        assert_eq!(stat_review_answer("accept"), StatReviewAnswer::Accept);
+        assert_eq!(stat_review_answer("1"), StatReviewAnswer::Accept);
+        assert_eq!(stat_review_answer("what"), StatReviewAnswer::Unknown);
     }
     // ---- login hardening: hashing, throttle, takeover ---------------
 

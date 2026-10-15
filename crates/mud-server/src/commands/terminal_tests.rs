@@ -254,3 +254,69 @@ fn saved_preferences_apply_when_a_connection_attaches() {
     assert_eq!(handle.charset(), Charset::Utf8);
     assert_eq!(handle.color(), ColorDepth::Ansi256);
 }
+
+fn dragonborn_catalog(world: &mut World) {
+    let mut catalog = mud_world::RaceCatalog::default();
+    for (race, name) in [
+        (
+            "DRAGONBORN_FIRE",
+            "<red>Dr</><b:red>a</><b:yellow>g</><b:red>on</><red>b</><b:red>o</><b:yellow>r</><b:red>n</>",
+        ),
+        (
+            "DRAGONBORN_GAS",
+            "<b:green>Dra</><b:yellow>g</><b:green>onb</><b:yellow>or</><b:green>n</>",
+        ),
+    ] {
+        catalog.by_race.insert(
+            race.to_string(),
+            mud_world::RaceDef {
+                race: race.to_string(),
+                name: name.to_string(),
+                plain_name: race.replace("DRAGONBORN_", "") + " Dragonborn",
+                ..Default::default()
+            },
+        );
+    }
+    world.insert_resource(catalog);
+}
+
+#[test]
+fn who_shows_the_race_display_name_with_its_colours_not_the_enum_spelling() {
+    let mut world = world();
+    dragonborn_catalog(&mut world);
+    let (viewer, mut rx) = spawn(&mut world, "Viewer", 10, None);
+    let handle = attach(&mut world, viewer);
+    let (fire, _frx) = spawn(&mut world, "Embers", 20, None);
+    let (gas, _grx) = spawn(&mut world, "Vapor", 20, None);
+    world.entity_mut(fire).get_mut::<Profile>().unwrap().race = "DRAGONBORN_FIRE".into();
+    world.entity_mut(gas).get_mut::<Profile>().unwrap().race = "DRAGONBORN_GAS".into();
+    dispatch(&mut world, viewer, "who");
+    let raw = wire(&mut rx, &handle);
+    let out = strip_ansi(&raw);
+    for who in ["Embers", "Vapor"] {
+        let row = out.lines().find(|l| l.contains(who)).expect("row");
+        assert!(row.contains("(Dragonborn)"), "{row}");
+        assert!(!row.contains("Dragonborn-"), "{row}");
+    }
+    // Same word, different colours: the subrace shows in the escape codes.
+    let colour_of = |who: &str| {
+        raw.lines()
+            .find(|l| l.contains(who))
+            .map(|l| l[l.find('(').unwrap()..].to_string())
+            .unwrap()
+    };
+    assert_ne!(colour_of("Embers"), colour_of("Vapor"));
+}
+
+#[test]
+fn who_without_a_catalog_entry_falls_back_to_a_readable_race() {
+    let mut world = world();
+    let (viewer, mut rx) = spawn(&mut world, "Viewer", 10, None);
+    let handle = attach(&mut world, viewer);
+    let (p, _prx) = spawn(&mut world, "Embers", 20, None);
+    world.entity_mut(p).get_mut::<Profile>().unwrap().race = "DRAGONBORN_FIRE".into();
+    dispatch(&mut world, viewer, "who");
+    let out = strip_ansi(&wire(&mut rx, &handle));
+    let row = out.lines().find(|l| l.contains("Embers")).expect("row");
+    assert!(row.contains("(Dragonborn-Fire)"), "{row}");
+}

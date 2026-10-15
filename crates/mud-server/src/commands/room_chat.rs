@@ -179,9 +179,9 @@ pub(super) fn hear_say(
     // friendly / open vs the louder yellow/red wide channels).
     // Speaker name emphasized so the eye lands on who's
     // talking; message body inherits authored color.
-    let line = format!("<b:green>{shown}</> <green>says,</> \"{message}\"\r\n");
+    let line = format!("<b:green>{shown}</> <green>says,</> '{message}'\r\n");
     send_rendered(world, listener, &line);
-    let gmcp_text = format!("{shown} says, \"{message}\"");
+    let gmcp_text = format!("{shown} says, '{message}'");
     send_comm_channel_text(world, listener, "say", &shown, &gmcp_text);
 }
 
@@ -219,10 +219,10 @@ pub(super) fn cmd_say(world: &mut World, player: Entity, message: &str) {
         let line = if norepeat {
             "Ok.\r\n".to_string()
         } else {
-            format!("<green>You say,</> \"{message}\"\r\n")
+            format!("<green>You say,</> '{message}'\r\n")
         };
         send_rendered(world, target, &line);
-        let gmcp_text = format!("{speaker} says, \"{message}\"");
+        let gmcp_text = format!("{speaker} says, '{message}'");
         send_comm_channel_text(world, target, "say", &speaker, &gmcp_text);
     }
     crate::triggers::fire_speech_in_room(world, player, located.0, message);
@@ -296,7 +296,7 @@ fn cmd_ask(world: &mut World, player: Entity, args: &str) {
         send_to(
             world,
             player,
-            format!("You ask {target_name} about \"{topic}\".\r\n"),
+            format!("You ask {target_name} about '{topic}'.\r\n"),
         );
     }
     broadcast_room_anonymised(
@@ -314,10 +314,10 @@ fn cmd_ask(world: &mut World, player: Entity, args: &str) {
     // rendering bystanders see in the main window. Target may
     // be a mob (no Connection); the helper no-ops cleanly.
     // The addressee's frame names the asker as they see them.
-    let gmcp_text = format!("{player_name} asks {target_name} about \"{topic}\"");
+    let gmcp_text = format!("{player_name} asks {target_name} about '{topic}'");
     send_comm_channel_text(world, player, "ask", &player_name, &gmcp_text);
     let heard_from = shown_name(world, target, player, &player_name);
-    let gmcp_to_target = format!("{heard_from} asks {target_name} about \"{topic}\"");
+    let gmcp_to_target = format!("{heard_from} asks {target_name} about '{topic}'");
     send_comm_channel_text(world, target, "ask", &heard_from, &gmcp_to_target);
     crate::triggers::fire_speech_at(world, target, player, topic);
     if world.get::<Mob>(target).is_some()
@@ -372,14 +372,14 @@ fn cmd_whisper(world: &mut World, player: Entity, args: &str) {
         send_rendered(
             world,
             player,
-            &format!("You whisper to {target_name}, \"{message}\"\r\n"),
+            &format!("You whisper to {target_name}, '{message}'\r\n"),
         );
     }
     let heard_from = shown_name(world, target, player, &speaker);
     send_msg(
         world,
         target,
-        format!("{heard_from} whispers to you, \"{message}\"\r\n"),
+        format!("{heard_from} whispers to you, '{message}'\r\n"),
     );
     broadcast_room_anonymised(
         world,
@@ -392,9 +392,9 @@ fn cmd_whisper(world: &mut World, player: Entity, args: &str) {
     // muffled "whispers something" line in the main window and
     // get no GMCP frame — keeps the message body private to
     // its intended audience.
-    let gmcp_text = format!("{speaker} whispers to {target_name}, \"{message}\"");
+    let gmcp_text = format!("{speaker} whispers to {target_name}, '{message}'");
     send_comm_channel_text(world, player, "whisper", &speaker, &gmcp_text);
-    let gmcp_to_target = format!("{heard_from} whispers to {target_name}, \"{message}\"");
+    let gmcp_to_target = format!("{heard_from} whispers to {target_name}, '{message}'");
     send_comm_channel_text(world, target, "whisper", &heard_from, &gmcp_to_target);
     // Legacy `do_spec_comm` hands a whisper to a mob to `speech_to_mtrigger`,
     // like `ask` and `tell`: only the addressed mob hears it.
@@ -516,15 +516,15 @@ fn cmd_gsay(world: &mut World, player: Entity, args: &str) {
         return;
     }
     let speaker = name_of(world, player);
-    let gmcp_text = format!("{speaker} group-says, \"{message}\"");
+    let gmcp_text = format!("{speaker} group-says, '{message}'");
     let norepeat = has_flag(world, player, PlayerFlag::NoRepeat);
     for m in members {
         let line = if m == player && norepeat {
             "Ok.\r\n".to_string()
         } else if m == player {
-            format!("You group-say, \"{message}\"\r\n")
+            format!("You group-say, '{message}'\r\n")
         } else {
-            format!("({speaker} group-says) \"{message}\"\r\n")
+            format!("({speaker} group-says) '{message}'\r\n")
         };
         send_rendered(world, m, &line);
         send_comm_channel_text(world, m, "group", &speaker, &gmcp_text);

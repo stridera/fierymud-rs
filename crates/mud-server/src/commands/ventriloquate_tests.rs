@@ -232,7 +232,7 @@ fn a_cast_makes_the_room_hear_the_target_and_tells_the_caster_nothing() {
     assert_eq!(out, "", "the caster sees nothing: {out:?}");
     let heard = raw(&mut cara);
     assert!(has_say_gmcp(&heard), "fooled listener gets the say frame");
-    assert_eq!(visible(&heard), "Bob says, \"hello there\"\r\n");
+    assert_eq!(visible(&heard), "Bob says, 'hello there'\r\n");
 }
 
 #[test]
@@ -328,7 +328,7 @@ fn failing_both_rolls_believes_it() {
         Some("boo"),
         &mut rolls(&[70, 22]),
     );
-    assert_eq!(visible(&raw(&mut cara)), "Bob says, \"boo\"\r\n");
+    assert_eq!(visible(&raw(&mut cara)), "Bob says, 'boo'\r\n");
 }
 
 #[test]
@@ -356,7 +356,7 @@ fn each_listener_rolls_for_themselves() {
     // The roll value is 60 for both: it beats Cara's 70, never Dana's 1.
     speak_as(&mut fx.world, caster, bob, 80, Some("hm"), &mut |_| 60);
     assert!(drain(&mut sharp).starts_with("Someone tried"));
-    assert_eq!(visible(&raw(&mut dull)), "Bob says, \"hm\"\r\n");
+    assert_eq!(visible(&raw(&mut dull)), "Bob says, 'hm'\r\n");
 }
 
 #[test]
@@ -367,7 +367,7 @@ fn a_blind_listener_cannot_name_the_speaker_but_hears_the_words() {
     fx.world.entity_mut(cara).insert(mud_world::Blinded);
     let caster = fx.caster;
     speak_as(&mut fx.world, caster, bob, 80, Some("hi"), &mut |max| max);
-    assert_eq!(visible(&raw(&mut crx)), "Someone says, \"hi\"\r\n");
+    assert_eq!(visible(&raw(&mut crx)), "Someone says, 'hi'\r\n");
 }
 
 #[test]
@@ -449,7 +449,7 @@ fn the_cast_is_announced_to_nobody_but_equal_or_higher_staff() {
     }
     let out = drain(&mut fx.rx);
     assert!(!out.contains("You complete"), "{out}");
-    assert_eq!(visible(&raw(&mut cara)), "Bob says, \"hello\"\r\n");
+    assert_eq!(visible(&raw(&mut cara)), "Bob says, 'hello'\r\n");
     let god_out = drain(&mut grx);
     assert!(!god_out.contains("completes"), "{god_out}");
     assert!(!god_out.contains("utters"), "{god_out}");

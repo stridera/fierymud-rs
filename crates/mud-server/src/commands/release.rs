@@ -2,7 +2,7 @@
 
 use bevy_ecs::prelude::*;
 use mud_db::enums::UserRole;
-use mud_world::{Ghost, Health, Located, Profile, RaceDefaults, RecallPoint, WorldKeyIndex};
+use mud_world::{Ghost, Health, Located, Profile, RecallPoint, WorldKeyIndex};
 
 use crate::commands::{
     Category, Command, Help, broadcast_room_visual, cap_sentence_start, cmd_look, name_of, send_to,
@@ -52,11 +52,7 @@ pub(crate) fn cmd_release(world: &mut World, player: Entity, _args: &str) {
     let target = world.get::<RecallPoint>(player).map(|r| r.0);
     let target = target.or_else(|| {
         let race = world.get::<Profile>(player).map(|p| p.race.clone())?;
-        let (zone, id) = world
-            .get_resource::<RaceDefaults>()?
-            .start_room_by_race
-            .get(&race)
-            .copied()?;
+        let (zone, id) = mud_world::race_start_room(world, &race)?;
         world
             .resource::<WorldKeyIndex>()
             .rooms

@@ -2,7 +2,7 @@
 
 use bevy_ecs::prelude::*;
 use mud_db::enums::UserRole;
-use mud_world::{Located, Mounted, Profile, RaceDefaults, RecallPoint, WorldKeyIndex};
+use mud_world::{Located, Mounted, Profile, RecallPoint, WorldKeyIndex};
 
 use crate::commands::{Category, Command, Help, cmd_look, name_of, send_to, try_remove};
 
@@ -34,11 +34,7 @@ pub(crate) fn recall_room(world: &World, player: Entity) -> Option<Entity> {
         return Some(r);
     }
     let race = world.get::<Profile>(player).map(|p| p.race.clone())?;
-    let key = world
-        .get_resource::<RaceDefaults>()?
-        .start_room_by_race
-        .get(&race)
-        .copied()?;
+    let key = mud_world::race_start_room(world, &race)?;
     world
         .get_resource::<WorldKeyIndex>()?
         .rooms
@@ -126,7 +122,7 @@ fn cmd_recall(world: &mut World, player: Entity, _args: &str) {
 mod tests {
     use super::*;
     use crate::commands::test_support::{drain, player_in};
-    use mud_world::Named;
+    use mud_world::{Named, RaceDefaults};
 
     #[test]
     fn unbound_player_recalls_to_the_race_start_room() {

@@ -7215,6 +7215,17 @@ fn parse_who_level_filter(args: &str) -> Option<(i32, i32)> {
     Some((lo, hi))
 }
 
+/// ` (race)` cell of a `who` row. A race name that carries its own colour
+/// tags (`Races.name`, e.g. the per-subrace Dragonborn colours) is shown as
+/// authored; a plain one is cyan.
+fn who_race_cell(race: &str) -> String {
+    if race.contains('<') {
+        format!(" ({race})")
+    } else {
+        format!(" (<cyan>{race}</>)")
+    }
+}
+
 pub(crate) fn cmd_who(world: &mut World, player: Entity, args: &str) {
     // Rows are free-flowing like legacy `who`: the title follows the
     // name directly (it reads as a last name), not a padded column.
@@ -7254,6 +7265,18 @@ pub(crate) fn cmd_who(world: &mut World, player: Entity, args: &str) {
             .iter()
             .map(|(id, def)| (*id, def.name.clone()))
             .collect();
+        // Race shown as the catalog's coloured display name (`Races.name`),
+        // e.g. every Dragonborn reads "Dragonborn", told apart by colour.
+        let race_lookup: std::collections::HashMap<String, String> = world
+            .get_resource::<mud_world::RaceCatalog>()
+            .map(|c| {
+                c.by_race
+                    .iter()
+                    .filter(|(_, def)| !def.name.trim().is_empty())
+                    .map(|(k, def)| (k.clone(), def.name.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut q = world.query_filtered::<(
             Entity,
             &Named,
@@ -7282,7 +7305,11 @@ pub(crate) fn cmd_who(world: &mut World, player: Entity, args: &str) {
                     .and_then(|p| p.class_id)
                     .and_then(|cid| class_lookup.get(&cid).cloned()),
                 race: prof
-                    .map(|p| crate::commands::pretty_effect_label(&p.race).replace(' ', "-"))
+                    .map(|p| {
+                        race_lookup.get(&p.race).cloned().unwrap_or_else(|| {
+                            crate::commands::pretty_effect_label(&p.race).replace(' ', "-")
+                        })
+                    })
                     .filter(|r| !r.is_empty()),
             })
             .collect()
@@ -7399,7 +7426,7 @@ pub(crate) fn cmd_who(world: &mut World, player: Entity, args: &str) {
             out.push_str(t.trim());
         }
         if let Some(race) = &r.race {
-            out.push_str(&format!(" (<cyan>{race}</>)"));
+            out.push_str(&who_race_cell(race));
         }
         if let Some(class) = &r.class_name {
             // class is the catalog `name` field (carries authored

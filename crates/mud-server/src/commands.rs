@@ -538,6 +538,9 @@ mod admin_inspect;
 mod admin_management;
 #[path = "commands/admin_reload.rs"]
 mod admin_reload;
+#[cfg(test)]
+#[path = "commands/comm_quoting_tests.rs"]
+mod comm_quoting_tests;
 #[path = "commands/lists.rs"]
 mod lists;
 #[cfg(test)]
@@ -19845,14 +19848,16 @@ pub(crate) fn invoke_ability_core(
                                 // Mob prototypes carry a lower-cased race;
                                 // `start_room_by_race` is keyed by the enum
                                 // spelling players' profiles use.
+                                // `race_start_room` also skips a start room that is
+                                // airborne or dark.
                                 let race = mud_world::effective_race(world, target_entity);
-                                let by_race = &world
-                                    .resource::<mud_world::RaceDefaults>()
-                                    .start_room_by_race;
-                                let start = by_race
-                                    .get(&race)
-                                    .or_else(|| by_race.get(&race.to_ascii_uppercase()))
-                                    .copied();
+                                let start =
+                                    mud_world::race_start_room(world, &race).or_else(|| {
+                                        mud_world::race_start_room(
+                                            world,
+                                            &race.to_ascii_uppercase(),
+                                        )
+                                    });
                                 start.and_then(|(z, i)| {
                                     world
                                         .resource::<WorldKeyIndex>()

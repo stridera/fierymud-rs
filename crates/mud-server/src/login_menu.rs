@@ -37,6 +37,21 @@ pub(crate) enum Pick<T> {
     None,
 }
 
+/// `text` without `<...>` colour tags.
+fn strip_tags(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_tag = false;
+    for c in text.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
 /// Lower-case alphanumerics only, so `Half-Elf`, `half elf` and `HALF_ELF`
 /// compare equal.
 pub(crate) fn normalize(s: &str) -> String {
@@ -133,7 +148,12 @@ pub(crate) fn race_options(world: &World) -> Vec<MenuOption<String>> {
     });
     rows.into_iter()
         .map(|(r, label)| {
-            let mut keys = vec![normalize(&label), normalize(&r.race), normalize(&r.name)];
+            // `name` carries colour tags (`<b:red>Dr</>...`); only its text is a key.
+            let mut keys = vec![
+                normalize(&label),
+                normalize(&r.race),
+                normalize(&strip_tags(&r.name)),
+            ];
             keys.retain(|k| !k.is_empty());
             keys.dedup();
             MenuOption {

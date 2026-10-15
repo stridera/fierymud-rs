@@ -2108,3 +2108,69 @@ async fn command_policy_query_fails_with_missing_schema_codes() {
         Some("42703")
     );
 }
+
+/// Every playable race (crossed with every base class: the class does not
+/// move the start room, but the combination must still resolve) starts in,
+/// and recalls to, a room that exists, is ground level, lit and open. This
+/// is the data behind issue #156 (a Lightning Dragonborn spawned in the air
+/// in Doom).
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn every_race_class_combination_has_a_valid_start_room() {
+    use mud_db::enums::Sector;
+    use sqlx::Row;
+    let pool = pool().await;
+    let races = sqlx::query(
+        r#"SELECT r.race::text AS race, r.start_room_zone_id AS zone, r.start_room_id AS room,
+                  ro.sector AS sector, ro.base_light_level AS light,
+                  ro.entry_restriction AS restriction, ro.is_death_trap AS dt,
+                  z.is_god_zone AS god
+           FROM "Races" r
+           LEFT JOIN "Room" ro ON ro.zone_id = r.start_room_zone_id AND ro.id = r.start_room_id
+           LEFT JOIN "Zones" z ON z.id = ro.zone_id
+           WHERE r.playable
+           ORDER BY r.race::text"#,
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("races with start rooms");
+    assert!(!races.is_empty(), "no playable races");
+    let classes: Vec<i32> = sqlx::query_scalar(r#"SELECT id FROM "Class" WHERE NOT is_subclass"#)
+        .fetch_all(&pool)
+        .await
+        .expect("base classes");
+    assert!(!classes.is_empty(), "no base classes");
+    let mut bad = Vec::new();
+    for row in &races {
+        let race: String = row.get("race");
+        let problem: Option<String> = match row.get::<Option<Sector>, _>("sector") {
+            None => Some("start room missing or unset".to_string()),
+            Some(sector) => {
+                let restricted = row
+                    .get::<Option<String>, _>("restriction")
+                    .is_some_and(|r| !r.trim().is_empty());
+                if row.get::<bool, _>("god") {
+                    Some("god zone".to_string())
+                } else {
+                    mud_db::rooms::start_room_problem(
+                        sector,
+                        row.get("light"),
+                        restricted,
+                        row.get("dt"),
+                    )
+                    .map(str::to_string)
+                }
+            }
+        };
+        if let Some(problem) = problem {
+            for class in &classes {
+                bad.push(format!(
+                    "{race} / class {class}: ({:?},{:?}) {problem}",
+                    row.get::<Option<i32>, _>("zone"),
+                    row.get::<Option<i32>, _>("room"),
+                ));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "invalid start rooms:\n{}", bad.join("\n"));
+}

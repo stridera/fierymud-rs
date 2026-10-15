@@ -138,3 +138,49 @@ pub async fn list_rooms(pool: &PgPool) -> sqlx::Result<Vec<Room>> {
     .fetch_all(pool)
     .await
 }
+
+/// Why a room cannot be where a brand-new character starts (or recalls to),
+/// or `None` when it can. A start room must be ground level (nothing to
+/// fall through or swim in), lit without a torch, safe to stand in, and open
+/// to everyone. Time-of-day darkness (outdoor rooms at night) is not
+/// counted: only rooms that are dark around the clock fail.
+///
+/// Shared by the server (which falls back to the default start when a
+/// race's room fails) and the live-DB test that checks every race.
+#[must_use]
+pub fn start_room_problem(
+    sector: Sector,
+    base_light_level: i32,
+    has_entry_restriction: bool,
+    is_death_trap: bool,
+) -> Option<&'static str> {
+    if matches!(
+        sector,
+        Sector::Air
+            | Sector::Airplane
+            | Sector::Astralplane
+            | Sector::Etherealplane
+            | Sector::Fireplane
+            | Sector::Earthplane
+            | Sector::Avernus
+    ) {
+        return Some("airborne or planar sector");
+    }
+    if matches!(sector, Sector::Water | Sector::Underwater) {
+        return Some("water sector");
+    }
+    let dark_sector = matches!(
+        sector,
+        Sector::Cave | Sector::Underdark | Sector::Underwater
+    );
+    if base_light_level < 0 || (base_light_level == 0 && dark_sector) {
+        return Some("dark without a light source");
+    }
+    if is_death_trap {
+        return Some("death trap");
+    }
+    if has_entry_restriction {
+        return Some("entry restriction");
+    }
+    None
+}

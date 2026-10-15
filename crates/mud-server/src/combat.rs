@@ -7158,9 +7158,9 @@ if not percent_chance(20) then
 end
 local rndm = random(1, 10)
 if damage == 0 then
-    self.room:send(tostring(self.shortdesc) .. " says, \"Missed again, big surprise.\"")
+    self.room:send(tostring(self.shortdesc) .. " says, 'Missed again, big surprise.'")
 else
-    self.room:send(tostring(self.shortdesc) .. " says, \"Booyah! (" .. rndm .. ")\"")
+    self.room:send(tostring(self.shortdesc) .. " says, 'Booyah! (" .. rndm .. ")'")
 end
 "#;
 
@@ -7227,7 +7227,7 @@ end
             }
         }
         assert!(
-            heard.contains("longsword says, \""),
+            heard.contains("longsword says, '"),
             "the sword never spoke; last round's output: {heard:?}"
         );
         let stats = world.resource::<crate::triggers::TriggerStats>();

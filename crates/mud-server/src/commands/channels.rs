@@ -99,7 +99,7 @@ inventory::submit! {
             summary: "Admin echo to the quest channel.",
             long: "Builder+. Drops a flavor announcement onto the \
                    quest channel without quoting the speaker (e.g. \
-                   \"<msg>\" rather than \"X qsays, '<msg>'\"). \
+                   <msg> alone rather than X quest-says, '<msg>'). \
                    Useful for run-of-show quest narration.",
         },
         run: cmd_qecho,
@@ -208,7 +208,7 @@ fn broadcast_global(
     // the speaker sees their own gossip in the chat tab in
     // third-person form, matching the IRE convention.
     let gmcp_text = format!(
-        "{}{}, \"{}\"",
+        "{}{}, '{}'",
         player_name,
         match channel_kind {
             "gossip" => " gossips",
@@ -255,9 +255,9 @@ fn broadcast_global(
         let line = if t == player && has_flag(world, player, PlayerFlag::NoRepeat) {
             "Ok.\r\n".to_string()
         } else if t == player {
-            format!("{channel_tag}You {verb_self}, \"{message}\"</>\r\n")
+            format!("{channel_tag}You {verb_self}, '{message}'</>\r\n")
         } else {
-            format!("{channel_tag}{player_name} {verb_other}, \"{message}\"</>\r\n")
+            format!("{channel_tag}{player_name} {verb_other}, '{message}'</>\r\n")
         };
         send_to(world, t, line);
         // GMCP companion frame — listeners see it in their chat
@@ -472,10 +472,10 @@ fn show_channel_history(
             .map(|d| d.as_secs())
             .unwrap_or(0);
         out.push_str(&format!(
-            "  <dim>{ago:>4}s ago</>  {channel_tag}{speaker}: \"{body}\"</>\r\n",
+            "  <dim>{ago:>4}s ago</>  {channel_tag}{speaker}: '{body}'</>\r\n",
             ago = secs_ago,
             speaker = entry.speaker,
-            body = entry.body.replace('"', "'"),
+            body = entry.body,
         ));
     }
     crate::commands::send_rendered(world, player, &out);

@@ -254,12 +254,12 @@ fn report_with_a_name_tells_only_that_player() {
     dispatch(&mut world, p, "report Target");
     let mine = plain(&drain(&mut prx));
     assert!(
-        mine.contains("You tell Target, \"I have 80 (100) hit and 40 (50) stamina points.\""),
+        mine.contains("You tell Target, 'I have 80 (100) hit and 40 (50) stamina points.'"),
         "{mine}"
     );
     let theirs = plain(&drain(&mut trx));
     assert!(
-        theirs.contains("Reader tells you, \"I have 80 (100) hit and 40 (50) stamina points.\""),
+        theirs.contains("Reader tells you, 'I have 80 (100) hit and 40 (50) stamina points.'"),
         "{theirs}"
     );
     let bystander = plain(&drain(&mut brx));
@@ -272,12 +272,9 @@ fn report_with_no_name_says_to_the_room() {
     let ((p, mut prx), (_t, mut trx), (_b, mut brx)) = report_pair(&mut world);
     dispatch(&mut world, p, "report");
     let mine = plain(&drain(&mut prx));
-    assert!(mine.contains("You say, \"I have 80 (100) hit"), "{mine}");
+    assert!(mine.contains("You say, 'I have 80 (100) hit"), "{mine}");
     let bystander = plain(&drain(&mut brx));
-    assert!(
-        bystander.contains("Reader says, \"I have 80"),
-        "{bystander}"
-    );
+    assert!(bystander.contains("Reader says, 'I have 80"), "{bystander}");
     assert!(plain(&drain(&mut trx)).is_empty());
 }
 
