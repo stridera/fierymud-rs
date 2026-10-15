@@ -10,7 +10,7 @@ use mud_world::{BodyMetrics, LifeForceTag, Profile, RaceCatalog};
 use crate::commands::{format_age, send_rendered};
 
 /// Legacy `compositions[].color` as an XML-Lite open tag.
-const fn composition_tag(c: Composition) -> &'static str {
+pub(super) const fn composition_tag(c: Composition) -> &'static str {
     match c {
         Composition::Flesh | Composition::Lava => "<red>",
         Composition::Earth => "<yellow>",
@@ -28,7 +28,7 @@ const fn composition_tag(c: Composition) -> &'static str {
 }
 
 /// Legacy `lifeforces[]` name and color tag.
-const fn lifeforce_style(lf: mud_db::enums::LifeForce) -> (&'static str, &'static str) {
+pub(super) const fn lifeforce_style(lf: mud_db::enums::LifeForce) -> (&'static str, &'static str) {
     use mud_db::enums::LifeForce;
     match lf {
         LifeForce::Life => ("life", "<b:green>"),
@@ -74,7 +74,7 @@ fn composition_of(world: &World, target: Entity) -> Composition {
     crate::commands::info::actor_composition(world, target)
 }
 
-fn life_force_of(world: &World, target: Entity) -> mud_db::enums::LifeForce {
+pub(super) fn life_force_of(world: &World, target: Entity) -> mud_db::enums::LifeForce {
     use mud_db::enums::LifeForce;
     if let Some(LifeForceTag(lf)) = world.get::<LifeForceTag>(target).copied() {
         return lf;

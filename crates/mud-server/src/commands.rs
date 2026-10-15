@@ -530,6 +530,8 @@ inventory::collect!(AsyncCommand);
 mod account_bank;
 #[path = "commands/account_chest.rs"]
 mod account_chest;
+#[path = "commands/actor_stat.rs"]
+mod actor_stat;
 #[path = "commands/admin_inspect.rs"]
 mod admin_inspect;
 #[path = "commands/admin_management.rs"]
@@ -820,6 +822,10 @@ mod wand_charge_tests;
 #[cfg(test)]
 #[path = "commands/identify_actor_tests.rs"]
 mod identify_actor_tests;
+
+#[cfg(test)]
+#[path = "commands/actor_stat_tests.rs"]
+mod actor_stat_tests;
 
 #[path = "commands/room_line.rs"]
 pub(crate) mod room_line;

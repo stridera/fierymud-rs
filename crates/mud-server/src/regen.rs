@@ -12,7 +12,7 @@ const REGEN_PERIOD_TICKS: u64 = 10;
 
 /// Stamina recovered per second by posture. Kneeling regens like
 /// standing — it's an alert posture, just lower-profile.
-fn stamina_per_tick(p: PostureKind) -> i32 {
+pub(crate) fn stamina_per_tick(p: PostureKind) -> i32 {
     match p {
         PostureKind::Standing | PostureKind::Kneeling => 1,
         PostureKind::Sitting => 2,
@@ -23,7 +23,7 @@ fn stamina_per_tick(p: PostureKind) -> i32 {
 
 /// HP recovered per second by posture. Standing players don't auto-heal —
 /// resting/sleeping does the work, like classic MUDs. Kneeling = standing.
-fn health_per_tick(p: PostureKind) -> i32 {
+pub(crate) fn health_per_tick(p: PostureKind) -> i32 {
     match p {
         PostureKind::Standing | PostureKind::Kneeling => 0,
         PostureKind::Sitting => 1,

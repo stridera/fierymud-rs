@@ -6,10 +6,10 @@ use std::collections::HashMap;
 use bevy_ecs::prelude::*;
 use mud_db::enums::{Direction, MobBehavior, UserRole};
 use mud_world::{
-    AbilityCatalog, Account, AttachedTriggers, ClassCatalog, CombatStats, EffectInstance,
-    EquippedSlot, ExitData, Exits, Fighting, FromObjectReset, Health, Item, Keywords, Located, Mob,
-    MobPrototypes, Named, ObjectPrototypes, Online, Player, PlayerFlags, Posture, Profile,
-    RoomSector, ShopCatalog, Stamina, TriggerCatalog, Wealth, WorldKey, WorldKeyIndex, ZoneClimate,
+    AbilityCatalog, Account, AttachedTriggers, ClassCatalog, CombatStats, EffectInstance, ExitData,
+    Exits, FromObjectReset, Health, Item, Located, Mob, MobPrototypes, Named, ObjectPrototypes,
+    Online, Player, Profile, RoomSector, ShopCatalog, Stamina, TriggerCatalog, Wealth, WorldKey,
+    WorldKeyIndex, ZoneClimate,
 };
 
 use super::admin_world::{ActorKind, find_actor_anywhere_of};
@@ -177,11 +177,14 @@ inventory::submit! {
         help: Help {
             usage: "stat <name>",
             summary: "Dump a LIVE entity's per-instance component state.",
-            long: "Builder+. Reads every component on the named live \
-                   entity (player, mob, or item by name in your room) \
-                   and prints a structured dump. \
-                   Items print the same block as 'ostat' plus their \
-                   instance state. \r\nNote the difference from mstat: stat \
+            long: "Builder+. Prints the legacy stat sheet for a live \
+                   player or mob (identity, race / life force / \
+                   composition / class, attributes, HP / MV with regen, \
+                   coins, armor / accuracy / evasion / power, saves, \
+                   position, flags, weight, followers / group, effect \
+                   flags and every active effect, cooldowns, scripts, \
+                   memory). Items print the same block as 'ostat' plus \
+                   their instance state. \r\nNote the difference from mstat: stat \
                    shows what the entity actually has right now \
                    (e.g. current HP, active effects, stored vars); \
                    mstat / ostat show the catalog template the \
@@ -2939,84 +2942,9 @@ pub(crate) fn cmd_stat(world: &mut World, player: Entity, args: &str) {
         return;
     }
 
-    let mut out = String::from("\r\n");
-    out.push_str(&format!("entity:        {target:?}\r\n"));
-    out.push_str(&format!(
-        "name:          {}\r\n",
-        cap_sentence_start(&name_of(world, target))
-    ));
-    if let Some(wk) = world.get::<WorldKey>(target) {
-        out.push_str(&format!("world_key:     ({}, {})\r\n", wk.zone, wk.id));
-    }
-    if let Some(located) = world.get::<Located>(target) {
-        let in_name = name_or(world, located.0, "(unknown)");
-        out.push_str(&format!("located_in:    {:?} ({})\r\n", located.0, in_name));
-    }
-    if let Some(kw) = world.get::<Keywords>(target) {
-        out.push_str(&format!("keywords:      {:?}\r\n", kw.0));
-    }
-    if world.get::<Player>(target).is_some() {
-        out.push_str("kind:          Player\r\n");
-    } else if world.get::<Mob>(target).is_some() {
-        out.push_str("kind:          Mob\r\n");
-    } else {
-        out.push_str("kind:          (other)\r\n");
-    }
-    if let Some(h) = world.get::<Health>(target) {
-        out.push_str(&format!("health:        {}/{}\r\n", h.hp, h.max));
-    }
-    if let Some(s) = world.get::<Stamina>(target) {
-        out.push_str(&format!("stamina:       {}/{}\r\n", s.current, s.max));
-    }
-    let overflow = crate::commands::stat_overflow_entries(world, target);
-    if !overflow.is_empty() {
-        let parts: Vec<String> = overflow.iter().map(|(k, n)| format!("{k} {n:+}")).collect();
-        out.push_str(&format!("stat_overflow: {}\r\n", parts.join(", ")));
-    }
-    if let Some(p) = world.get::<Posture>(target) {
-        out.push_str(&format!("posture:       {}\r\n", p.0.label()));
-    }
-    if let Some(cs) = world.get::<CombatStats>(target) {
-        out.push_str(&format!(
-            "combat:        acc {} / eva {} / atk {:+} / armor {}%/{} / ward {}% / hardness {} / align {}\r\n",
-            cs.accuracy,
-            cs.evasion,
-            cs.attack_power,
-            cs.armor_pct,
-            cs.armor_flat,
-            cs.ward_pct,
-            cs.hardness,
-            cs.alignment,
-        ));
-    }
-    if let Some(prof) = world.get::<Profile>(target) {
-        let class_label = prof
-            .class_id
-            .and_then(|id| {
-                world
-                    .get_resource::<ClassCatalog>()
-                    .and_then(|c| c.by_id.get(&id).map(|d| d.plain_name.clone()))
-            })
-            .unwrap_or_else(|| String::from("(none)"));
-        out.push_str(&format!(
-            "profile:       L{} {} ({}), xp {}\r\n",
-            prof.level, prof.race, class_label, prof.experience,
-        ));
-    }
-    if let Some(f) = world.get::<Fighting>(target) {
-        let n = name_or(world, f.0, "(gone)");
-        out.push_str(&format!("fighting:      {:?} ({n})\r\n", f.0));
-    }
-    if let Some(eq) = world.get::<EquippedSlot>(target) {
-        out.push_str(&format!("equipped_slot: {}\r\n", eq.0.db_label()));
-    }
-    if let Some(account) = world.get::<Account>(target) {
-        out.push_str(&format!(
-            "account:       role={} char_id={}\r\n",
-            account.role.label(),
-            account.character_id,
-        ));
-    }
+    // The legacy `do_stat_character` sheet (issue #158).
+    let out = super::actor_stat::render_actor_stat(world, target);
+    send_to(world, player, out);
     // Staff notes (Builder+ only readers — gate via min_role on the
     // Command record itself, so reaching here implies authorization).
     // Fire-and-forget DB read; the formatted block ships as a
@@ -3043,62 +2971,6 @@ pub(crate) fn cmd_stat(world: &mut World, player: Entity, args: &str) {
             }
         });
     }
-    if let Some(fl) = world.get::<PlayerFlags>(target) {
-        let labels: Vec<&'static str> = fl.0.iter().map(|f| f.label()).collect();
-        if labels.is_empty() {
-            out.push_str("flags:         <none>\r\n");
-        } else {
-            out.push_str(&format!("flags:         {}\r\n", labels.join(", ")));
-        }
-    }
-    // Admin sanction / state markers — these don't ride on
-    // PlayerFlags but a builder running stat absolutely needs to
-    // see them. Each line emits only when the marker is set, so
-    // a typical NPC's stat block doesn't grow. WizInvis carries
-    // its level so the builder knows whether they're behind it.
-    if world.get::<mud_world::Frozen>(target).is_some() {
-        out.push_str("frozen:        yes — dispatch is locked until thawed\r\n");
-    }
-    if let Some(w) = world.get::<mud_world::WizInvis>(target) {
-        out.push_str(&format!(
-            "wizinvis:      L{} (only visible to viewers at this level or higher)\r\n",
-            w.0,
-        ));
-    }
-    if world
-        .get::<PlayerFlags>(target)
-        .is_some_and(|pf| pf.has(mud_db::enums::PlayerFlag::Muted))
-    {
-        out.push_str("muted:         yes — silenced on global channels\r\n");
-    }
-    if let Some(w) = world.get::<mud_world::WimpyThreshold>(target)
-        && w.0 > 0
-    {
-        out.push_str(&format!(
-            "wimpy:         {}% (auto-flee when HP drops below this)\r\n",
-            w.0,
-        ));
-    }
-    // EffectInstances applied to this entity.
-    let effects: Vec<(String, i32)> = {
-        mud_world::effects_on(world, target)
-            .into_iter()
-            .filter_map(|e| world.get::<EffectInstance>(e))
-            .map(|eff| (eff.name.clone(), eff.remaining_secs))
-            .collect()
-    };
-    if effects.is_empty() {
-        out.push_str("effects:       <none>\r\n");
-    } else {
-        out.push_str(&format!("effects:       {} active\r\n", effects.len()));
-        for (name, secs) in &effects {
-            out.push_str(&format!(
-                "               {name} ({})\r\n",
-                crate::commands::format_effect_duration(*secs)
-            ));
-        }
-    }
-    send_to(world, player, out);
 }
 
 /// Hard cap on `*search` listing length so a wide query (`osearch a`)
