@@ -9829,6 +9829,13 @@ pub(crate) mod tests {
             .execute(&pool)
             .await
             .ok()?;
+        // Character rows need a seeded Class (class_id 1); a schema-only
+        // database (CI) has the tables but not the rows, so skip like an
+        // unreachable database.
+        mud_db::sqlx::query("SELECT 1 FROM \"Class\" WHERE id = 1")
+            .fetch_optional(&pool)
+            .await
+            .ok()??;
         Some((pool, db_lock))
     }
 

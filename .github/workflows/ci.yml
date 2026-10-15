@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  # Smaller debug artifacts keep the hosted runner inside its disk quota.
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_INCREMENTAL: 0
+  # sqlx's compile-time query checks and the DB-backed tests need a live
+  # database holding the Prisma schema. Tests that need seeded content rows
+  # skip themselves on a schema-only database.
+  DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      # The schema's source of truth is muditor's Prisma schema.
+      - uses: actions/checkout@v4
+        with:
+          repository: stridera/muditor
+          path: muditor
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4'
+      - name: Apply the Prisma schema to the CI database
+        working-directory: muditor
+        run: |
+          bun install --frozen-lockfile
+          bun run db:generate
+          bun run db:push
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt
+        run: cargo fmt --check
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: cargo test
+        run: cargo test --workspace

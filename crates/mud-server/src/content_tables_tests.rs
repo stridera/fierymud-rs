@@ -47,6 +47,11 @@ async fn seeded_pool() -> Option<PgPool> {
         .execute(&pool)
         .await
         .ok()?;
+    // A schema-only database (CI) has the tables but no seeded rows.
+    mud_db::sqlx::query("SELECT flag FROM \"StatusFlagValue\" LIMIT 1")
+        .fetch_optional(&pool)
+        .await
+        .ok()??;
     Some(pool)
 }
 
