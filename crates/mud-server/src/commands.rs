@@ -2133,6 +2133,9 @@ thread_local! {
     /// How many script-queued dispatches are currently on the stack
     /// ([`flush_lua_outbox`]).
     static SCRIPT_COMMAND_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// How many [`OutboxHold`]s are live: while any is, [`drain_lua_outbox`]
+    /// leaves the script outbox queued.
+    static OUTBOX_HOLDS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     /// Whether the line most recently dispatched ended in whitespace, i.e.
     /// a client sent `verb ` with an argument slot that is present but empty.
     static LINE_HAS_TRAILING_SPACE: std::cell::Cell<bool> =
@@ -2973,10 +2976,31 @@ pub(crate) fn send_comm_channel_text(
 /// command handlers (`cmd_lua`, `cmd_firetrig`) and the trigger
 /// dispatcher after each `exec_for_actor` returns.
 pub(crate) fn drain_lua_outbox(world: &mut World) {
+    if OUTBOX_HOLDS.with(std::cell::Cell::get) > 0 {
+        return;
+    }
     flush_lua_outbox(world);
     // Trigger fires that a script's server calls could not run while it held
     // the `LuaHost` (see `deferred_triggers`) run now that it is back.
     crate::deferred_triggers::drain(world);
+}
+
+/// Keeps script output queued while it lives, so a bulk command can print
+/// its own grouped action line first and let the per-item trigger output
+/// follow it (the caller calls [`drain_lua_outbox`] after dropping the hold).
+pub(crate) struct OutboxHold;
+
+impl OutboxHold {
+    pub(crate) fn new() -> Self {
+        OUTBOX_HOLDS.with(|h| h.set(h.get() + 1));
+        OutboxHold
+    }
+}
+
+impl Drop for OutboxHold {
+    fn drop(&mut self) {
+        OUTBOX_HOLDS.with(|h| h.set(h.get().saturating_sub(1)));
+    }
 }
 
 fn flush_lua_outbox(world: &mut World) {

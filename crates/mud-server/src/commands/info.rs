@@ -11379,7 +11379,7 @@ pub(crate) fn cmd_give(world: &mut World, player: Entity, args: &str) {
         give_coins(world, player, copper, rest);
         return;
     }
-    if let Some(msg) = give_count_refusal(args.trim()) {
+    if let Some(msg) = give_count_refusal(world, player, args.trim()) {
         send_to(world, player, msg);
         return;
     }
@@ -11501,8 +11501,10 @@ fn give_counted(
 
 /// Refusal for a `give` whose leading number cannot be a count: zero or
 /// negative ("give 0 stick bob"), or a bare "coins" with no denomination
-/// ("give 5 coins bob"; the denomination picks the value).
-fn give_count_refusal(args: &str) -> Option<String> {
+/// ("give 5 coins bob"; the denomination picks the value). Carried items
+/// that answer to the keyword ("a worn coin") are real items, so "coins"
+/// only asks for a denomination when nothing in the pack matches it.
+fn give_count_refusal(world: &mut World, player: Entity, args: &str) -> Option<String> {
     let (head, rest) = args.split_once(char::is_whitespace)?;
     let rest = rest.trim();
     if rest.is_empty() {
@@ -11515,6 +11517,7 @@ fn give_count_refusal(args: &str) -> Option<String> {
     let unit = rest.split_whitespace().next().unwrap_or("");
     if head.parse::<i64>().is_ok_and(|n| n > 0)
         && (unit.eq_ignore_ascii_case("coins") || unit.eq_ignore_ascii_case("coin"))
+        && find_item(world, player, unit, ItemClass::Inventory).is_none()
     {
         return Some(
             "Which coin? Name a denomination: platinum, gold, silver or copper \
@@ -12346,6 +12349,8 @@ fn get_all_from_floor(world: &mut World, player: Entity, room: Entity, filter: &
     let mut blocked = 0usize;
     let mut picked: Vec<(String, usize)> = Vec::new();
     let bypass_encumbrance = crate::commands::is_staff(world, player);
+    // Get-trigger output waits until the grouped "You pick up" lines are out.
+    let hold = crate::commands::OutboxHold::new();
     for (item, item_name) in &items {
         if let Some(amount) = take_loose_coins(world, player, *item) {
             let coin =
@@ -12394,6 +12399,8 @@ fn get_all_from_floor(world: &mut World, player: Entity, room: Entity, filter: &
         moved += 1;
     }
     send_tallied(world, player, "You pick up", &picked);
+    drop(hold);
+    crate::commands::drain_lua_outbox(world);
     if moved == 0 && skipped == 0 && blocked > 0 {
         // Every candidate was fixed in place: never answer with silence.
         send_to(
@@ -13064,6 +13071,8 @@ fn drop_plain(world: &mut World, player: Entity, args: &str) {
         }
         let mut dropped = 0usize;
         let mut dropped_names: Vec<(String, usize)> = Vec::new();
+        // Fluid-body notes follow the grouped "You drop" lines.
+        let mut solidified: Vec<String> = Vec::new();
         let mut blocked = 0usize;
         for (item, item_name) in &items {
             // NO_DROP / SOULBOUND skip silently in the bulk path —
@@ -13098,10 +13107,13 @@ fn drop_plain(world: &mut World, player: Entity, args: &str) {
                 e.remove::<mud_world::Identified>();
             }
             note_given(&mut dropped_names, item_name.clone());
-            crate::commands::composition::note_item_turns_solid(world, player, item_name);
+            solidified.push(item_name.clone());
             dropped += 1;
         }
         send_tallied(world, player, "You drop", &dropped_names);
+        for item_name in &solidified {
+            crate::commands::composition::note_item_turns_solid(world, player, item_name);
+        }
         if dropped > 0 {
             broadcast_room_except_rendered(
                 world,

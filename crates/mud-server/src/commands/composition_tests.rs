@@ -341,6 +341,19 @@ fn what_leaves_a_fluid_hand_turns_solid_again() {
 }
 
 #[test]
+fn drop_all_prints_the_grouped_line_before_the_solid_flavour() {
+    let mut s = scene();
+    for _ in 0..2 {
+        item_at(&mut s.fx.world, s.mortal, 7, "a steel sword", "sword");
+    }
+    s.fluid(s.mortal);
+    let out = s.cmd("drop all");
+    let line = out.find("You drop a steel sword. (x2)").expect(&out);
+    let flavour = out.find("becomes solid again").expect(&out);
+    assert!(line < flavour, "{out}");
+}
+
+#[test]
 fn a_solid_hand_drops_without_the_flavour() {
     let mut s = scene();
     item_at(&mut s.fx.world, s.mortal, 7, "a steel sword", "sword");

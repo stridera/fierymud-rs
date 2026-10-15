@@ -2,7 +2,10 @@
 //! `effects` works mid-cast, and `hold` of a held item says so. Test-only.
 
 use bevy_ecs::prelude::*;
-use mud_world::{EquippedSlot, Located, Slot};
+use mud_world::{
+    AttachedTriggers, EquippedSlot, Located, Slot, TriggerAttach, TriggerCatalog, TriggerDef,
+    TriggerEvent,
+};
 
 use super::dispatch;
 use super::god_zone_tests::Fx;
@@ -95,4 +98,36 @@ fn holding_what_you_already_hold_says_so() {
     assert!(!out.contains("aren't carrying"), "{out}");
     dispatch(&mut fx.world, p, "hold lantern");
     assert!(drain(&mut rx).contains("You aren't carrying 'lantern'."));
+}
+
+#[test]
+fn get_all_prints_the_grouped_line_before_the_get_trigger_output() {
+    let (mut fx, room, p, mut rx) = scene();
+    let mut catalog = TriggerCatalog::default();
+    catalog.by_key.insert(
+        (99, 1),
+        TriggerDef {
+            zone_id: 99,
+            id: 1,
+            name: "twitch".into(),
+            attach_type: TriggerAttach::Object,
+            commands: "actor:send('The stick twitches.')".into(),
+            flags: vec![TriggerEvent::Get],
+            arg_list: vec![],
+            num_args: 0,
+        },
+    );
+    fx.world.insert_resource(catalog);
+    for _ in 0..2 {
+        let stick = item_at(&mut fx.world, room, 7, "a small stick", "stick");
+        fx.world
+            .entity_mut(stick)
+            .insert(AttachedTriggers(vec![(99, 1)]));
+    }
+    dispatch(&mut fx.world, p, "get all");
+    let out = drain(&mut rx);
+    let line = out.find("You pick up a small stick. (x2)").expect(&out);
+    let first = out.find("The stick twitches.").expect(&out);
+    assert!(line < first, "{out}");
+    assert_eq!(count(&out, "The stick twitches."), 2, "{out}");
 }

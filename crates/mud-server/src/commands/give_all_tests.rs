@@ -571,3 +571,19 @@ fn give_zero_negative_or_bare_coins_explain_themselves() {
     assert!(!out.contains("aren't carrying"), "{out}");
     assert_eq!(s.holder(sword), s.giver);
 }
+
+#[test]
+fn give_n_coin_gives_carried_items_with_that_keyword() {
+    let mut s = scene();
+    let (bob, _rx) = s.player("Bob", 30);
+    let coins: Vec<Entity> = (0..2)
+        .map(|_| item_at(&mut s.fx.world, s.giver, 58, "a worn coin", "coin"))
+        .collect();
+    let out = s.cmd("give 2 coin bob");
+    assert!(!out.contains("Which coin?"), "{out}");
+    assert!(out.contains("You give a worn coin to Bob. (x2)"), "{out}");
+    assert!(coins.iter().all(|&c| s.holder(c) == bob), "{out}");
+    // With nothing carried under that keyword the denomination is still asked.
+    let out = s.cmd("give 2 coin bob");
+    assert!(out.contains("Which coin?"), "{out}");
+}
