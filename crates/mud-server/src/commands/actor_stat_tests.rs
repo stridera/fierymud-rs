@@ -217,7 +217,7 @@ SPL: ( 10hr) Strength              +8 to strength
 SPL: (  2hr) Bless
 ";
 const MOB_SHEET: &str = r"
-MOB 'a brown fox'  Entity: [2v0], In room (30, 1)
+MOB 'a brown fox', In room (30, 1)
 Alias: fox brown, VNum: (30, 7)
 L-Des: A brown fox sniffs about here.
 Desc: Its coat is russet.

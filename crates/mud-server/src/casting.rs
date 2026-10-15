@@ -185,6 +185,7 @@ const CASTING_ALLOWED: &[&str] = &[
     "music",
     "ignore",
     "score",
+    "effects",
     "inventory",
     "equipment",
     "experience",
@@ -1774,7 +1775,7 @@ mod tests {
             assert!(builtin_allowed_while_casting(name), "{name}");
         }
         // Legacy CMD_CAST (directly or via CMD_ANY).
-        for name in ["cls", "world", "quest", "score", "inventory"] {
+        for name in ["cls", "world", "quest", "score", "effects", "inventory"] {
             assert!(builtin_allowed_while_casting(name), "{name}");
         }
         // `quit` / `save` / `toggle` are `CMD_ANY ^ CMD_CAST`: refused.

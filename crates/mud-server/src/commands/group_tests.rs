@@ -319,12 +319,30 @@ fn invite_also_enrols_your_own_pet_but_not_a_stranger_mob() {
     assert!(t.fx.world.get::<GroupMember>(pet).is_some());
     // Someone else's pet is not yours to group.
     let other = add_pet(&mut t, "a feral dog");
-    t.fx.world
-        .entity_mut(other)
-        .insert(mud_world::Follower(t.friend));
+    t.fx.world.entity_mut(other).insert((
+        mud_world::Follower(t.friend),
+        mud_world::Keywords(vec!["dog".into()]),
+    ));
     let out = say(&mut t.fx, t.leader, &mut t.lrx, "group dog");
-    assert!(out.contains("Usage"), "{out}");
+    assert!(out.contains("isn't one of your followers"), "{out}");
+    assert!(!out.contains("Usage"), "{out}");
     assert!(t.fx.world.get::<GroupMember>(other).is_none());
+}
+
+#[test]
+fn group_with_a_word_that_matches_nobody_says_so_instead_of_usage() {
+    let mut t = trio();
+    for word in ["zork", "leave", "all"] {
+        let out = say(&mut t.fx, t.leader, &mut t.lrx, &format!("group {word}"));
+        assert!(
+            out.contains(&format!("You don't see '{word}' here.")),
+            "{out}"
+        );
+        assert!(!out.contains("Usage"), "{out}");
+    }
+    // A player is pointed at invite.
+    let out = say(&mut t.fx, t.leader, &mut t.lrx, "group friend");
+    assert!(out.contains("use 'invite friend'"), "{out}");
 }
 
 #[test]

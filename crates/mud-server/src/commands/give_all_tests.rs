@@ -535,3 +535,39 @@ fn a_deferred_receive_refusal_does_not_take_the_item_back() {
     crate::commands::drain_lua_outbox(&mut s.fx.world);
     assert_eq!(s.holder(items[0]), keeper);
 }
+
+#[test]
+fn give_more_than_carried_says_how_many_went() {
+    let mut s = scene();
+    let (bob, _rx) = s.player("Bob", 30);
+    let items: Vec<Entity> = (0..3)
+        .map(|_| item_at(&mut s.fx.world, s.giver, 7, "a steel sword", "sword"))
+        .collect();
+    let out = s.cmd("give 9 sword bob");
+    assert!(out.contains("You give a steel sword to Bob. (x3)"), "{out}");
+    assert!(out.contains("You only had 3 of those"), "{out}");
+    assert!(items.iter().all(|&i| s.holder(i) == bob), "{out}");
+    // Exactly the number asked for needs no note.
+    let more: Vec<Entity> = (0..2)
+        .map(|_| item_at(&mut s.fx.world, s.giver, 7, "a steel sword", "sword"))
+        .collect();
+    let out = s.cmd("give 2 sword bob");
+    assert!(!out.contains("You only had"), "{out}");
+    assert!(more.iter().all(|&i| s.holder(i) == bob), "{out}");
+}
+
+#[test]
+fn give_zero_negative_or_bare_coins_explain_themselves() {
+    let mut s = scene();
+    let (_bob, _rx) = s.player("Bob", 30);
+    let sword = item_at(&mut s.fx.world, s.giver, 7, "a steel sword", "sword");
+    for line in ["give 0 sword bob", "give -1 sword bob"] {
+        let out = s.cmd(line);
+        assert!(out.contains("Give a positive number"), "{line}: {out}");
+        assert!(!out.contains("aren't carrying"), "{line}: {out}");
+    }
+    let out = s.cmd("give 5 coins bob");
+    assert!(out.contains("Which coin?"), "{out}");
+    assert!(!out.contains("aren't carrying"), "{out}");
+    assert_eq!(s.holder(sword), s.giver);
+}

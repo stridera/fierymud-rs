@@ -11379,6 +11379,10 @@ pub(crate) fn cmd_give(world: &mut World, player: Entity, args: &str) {
         give_coins(world, player, copper, rest);
         return;
     }
+    if let Some(msg) = give_count_refusal(args.trim()) {
+        send_to(world, player, msg);
+        return;
+    }
     let (count, rest) = parse_count_prefix(args.trim());
     let Some((item_word, target_word)) = split_give_args(rest) else {
         give_plain(world, player, rest);
@@ -11409,6 +11413,7 @@ pub(crate) fn cmd_give(world: &mut World, player: Entity, args: &str) {
     // run began: a RECEIVE trigger may destroy the one or move the other.
     let target_name = name_of(world, target);
     let mut given: Vec<(String, usize)> = Vec::new();
+    let mut ran_out = false;
     let busy = if let Some(filter) = filter {
         give_all(world, player, target, &filter, &mut given)
     } else {
@@ -11419,9 +11424,18 @@ pub(crate) fn cmd_give(world: &mut World, player: Entity, args: &str) {
             item_word,
             count.unwrap_or(1),
             &mut given,
+            &mut ran_out,
         )
     };
     announce_gives(world, player, target, room, &target_name, &given);
+    if ran_out {
+        let total: usize = given.iter().map(|(_, q)| q).sum();
+        send_to(
+            world,
+            player,
+            format!("You only had {total} of those, so that is all you gave.\r\n"),
+        );
+    }
     if busy {
         send_busy(world, player, &target_name);
     }
@@ -11441,6 +11455,7 @@ fn give_counted(
     item_word: &str,
     count: usize,
     given: &mut Vec<(String, usize)>,
+    ran_out: &mut bool,
 ) -> bool {
     // Items already offered in this command: a RECEIVE trigger that
     // hands one back must not be given (and counted) again.
@@ -11468,6 +11483,8 @@ fn give_counted(
                     player,
                     &format!("You aren't carrying '{item_word}'.\r\n"),
                 );
+            } else {
+                *ran_out = true;
             }
             break;
         };
@@ -11480,6 +11497,35 @@ fn give_counted(
         }
     }
     false
+}
+
+/// Refusal for a `give` whose leading number cannot be a count: zero or
+/// negative ("give 0 stick bob"), or a bare "coins" with no denomination
+/// ("give 5 coins bob"; the denomination picks the value).
+fn give_count_refusal(args: &str) -> Option<String> {
+    let (head, rest) = args.split_once(char::is_whitespace)?;
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return None;
+    }
+    let digits = head.strip_prefix('-').unwrap_or(head);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let unit = rest.split_whitespace().next().unwrap_or("");
+    if head.parse::<i64>().is_ok_and(|n| n > 0)
+        && (unit.eq_ignore_ascii_case("coins") || unit.eq_ignore_ascii_case("coin"))
+    {
+        return Some(
+            "Which coin? Name a denomination: platinum, gold, silver or copper \
+             (e.g. 'give 5 gold bob').\r\n"
+                .to_string(),
+        );
+    }
+    if head.parse::<i64>().is_ok_and(|n| n > 0) {
+        return None;
+    }
+    Some("Give a positive number of items.\r\n".to_string())
 }
 
 /// Whether `target` still stands in the giver's room and the giver is still
@@ -12298,6 +12344,7 @@ fn get_all_from_floor(world: &mut World, player: Entity, room: Entity, filter: &
     let mut moved = 0usize;
     let mut skipped = 0usize;
     let mut blocked = 0usize;
+    let mut picked: Vec<(String, usize)> = Vec::new();
     let bypass_encumbrance = crate::commands::is_staff(world, player);
     for (item, item_name) in &items {
         if let Some(amount) = take_loose_coins(world, player, *item) {
@@ -12339,13 +12386,14 @@ fn get_all_from_floor(world: &mut World, player: Entity, room: Entity, filter: &
             world.entity_mut(*item).insert(Located(player));
             crate::hiding::set_hiddenness(world, *item, 0);
         }
-        send_rendered(world, player, &format!("You pick up {item_name}.\r\n"));
+        note_given(&mut picked, item_name.clone());
         crate::triggers::fire_item_event(world, *item, player, mud_world::TriggerEvent::Get);
         if let Some(key) = world.get::<WorldKey>(*item).copied() {
             bump_collect_quest_progress(world, player, key.zone, key.id);
         }
         moved += 1;
     }
+    send_tallied(world, player, "You pick up", &picked);
     if moved == 0 && skipped == 0 && blocked > 0 {
         // Every candidate was fixed in place: never answer with silence.
         send_to(
@@ -12708,8 +12756,44 @@ fn junk_all(world: &mut World, player: Entity, filter: &str) {
         return;
     }
     crate::commands::sort_newest_first(world, player, &mut items, |e| *e);
+    let mut destroyed: Vec<(String, usize)> = Vec::new();
     for item in items {
-        junk_item(world, player, item);
+        if let Some(name) = junk_item(world, player, item, true) {
+            note_given(&mut destroyed, name);
+        }
+    }
+    send_tallied(world, player, "You destroy", &destroyed);
+    if let Some(room) = world.get::<Located>(player).map(|l| l.0) {
+        let player_name = name_of(world, player);
+        for (name, qty) in &destroyed {
+            broadcast_room_except_rendered(
+                world,
+                room,
+                &[player],
+                &format!("{player_name} destroys {name}.{}\r\n", qty_tag(*qty)),
+            );
+        }
+    }
+}
+
+/// ` (xN)` for a run of identical items, empty for one.
+fn qty_tag(qty: usize) -> String {
+    if qty > 1 {
+        format!(" (x{qty})")
+    } else {
+        String::new()
+    }
+}
+
+/// One `<verb> <item>. (xN)` line per distinct item of a bulk get / drop /
+/// junk, in first-seen order.
+fn send_tallied(world: &mut World, player: Entity, verb: &str, items: &[(String, usize)]) {
+    for (name, qty) in items {
+        send_rendered(
+            world,
+            player,
+            &format!("{verb} {name}.{}\r\n", qty_tag(*qty)),
+        );
     }
 }
 
@@ -12722,33 +12806,37 @@ fn junk_one(world: &mut World, player: Entity, target_word: &str) {
         );
         return;
     };
-    junk_item(world, player, item);
+    junk_item(world, player, item, false);
 }
 
-fn junk_item(world: &mut World, player: Entity, item: Entity) {
+/// Destroy one carried item. Returns its name when it was destroyed. With
+/// `quiet` the success lines are left to the caller (a bulk `junk all.X`
+/// groups them).
+fn junk_item(world: &mut World, player: Entity, item: Entity, quiet: bool) -> Option<String> {
     let item_name = name_of(world, item);
     let player_name = name_of(world, player);
-    let Some(located) = world.get::<Located>(player).copied() else {
-        return;
-    };
+    let located = world.get::<Located>(player).copied()?;
     // Junking destroys only the item itself; a full bag's contents would be
     // orphaned and lost without the player ever choosing that.
     if refuse_nonempty_container(world, player, item, &item_name) {
-        return;
+        return None;
     }
     // Destroying an item is letting go of it: NO_DROP / soulbound items stay
     // (a god ignores NO_DROP, as in legacy).
     if refuse_let_go_blocked(world, player, item, &item_name) {
-        return;
+        return None;
     }
     crate::equip_apply::despawn_item(world, item);
-    send_rendered(world, player, &format!("You destroy {item_name}.\r\n"));
-    broadcast_room_except_rendered(
-        world,
-        located.0,
-        &[player],
-        &format!("{player_name} destroys {item_name}.\r\n"),
-    );
+    if !quiet {
+        send_rendered(world, player, &format!("You destroy {item_name}.\r\n"));
+        broadcast_room_except_rendered(
+            world,
+            located.0,
+            &[player],
+            &format!("{player_name} destroys {item_name}.\r\n"),
+        );
+    }
+    Some(item_name)
 }
 
 /// `donate <item>`: drop an item with a charitable flavor. Without a
@@ -12975,6 +13063,7 @@ fn drop_plain(world: &mut World, player: Entity, args: &str) {
             return;
         }
         let mut dropped = 0usize;
+        let mut dropped_names: Vec<(String, usize)> = Vec::new();
         let mut blocked = 0usize;
         for (item, item_name) in &items {
             // NO_DROP / SOULBOUND skip silently in the bulk path —
@@ -13008,10 +13097,11 @@ fn drop_plain(world: &mut World, player: Entity, args: &str) {
             if let Ok(mut e) = world.get_entity_mut(*item) {
                 e.remove::<mud_world::Identified>();
             }
-            send_rendered(world, player, &format!("You drop {item_name}.\r\n"));
+            note_given(&mut dropped_names, item_name.clone());
             crate::commands::composition::note_item_turns_solid(world, player, item_name);
             dropped += 1;
         }
+        send_tallied(world, player, "You drop", &dropped_names);
         if dropped > 0 {
             broadcast_room_except_rendered(
                 world,
@@ -15884,15 +15974,20 @@ fn group_toggle_pet(world: &mut World, player: Entity, name: &str) {
     let Some(here) = world.get::<Located>(player).map(|l| l.0) else {
         return;
     };
-    let target = find_actor_in_room(world, name, here, player);
-    if !target.is_some_and(|t| group_pet_toggle(world, player, t)) {
-        send_to(
-            world,
-            player,
-            "Usage: 'group' (list), 'group <pet>' or 'group dismiss <player>'. \
-             Players join with 'invite'.\r\n",
-        );
+    let Some(target) = find_actor_in_room(world, name, here, player) else {
+        send_to(world, player, format!("You don't see '{name}' here.\r\n"));
+        return;
+    };
+    if group_pet_toggle(world, player, target) {
+        return;
     }
+    let who = name_of(world, target);
+    let line = if world.get::<Player>(target).is_some() {
+        format!("{who} is a player: use 'invite {name}' to ask them to join.\r\n")
+    } else {
+        format!("{who} isn't one of your followers.\r\n")
+    };
+    send_to(world, player, line);
 }
 
 /// `invite <player>`: send a group invite. Recipient gets a

@@ -288,9 +288,7 @@ pub(crate) fn render_actor_stat(world: &mut World, target: Entity) -> String {
         out.push_str(&format!("PC '{name}'  IDNum: [{id}], In room {room}\r\n"));
     } else {
         let kind = if proto.is_some() { "MOB" } else { "NPC" };
-        out.push_str(&format!(
-            "{kind} '{name}'  Entity: [{target:?}], In room {room}\r\n"
-        ));
+        out.push_str(&format!("{kind} '{name}', In room {room}\r\n"));
     }
 
     // ---- Strings --------------------------------------------------------

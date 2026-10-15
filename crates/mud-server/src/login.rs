@@ -4714,7 +4714,7 @@ impl ConnRouter {
                         + std::time::Duration::from_secs(
                             u64::try_from(row.sent_at.and_utc().timestamp().max(0)).unwrap_or(0),
                         );
-                    log.push_at(row.sender_name.clone(), when);
+                    log.push_at(row.sender_name.clone(), when, row.body.clone());
                 }
                 e.insert(log);
             }

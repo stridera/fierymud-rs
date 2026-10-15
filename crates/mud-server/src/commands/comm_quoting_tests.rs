@@ -184,10 +184,7 @@ fn group_say_uses_single_quotes() {
     assert!(mine.contains("You group-say, 'form up'"), "{mine:?}");
     assert_single_quoted("gsay (speaker)", &mine, &mine_gmcp, "form up");
     let (theirs, their_gmcp) = read(&mut brx);
-    assert!(
-        theirs.contains("(Alice group-says) 'form up'"),
-        "{theirs:?}"
-    );
+    assert!(theirs.contains("Alice group-says, 'form up'"), "{theirs:?}");
     assert_single_quoted("gsay (member)", &theirs, &their_gmcp, "form up");
 }
 
@@ -199,4 +196,15 @@ fn channel_history_quotes_with_single_quotes_and_keeps_inner_quotes() {
     dispatch(&mut fx.world, alice, "lastgossips");
     let (out, _) = read(&mut arx);
     assert!(out.contains("Alice: 'it is \"fine\"'"), "{out:?}");
+}
+
+#[test]
+fn lasttells_shows_what_was_said() {
+    let (mut fx, (alice, _arx), (bob, mut brx), _cara) = trio();
+    dispatch(&mut fx.world, alice, "tell bob meet me at the inn");
+    drain_bytes(&mut brx);
+    dispatch(&mut fx.world, bob, "lasttells");
+    let (out, _) = read(&mut brx);
+    assert!(out.contains("Alice"), "{out:?}");
+    assert!(out.contains("'meet me at the inn'"), "{out:?}");
 }

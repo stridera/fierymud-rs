@@ -531,7 +531,7 @@ fn cmd_gsay(world: &mut World, player: Entity, args: &str) {
         } else if m == player {
             format!("You group-say, '{message}'\r\n")
         } else {
-            format!("({speaker} group-says) '{message}'\r\n")
+            format!("{speaker} group-says, '{message}'\r\n")
         };
         send_rendered(world, m, &line);
         send_comm_channel_text(world, m, "group", &speaker, &gmcp_text);

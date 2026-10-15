@@ -2715,11 +2715,11 @@ impl CommandGrants {
 /// uses `LastTeller`.
 #[derive(Component, Debug, Default, Clone)]
 pub struct TellLog {
-    /// (`sender_name`, `when_received`). Capped at `cap`; oldest dropped.
+    /// (`sender_name`, `when_received`, `body`). Capped at `cap`; oldest dropped.
     /// `SystemTime` (not `Instant`) so login-time hydration from the
     /// `tell_message` table can preserve real timestamps across
     /// process restarts.
-    pub entries: std::collections::VecDeque<(String, std::time::SystemTime)>,
+    pub entries: std::collections::VecDeque<(String, std::time::SystemTime, String)>,
     pub cap: usize,
 }
 
@@ -2732,16 +2732,16 @@ impl TellLog {
         }
     }
 
-    pub fn push(&mut self, name: String) {
-        self.push_at(name, std::time::SystemTime::now());
+    pub fn push(&mut self, name: String, body: String) {
+        self.push_at(name, std::time::SystemTime::now(), body);
     }
 
     /// Push with a specific timestamp — used when hydrating from
     /// the persisted `tell_message` table so the entries keep
     /// their original `sent_at` rather than getting clobbered to
     /// "right now."
-    pub fn push_at(&mut self, name: String, when: std::time::SystemTime) {
-        self.entries.push_front((name, when));
+    pub fn push_at(&mut self, name: String, when: std::time::SystemTime, body: String) {
+        self.entries.push_front((name, when, body));
         while self.entries.len() > self.cap {
             self.entries.pop_back();
         }

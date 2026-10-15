@@ -946,6 +946,9 @@ mod exploit_gate_tests;
 #[path = "commands/help_tests.rs"]
 mod help_tests;
 #[cfg(test)]
+#[path = "commands/polish_r12_tests.rs"]
+mod polish_r12_tests;
+#[cfg(test)]
 #[path = "commands/polish_r3_tests.rs"]
 mod polish_r3_tests;
 #[path = "commands/staff_find.rs"]
@@ -14521,6 +14524,17 @@ pub(crate) fn wear_into(
         return;
     }
     let Some(item) = find_item(world, player, target_word, ItemClass::Inventory) else {
+        // Already on: say so rather than denying it is carried.
+        if let Some(worn) = find_item(world, player, target_word, ItemClass::Equipment) {
+            let verb = match world.get::<EquippedSlot>(worn).map(|e| e.0) {
+                Some(Slot::Wield) => "wielding",
+                Some(Slot::Hold) => "holding",
+                _ => "wearing",
+            };
+            let name = name_of(world, worn);
+            send_to(world, player, format!("You are already {verb} {name}.\r\n"));
+            return;
+        }
         send_to(
             world,
             player,

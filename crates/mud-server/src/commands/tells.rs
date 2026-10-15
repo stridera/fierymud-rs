@@ -230,10 +230,10 @@ fn deliver_tell(world: &mut World, player: Entity, target_name: &str, message: &
     try_insert(world, target, LastTeller(player));
     let player_name_owned = player_name.clone();
     if let Some(mut log) = world.get_mut::<TellLog>(target) {
-        log.push(player_name_owned);
+        log.push(player_name_owned, message.to_string());
     } else {
         let mut log = TellLog::with_cap(10);
-        log.push(player_name_owned);
+        log.push(player_name_owned, message.to_string());
         try_insert(world, target, log);
     }
     let recipient_id = world.get::<Account>(target).map(|a| a.character_id.clone());
@@ -357,14 +357,14 @@ fn cmd_unignore(world: &mut World, player: Entity, args: &str) {
 }
 
 fn cmd_lasttells(world: &mut World, player: Entity, _args: &str) {
-    let entries: Vec<(String, u64)> = world
+    let entries: Vec<(String, u64, String)> = world
         .get::<TellLog>(player)
         .map(|log| {
             log.entries
                 .iter()
-                .map(|(name, when)| {
+                .map(|(name, when, body)| {
                     let secs = when.elapsed().map(|d| d.as_secs()).unwrap_or(0);
-                    (name.clone(), secs)
+                    (name.clone(), secs, body.clone())
                 })
                 .collect()
         })
@@ -374,9 +374,9 @@ fn cmd_lasttells(world: &mut World, player: Entity, _args: &str) {
         return;
     }
     let mut out = format!("\r\nRecent tells ({}):\r\n", entries.len());
-    for (name, secs_ago) in &entries {
+    for (name, secs_ago, body) in &entries {
         out.push_str(&format!(
-            "  {:<20} ({} ago)\r\n",
+            "  {:<20} ({} ago): '{body}'\r\n",
             name,
             format_idle(*secs_ago)
         ));
