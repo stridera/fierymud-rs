@@ -146,10 +146,12 @@ Every other event ignores what the body returns. In particular a mistaken `retur
 
 Bodies run inside a Lua coroutine, so `wait(n)` can pause one.
 
-* `wait(n)`: pause `n` **real seconds** (minimum 1; the server tick is 10 Hz). `wait()` = 1.
+* `wait(n)`: pause `n` **real seconds**; fractions are fine (`wait(0.2)`). The server tick is 10 Hz
+  (0.1 s), so `n` is rounded to whole ticks with a one-tick floor. `wait()` = 1.
 * `wait_until(hour, minute)`: pause until that game time (minute defaults to 0; if it is already
   past, until the next day). One game hour is about 75 real seconds.
-* `wait_ticks(n)`: legacy `wait N t`; sleeps `n` game hours.
+* `wait_hours(n)`: legacy `wait N t`; sleeps `n` **game hours** (75 real seconds each, so it is `wait(n * 75)`).
+  Not to be confused with a server tick, which is 0.1 s.
 * On resume the body gets its `actor`/`self`/`object`/`speech` and a fresh `time` again, and a
   fresh instruction budget. Locals and its private globals are kept.
 * A parked body is dropped if its `self` or `actor` is despawned (killed, purged, quit) before the
@@ -181,7 +183,7 @@ Messages sent from Lua already end with a newline; do not add `\r\n`. `print()` 
 | `find_player(name)` | A player by name; handle or nil. |
 | `random(low, high)` | Uniform integer, inclusive. Use this, not `math.random`. |
 | `percent_chance(n)` | True n percent of the time (n clamped to 0-100). |
-| `wait(n)`, `wait_until(h, m)`, `wait_ticks(n)`, `allow_command()` | See above. |
+| `wait(n)`, `wait_until(h, m)`, `wait_hours(n)`, `allow_command()` | See above. |
 | `run_room_trigger(zone, id)` | Run every trigger on that room after this script returns. |
 | `timestamp()` | Game hours as an integer. |
 | `get_obj_noadesc(zone, id)` | An object prototype's name without its leading article. |
@@ -336,7 +338,7 @@ Semantics (as standard Lua `require`, adapted to the database):
    loaded it. Functions that rely on the firing entity (`combat.engage(target)`, `actor:`
    methods on a passed-in handle) work when a trigger calls them, because that context is bound
    at call time; pass handles in as parameters.
-4. **No yielding at load.** `wait()`, `wait_until()` and `wait_ticks()` at a library's top level
+4. **No yielding at load.** `wait()`, `wait_until()` and `wait_hours()` at a library's top level
    raise `wait() cannot be called while library '<name>' is loading ...`. A **function the
    library returns may call `wait()`**: it runs in the calling trigger's coroutine and parks that
    trigger like any other `wait`.

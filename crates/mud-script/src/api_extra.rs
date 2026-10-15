@@ -2,7 +2,7 @@
 //! `lib.rs` did not provide: `zone.echo`, `timestamp`, `trigger_log`,
 //! `find_player`, `get_obj_noadesc`, the `actor:get_*` world-query methods,
 //! `actor:set_skill`, and the `.group` / `.fighting` actor fields; plus
-//! `wait_ticks`, `wizard_notify`, `actor:cast`, `actor:has_effect_named`,
+//! `wait_hours`, `wizard_notify`, `actor:cast`, `actor:has_effect_named`,
 //! the no-argument `get_people()` list, and the `.composition`,
 //! `.wearing` and `.val0`..`.val3` fields.
 //!
@@ -42,7 +42,7 @@ const MONTHS_PER_YEAR: i64 = 16;
 const MAX_SET_SKILL: i32 = 1000;
 
 /// Real seconds in one game hour (legacy `SECS_PER_MUD_HOUR`). The DG
-/// `wait N t` unit is "N game hours", and `wait_ticks(N)` sleeps that long.
+/// `wait N t` unit is "N game hours", and `wait_hours(N)` sleeps that long.
 const SECS_PER_MUD_HOUR: i64 = 75;
 
 /// Container flag bits (container `val1`).
@@ -98,10 +98,10 @@ pub(crate) fn bind_globals(lua: &Lua, globals: &Table) -> mlua::Result<()> {
         })?,
     )?;
 
-    // wait_ticks(n): legacy `wait N t`, sleep N game hours. Pure Lua so the
+    // wait_hours(n): legacy `wait N t`, sleep N game hours. Pure Lua so the
     // yield works inside the coroutine the way `wait` does.
     globals.set(
-        "wait_ticks",
+        "wait_hours",
         lua.load(format!(
             "local y = coroutine.yield; return function(n) y((n or 1) * {SECS_PER_MUD_HOUR}) end"
         ))
@@ -1647,13 +1647,13 @@ mod tests {
         assert!(f.world.get_entity(coin).is_err());
     }
 
-    // ----- wait_ticks -----
+    // ----- wait_hours -----
 
     #[test]
-    fn wait_ticks_parks_the_script_for_game_hours() {
+    fn wait_hours_parks_the_script_for_game_hours() {
         let mut f = fixture();
         f.host.set_current_tick(0);
-        assert_eq!(f.ok("print('a') wait_ticks(2) print('b')"), "a\r\n");
+        assert_eq!(f.ok("print('a') wait_hours(2) print('b')"), "a\r\n");
         assert_eq!(f.host.yielded_count(), 1);
         // Two game hours: 2 * 75 s at 10 Hz.
         f.host.set_current_tick(1499);

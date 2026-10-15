@@ -20,7 +20,7 @@
 //! clock live because the environment outlives the fire that created it.
 //!
 //! Libraries cannot yield while they load (`require` is a native call and a coroutine cannot
-//! yield across it): `wait`, `wait_until` and `wait_ticks` raise a clear error then. Functions a
+//! yield across it): `wait`, `wait_until` and `wait_hours` raise a clear error then. Functions a
 //! library returns run inside the calling trigger's coroutine, so they may `wait()` normally.
 
 use mlua::{Lua, Table, Value};
@@ -166,7 +166,7 @@ fn guard_yields(lua: &Lua, env: &Table) -> mlua::Result<()> {
     lua.load(
         r#"
         local env, loading = ...
-        for _, fname in ipairs({ "wait", "wait_until", "wait_ticks" }) do
+        for _, fname in ipairs({ "wait", "wait_until", "wait_hours" }) do
             local real = env[fname]
             env[fname] = function(...)
                 local lib = loading()
