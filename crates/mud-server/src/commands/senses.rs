@@ -231,7 +231,7 @@ pub(crate) fn item_tags(world: &World, viewer: Entity, item: Entity) -> Vec<Stri
     }
     let hid = crate::hiding::hiddenness(world, item);
     if hid > 0 {
-        if super::info::is_immortal(world, viewer) {
+        if crate::room_access::is_immortal_role(world, viewer) {
             tags.push(format!("(h{hid})"));
         } else {
             tags.push("(hidden)".into());

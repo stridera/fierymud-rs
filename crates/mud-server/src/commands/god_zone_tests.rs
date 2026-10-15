@@ -243,6 +243,105 @@ fn areas_lists_god_zones_for_staff_only() {
     assert!(out.contains("Zone 30") && out.contains("Zone 12"), "{out}");
 }
 
+/// A level-100 staff member with the `mortal` toggle on.
+fn mortal_imm(fx: &mut Fx, name: &str, room: Entity) -> (Entity, Rx) {
+    let (e, rx) = fx.person(name, 100, room);
+    fx.world.entity_mut(e).insert(mud_world::MortalMode);
+    (e, rx)
+}
+
+#[test]
+fn mortal_mode_imm_sees_and_walks_god_zone_exits() {
+    let mut fx = Fx::new();
+    let town = fx.zone(30, false);
+    let heavens = fx.zone(12, true);
+    let square = fx.room(town, 30, 1);
+    let hall = fx.room(heavens, 12, 4);
+    let annex = fx.room(heavens, 12, 5);
+    fx.link(square, Direction::Up, hall);
+    fx.link(hall, Direction::North, annex);
+    // An open god-zone room and a restricted one: both stay walkable.
+    restrict(&mut fx, annex, "return false");
+    let (imm, mut rx) = mortal_imm(&mut fx, "Laoris", square);
+
+    assert!(room_access::zone_visible_to(&fx.world, imm, 12));
+    assert!(room_access::room_visible_to(&fx.world, imm, hall));
+    let ed = fx.world.get::<Exits>(square).unwrap().0[&Direction::Up].clone();
+    assert!(!crate::commands::exit_is_hidden_to(
+        &fx.world,
+        imm,
+        square,
+        Direction::Up,
+        &ed
+    ));
+    dispatch(&mut fx.world, imm, "exits");
+    assert!(drain(&mut rx).contains("Room 12:4"));
+    dispatch(&mut fx.world, imm, "up");
+    assert_eq!(fx.room_of(imm), hall);
+    dispatch(&mut fx.world, imm, "north");
+    assert_eq!(fx.room_of(imm), annex);
+}
+
+#[test]
+fn mortal_mode_imm_is_still_refused_a_restricted_room_outside_god_zones() {
+    let mut fx = Fx::new();
+    let town = fx.zone(30, false);
+    let vault = fx.room(town, 30, 2);
+    restrict(&mut fx, vault, "return false");
+    let (imm, _rx) = mortal_imm(&mut fx, "Laoris", vault);
+    assert!(!entry_allowed(&mut fx.world, imm, vault));
+}
+
+#[test]
+fn where_zlist_and_world_output_is_unchanged_in_mortal_mode() {
+    let mut fx = Fx::new();
+    let town = fx.zone(30, false);
+    let heavens = fx.zone(12, true);
+    let square = fx.room(town, 30, 1);
+    let hall = fx.room(heavens, 12, 4);
+    let (_god, _grx) = fx.person("Chinok", 105, hall);
+    // Level 102 (Builder) so `where all` is available too.
+    let (imm, mut rx) = fx.person("Laoris", 102, hall);
+    fx.world.insert_resource(crate::TickCount(0));
+    fx.world
+        .insert_resource(crate::ServerStart(std::time::Instant::now()));
+
+    // The uptime line ticks in real seconds; everything else must match.
+    let no_uptime = |s: String| -> String {
+        s.lines()
+            .filter(|l| !l.contains("Uptime"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let cmds = [
+        "where Chinok",
+        "where",
+        "where all",
+        "zlist",
+        "areas",
+        "world",
+    ];
+    let mut before = Vec::new();
+    for c in cmds {
+        dispatch(&mut fx.world, imm, c);
+        before.push(no_uptime(drain(&mut rx)));
+    }
+    assert!(before[0].contains("Room 12:4"), "{}", before[0]);
+    assert!(before[1].contains("[12:4]"), "{}", before[1]);
+    assert!(before[2].contains("Chinok"), "{}", before[2]);
+    assert!(before[3].contains("Zone 12"), "{}", before[3]);
+    fx.world.entity_mut(imm).insert(mud_world::MortalMode);
+    for (c, b) in cmds.iter().zip(&before) {
+        dispatch(&mut fx.world, imm, c);
+        assert_eq!(
+            &no_uptime(drain(&mut rx)),
+            b,
+            "`{c}` changed in mortal mode"
+        );
+    }
+    let _ = square;
+}
+
 /// `s` with ANSI colour escapes removed.
 fn plain(s: &str) -> String {
     let mut out = String::new();

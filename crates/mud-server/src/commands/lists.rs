@@ -159,7 +159,7 @@ fn cmd_areas(world: &mut World, player: Entity, args: &str) {
 /// internal plumbing zone, with at least one room, and not a god zone unless
 /// the viewer is staff (Immortal+). Sorted by zone id.
 fn area_rows(world: &mut World, viewer: Entity) -> Vec<(i32, String)> {
-    let sees_god_zones = crate::room_access::is_immortal(world, viewer);
+    let sees_god_zones = crate::room_access::is_immortal_role(world, viewer);
     let zones: Vec<(i32, Entity)> = world
         .resource::<WorldKeyIndex>()
         .zones

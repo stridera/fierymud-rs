@@ -25,7 +25,8 @@ pub use class_skills::{STARTING_SKILL_PROFICIENCY, grant_class_skills};
 pub use command_help::CommandHelp;
 pub use command_policy::{CommandPolicy, PolicyFlag, PolicyFlags};
 pub use god::{
-    GOD_PROFICIENCY, bypasses_restrictions, is_mortal_mode, known_abilities_of, proficiency_of,
+    GOD_PROFICIENCY, bypasses_restrictions, has_immortal_role, is_mortal_mode, known_abilities_of,
+    proficiency_of,
 };
 pub use liquid_legacy::{BUILTIN_CODES as LEGACY_LIQUID_CODES, LegacyLiquidRow, LiquidLegacyIndex};
 pub use mount_type::{MountPlan, MountTypes};

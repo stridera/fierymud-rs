@@ -803,7 +803,7 @@ pub(crate) fn cmd_where(world: &mut World, player: Entity, args: &str) {
 
     // Immortal+ (legacy `perform_immort_where`): players, then live
     // mobs, then objects wherever they sit.
-    if crate::room_access::is_immortal(world, player) {
+    if crate::room_access::is_immortal_role(world, player) {
         staff_where(world, player, arg);
         return;
     }

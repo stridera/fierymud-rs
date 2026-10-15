@@ -21,13 +21,22 @@ pub const GOD_PROFICIENCY: i32 = 1000;
 /// role), so a level-100+ character counts even without a linked account.
 /// `DevMode` deliberately does not count: this is about who the character is.
 /// A god who turned on `mortal` ([`MortalMode`]) is treated as a mortal here;
-/// their role and command permissions are untouched.
+/// their role and command permissions are untouched. This is the check for
+/// game rules (water, fly, slots, `NO_DROP`, ...). Visibility and admin or
+/// inspection output use [`has_immortal_role`], which ignores `mortal`.
 #[must_use]
 pub fn bypasses_restrictions(world: &World, entity: Entity) -> bool {
-    !is_mortal_mode(world, entity)
-        && world
-            .get::<Account>(entity)
-            .is_some_and(|a| a.role.at_least(mud_db::enums::UserRole::Immortal))
+    !is_mortal_mode(world, entity) && has_immortal_role(world, entity)
+}
+
+/// True when `entity`'s effective rank is `Immortal` or above, whether or not
+/// the `mortal` toggle is on. For visibility (god zones), admin tools and
+/// inspection output, which must not degrade in mortal mode.
+#[must_use]
+pub fn has_immortal_role(world: &World, entity: Entity) -> bool {
+    world
+        .get::<Account>(entity)
+        .is_some_and(|a| a.role.at_least(mud_db::enums::UserRole::Immortal))
 }
 
 /// True while `entity` has the `mortal` toggle on.

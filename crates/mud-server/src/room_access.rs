@@ -34,10 +34,18 @@ pub(crate) const RANDOM_TELEPORT_TRIES: u32 = 100;
 /// importer maps legacy PRIVATE to capacity 2 and TUNNEL to 1.
 const PRIVATE_ROOM_MAX_CAPACITY: i32 = 2;
 
-/// Staff = effective rank Immortal or above. Deliberately ignores
-/// `DevMode`: visibility and entry rules are about who the character *is*.
+/// Staff = effective rank Immortal or above, unless the `mortal` toggle is on.
+/// For game rules (water, flight, unlocking, teleport-block, ...): mortal mode
+/// plays them as a mortal. Deliberately ignores `DevMode`. Visibility and
+/// admin output use [`is_immortal_role`] instead.
 pub(crate) fn is_immortal(world: &World, entity: Entity) -> bool {
     mud_world::bypasses_restrictions(world, entity)
+}
+
+/// Staff by role only: stays true in `mortal` mode. For god-zone visibility
+/// and every admin or inspection surface (`where`, `zlist`, `world`, ...).
+pub(crate) fn is_immortal_role(world: &World, entity: Entity) -> bool {
+    mud_world::has_immortal_role(world, entity)
 }
 
 /// Legacy `rooms.cpp` (can-go-direction): characters at `LVL_GOD` (101) or
@@ -82,12 +90,12 @@ pub(crate) fn can_unlock_without_key(world: &World, entity: Entity) -> bool {
 
 /// May `viewer` see (be told about) zone `zone_id`?
 pub(crate) fn zone_visible_to(world: &World, viewer: Entity, zone_id: i32) -> bool {
-    !zone_is_god(world, zone_id) || is_immortal(world, viewer)
+    !zone_is_god(world, zone_id) || is_immortal_role(world, viewer)
 }
 
 /// May `viewer` be told about `room` (its zone, name-in-listings, ...)?
 pub(crate) fn room_visible_to(world: &World, viewer: Entity, room: Entity) -> bool {
-    !room_in_god_zone(world, room) || is_immortal(world, viewer)
+    !room_in_god_zone(world, room) || is_immortal_role(world, viewer)
 }
 
 // ---------------------------------------------------------------------------
@@ -270,6 +278,12 @@ pub(crate) fn entry_allowed(world: &mut World, mover: Entity, dest: Entity) -> b
         return true;
     };
     if is_immortal(world, mover) {
+        return true;
+    }
+    // A staff member in `mortal` mode still plays by mortal rules in ordinary
+    // rooms, but god-zone rooms stay open to them (they could not walk about
+    // their own zones otherwise).
+    if is_immortal_role(world, mover) && room_in_god_zone(world, dest) {
         return true;
     }
     evaluate_restriction(world, mover, dest, &expr)
