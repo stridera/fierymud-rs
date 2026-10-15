@@ -27,6 +27,7 @@ use mud_world::resources::{
     AbilityCatalog, LuaOutbox, MudClock, ObjectPrototypes, TriggerCatalog, WorldKeyIndex,
 };
 
+use super::id_arg::{IdArg, OptIdArg};
 use super::{LuaActor, LuaRoom, SelfEntity, format_args, world_from_lua, world_mut_from_lua};
 
 /// Hours in a MUD day, days in a MUD month, months in a MUD year. The
@@ -148,7 +149,7 @@ pub(crate) fn bind_globals(lua: &Lua, globals: &Table) -> mlua::Result<()> {
     // get_obj_noadesc(zone, id)
     globals.set(
         "get_obj_noadesc",
-        lua.create_function(|lua, (zone, id): (i32, i32)| -> mlua::Result<String> {
+        lua.create_function(|lua, IdArg { zone, id }: IdArg| -> mlua::Result<String> {
             world_from_lua(lua, |w| {
                 match w
                     .get_resource::<ObjectPrototypes>()
@@ -774,26 +775,20 @@ pub(crate) fn add_actor_methods<M: UserDataMethods<LuaActor>>(methods: &mut M) {
     // them. Replaces the DG `self.people` / `person.next_in_room` walk.
     methods.add_method(
         "get_people",
-        |lua, this, (zone, id): (Option<i32>, Option<i32>)| -> mlua::Result<Value> {
-            match (zone, id) {
-                (Some(zone), Some(id)) => {
-                    let found = world_mut_from_lua(lua, |w| {
-                        let room = room_of(w, this.entity)?;
-                        find_in_room(w, room, zone, id, false)
-                    })?;
-                    actor_value(lua, found)
-                }
-                (None, None) => {
-                    let people = world_mut_from_lua(lua, |w| {
-                        enclosing_room(w, this.entity)
-                            .map(|r| people_in(w, r))
-                            .unwrap_or_default()
-                    })?;
-                    actor_list(lua, &people)
-                }
-                _ => Err(mlua::Error::external(
-                    "get_people takes (zone, id) or no arguments",
-                )),
+        |lua, this, OptIdArg(key): OptIdArg| -> mlua::Result<Value> {
+            if let Some(IdArg { zone, id }) = key {
+                let found = world_mut_from_lua(lua, |w| {
+                    let room = room_of(w, this.entity)?;
+                    find_in_room(w, room, zone, id, false)
+                })?;
+                actor_value(lua, found)
+            } else {
+                let people = world_mut_from_lua(lua, |w| {
+                    enclosing_room(w, this.entity)
+                        .map(|r| people_in(w, r))
+                        .unwrap_or_default()
+                })?;
+                actor_list(lua, &people)
             }
         },
     );
@@ -801,7 +796,7 @@ pub(crate) fn add_actor_methods<M: UserDataMethods<LuaActor>>(methods: &mut M) {
     // entity's room, or nil.
     methods.add_method(
         "get_objects",
-        |lua, this, (zone, id): (i32, i32)| -> mlua::Result<Value> {
+        |lua, this, IdArg { zone, id }: IdArg| -> mlua::Result<Value> {
             let found = world_mut_from_lua(lua, |w| {
                 let room = room_of(w, this.entity)?;
                 find_in_room(w, room, zone, id, true)
@@ -813,13 +808,13 @@ pub(crate) fn add_actor_methods<M: UserDataMethods<LuaActor>>(methods: &mut M) {
     // items with that prototype exist in the whole world.
     methods.add_method(
         "get_mexists",
-        |lua, _this, (zone, id): (i32, i32)| -> mlua::Result<i64> {
+        |lua, _this, IdArg { zone, id }: IdArg| -> mlua::Result<i64> {
             world_mut_from_lua(lua, |w| count_world(w, zone, id, false))
         },
     );
     methods.add_method(
         "get_oexists",
-        |lua, _this, (zone, id): (i32, i32)| -> mlua::Result<i64> {
+        |lua, _this, IdArg { zone, id }: IdArg| -> mlua::Result<i64> {
             world_mut_from_lua(lua, |w| count_world(w, zone, id, true))
         },
     );
@@ -869,26 +864,20 @@ pub(crate) fn add_room_methods<M: UserDataMethods<LuaRoom>>(methods: &mut M) {
     // `room:get_people(zone, id)` / `room:get_people()`: see the actor form.
     methods.add_method(
         "get_people",
-        |lua, this, (zone, id): (Option<i32>, Option<i32>)| -> mlua::Result<Value> {
-            match (zone, id) {
-                (Some(zone), Some(id)) => {
-                    let found =
-                        world_mut_from_lua(lua, |w| find_in_room(w, this.entity, zone, id, false))?;
-                    actor_value(lua, found)
-                }
-                (None, None) => {
-                    let people = world_mut_from_lua(lua, |w| people_in(w, this.entity))?;
-                    actor_list(lua, &people)
-                }
-                _ => Err(mlua::Error::external(
-                    "get_people takes (zone, id) or no arguments",
-                )),
+        |lua, this, OptIdArg(key): OptIdArg| -> mlua::Result<Value> {
+            if let Some(IdArg { zone, id }) = key {
+                let found =
+                    world_mut_from_lua(lua, |w| find_in_room(w, this.entity, zone, id, false))?;
+                actor_value(lua, found)
+            } else {
+                let people = world_mut_from_lua(lua, |w| people_in(w, this.entity))?;
+                actor_list(lua, &people)
             }
         },
     );
     methods.add_method(
         "get_objects",
-        |lua, this, (zone, id): (i32, i32)| -> mlua::Result<Value> {
+        |lua, this, IdArg { zone, id }: IdArg| -> mlua::Result<Value> {
             let found = world_mut_from_lua(lua, |w| find_in_room(w, this.entity, zone, id, true))?;
             actor_value(lua, found)
         },
@@ -2037,5 +2026,282 @@ mod tests {
         assert_eq!(run(&mut f, 7), "0\t2\t6\t3\r\n");
         // Characters have no values.
         assert_eq!(f.ok("print(actor.val0, self.val2)"), "nil\tnil\r\n");
+    }
+
+    // ----- (zone, id) argument forms (IdArg) -----
+
+    /// Every spelling of the key (30, 1) a script may pass.
+    const FORMS: [&str; 4] = [
+        "30, 1",
+        "{30, 1}",
+        "{zone = 30, id = 1}",
+        "{zone_id = 30, local_id = 1}",
+    ];
+
+    /// Calls built from `tmpl` (with `$K` the key) that are not valid keys.
+    const BAD_KEYS: [&str; 6] = ["", "30", "{30}", "{zone = 30}", "{30, 1, 2}", "{'a', 'b'}"];
+
+    /// Run `tmpl` once per accepted form and expect `want` every time.
+    fn all_forms(f: &mut Fixture, tmpl: &str, want: &str) {
+        for form in FORMS {
+            let body = tmpl.replace("$K", form);
+            assert_eq!(f.ok(&body), want, "{body}");
+        }
+    }
+
+    /// Every malformed key must be refused with the accepted-forms message.
+    fn all_bad(f: &mut Fixture, tmpl: &str) {
+        for bad in BAD_KEYS {
+            let body = tmpl.replace("$K", bad);
+            let err = f.run(&body).expect_err(&body);
+            assert!(err.contains("(zone, id)"), "{body}: {err}");
+        }
+    }
+
+    #[test]
+    fn id_forms_for_templates_rooms_and_world_lookups() {
+        let mut f = fixture();
+        f.world.spawn((
+            Mob,
+            Named {
+                name: "a druid".into(),
+            },
+            WorldKey { zone: 30, id: 1 },
+            Located(f.room),
+        ));
+        f.world.spawn((
+            Item,
+            Named {
+                name: "a gem".into(),
+            },
+            WorldKey { zone: 30, id: 1 },
+            Located(f.room),
+        ));
+        let mut index = f.world.remove_resource::<WorldKeyIndex>().unwrap();
+        let r = f
+            .world
+            .spawn((
+                Room,
+                Named { name: "r".into() },
+                WorldKey { zone: 30, id: 1 },
+            ))
+            .id();
+        index.rooms.insert((30, 1), r);
+        f.world.insert_resource(index);
+        for api in ["mobiles.template", "objects.template"] {
+            all_forms(
+                &mut f,
+                &format!("print({api}($K).zone_id, {api}($K).id)"),
+                "30\t1\r\n",
+            );
+            all_bad(&mut f, &format!("print({api}($K).id)"));
+        }
+        all_forms(&mut f, "print(get_room($K).id)", "1\r\n");
+        all_forms(
+            &mut f,
+            "print(world.count_mobiles($K), world.count_objects($K))",
+            "1\t1\r\n",
+        );
+        all_forms(&mut f, "print(world.find_mobile($K).name)", "a druid\r\n");
+        for api in [
+            "get_room",
+            "world.count_mobiles",
+            "world.count_objects",
+            "world.find_mobile",
+        ] {
+            all_bad(&mut f, &format!("{api}($K)"));
+        }
+    }
+
+    #[test]
+    fn id_forms_for_room_queries_and_world_counts() {
+        let mut f = fixture();
+        f.world.spawn((
+            Mob,
+            Named {
+                name: "a guard".into(),
+            },
+            WorldKey { zone: 30, id: 1 },
+            Located(f.room),
+        ));
+        f.world.spawn((
+            Item,
+            Named {
+                name: "lash".into(),
+            },
+            WorldKey { zone: 30, id: 1 },
+            Located(f.room),
+        ));
+        all_forms(&mut f, "print(self:get_people($K).name)", "a guard\r\n");
+        all_forms(&mut f, "print(self:get_objects($K).name)", "lash\r\n");
+        all_forms(
+            &mut f,
+            "print(get_room(5, 1):get_people($K).name, get_room(5, 1):get_objects($K).name)",
+            "a guard\tlash\r\n",
+        );
+        all_forms(
+            &mut f,
+            "print(self:get_mexists($K), self:get_oexists($K))",
+            "1\t1\r\n",
+        );
+        all_forms(&mut f, "print(actor:get_mexists($K))", "1\r\n");
+        for call in [
+            "self:get_objects($K)",
+            "self:get_mexists($K)",
+            "self:get_oexists($K)",
+            "get_room(5, 1):get_objects($K)",
+        ] {
+            all_bad(&mut f, call);
+        }
+        // A half-given key is still refused; no key at all lists the room.
+        for bad in ["30", "{30}", "{zone = 30}"] {
+            let err = f.run(&format!("self:get_people({bad})")).unwrap_err();
+            assert!(err.contains("(zone, id)"), "{bad}: {err}");
+        }
+        assert_eq!(f.ok("print(#self:get_people() >= 2)"), "true\r\n");
+    }
+
+    #[test]
+    fn id_forms_for_get_obj_noadesc() {
+        let mut f = fixture();
+        let mut protos = ObjectPrototypes::default();
+        protos
+            .by_key
+            .insert((30, 1), proto(30, 1, "a gleaming trident"));
+        f.world.insert_resource(protos);
+        all_forms(&mut f, "print(get_obj_noadesc($K))", "gleaming trident\r\n");
+        all_bad(&mut f, "get_obj_noadesc($K)");
+    }
+
+    #[test]
+    fn id_forms_for_has_item_and_has_equipped() {
+        let mut f = fixture();
+        f.world.spawn((
+            Item,
+            Named {
+                name: "carried".into(),
+            },
+            WorldKey { zone: 30, id: 1 },
+            Located(f.player),
+        ));
+        all_forms(
+            &mut f,
+            "print(actor:has_item($K), actor:has_equipped($K))",
+            "true\tfalse\r\n",
+        );
+        f.world.spawn((
+            Item,
+            Named {
+                name: "worn".into(),
+            },
+            WorldKey { zone: 30, id: 2 },
+            Located(f.player),
+            EquippedSlot(mud_world::Slot::Head),
+        ));
+        assert_eq!(f.ok("print(actor:has_equipped({30, 2}), actor:has_equipped(30, 2), actor:has_equipped({zone = 30, id = 2}))"), "true\ttrue\ttrue\r\n");
+        all_bad(&mut f, "actor:has_item($K)");
+        all_bad(&mut f, "actor:has_equipped($K)");
+    }
+
+    #[test]
+    fn id_forms_for_spawn_object_and_spawn_mobile() {
+        let mut f = fixture();
+        let mut protos = ObjectPrototypes::default();
+        protos.by_key.insert((30, 1), proto(30, 1, "a gem"));
+        f.world.insert_resource(protos);
+        f.world.insert_resource(mud_world::MobPrototypes::default());
+        let count = |f: &mut Fixture| f.ok("print(self:get_oexists(30, 1))");
+        let mut n = 0;
+        for form in FORMS {
+            f.ok(&format!("actor:spawn_object({form})"));
+            n += 1;
+            assert_eq!(
+                count(&mut f),
+                format!("{n}\r\n"),
+                "actor:spawn_object({form})"
+            );
+            f.ok(&format!("get_room(5, 1):spawn_object({form})"));
+            n += 1;
+            assert_eq!(
+                count(&mut f),
+                format!("{n}\r\n"),
+                "room:spawn_object({form})"
+            );
+        }
+        // A key with no prototype is nil in every form, never an error;
+        // spawn_mobile has no prototype loaded here, so this covers its parsing.
+        all_forms(&mut f, "print(get_room(5, 1):spawn_mobile($K))", "nil\r\n");
+        for call in [
+            "actor:spawn_object($K)",
+            "get_room(5, 1):spawn_object($K)",
+            "get_room(5, 1):spawn_mobile($K)",
+        ] {
+            all_bad(&mut f, call);
+        }
+    }
+
+    #[test]
+    fn id_forms_for_active_quest_and_run_room_trigger() {
+        let mut f = fixture();
+        f.world.entity_mut(f.player).insert(Account {
+            user_id: "u".into(),
+            character_id: "c".into(),
+            role: UserRole::Player,
+            account_role: UserRole::Player,
+            perms: vec![],
+        });
+        all_forms(&mut f, "print(actor:active_quest($K) ~= nil)", "true\r\n");
+        all_bad(&mut f, "actor:active_quest($K)");
+        for form in FORMS {
+            f.ok(&format!("run_room_trigger({form})"));
+        }
+        let queued: Vec<(i32, i32)> = f
+            .world
+            .resource::<mud_world::DeferredRoomTriggerFires>()
+            .queue
+            .iter()
+            .map(|q| (q.room_zone, q.room_id))
+            .collect();
+        assert_eq!(queued, vec![(30, 1); FORMS.len()]);
+        all_bad(&mut f, "run_room_trigger($K)");
+    }
+
+    #[test]
+    fn id_forms_for_exit_set_key() {
+        use mud_db::enums::{Direction, ExitState};
+        let mut f = fixture();
+        f.world
+            .entity_mut(f.room)
+            .insert(mud_world::Exits(std::collections::HashMap::from([(
+                Direction::North,
+                mud_world::ExitData {
+                    to: Some(f.other_room),
+                    state: ExitState::Open,
+                    key: None,
+                    description: None,
+                    keywords: vec![],
+                    is_hidden: false,
+                    is_pickproof: false,
+                    is_bashable: false,
+                    hit_points: None,
+                },
+            )])));
+        let key = |f: &mut Fixture| {
+            f.world.get::<mud_world::Exits>(f.room).unwrap().0[&Direction::North].key
+        };
+        for form in FORMS {
+            f.ok("get_room(5, 1):exit('north'):set_key(nil)");
+            assert_eq!(key(&mut f), None);
+            f.ok(&format!("get_room(5, 1):exit('north'):set_key({form})"));
+            assert_eq!(key(&mut f), Some((30, 1)), "{form}");
+        }
+        f.ok("get_room(5, 1):exit('north'):set_key()");
+        assert_eq!(key(&mut f), None);
+        for bad in ["30", "{30}", "{zone = 30}", "{30, 1, 2}", "{'a', 'b'}"] {
+            let err = f
+                .run(&format!("get_room(5, 1):exit('north'):set_key({bad})"))
+                .unwrap_err();
+            assert!(err.contains("(zone, id)"), "{bad}: {err}");
+        }
     }
 }

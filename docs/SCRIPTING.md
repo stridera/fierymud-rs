@@ -36,7 +36,11 @@ committed sources and is what a full import loads.
   [Pitfalls](#pitfalls)).
 * **`object`** is nil except for `RECEIVE`, where it is the item handed over.
 * Coordinates are **composite keys**: `(zone_id, id)`, e.g. `actor:has_item(30, 45)`. There are no
-  legacy vnums. Legacy id `3045` is zone 30, id 45 (zone 0 is zone 1000).
+  legacy vnums. Legacy id `3045` is zone 30, id 45 (zone 0 is zone 1000). Wherever the API below
+  says `(zone, id)`, the key may be given any of three ways: `f(30, 45)`, `f({30, 45})` or
+  `f({zone = 30, id = 45})` (`zone_id` / `local_id` also work as the key names). A key that is
+  not one of those raises an error naming the accepted forms. Strings such as `"30:45"` are not
+  keys.
 * A body runs once per fire in a **private environment**: globals you assign are visible only to
   that run (they survive a `wait()` of the same run, nothing else). Use `setvar` or quest
   variables to remember anything between runs.

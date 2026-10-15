@@ -8,11 +8,13 @@
 //! while we hold `&mut World` and never re-enter.
 
 mod api_extra;
+mod id_arg;
 mod require;
 
 use std::ptr::NonNull;
 
 use bevy_ecs::prelude::*;
+use id_arg::{IdArg, OptIdArg};
 use mlua::{
     AnyUserData, Function, Lua, MetaMethod, MultiValue, ObjectLike, Table, Thread, ThreadStatus,
     UserData, UserDataMethods, Value, Variadic,
@@ -1425,19 +1427,19 @@ impl LuaHost {
         let world_tbl = lua.create_table()?;
         world_tbl.set(
             "count_mobiles",
-            lua.create_function(|lua, (zone, id): (i32, i32)| -> mlua::Result<i64> {
+            lua.create_function(|lua, IdArg { zone, id }: IdArg| -> mlua::Result<i64> {
                 world_count_kind(lua, zone, id, EntityKind::Mob)
             })?,
         )?;
         world_tbl.set(
             "count_objects",
-            lua.create_function(|lua, (zone, id): (i32, i32)| -> mlua::Result<i64> {
+            lua.create_function(|lua, IdArg { zone, id }: IdArg| -> mlua::Result<i64> {
                 world_count_kind(lua, zone, id, EntityKind::Item)
             })?,
         )?;
         world_tbl.set(
             "find_mobile",
-            lua.create_function(|lua, (zone, id): (i32, i32)| -> mlua::Result<Value> {
+            lua.create_function(|lua, IdArg { zone, id }: IdArg| -> mlua::Result<Value> {
                 world_find_kind(lua, zone, id, EntityKind::Mob)
             })?,
         )?;
@@ -1494,7 +1496,7 @@ impl LuaHost {
         // the caller's perspective.
         globals.set(
             "run_room_trigger",
-            lua.create_function(|lua, (zone, id): (i32, i32)| -> mlua::Result<()> {
+            lua.create_function(|lua, IdArg { zone, id }: IdArg| -> mlua::Result<()> {
                 let caller = lua.app_data_ref::<SelfEntity>().map(|s| s.0);
                 world_mut_from_lua(lua, |world| {
                     if !world.contains_resource::<mud_world::DeferredRoomTriggerFires>() {
@@ -1645,7 +1647,7 @@ impl LuaHost {
         let mobiles_tbl = lua.create_table()?;
         mobiles_tbl.set(
             "template",
-            lua.create_function(|lua, (zone, id): (i32, i32)| -> mlua::Result<Value> {
+            lua.create_function(|lua, IdArg { zone, id }: IdArg| -> mlua::Result<Value> {
                 Ok(Value::UserData(lua.create_userdata(LuaProto {
                     zone,
                     id,
@@ -1657,7 +1659,7 @@ impl LuaHost {
         let objects_tbl = lua.create_table()?;
         objects_tbl.set(
             "template",
-            lua.create_function(|lua, (zone, id): (i32, i32)| -> mlua::Result<Value> {
+            lua.create_function(|lua, IdArg { zone, id }: IdArg| -> mlua::Result<Value> {
                 Ok(Value::UserData(lua.create_userdata(LuaProto {
                     zone,
                     id,
@@ -1734,7 +1736,7 @@ impl LuaHost {
         // checks all use this.
         globals.set(
             "get_room",
-            lua.create_function(|lua, (zone, id): (i32, i32)| -> mlua::Result<Value> {
+            lua.create_function(|lua, IdArg { zone, id }: IdArg| -> mlua::Result<Value> {
                 get_room(lua, zone, id)
             })?,
         )?;
@@ -3082,7 +3084,7 @@ impl UserData for LuaActor {
         // `WorldKey == (zone, id)`. 65 corpus refs.
         methods.add_method(
             "has_item",
-            |lua, this, (zone, id): (i32, i32)| -> mlua::Result<bool> {
+            |lua, this, IdArg { zone, id }: IdArg| -> mlua::Result<bool> {
                 world_from_lua(lua, |w| {
                     carried_items(w, this.entity).any(|e| item_is(w, e, zone, id))
                 })
@@ -3094,7 +3096,7 @@ impl UserData for LuaActor {
         // not just carried). 141 corpus refs.
         methods.add_method(
             "has_equipped",
-            |lua, this, (zone, id): (i32, i32)| -> mlua::Result<bool> {
+            |lua, this, IdArg { zone, id }: IdArg| -> mlua::Result<bool> {
                 world_from_lua(lua, |w| {
                     carried_items(w, this.entity)
                         .any(|e| w.get::<EquippedSlot>(e).is_some() && item_is(w, e, zone, id))
@@ -3524,7 +3526,7 @@ impl UserData for LuaActor {
         // LuaActor on the new item entity, or nil.
         methods.add_method(
             "spawn_object",
-            |lua, this, (zone, id): (i32, i32)| -> mlua::Result<Value> {
+            |lua, this, IdArg { zone, id }: IdArg| -> mlua::Result<Value> {
                 spawn_obj_proto(lua, this.entity, zone, id)
             },
         );
@@ -3748,7 +3750,7 @@ impl UserData for LuaActor {
         // row simply returns nil.
         methods.add_method(
             "active_quest",
-            |lua, this, (qz, qid): (i32, i32)| -> mlua::Result<Value> {
+            |lua, this, IdArg { zone: qz, id: qid }: IdArg| -> mlua::Result<Value> {
                 let entity = this.entity;
                 let cid_opt = world_from_lua(lua, |world| {
                     world
@@ -4573,7 +4575,7 @@ impl UserData for LuaRoom {
         // firing would risk infinite recursion (LOAD → spawn → LOAD).
         methods.add_method(
             "spawn_mobile",
-            |lua, this, (zone, id): (i32, i32)| -> mlua::Result<Value> {
+            |lua, this, IdArg { zone, id }: IdArg| -> mlua::Result<Value> {
                 spawn_mob_proto(lua, this.entity, zone, id)
             },
         );
@@ -4612,7 +4614,7 @@ impl UserData for LuaRoom {
         // `drop` that follows.
         methods.add_method(
             "spawn_object",
-            |lua, this, (zone, id): (i32, i32)| -> mlua::Result<Value> {
+            |lua, this, IdArg { zone, id }: IdArg| -> mlua::Result<Value> {
                 let value = spawn_obj_proto(lua, this.entity, zone, id)?;
                 if let Value::UserData(ud) = &value
                     && let Ok(item) = ud.borrow::<LuaActor>().map(|a| a.entity)
@@ -5066,23 +5068,8 @@ impl UserData for LuaExit {
         // puzzle triggers that swap which key opens a door mid-quest.
         methods.add_method(
             "set_key",
-            |lua, this, args: Variadic<Value>| -> mlua::Result<()> {
-                let key: Option<(i32, i32)> = match args.len() {
-                    0 => None,
-                    1 => match &args[0] {
-                        Value::Nil => None,
-                        _ => {
-                            return Err(mlua::Error::external(
-                                "set_key: pass (zone, id) or no args / nil to clear",
-                            ));
-                        }
-                    },
-                    _ => {
-                        let z: i32 = mlua::FromLua::from_lua(args[0].clone(), lua)?;
-                        let l: i32 = mlua::FromLua::from_lua(args[1].clone(), lua)?;
-                        Some((z, l))
-                    }
-                };
+            |lua, this, OptIdArg(key): OptIdArg| -> mlua::Result<()> {
+                let key = key.map(|k| (k.zone, k.id));
                 world_mut_from_lua(lua, |world| {
                     if let Some(mut exits) = world.get_mut::<mud_world::Exits>(this.room)
                         && let Some(exit) = exits.0.get_mut(&this.dir)
