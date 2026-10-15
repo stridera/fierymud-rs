@@ -9,7 +9,7 @@ publish.workspace = true
 bcrypt = "0.19.0"
 pwhash = "1.0"
 subtle = "2.6"
-bevy_ecs = "0.18.1"
+bevy_ecs = { version = "0.18.1", features = ["debug"] }
 chrono = "0.4.44"
 dotenvy = "0.15.7"
 mud-db = { version = "0.1.0", path = "../mud-db" }

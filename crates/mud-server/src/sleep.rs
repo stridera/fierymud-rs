@@ -12,6 +12,7 @@ use crate::commands::{
     Connection, broadcast_room_except_players_rendered, broadcast_room_except_rendered,
     cap_sentence_start, sector_is_outdoor_for_weather,
 };
+use crate::query_cache::with_query;
 use mud_world::Player;
 
 /// Hour night falls — also when the dark-room gate kicks in
@@ -93,14 +94,13 @@ pub fn mob_sleep_tick(world: &mut World) {
 fn announce_to_outdoor_players(world: &mut World, msg: &str) {
     // Distinct rooms each get one broadcast call (which itself sends
     // per-player), so dedupe before iterating.
-    let rooms: Vec<Entity> = {
-        let mut q = world.query_filtered::<&Located, With<Player>>();
+    let rooms: Vec<Entity> = with_query::<&Located, With<Player>, _>(world, |world, q| {
         let mut seen = std::collections::HashSet::new();
         q.iter(world)
             .map(|l| l.0)
             .filter(|r| seen.insert(*r))
             .collect()
-    };
+    });
     for room in rooms {
         let outdoor = world
             .get::<RoomSector>(room)
@@ -164,16 +164,16 @@ fn sleep_outdoor_mobs(world: &mut World) {
     let percent = world
         .get_resource::<NightSleepChance>()
         .map_or(FALL_ASLEEP_PERCENT, |c| c.0);
-    let candidates: Vec<(Entity, Entity)> = {
-        let mut q = world.query_filtered::<
-            (Entity, &Located, &Posture),
-            (With<Mob>, Without<Fighting>, Without<RiddenBy>),
-        >();
+    let candidates: Vec<(Entity, Entity)> = with_query::<
+        (Entity, &Located, &Posture),
+        (With<Mob>, Without<Fighting>, Without<RiddenBy>),
+        _,
+    >(world, |world, q| {
         q.iter(world)
             .filter(|(_, _, posture)| posture.0 != PostureKind::Sleeping)
             .map(|(e, l, _)| (e, l.0))
             .collect()
-    };
+    });
     let candidates: Vec<(Entity, Entity)> = candidates
         .into_iter()
         .filter(|&(mob, _)| mud_world::mob_sleeps_at_night(world, mob))

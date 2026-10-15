@@ -20,6 +20,7 @@ use crate::commands::{
     refuse_hidden_exit, remove_effect_named, require_alert_posture, resolve_exit_arg, send_msg,
     send_rendered, send_to, skill_stamina_cost, try_insert, try_remove,
 };
+use crate::query_cache::with_query;
 
 inventory::submit! {
     Command {
@@ -1231,9 +1232,11 @@ fn attack_with_switch_roll(world: &mut World, player: Entity, target_name: &str,
     // CombatStats keeps the filter targeted to attackable actors
     // (mobs/players with the combat package) rather than e.g. items
     // that happen to share a keyword.
-    let target = {
-        let mut q =
-            world.query_filtered::<(Entity, &Located, &Named), (With<mud_world::CombatStats>, Without<mud_world::Corpse>)>();
+    let target = with_query::<
+        (Entity, &Located, &Named),
+        (With<mud_world::CombatStats>, Without<mud_world::Corpse>),
+        _,
+    >(world, |world, q| {
         q.iter(world)
             .find(|(e, l, n)| {
                 *e != player
@@ -1242,7 +1245,7 @@ fn attack_with_switch_roll(world: &mut World, player: Entity, target_name: &str,
                     && crate::commands::can_see_player(world, player, *e)
             })
             .map(|(e, _, _)| e)
-    };
+    });
 
     let Some(target) = target else {
         send_rendered(
@@ -1831,20 +1834,23 @@ pub(crate) fn cmd_steal(world: &mut World, player: Entity, args: &str) {
 
     // Item path: find a carried (non-equipped) item by keyword.
     let needle = what.to_ascii_lowercase();
-    let item_opt: Option<(Entity, String)> = {
-        let mut q = world.query_filtered::<(
+    let item_opt: Option<(Entity, String)> = with_query::<
+        (
             Entity,
             &mud_world::Located,
             &Named,
             Option<&mud_world::Keywords>,
             Option<&mud_world::EquippedSlot>,
-        ), With<Item>>();
+        ),
+        With<Item>,
+        _,
+    >(world, |world, q| {
         q.iter(world)
             .find(|(_, l, n, kw, eq)| {
                 l.0 == target && eq.is_none() && crate::commands::matches(&needle, n, *kw)
             })
             .map(|(e, _, n, _, _)| (e, n.name.clone()))
-    };
+    });
     let Some((item, item_name)) = item_opt else {
         send_msg(
             world,
@@ -2362,9 +2368,11 @@ pub(crate) fn cmd_sweep(world: &mut World, player: Entity, _args: &str) {
     let dmg = world
         .get::<CombatStats>(player)
         .map_or(1, |c| ((c.attack_power / 5) / 4).max(1));
-    let targets: Vec<Entity> = {
-        let mut q = world
-            .query_filtered::<(Entity, &Located, Option<&Posture>, Option<&Health>), With<Mob>>();
+    let targets: Vec<Entity> = with_query::<
+        (Entity, &Located, Option<&Posture>, Option<&Health>),
+        With<Mob>,
+        _,
+    >(world, |world, q| {
         q.iter(world)
             .filter(|(_, l, p, h)| {
                 l.0 == room
@@ -2373,7 +2381,7 @@ pub(crate) fn cmd_sweep(world: &mut World, player: Entity, _args: &str) {
             })
             .map(|(e, _, _, _)| e)
             .collect()
-    };
+    });
     let targets = skip_forbidden_pets(world, player, targets);
     if targets.is_empty() {
         send_to(world, player, "Nothing here to sweep.\r\n");
@@ -2755,13 +2763,13 @@ pub(crate) fn cmd_hitall(world: &mut World, player: Entity, _args: &str) {
     let dmg = world
         .get::<CombatStats>(player)
         .map_or(1, |c| ((c.attack_power / 5) / 2).max(1));
-    let mob_targets: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located, Option<&Health>), With<Mob>>();
-        q.iter(world)
-            .filter(|(_, l, h)| l.0 == room && h.is_some())
-            .map(|(e, _, _)| e)
-            .collect()
-    };
+    let mob_targets: Vec<Entity> =
+        with_query::<(Entity, &Located, Option<&Health>), With<Mob>, _>(world, |world, q| {
+            q.iter(world)
+                .filter(|(_, l, h)| l.0 == room && h.is_some())
+                .map(|(e, _, _)| e)
+                .collect()
+        });
     let mob_targets = skip_forbidden_pets(world, player, mob_targets);
     if mob_targets.is_empty() {
         send_to(world, player, "Nothing here to swing at.\r\n");
@@ -2852,12 +2860,12 @@ pub(crate) fn cmd_disarm(world: &mut World, player: Entity, args: &str) {
     }
 
     // Find the target's wielded item.
-    let weapon: Option<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located, &EquippedSlot), With<Item>>();
-        q.iter(world)
-            .find(|(_, l, eq)| l.0 == target && eq.0 == Slot::Wield)
-            .map(|(e, _, _)| e)
-    };
+    let weapon: Option<Entity> =
+        with_query::<(Entity, &Located, &EquippedSlot), With<Item>, _>(world, |world, q| {
+            q.iter(world)
+                .find(|(_, l, eq)| l.0 == target && eq.0 == Slot::Wield)
+                .map(|(e, _, _)| e)
+        });
     let Some(weapon) = weapon else {
         let target_name = name_or(world, target, "(unknown)");
         send_msg(

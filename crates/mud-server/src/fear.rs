@@ -41,6 +41,7 @@ use crate::commands::{
     try_insert, try_remove,
 };
 use crate::effects::{FREEZE_SOURCE, sync_stunned};
+use crate::query_cache::with_query;
 
 /// Is `flag` (a status effect's `flag` param) the fear flag?
 pub(crate) fn is_fear_flag(flag: &str) -> bool {
@@ -681,10 +682,7 @@ pub(crate) fn on_fear_applied(
 /// Drop the [`Feared`] marker from anyone with no `feared` effect left
 /// (expired, dispelled, cleansed). Cheap: only marked actors are visited.
 pub(crate) fn sync_markers(world: &mut World) {
-    let marked: Vec<Entity> = world
-        .query_filtered::<Entity, With<Feared>>()
-        .iter(world)
-        .collect();
+    let marked: Vec<Entity> = crate::query_cache::entities::<With<Feared>>(world);
     if marked.is_empty() {
         return;
     }
@@ -705,17 +703,20 @@ pub(crate) fn sync_markers(world: &mut World) {
 /// Combat-tick pass: every feared mob in a fight tries to run instead of
 /// swinging. A cornered one keeps its fight and swings as usual.
 pub(crate) fn feared_mobs_flee(world: &mut World) {
-    let scared: Vec<(Entity, Entity)> = {
-        let mut q = world.query_filtered::<(Entity, &Located), (
+    let scared: Vec<(Entity, Entity)> = with_query::<
+        (Entity, &Located),
+        (
             With<Mob>,
             With<Feared>,
             With<Fighting>,
             Without<Stunned>,
             Without<Frozen>,
             Without<Ghost>,
-        )>();
+        ),
+        _,
+    >(world, |world, q| {
         q.iter(world).map(|(e, l)| (e, l.0)).collect()
-    };
+    });
     for (mob, room) in scared {
         let standing = world
             .get::<Posture>(mob)

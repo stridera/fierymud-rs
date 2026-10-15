@@ -8,6 +8,7 @@ use crate::TickCount;
 use crate::commands::{
     apply_damage, drain_lua_outbox, name_of, name_or, send_msg, send_to, try_insert, try_remove,
 };
+use crate::query_cache::with_query;
 
 /// Effect instances whose `on_apply` Lua hook has fired. Lets the
 /// lifecycle scan distinguish "freshly spawned" effects from ones the loop
@@ -178,18 +179,17 @@ pub(crate) fn sync_stunned(world: &mut World, target: Entity) {
 
 /// [`sync_stunned`] for everyone with the marker or a backing instance.
 fn sync_stunned_all(world: &mut World) {
-    let mut targets: std::collections::HashSet<Entity> = world
-        .query_filtered::<Entity, With<Stunned>>()
-        .iter(world)
-        .collect();
-    {
-        let mut q = world.query::<(&EffectInstance, &AppliedTo)>();
+    let mut targets: std::collections::HashSet<Entity> =
+        crate::query_cache::entities::<With<Stunned>>(world)
+            .into_iter()
+            .collect();
+    with_query::<(&EffectInstance, &AppliedTo), (), _>(world, |world, q| {
         targets.extend(
             q.iter(world)
                 .filter(|(eff, _)| is_stun_name(&eff.name))
                 .map(|(_, applied)| applied.0),
         );
-    }
+    });
     for t in targets {
         if world.get_entity(t).is_ok() {
             sync_stunned(world, t);
@@ -364,10 +364,7 @@ fn combat_break_params(
 /// the first round lands; non-combat actions never reach it.
 pub fn break_on_combat_tick(world: &mut World) {
     type Ended = (Entity, Entity, String, i32, Option<String>, Option<String>);
-    let fighters: Vec<Entity> = world
-        .query_filtered::<Entity, With<mud_world::Fighting>>()
-        .iter(world)
-        .collect();
+    let fighters: Vec<Entity> = crate::query_cache::entities::<With<mud_world::Fighting>>(world);
     if fighters.is_empty() {
         return;
     }
@@ -650,14 +647,16 @@ fn despawn_summoned_mob(world: &mut World, target: Entity) {
     let mob_room = world.get::<mud_world::Located>(target).map(|l| l.0);
     let mut told_owner = false;
     if let Some(mob_room) = mob_room {
-        let players: Vec<Entity> = {
-            let mut q =
-                world.query_filtered::<(Entity, &mud_world::Located), With<mud_world::Player>>();
+        let players: Vec<Entity> = with_query::<
+            (Entity, &mud_world::Located),
+            With<mud_world::Player>,
+            _,
+        >(world, |world, q| {
             q.iter(world)
                 .filter(|(_, l)| l.0 == mob_room)
                 .map(|(e, _)| e)
                 .collect()
-        };
+        });
         let msg = format!("{mob_name} fades back to where it was summoned from.\r\n");
         for p in players {
             if Some(p) == owner {
@@ -870,20 +869,20 @@ pub fn effects_tick(world: &mut World) {
 
     // Snapshot all active effects: (effect_entity, target_entity, remaining_secs, name, ability_id).
     // Doing this in a scoped block releases the query borrow before we mutate.
-    let snapshots: Vec<(Entity, Entity, i32, String, Option<i32>)> = {
-        let mut q = world.query::<(Entity, &EffectInstance, &AppliedTo)>();
-        q.iter(world)
-            .map(|(eff, inst, applied)| {
-                (
-                    eff,
-                    applied.0,
-                    inst.remaining_secs,
-                    inst.name.clone(),
-                    inst.ability_id,
-                )
-            })
-            .collect()
-    };
+    let snapshots: Vec<(Entity, Entity, i32, String, Option<i32>)> =
+        with_query::<(Entity, &EffectInstance, &AppliedTo), (), _>(world, |world, q| {
+            q.iter(world)
+                .map(|(eff, inst, applied)| {
+                    (
+                        eff,
+                        applied.0,
+                        inst.remaining_secs,
+                        inst.name.clone(),
+                        inst.ability_id,
+                    )
+                })
+                .collect()
+        });
 
     let mut expired = 0usize;
     let mut orphaned = 0usize;
@@ -993,13 +992,17 @@ pub fn effects_tick(world: &mut World) {
                 // got cornered behind one) would have no signal it's
                 // safe to move now. Mirrors the bash-crumble UX.
                 if let Some((dir, kind_label)) = expiring_wall {
-                    let players: Vec<bevy_ecs::entity::Entity> = {
-                        let mut q = world.query_filtered::<(bevy_ecs::entity::Entity, &mud_world::Located), bevy_ecs::prelude::With<mud_world::Player>>();
-                        q.iter(world)
-                            .filter(|(_, l)| l.0 == target)
-                            .map(|(e, _)| e)
-                            .collect()
-                    };
+                    let players: Vec<bevy_ecs::entity::Entity> =
+                        with_query::<
+                            (bevy_ecs::entity::Entity, &mud_world::Located),
+                            bevy_ecs::prelude::With<mud_world::Player>,
+                            _,
+                        >(world, |world, q| {
+                            q.iter(world)
+                                .filter(|(_, l)| l.0 == target)
+                                .map(|(e, _)| e)
+                                .collect()
+                        });
                     let dir_name = crate::commands::direction_name(dir);
                     let msg = format!(
                         "The {kind_label} {dir_name} shudders and dissolves into nothing.\r\n"
@@ -1021,13 +1024,17 @@ pub fn effects_tick(world: &mut World) {
                 };
                 if !still_lit {
                     try_remove::<mud_world::RoomMagicalLight>(world, target);
-                    let players: Vec<bevy_ecs::entity::Entity> = {
-                        let mut q = world.query_filtered::<(bevy_ecs::entity::Entity, &mud_world::Located), bevy_ecs::prelude::With<mud_world::Player>>();
-                        q.iter(world)
-                            .filter(|(_, l)| l.0 == target)
-                            .map(|(e, _)| e)
-                            .collect()
-                    };
+                    let players: Vec<bevy_ecs::entity::Entity> =
+                        with_query::<
+                            (bevy_ecs::entity::Entity, &mud_world::Located),
+                            bevy_ecs::prelude::With<mud_world::Player>,
+                            _,
+                        >(world, |world, q| {
+                            q.iter(world)
+                                .filter(|(_, l)| l.0 == target)
+                                .map(|(e, _)| e)
+                                .collect()
+                        });
                     let msg = "The magical radiance fades.\r\n".to_string();
                     for p in players {
                         crate::commands::send_to(world, p, msg.clone());
@@ -1043,13 +1050,17 @@ pub fn effects_tick(world: &mut World) {
                 };
                 if !still_dark {
                     try_remove::<mud_world::RoomMagicalDarkness>(world, target);
-                    let players: Vec<bevy_ecs::entity::Entity> = {
-                        let mut q = world.query_filtered::<(bevy_ecs::entity::Entity, &mud_world::Located), bevy_ecs::prelude::With<mud_world::Player>>();
-                        q.iter(world)
-                            .filter(|(_, l)| l.0 == target)
-                            .map(|(e, _)| e)
-                            .collect()
-                    };
+                    let players: Vec<bevy_ecs::entity::Entity> =
+                        with_query::<
+                            (bevy_ecs::entity::Entity, &mud_world::Located),
+                            bevy_ecs::prelude::With<mud_world::Player>,
+                            _,
+                        >(world, |world, q| {
+                            q.iter(world)
+                                .filter(|(_, l)| l.0 == target)
+                                .map(|(e, _)| e)
+                                .collect()
+                        });
                     let msg = "The unnatural darkness dissipates.\r\n".to_string();
                     for p in players {
                         crate::commands::send_to(world, p, msg.clone());
@@ -1069,13 +1080,17 @@ pub fn effects_tick(world: &mut World) {
                     // the room so they know it's safe to walk again
                     // without taking damage. Without it the hazard
                     // just silently lifts.
-                    let players: Vec<bevy_ecs::entity::Entity> = {
-                        let mut q = world.query_filtered::<(bevy_ecs::entity::Entity, &mud_world::Located), bevy_ecs::prelude::With<mud_world::Player>>();
-                        q.iter(world)
-                            .filter(|(_, l)| l.0 == target)
-                            .map(|(e, _)| e)
-                            .collect()
-                    };
+                    let players: Vec<bevy_ecs::entity::Entity> =
+                        with_query::<
+                            (bevy_ecs::entity::Entity, &mud_world::Located),
+                            bevy_ecs::prelude::With<mud_world::Player>,
+                            _,
+                        >(world, |world, q| {
+                            q.iter(world)
+                                .filter(|(_, l)| l.0 == target)
+                                .map(|(e, _)| e)
+                                .collect()
+                        });
                     let msg = "The flames lash one last time, then sputter out.\r\n".to_string();
                     for p in players {
                         crate::commands::send_to(world, p, msg.clone());

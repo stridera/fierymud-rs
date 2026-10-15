@@ -33,6 +33,7 @@ use mud_world::{
 };
 use tracing::{info_span, warn};
 
+use crate::query_cache::with_query;
 use crate::{ServerStart, TickCount};
 
 // ---------------------------------------------------------------------------
@@ -284,12 +285,12 @@ pub fn drain_player_updates(world: &mut World) {
     for msg in drained {
         let target_cid = msg.character_id().to_string();
         // Resolve the entity by Account.character_id.
-        let entity: Option<Entity> = {
-            let mut q = world.query_filtered::<(Entity, &Account), With<Player>>();
-            q.iter(world)
-                .find(|(_, a)| a.character_id == target_cid)
-                .map(|(e, _)| e)
-        };
+        let entity: Option<Entity> =
+            with_query::<(Entity, &Account), With<Player>, _>(world, |world, q| {
+                q.iter(world)
+                    .find(|(_, a)| a.character_id == target_cid)
+                    .map(|(e, _)| e)
+            });
         let Some(entity) = entity else {
             // The player is gone (disconnected before this drained). A
             // COLLECT claim made for them must not be left dangling.
@@ -689,7 +690,7 @@ mod economy;
 #[path = "commands/followers.rs"]
 mod followers;
 #[path = "commands/gmcp.rs"]
-mod gmcp;
+pub(crate) mod gmcp;
 #[path = "commands/grants.rs"]
 mod grants;
 #[cfg(test)]
@@ -3155,11 +3156,11 @@ pub(crate) fn drain_syslog_to_watchers(world: &mut World) {
     // Snapshot subscribers up front so we don't reborrow the World
     // mid-fanout. Tracking the floor per-subscriber lets us skip
     // formatting work when an ERROR-only watcher won't see a WARN.
-    let watchers: Vec<(Entity, mud_world::SyslogMinLevel)> = {
-        let mut q =
-            world.query_filtered::<(Entity, &mud_world::WatchingSyslog), With<mud_world::Online>>();
-        q.iter(world).map(|(e, w)| (e, w.min_level)).collect()
-    };
+    let watchers: Vec<(Entity, mud_world::SyslogMinLevel)> =
+        with_query::<(Entity, &mud_world::WatchingSyslog), With<mud_world::Online>, _>(
+            world,
+            |world, q| q.iter(world).map(|(e, w)| (e, w.min_level)).collect(),
+        );
     if watchers.is_empty() {
         return;
     }
@@ -9828,9 +9829,10 @@ pub(crate) fn mark_room_visited(world: &mut World, player: Entity, room: Entity)
 }
 
 /// The room `note_room_entry` last ran for, so [`room_entry_tick`] only
-/// reacts to arrivals nobody has reported yet.
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct LastNotedRoom(Entity);
+/// reacts to arrivals nobody has reported yet. `None` until the player's
+/// first sighting (a player carries one from spawn, see `bookkeeping`).
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct LastNotedRoom(pub(crate) Option<Entity>);
 
 /// Catch arrivals that do not go through the walking code - teleport,
 /// goto, transfer, summon, recall, portals, anything that moves a
@@ -9839,15 +9841,15 @@ pub(crate) struct LastNotedRoom(Entity);
 /// (login, spawn) only records where they are: appearing in the world
 /// is not an entry.
 pub(crate) fn room_entry_tick(world: &mut World) {
-    let seen: Vec<(Entity, Entity, Option<Entity>)> = {
-        let mut q = world.query_filtered::<
-            (Entity, &Located, Option<&LastNotedRoom>),
-            (With<Player>, With<mud_world::Online>),
-        >();
+    let seen: Vec<(Entity, Entity, Option<Entity>)> = crate::query_cache::with_query::<
+        (Entity, &Located, Option<&LastNotedRoom>),
+        (With<Player>, With<mud_world::Online>),
+        _,
+    >(world, |world, q| {
         q.iter(world)
-            .map(|(e, l, last)| (e, l.0, last.map(|r| r.0)))
+            .map(|(e, l, last)| (e, l.0, last.and_then(|r| r.0)))
             .collect()
-    };
+    });
     for (player, room, last) in seen {
         if last == Some(room) {
             continue;
@@ -9855,7 +9857,7 @@ pub(crate) fn room_entry_tick(world: &mut World) {
         if last.is_some() {
             note_room_entry(world, player, room);
         } else {
-            try_insert(world, player, LastNotedRoom(room));
+            try_insert(world, player, LastNotedRoom(Some(room)));
         }
     }
 }
@@ -9872,7 +9874,7 @@ pub(crate) fn note_room_entry(world: &mut World, player: Entity, room: Entity) {
     if world.get::<Player>(player).is_none() {
         return;
     }
-    try_insert(world, player, LastNotedRoom(room));
+    try_insert(world, player, LastNotedRoom(Some(room)));
     let Some(key) = world.get::<WorldKey>(room).copied() else {
         return;
     };
@@ -14993,20 +14995,24 @@ pub(crate) fn find_actor_in_room(
 ) -> Option<Entity> {
     let (index, needle) = parse_indexed_needle(needle);
     let needle = needle.to_ascii_lowercase();
-    let mut q = world.query::<(Entity, &Located, &Named, Option<&Keywords>, Option<&Item>)>();
     // `exclude` is the looking actor: an actor it cannot see is not a
     // valid name target (legacy `get_char_vis`).
-    let mut hits: Vec<Entity> = q
-        .iter(world)
-        .filter(|(e, l, n, kw, item)| {
-            *e != exclude
-                && l.0 == room
-                && item.is_none()
-                && matches(&needle, n, *kw)
-                && can_see_player(world, exclude, *e)
-        })
-        .map(|(e, _, _, _, _)| e)
-        .collect();
+    let mut hits: Vec<Entity> = crate::query_cache::with_query::<
+        (Entity, &Located, &Named, Option<&Keywords>, Option<&Item>),
+        (),
+        _,
+    >(world, |world, q| {
+        q.iter(world)
+            .filter(|(e, l, n, kw, item)| {
+                *e != exclude
+                    && l.0 == room
+                    && item.is_none()
+                    && matches(&needle, n, *kw)
+                    && can_see_player(world, exclude, *e)
+            })
+            .map(|(e, _, _, _, _)| e)
+            .collect()
+    });
     sort_newest_first(world, room, &mut hits, |e| *e);
     // `look` renders the mob lines first and the player lines
     // after them, each newest first; the stable sort keeps that inner order.

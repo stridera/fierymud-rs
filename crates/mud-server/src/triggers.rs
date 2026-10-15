@@ -27,6 +27,7 @@ use mud_world::{
 use tracing::warn;
 
 use crate::commands::drain_lua_outbox;
+use crate::query_cache::with_query;
 
 /// Aggregate fire counters by event type. Per-event keys use the
 /// `Debug` form ("Speech" / "Greet" / "Load" / …) so the JSON
@@ -1315,10 +1316,10 @@ pub fn apply_reloaded_catalog(world: &mut World, new: TriggerCatalog) -> ReloadS
     let room_attachments = new.room_attachments.clone();
     world.insert_resource(new);
 
-    let rooms_to_refresh: Vec<(Entity, (i32, i32))> = {
-        let mut q = world.query_filtered::<(Entity, &WorldKey), With<Room>>();
-        q.iter(world).map(|(e, k)| (e, (k.zone, k.id))).collect()
-    };
+    let rooms_to_refresh: Vec<(Entity, (i32, i32))> =
+        with_query::<(Entity, &WorldKey), With<Room>, _>(world, |world, q| {
+            q.iter(world).map(|(e, k)| (e, (k.zone, k.id))).collect()
+        });
     for (room, key) in rooms_to_refresh {
         let attached = room_attachments.get(&key).cloned();
         if let Ok(mut em) = world.get_entity_mut(room) {
@@ -1347,10 +1348,10 @@ pub fn apply_reloaded_catalog(world: &mut World, new: TriggerCatalog) -> ReloadS
 }
 
 pub fn fire_load_for_all_mobs(world: &mut World) {
-    let mobs: Vec<Entity> = {
-        let mut q = world.query_filtered::<Entity, (With<Mob>, With<AttachedTriggers>)>();
-        q.iter(world).collect()
-    };
+    let mobs: Vec<Entity> =
+        with_query::<Entity, (With<Mob>, With<AttachedTriggers>), _>(world, |world, q| {
+            q.iter(world).collect()
+        });
     let count = mobs.len();
     for e in mobs {
         fire_event(world, e, TriggerEvent::Load);
@@ -1531,10 +1532,10 @@ fn split_leading_gate(body: &str) -> (Option<i64>, &str) {
 /// current on insert by a component hook; this catches the entities
 /// whose attachments survive a catalog reload.
 fn reindex_random_triggers(world: &mut World) {
-    let attached: Vec<(Entity, Vec<(i32, i32)>)> = {
-        let mut q = world.query::<(Entity, &AttachedTriggers)>();
-        q.iter(world).map(|(e, at)| (e, at.0.clone())).collect()
-    };
+    let attached: Vec<(Entity, Vec<(i32, i32)>)> =
+        with_query::<(Entity, &AttachedTriggers), (), _>(world, |world, q| {
+            q.iter(world).map(|(e, at)| (e, at.0.clone())).collect()
+        });
     let scripted: Vec<(Entity, bool)> = {
         let catalog = world.resource::<TriggerCatalog>();
         attached
@@ -1584,10 +1585,10 @@ pub fn random_trigger_tick(world: &mut World) {
     if tick == 0 {
         return;
     }
-    let due: Vec<Entity> = {
-        let mut q = world.query_filtered::<Entity, With<mud_world::RandomTriggers>>();
-        q.iter(world).filter(|&e| random_slot(e, tick)).collect()
-    };
+    let due: Vec<Entity> =
+        with_query::<Entity, With<mud_world::RandomTriggers>, _>(world, |world, q| {
+            q.iter(world).filter(|&e| random_slot(e, tick)).collect()
+        });
     run_random_for(world, due);
 }
 
@@ -1602,10 +1603,10 @@ fn random_slot(entity: Entity, tick: u64) -> bool {
 /// to run the dispatch without tick math.
 #[cfg(test)]
 pub(crate) fn run_random_pulse(world: &mut World) {
-    let candidates: Vec<Entity> = {
-        let mut q = world.query_filtered::<Entity, With<mud_world::RandomTriggers>>();
-        q.iter(world).collect()
-    };
+    let candidates: Vec<Entity> =
+        with_query::<Entity, With<mud_world::RandomTriggers>, _>(world, |world, q| {
+            q.iter(world).collect()
+        });
     run_random_for(world, candidates);
 }
 
@@ -1621,8 +1622,11 @@ fn run_random_for(world: &mut World, candidates: Vec<Entity>) {
         active_zones
             .get_or_insert_with(|| {
                 let mut zones = std::collections::HashSet::new();
-                let mut q = world.query_filtered::<&mud_world::Located, With<mud_world::Player>>();
-                let rooms: Vec<Entity> = q.iter(world).map(|l| l.0).collect();
+                let rooms: Vec<Entity> =
+                    with_query::<&mud_world::Located, With<mud_world::Player>, _>(
+                        world,
+                        |world, q| q.iter(world).map(|l| l.0).collect(),
+                    );
                 for room in rooms {
                     if let Some(k) = world.get::<WorldKey>(room) {
                         zones.insert(k.zone);

@@ -9,6 +9,8 @@
 use std::collections::HashMap;
 
 use bevy_ecs::prelude::{Entity, Has, With, World};
+
+use crate::query_cache::with_query;
 use mud_db::enums::{Direction, UserRole};
 use mud_world::*;
 
@@ -3498,27 +3500,27 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
         // Then ObjectExtras on items in the room or in inventory.
         // Item must be visible to the player to count — same
         // located-in-room-or-on-player gate the entity search uses.
-        let extras_hits: Vec<String> = {
-            let mut q = world.query_filtered::<(&Located, &WorldKey), With<Item>>();
-            let protos = world.resource::<mud_world::ObjectPrototypes>();
-            q.iter(world)
-                .filter(|(l, _)| l.0 == room || l.0 == player)
-                .flat_map(|(_, key)| {
-                    let proto = protos.by_key.get(&(key.zone, key.id));
-                    proto
-                        .map(|p| p.extras.clone())
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter(|(keywords, _)| {
-                            keywords
-                                .iter()
-                                .any(|kw| kw.to_ascii_lowercase().contains(&needle_lc))
-                        })
-                        .map(|(_, body)| body)
-                        .collect::<Vec<_>>()
-                })
-                .collect()
-        };
+        let extras_hits: Vec<String> =
+            with_query::<(&Located, &WorldKey), With<Item>, _>(world, |world, q| {
+                let protos = world.resource::<mud_world::ObjectPrototypes>();
+                q.iter(world)
+                    .filter(|(l, _)| l.0 == room || l.0 == player)
+                    .flat_map(|(_, key)| {
+                        let proto = protos.by_key.get(&(key.zone, key.id));
+                        proto
+                            .map(|p| p.extras.clone())
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter(|(keywords, _)| {
+                                keywords
+                                    .iter()
+                                    .any(|kw| kw.to_ascii_lowercase().contains(&needle_lc))
+                            })
+                            .map(|(_, body)| body)
+                            .collect::<Vec<_>>()
+                    })
+                    .collect()
+            });
         if remaining <= extras_hits.len() {
             let mode = color_mode_for(world, player);
             let rendered = render_color_tags(extras_hits[remaining - 1].trim_end(), mode);
@@ -3920,13 +3922,13 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
         // (the warhammer vs the toothpick matters tactically).
         // Mirrors `cmd_equipment`'s ordering via Slot::ORDER so the
         // readout reads consistently regardless of equip sequence.
-        let worn: Vec<(Slot, String)> = {
-            let mut q = world.query_filtered::<(&Located, &Named, &EquippedSlot), With<Item>>();
-            q.iter(world)
-                .filter(|(l, _, _)| l.0 == target)
-                .map(|(_, n, eq)| (eq.0, n.name.clone()))
-                .collect()
-        };
+        let worn: Vec<(Slot, String)> =
+            with_query::<(&Located, &Named, &EquippedSlot), With<Item>, _>(world, |world, q| {
+                q.iter(world)
+                    .filter(|(l, _, _)| l.0 == target)
+                    .map(|(_, n, eq)| (eq.0, n.name.clone()))
+                    .collect()
+            });
         if !worn.is_empty() {
             let mut sorted = worn;
             sorted.sort_by_key(|(s, _)| {
@@ -4486,12 +4488,12 @@ pub(crate) fn cmd_list(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "You are nowhere.\r\n");
         return;
     };
-    let keeper: Option<(Entity, Shopkeeper)> = {
-        let mut q = world.query_filtered::<(Entity, &Located, &Shopkeeper), With<Mob>>();
-        q.iter(world)
-            .find(|(_, l, _)| l.0 == located.0)
-            .map(|(e, _, s)| (e, *s))
-    };
+    let keeper: Option<(Entity, Shopkeeper)> =
+        with_query::<(Entity, &Located, &Shopkeeper), With<Mob>, _>(world, |world, q| {
+            q.iter(world)
+                .find(|(_, l, _)| l.0 == located.0)
+                .map(|(e, _, s)| (e, *s))
+        });
     let Some((keeper_entity, keeper_marker)) = keeper else {
         send_to(world, player, "No one here is selling anything.\r\n");
         return;
@@ -4684,12 +4686,12 @@ pub(crate) fn cmd_inspect(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "You are nowhere.\r\n");
         return;
     };
-    let keeper: Option<(Entity, Shopkeeper)> = {
-        let mut q = world.query_filtered::<(Entity, &Located, &Shopkeeper), With<Mob>>();
-        q.iter(world)
-            .find(|(_, l, _)| l.0 == located.0)
-            .map(|(e, _, s)| (e, *s))
-    };
+    let keeper: Option<(Entity, Shopkeeper)> =
+        with_query::<(Entity, &Located, &Shopkeeper), With<Mob>, _>(world, |world, q| {
+            q.iter(world)
+                .find(|(_, l, _)| l.0 == located.0)
+                .map(|(e, _, s)| (e, *s))
+        });
     let Some((keeper_entity, keeper_marker)) = keeper else {
         send_to(world, player, "No one here is selling anything.\r\n");
         return;
@@ -4917,12 +4919,12 @@ pub(crate) fn cmd_buy(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "You are nowhere.\r\n");
         return;
     };
-    let keeper: Option<(Entity, Shopkeeper)> = {
-        let mut q = world.query_filtered::<(Entity, &Located, &Shopkeeper), With<Mob>>();
-        q.iter(world)
-            .find(|(_, l, _)| l.0 == located.0)
-            .map(|(e, _, s)| (e, *s))
-    };
+    let keeper: Option<(Entity, Shopkeeper)> =
+        with_query::<(Entity, &Located, &Shopkeeper), With<Mob>, _>(world, |world, q| {
+            q.iter(world)
+                .find(|(_, l, _)| l.0 == located.0)
+                .map(|(e, _, s)| (e, *s))
+        });
     let Some((keeper_entity, keeper_marker)) = keeper else {
         send_to(world, player, "No one here is selling anything.\r\n");
         return;
@@ -5134,12 +5136,12 @@ pub(crate) fn cmd_hire(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "You are nowhere.\r\n");
         return;
     };
-    let keeper: Option<(Entity, Shopkeeper)> = {
-        let mut q = world.query_filtered::<(Entity, &Located, &Shopkeeper), With<Mob>>();
-        q.iter(world)
-            .find(|(_, l, _)| l.0 == located.0)
-            .map(|(e, _, s)| (e, *s))
-    };
+    let keeper: Option<(Entity, Shopkeeper)> =
+        with_query::<(Entity, &Located, &Shopkeeper), With<Mob>, _>(world, |world, q| {
+            q.iter(world)
+                .find(|(_, l, _)| l.0 == located.0)
+                .map(|(e, _, s)| (e, *s))
+        });
     let Some((keeper_entity, keeper_marker)) = keeper else {
         send_to(world, player, "No one here is hiring out pets.\r\n");
         return;
@@ -5283,12 +5285,12 @@ pub(crate) fn cmd_sell(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "You are nowhere.\r\n");
         return;
     };
-    let keeper: Option<(Entity, Shopkeeper)> = {
-        let mut q = world.query_filtered::<(Entity, &Located, &Shopkeeper), With<Mob>>();
-        q.iter(world)
-            .find(|(_, l, _)| l.0 == located.0)
-            .map(|(e, _, s)| (e, *s))
-    };
+    let keeper: Option<(Entity, Shopkeeper)> =
+        with_query::<(Entity, &Located, &Shopkeeper), With<Mob>, _>(world, |world, q| {
+            q.iter(world)
+                .find(|(_, l, _)| l.0 == located.0)
+                .map(|(e, _, s)| (e, *s))
+        });
     let Some((keeper_entity, keeper_marker)) = keeper else {
         send_to(world, player, "No one here is buying anything.\r\n");
         return;
@@ -5538,12 +5540,12 @@ pub(crate) fn cmd_value(world: &mut World, player: Entity, args: &str) {
     // With a shopkeeper in the room, quote what the keeper would pay (the
     // same figure `sell` uses); anywhere else, the item's base cost.
     if let Some(located) = world.get::<Located>(player).copied()
-        && let Some((keeper_entity, keeper_marker)) = {
-            let mut q = world.query_filtered::<(Entity, &Located, &Shopkeeper), With<Mob>>();
-            q.iter(world)
-                .find(|(_, l, _)| l.0 == located.0)
-                .map(|(e, _, s)| (e, *s))
-        }
+        && let Some((keeper_entity, keeper_marker)) =
+            with_query::<(Entity, &Located, &Shopkeeper), With<Mob>, _>(world, |world, q| {
+                q.iter(world)
+                    .find(|(_, l, _)| l.0 == located.0)
+                    .map(|(e, _, s)| (e, *s))
+            })
         && let Some(shop) = world
             .resource::<ShopCatalog>()
             .by_key
@@ -5849,11 +5851,11 @@ pub(crate) fn cmd_track(world: &mut World, player: Entity, args: &str) {
     // tracker can't see), keyed by their current room. Items, rooms and
     // zones are never tracked. Then BFS rooms until we hit one in the
     // candidate map.
-    let candidate_rooms: HashSet<Entity> = {
-        let mut q = world.query_filtered::<
-            (Entity, &Located, &Named, Option<&Keywords>),
-            Or<(With<Player>, With<Mob>)>,
-        >();
+    let candidate_rooms: HashSet<Entity> = with_query::<
+        (Entity, &Located, &Named, Option<&Keywords>),
+        Or<(With<Player>, With<Mob>)>,
+        _,
+    >(world, |world, q| {
         q.iter(world)
             .filter(|(e, _, n, kw)| {
                 *e != player
@@ -5866,7 +5868,7 @@ pub(crate) fn cmd_track(world: &mut World, player: Entity, args: &str) {
             })
             .map(|(_, l, _, _)| l.0)
             .collect()
-    };
+    });
     if candidate_rooms.is_empty() {
         send_rendered(
             world,
@@ -6005,18 +6007,18 @@ fn scan_room_actors(
     dir: Direction,
     scanner: Entity,
 ) -> usize {
-    let actors: Vec<(Entity, String)> = {
-        let mut q = world.query_filtered::<
-            (Entity, &Located, &Named),
-            Or<(With<Mob>, (With<Player>, With<Online>))>,
-        >();
+    let actors: Vec<(Entity, String)> = with_query::<
+        (Entity, &Located, &Named),
+        Or<(With<Mob>, (With<Player>, With<Online>))>,
+        _,
+    >(world, |world, q| {
         q.iter(world)
             .filter(|(e, l, _)| {
                 *e != scanner && l.0 == room && crate::commands::can_see_player(world, scanner, *e)
             })
             .map(|(e, _, n)| (e, n.name.clone()))
             .collect()
-    };
+    });
     let label = if dis == 0 {
         format!("{} here", scan_distance(dis))
     } else {
@@ -6352,13 +6354,13 @@ fn search_scope(
         return (Vec::new(), true);
     }
     let holder = container.unwrap_or(room);
-    let mut items: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Item>>();
-        q.iter(world)
-            .filter(|(e, l)| l.0 == holder && *e != player)
-            .map(|(e, _)| e)
-            .collect()
-    };
+    let mut items: Vec<Entity> =
+        with_query::<(Entity, &Located), With<Item>, _>(world, |world, q| {
+            q.iter(world)
+                .filter(|(e, l)| l.0 == holder && *e != player)
+                .map(|(e, _)| e)
+                .collect()
+        });
     crate::commands::sort_newest_first(world, holder, &mut items, |e| *e);
     (items, container.is_some())
 }
@@ -7644,13 +7646,16 @@ pub(crate) fn summoned_mounts_of(world: &mut World, owner: Entity) -> Vec<Entity
 pub(crate) fn orphan_follower_sweep(world: &mut World) {
     let mut doomed: Vec<Entity> = Vec::new();
     let mut freed: Vec<Entity> = Vec::new();
-    {
-        let mut q = world.query_filtered::<(
+    with_query::<
+        (
             Entity,
             &Follower,
             Has<mud_world::SummonedMount>,
             Has<mud_world::PersistentPet>,
-        ), With<Mob>>();
+        ),
+        With<Mob>,
+        _,
+    >(world, |world, q| {
         for (e, f, mount, pet) in q.iter(world) {
             if world.get_entity(f.0).is_ok() {
                 continue;
@@ -7664,7 +7669,7 @@ pub(crate) fn orphan_follower_sweep(world: &mut World) {
         let mut loose =
             world.query_filtered::<Entity, (With<mud_world::SummonedMount>, Without<Follower>)>();
         doomed.extend(loose.iter(world));
-    }
+    });
     for e in freed {
         try_remove::<Follower>(world, e);
     }
@@ -7745,10 +7750,10 @@ pub(crate) fn cmd_summonmount(world: &mut World, player: Entity, _args: &str) {
     }
     // Refuse if a Mountable follower of this player is already in
     // the room.
-    let already_mounted: bool = {
-        let mut q = world.query_filtered::<&Follower, (With<Mob>, With<mud_world::Mountable>)>();
-        q.iter(world).any(|f| f.0 == player)
-    };
+    let already_mounted: bool =
+        with_query::<&Follower, (With<Mob>, With<mud_world::Mountable>), _>(world, |world, q| {
+            q.iter(world).any(|f| f.0 == player)
+        });
     if already_mounted {
         send_to(world, player, "You already have a mount.\r\n");
         return;
@@ -8125,12 +8130,11 @@ pub(crate) fn cmd_idle(world: &mut World, player: Entity, args: &str) {
         .split_whitespace()
         .find_map(|t| t.parse::<u64>().ok())
         .map(|m| m.saturating_mul(60));
-    let mut rows: Vec<(String, Option<u64>, Option<u64>)> = {
-        let mut q = world.query_filtered::<(
-            &Named,
-            Option<&LastInputAt>,
-            Option<&LoggedInAt>,
-        ), (With<Player>, With<Online>)>();
+    let mut rows: Vec<(String, Option<u64>, Option<u64>)> = with_query::<
+        (&Named, Option<&LastInputAt>, Option<&LoggedInAt>),
+        (With<Player>, With<Online>),
+        _,
+    >(world, |world, q| {
         q.iter(world)
             .map(|(n, last, login)| {
                 (
@@ -8140,7 +8144,7 @@ pub(crate) fn cmd_idle(world: &mut World, player: Entity, args: &str) {
                 )
             })
             .collect()
-    };
+    });
     let total_online = rows.len();
     if let Some(threshold) = min_idle_secs {
         rows.retain(|(_, idle, _)| idle.is_some_and(|s| s >= threshold));
@@ -9668,15 +9672,14 @@ pub(crate) fn cmd_pk(world: &mut World, player: Entity, args: &str) {
 /// another player's pet, in either direction?
 fn fighting_another_player(world: &mut World, player: Entity) -> bool {
     let mut mine = vec![player];
-    {
-        let mut q = world.query_filtered::<Entity, With<Mob>>();
+    with_query::<Entity, With<Mob>, _>(world, |world, q| {
         let mobs: Vec<Entity> = q.iter(world).collect();
         for m in mobs {
             if super::attack_ok::pet_owner(world, m) == Some(player) {
                 mine.push(m);
             }
         }
-    }
+    });
     let theirs = |world: &World, e: Entity| {
         e != player
             && !mine.contains(&e)
@@ -9970,11 +9973,10 @@ pub(crate) fn cmd_unlock(world: &mut World, player: Entity, args: &str) {
         // Match a carried item by exact `WorldKey` against the exit's
         // (zone, id) key composite. The fallback keyword chain we used
         // for the old text-encoded vnum data isn't needed any more.
-        let has_key = {
-            let mut q = world.query_filtered::<(&Located, &WorldKey), With<Item>>();
+        let has_key = with_query::<(&Located, &WorldKey), With<Item>, _>(world, |world, q| {
             q.iter(world)
                 .any(|(l, k)| l.0 == player && k.zone == key_req.0 && k.id == key_req.1)
-        };
+        });
         if !has_key {
             // Don't reveal which key fits — some doors are puzzles and
             // naming the key short-circuits the hunt. Players see only
@@ -10176,11 +10178,10 @@ pub(crate) fn cmd_lock(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, format!("There's no keyhole on {door}.\r\n"));
         return;
     };
-    let has_key = {
-        let mut q = world.query_filtered::<(&Located, &WorldKey), With<Item>>();
+    let has_key = with_query::<(&Located, &WorldKey), With<Item>, _>(world, |world, q| {
         q.iter(world)
             .any(|(l, k)| l.0 == player && k.zone == key_req.0 && k.id == key_req.1)
-    };
+    });
     if !has_key {
         let hint = world
             .resource::<ObjectPrototypes>()
@@ -10329,12 +10330,12 @@ pub(crate) fn cmd_compare(world: &mut World, player: Entity, args: &str) {
             );
             return;
         };
-        let equipped = {
-            let mut q = world.query_filtered::<(Entity, &Located, &EquippedSlot), With<Item>>();
-            q.iter(world)
-                .find(|(_, l, eq)| l.0 == player && eq.0 == target_slot)
-                .map(|(ent, _, _)| ent)
-        };
+        let equipped =
+            with_query::<(Entity, &Located, &EquippedSlot), With<Item>, _>(world, |world, q| {
+                q.iter(world)
+                    .find(|(_, l, eq)| l.0 == player && eq.0 == target_slot)
+                    .map(|(ent, _, _)| ent)
+            });
         let Some(found) = equipped else {
             send_to(
                 world,
@@ -11074,9 +11075,11 @@ pub(crate) fn cmd_inventory(world: &mut World, player: Entity, args: &str) {
     // matching `Char.Items.List` GMCP frame after rendering the
     // text — the entity ids stable within the session let the
     // client correlate Add/Remove diffs.
-    let item_entities: Vec<Entity> = {
-        let mut q =
-            world.query_filtered::<(Entity, &Located, &Named, Option<&EquippedSlot>), With<Item>>();
+    let item_entities: Vec<Entity> = with_query::<
+        (Entity, &Located, &Named, Option<&EquippedSlot>),
+        With<Item>,
+        _,
+    >(world, |world, q| {
         q.iter(world)
             .filter(|(_, l, _, eq)| l.0 == player && eq.is_none())
             .filter(|(_, _, n, _)| {
@@ -11089,7 +11092,7 @@ pub(crate) fn cmd_inventory(world: &mut World, player: Entity, args: &str) {
             .map(|(e, _, _, _)| e)
             .filter(|e| crate::commands::senses::item_visible_to(world, player, *e))
             .collect()
-    };
+    });
     let item_entities: Vec<Entity> = {
         let mut v = item_entities;
         crate::commands::sort_newest_first(world, player, &mut v, |e| *e);
@@ -11833,16 +11836,18 @@ fn get_from_container_inner(
     // (the coin pile is drained for bare `all` and for coin words
     // such as `all.coin`).
     if let Some(filter) = parse_all_filter(needle) {
-        let items: Vec<(Entity, String)> = {
-            let mut q =
-                world.query_filtered::<(Entity, &Located, &Named, Option<&Keywords>), With<Item>>();
+        let items: Vec<(Entity, String)> = with_query::<
+            (Entity, &Located, &Named, Option<&Keywords>),
+            With<Item>,
+            _,
+        >(world, |world, q| {
             q.iter(world)
                 .filter(|(_, l, n, kw)| {
                     l.0 == container && (filter.is_empty() || matches(&filter, n, *kw))
                 })
                 .map(|(e, _, n, _)| (e, n.name.clone()))
                 .collect()
-        };
+        });
         let items = {
             let mut v = items;
             v.retain(|(e, _)| crate::commands::senses::item_visible_to(world, player, *e));
@@ -12281,14 +12286,17 @@ fn put_plain(world: &mut World, player: Entity, args: &str) {
     // `put all.<filter> in <container>` restricts to items whose
     // name or keywords contain the filter.
     if let Some(filter) = parse_all_filter(item_word) {
-        let items: Vec<(Entity, String)> = {
-            let mut q = world.query_filtered::<(
+        let items: Vec<(Entity, String)> = with_query::<
+            (
                 Entity,
                 &Located,
                 &Named,
                 Option<&Keywords>,
                 Option<&EquippedSlot>,
-            ), With<Item>>();
+            ),
+            With<Item>,
+            _,
+        >(world, |world, q| {
             q.iter(world)
                 .filter(|(e, l, n, kw, eq)| {
                     l.0 == player
@@ -12299,7 +12307,7 @@ fn put_plain(world: &mut World, player: Entity, args: &str) {
                 })
                 .map(|(e, _, n, _, _)| (e, n.name.clone()))
                 .collect()
-        };
+        });
         let items = {
             let mut v = items;
             crate::commands::sort_newest_first(world, player, &mut v, |r| r.0);
@@ -12440,19 +12448,22 @@ fn junk_all(world: &mut World, player: Entity, filter: &str) {
         );
         return;
     }
-    let mut items: Vec<Entity> = {
-        let mut q = world.query_filtered::<(
+    let mut items: Vec<Entity> = with_query::<
+        (
             Entity,
             &Located,
             &Named,
             Option<&Keywords>,
             Option<&EquippedSlot>,
-        ), With<Item>>();
+        ),
+        With<Item>,
+        _,
+    >(world, |world, q| {
         q.iter(world)
             .filter(|(_, l, n, kw, eq)| l.0 == player && eq.is_none() && matches(filter, n, *kw))
             .map(|(e, _, _, _, _)| e)
             .collect()
-    };
+    });
     if items.is_empty() {
         send_to(
             world,
@@ -12693,21 +12704,24 @@ fn drop_plain(world: &mut World, player: Entity, args: &str) {
     // `drop all.<filter>` — same, restricted to items whose name or
     // keywords contain the filter.
     if let Some(filter) = parse_all_filter(target_word) {
-        let items: Vec<(Entity, String)> = {
-            let mut q = world.query_filtered::<(
+        let items: Vec<(Entity, String)> = with_query::<
+            (
                 Entity,
                 &Located,
                 &Named,
                 Option<&Keywords>,
                 Option<&EquippedSlot>,
-            ), With<Item>>();
+            ),
+            With<Item>,
+            _,
+        >(world, |world, q| {
             q.iter(world)
                 .filter(|(_, l, n, kw, eq)| {
                     l.0 == player && eq.is_none() && (filter.is_empty() || matches(&filter, n, *kw))
                 })
                 .map(|(e, _, n, _, _)| (e, n.name.clone()))
                 .collect()
-        };
+        });
         let items = {
             let mut v = items;
             crate::commands::sort_newest_first(world, player, &mut v, |r| r.0);
@@ -13108,13 +13122,16 @@ pub(crate) fn cmd_wear(world: &mut World, player: Entity, args: &str) {
 /// Items the player carries but has not equipped, in inventory listing
 /// order (newest first, as legacy's `ch->carrying` list).
 fn carried_unequipped_items(world: &mut World, player: Entity) -> Vec<Entity> {
-    let mut items: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located, Option<&EquippedSlot>), With<Item>>();
+    let mut items: Vec<Entity> = with_query::<
+        (Entity, &Located, Option<&EquippedSlot>),
+        With<Item>,
+        _,
+    >(world, |world, q| {
         q.iter(world)
             .filter(|(_, l, eq)| l.0 == player && eq.is_none())
             .map(|(e, _, _)| e)
             .collect()
-    };
+    });
     crate::commands::sort_newest_first(world, player, &mut items, |e| *e);
     items
 }
@@ -14017,13 +14034,13 @@ pub(crate) fn cmd_fill(world: &mut World, player: Entity, args: &str) {
 fn find_fountain_in_room(world: &mut World, room: Entity) -> Option<Entity> {
     // Snapshot candidates first so the proto lookup doesn't conflict
     // with the query borrow.
-    let candidates: Vec<(Entity, WorldKey)> = {
-        let mut q = world.query_filtered::<(Entity, &Located, &WorldKey), With<Item>>();
-        q.iter(world)
-            .filter(|(_, l, _)| l.0 == room)
-            .map(|(e, _, k)| (e, *k))
-            .collect()
-    };
+    let candidates: Vec<(Entity, WorldKey)> =
+        with_query::<(Entity, &Located, &WorldKey), With<Item>, _>(world, |world, q| {
+            q.iter(world)
+                .filter(|(_, l, _)| l.0 == room)
+                .map(|(e, _, k)| (e, *k))
+                .collect()
+        });
     let protos = world.resource::<ObjectPrototypes>();
     candidates
         .into_iter()
@@ -14133,20 +14150,17 @@ fn use_held_item(world: &mut World, player: Entity, args: &str, verb: &str) {
         return;
     }
     let needle = item_word.to_ascii_lowercase();
-    let held = {
-        let mut q = world.query_filtered::<(
-            Entity,
-            &Located,
-            &Named,
-            Option<&Keywords>,
-            &EquippedSlot,
-        ), With<Item>>();
+    let held = with_query::<
+        (Entity, &Located, &Named, Option<&Keywords>, &EquippedSlot),
+        With<Item>,
+        _,
+    >(world, |world, q| {
         q.iter(world)
             .find(|(_, l, n, kw, slot)| {
                 l.0 == player && slot.0 == Slot::Hold && matches(&needle, n, *kw)
             })
             .map(|(e, ..)| e)
-    };
+    });
     let Some(item) = held else {
         let article = if "aeiou".contains(needle.chars().next().unwrap_or('x')) {
             "an"
@@ -14291,14 +14305,16 @@ pub(crate) fn cmd_remove(world: &mut World, player: Entity, args: &str) {
     }
     // `remove all` — strip every equipped item.
     if target_word.eq_ignore_ascii_case("all") {
-        let mut worn: Vec<(Entity, String, Slot)> = {
-            let mut q =
-                world.query_filtered::<(Entity, &Located, &Named, &EquippedSlot), With<Item>>();
+        let mut worn: Vec<(Entity, String, Slot)> = with_query::<
+            (Entity, &Located, &Named, &EquippedSlot),
+            With<Item>,
+            _,
+        >(world, |world, q| {
             q.iter(world)
                 .filter(|(_, l, _, _)| l.0 == player)
                 .map(|(e, _, n, eq)| (e, n.name.clone(), eq.0))
                 .collect()
-        };
+        });
         // Legacy `do_remove` walks `where = 0..NUM_WEARS`, so the strip
         // (and its messages) follow equipment slot order, not query order.
         // Legacy `WEAR_OBELT` is 26, after `WEAR_WAIST` (13), but here the
@@ -14746,13 +14762,16 @@ pub(crate) fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
     // Snapshot effects on the player; pull the optional ModifyDelta
     // companion in the same query so the renderer can show
     // "Bless (+2 Strength)" for stat-bonus effects.
-    let active: Vec<ActiveEffectRow> = {
-        let mut q = world.query::<(
+    let active: Vec<ActiveEffectRow> = with_query::<
+        (
             &EffectInstance,
             Option<&mud_world::ModifyDelta>,
             Option<&mud_world::GrantedByItem>,
             Has<mud_world::InvisibleSource>,
-        )>();
+        ),
+        (),
+        _,
+    >(world, |world, q| {
         let rows: Vec<_> = mud_world::effects_on(world, player)
             .into_iter()
             .filter_map(|e| q.get(world, e).ok())
@@ -14788,7 +14807,7 @@ pub(crate) fn cmd_effects(world: &mut World, player: Entity, _args: &str) {
                 )
                 .collect(),
         )
-    };
+    });
     let mut out = if active.is_empty() {
         "\r\nYou have no active effects.\r\n".to_string()
     } else {
@@ -15800,13 +15819,13 @@ pub(crate) fn cmd_accept(world: &mut World, player: Entity, _args: &str) {
 /// component per actively-prompted target).
 pub(crate) fn pending_summon_tick(world: &mut World) {
     let now = std::time::Instant::now();
-    let expired: Vec<(Entity, Entity, String, String)> = {
-        let mut q = world.query::<(Entity, &mud_world::PendingSummon)>();
-        q.iter(world)
-            .filter(|(_, p)| now.duration_since(p.at) > std::time::Duration::from_secs(30))
-            .map(|(e, p)| (e, p.from, p.from_name.clone(), p.dest_room_name.clone()))
-            .collect()
-    };
+    let expired: Vec<(Entity, Entity, String, String)> =
+        with_query::<(Entity, &mud_world::PendingSummon), (), _>(world, |world, q| {
+            q.iter(world)
+                .filter(|(_, p)| now.duration_since(p.at) > std::time::Duration::from_secs(30))
+                .map(|(e, p)| (e, p.from, p.from_name.clone(), p.dest_room_name.clone()))
+                .collect()
+        });
     for (target, caster, _caster_name, dest_room_name) in expired {
         try_remove::<mud_world::PendingSummon>(world, target);
         let tname = world
@@ -15986,13 +16005,13 @@ pub(crate) fn cmd_order(world: &mut World, player: Entity, args: &str) {
     // Mob followers in the same room pointing Follower(player) at
     // the caller. Players following you are NOT touched; `order` is
     // a charm/pet thing.
-    let followers: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located, &Follower), With<Mob>>();
-        q.iter(world)
-            .filter(|(_, l, f)| l.0 == room && f.0 == player)
-            .map(|(e, _, _)| e)
-            .collect()
-    };
+    let followers: Vec<Entity> =
+        with_query::<(Entity, &Located, &Follower), With<Mob>, _>(world, |world, q| {
+            q.iter(world)
+                .filter(|(_, l, f)| l.0 == room && f.0 == player)
+                .map(|(e, _, _)| e)
+                .collect()
+        });
     if followers.is_empty() {
         send_to(world, player, "You have no followers here to order.\r\n");
         return;
@@ -16147,19 +16166,18 @@ pub(crate) fn cmd_split(world: &mut World, player: Entity, args: &str) {
 /// Followers' own followers stay attached. Self has no component to
 /// touch: only entities pointing at self.
 pub(crate) fn cmd_disband(world: &mut World, player: Entity, _args: &str) {
-    let to_release: Vec<Entity> = {
-        let mut q = world.query_filtered::<(
-            Entity,
-            Option<&Follower>,
-            Option<&mud_world::GroupMember>,
-        ), With<Player>>();
+    let to_release: Vec<Entity> = with_query::<
+        (Entity, Option<&Follower>, Option<&mud_world::GroupMember>),
+        With<Player>,
+        _,
+    >(world, |world, q| {
         q.iter(world)
             .filter(|(_, f, g)| {
                 f.is_some_and(|f| f.0 == player) || g.is_some_and(|g| g.0 == player)
             })
             .map(|(e, _, _)| e)
             .collect()
-    };
+    });
     for pet in mud_world::group_pets(world, player) {
         try_remove::<mud_world::GroupMember>(world, pet);
     }
@@ -16964,16 +16982,19 @@ pub(crate) fn cmd_house_take(
         }
     }
     // Find a house item in this room matching the keyword.
-    let matched: Option<(Entity, String)> = {
-        let mut q = world.query_filtered::<(Entity, &Located, &Named, Option<&Keywords>), (
+    let matched: Option<(Entity, String)> = with_query::<
+        (Entity, &Located, &Named, Option<&Keywords>),
+        (
             With<Item>,
             Or<(With<mud_world::HouseItem>, With<mud_world::HousePlacement>)>,
-        )>();
+        ),
+        _,
+    >(world, |world, q| {
         q.iter(world)
             .filter(|(_, l, _, _)| l.0 == room)
             .find(|(_, _, named, kw)| name_or_keyword_matches(target_word, &named.name, *kw))
             .map(|(e, _, n, _)| (e, n.name.clone()))
-    };
+    });
     let Some((item, item_name)) = matched else {
         send_rendered(
             world,

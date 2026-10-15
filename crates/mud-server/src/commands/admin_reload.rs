@@ -350,10 +350,7 @@ fn parse_trigger_key(world: &World, player: Entity, tokens: &[&str]) -> Option<(
 
 /// Send `text` to every online player.
 fn broadcast_all(world: &mut World, text: &str) {
-    let targets: Vec<Entity> = world
-        .query_filtered::<Entity, (With<Player>, With<Online>)>()
-        .iter(world)
-        .collect();
+    let targets: Vec<Entity> = crate::query_cache::entities::<(With<Player>, With<Online>)>(world);
     for e in targets {
         send_to(world, e, text.to_string());
     }

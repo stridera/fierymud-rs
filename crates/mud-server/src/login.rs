@@ -18,6 +18,7 @@ use tracing::{error, info, warn};
 
 use crate::autosave::SaveCoordinator;
 use crate::commands::{self, Connection};
+use crate::query_cache::with_query;
 
 /// Pre-login banner — XML-Lite content. Live banner content lives
 /// in the schema's `LoginMessage` table (stage `WELCOME_BANNER`,
@@ -1814,10 +1815,8 @@ impl ConnRouter {
     /// ([`Retiring`]). Each tick, never awaits: one still busy is simply
     /// tried again next tick.
     pub fn drain_retiring(world: &mut World, pool: &PgPool) {
-        let pending: Vec<Entity> = {
-            let mut q = world.query_filtered::<Entity, With<Retiring>>();
-            q.iter(world).collect()
-        };
+        let pending: Vec<Entity> =
+            with_query::<Entity, With<Retiring>, _>(world, |world, q| q.iter(world).collect());
         for entity in pending {
             let _ = retire_player(world, entity, pool);
         }
@@ -1827,11 +1826,11 @@ impl ConnRouter {
     /// command: a completed `camp` is the only such source today (`quit` and
     /// `rent` are drained by [`Self::on_line`] right after the command).
     pub fn drain_quitting(&mut self, world: &mut World, pool: &PgPool) {
-        let pending: Vec<Entity> = {
-            let mut q =
-                world.query_filtered::<Entity, (With<commands::Quitting>, Without<Retiring>)>();
-            q.iter(world).collect()
-        };
+        let pending: Vec<Entity> = with_query::<
+            Entity,
+            (With<commands::Quitting>, Without<Retiring>),
+            _,
+        >(world, |world, q| q.iter(world).collect());
         for entity in pending {
             if let Some(conn_id) = self.find_conn(entity) {
                 self.on_disconnect(world, conn_id, pool);
@@ -1851,10 +1850,10 @@ impl ConnRouter {
     /// main loop; costs one query over linkdead characters only.
     pub fn drain_linkdead(world: &mut World, pool: &PgPool) {
         let now = world.get_resource::<crate::TickCount>().map_or(0, |t| t.0);
-        let linkdead: Vec<(Entity, u64)> = {
-            let mut q = world.query::<(Entity, &commands::Linkdead)>();
-            q.iter(world).map(|(e, l)| (e, l.since_tick)).collect()
-        };
+        let linkdead: Vec<(Entity, u64)> =
+            with_query::<(Entity, &commands::Linkdead), (), _>(world, |world, q| {
+                q.iter(world).map(|(e, l)| (e, l.since_tick)).collect()
+            });
         for (entity, since) in linkdead {
             if world.get::<Ghost>(entity).is_none() {
                 if commands::in_combat(world, entity) {
@@ -4212,12 +4211,11 @@ impl ConnRouter {
     /// `true` when a takeover happened — the caller must NOT spawn a
     /// second entity (that would duplicate the inventory on save).
     fn try_takeover(&mut self, world: &mut World, conn_id: ConnId, character_id: &str) -> bool {
-        let existing = {
-            let mut q = world.query_filtered::<(Entity, &Account), With<Player>>();
+        let existing = with_query::<(Entity, &Account), With<Player>, _>(world, |world, q| {
             q.iter(world)
                 .find(|(_, a)| a.character_id == character_id)
                 .map(|(e, _)| e)
-        };
+        });
         let Some(entity) = existing else {
             return false;
         };
@@ -5743,14 +5741,17 @@ pub(crate) fn snapshot_player(
     // persistence shape with optional ModifyDelta. Permanent effects
     // (`remaining_secs < 0`) and short-lived buffs alike are
     // captured — the load path is what enforces the 1h cap.
-    let effect_instances_json: Option<serde_json::Value> = {
-        let mut q = world.query::<(
+    let effect_instances_json: Option<serde_json::Value> = with_query::<
+        (
             &mud_world::EffectInstance,
             Option<&mud_world::ModifyDelta>,
             Option<&mud_world::SpellResistanceDelta>,
             Option<&mud_world::AlignmentProtectionTag>,
             Has<mud_world::InvisibleSource>,
-        )>();
+        ),
+        (),
+        _,
+    >(world, |world, q| {
         let effects: Vec<PersistedEffectInstance> = mud_world::effects_on(world, entity)
             .into_iter()
             .filter_map(|e| q.get(world, e).ok())
@@ -5789,7 +5790,7 @@ pub(crate) fn snapshot_player(
             })
             .ok()
         }
-    };
+    });
     // Pets — query mob entities with `Follower(player)` AND
     // `PersistentPet` (the durability marker attached at hire sites), minus
     // charmed followers (legacy `save_pets` saved `IS_PET` only, the pet shop's
@@ -6777,10 +6778,7 @@ pub(crate) fn spawn_background_save(world: &mut World, entity: Entity, pool: &Pg
 /// `Account`, e.g. a mob a script called `save()` on) can never be
 /// satisfied, so it is removed rather than retried forever.
 pub(crate) fn drain_pending_saves(world: &mut World, pool: &PgPool) {
-    let pending: Vec<Entity> = world
-        .query_filtered::<Entity, With<mud_world::PendingSave>>()
-        .iter(world)
-        .collect();
+    let pending: Vec<Entity> = crate::query_cache::entities::<With<mud_world::PendingSave>>(world);
     for e in pending {
         if world.get::<Account>(e).is_none() {
             warn!(entity = ?e, "PendingSave on a non-player entity; dropping marker");

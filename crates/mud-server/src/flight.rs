@@ -30,6 +30,7 @@ use crate::commands::{
     carry_capacity, direction_name, effect_prevents, has_effect_named, name_of, opposite, send_msg,
     send_to, try_insert, try_remove,
 };
+use crate::query_cache::with_query;
 
 /// Legacy `LVL_IMMORT`: gods neither fall nor feel weight.
 const LVL_IMMORT: i32 = 100;
@@ -281,10 +282,8 @@ const OVERWEIGHT_SWEEP_TICKS: u64 = 10;
 /// Re-check every flier's load. Only entities carrying [`Flying`] are
 /// visited, so this costs nothing while nobody flies.
 fn overweight_sweep(world: &mut World) {
-    let fliers: Vec<Entity> = {
-        let mut q = world.query_filtered::<Entity, With<Flying>>();
-        q.iter(world).collect()
-    };
+    let fliers: Vec<Entity> =
+        with_query::<Entity, With<Flying>, _>(world, |world, q| q.iter(world).collect());
     for e in fliers {
         check_overweight(world, e);
     }
@@ -371,13 +370,12 @@ fn falling_yell(world: &mut World, e: Entity, room: Entity) {
 /// visited, so this costs nothing while nobody falls.
 pub fn gravity_tick(world: &mut World) {
     let tick = world.resource::<TickCount>().0;
-    let due: Vec<Entity> = {
-        let mut q = world.query::<(Entity, &Falling)>();
+    let due: Vec<Entity> = with_query::<(Entity, &Falling), (), _>(world, |world, q| {
         q.iter(world)
             .filter(|(_, f)| f.due_tick <= tick)
             .map(|(e, _)| e)
             .collect()
-    };
+    });
     for e in due {
         fall_step(world, e, tick);
     }
@@ -439,26 +437,26 @@ fn item_can_fall(world: &World, item: Entity) -> bool {
 /// falling steps once its delay has passed.
 fn item_gravity_tick(world: &mut World, tick: u64) {
     if tick.is_multiple_of(ITEM_SCAN_TICKS) {
-        let air_rooms: std::collections::HashSet<Entity> = {
-            let mut q = world.query_filtered::<(Entity, &RoomSector), With<mud_world::Room>>();
-            q.iter(world)
-                .filter(|(_, s)| s.0 == Sector::Air)
-                .map(|(e, _)| e)
-                .collect()
-        };
+        let air_rooms: std::collections::HashSet<Entity> =
+            with_query::<(Entity, &RoomSector), With<mud_world::Room>, _>(world, |world, q| {
+                q.iter(world)
+                    .filter(|(_, s)| s.0 == Sector::Air)
+                    .map(|(e, _)| e)
+                    .collect()
+            });
         if !air_rooms.is_empty() {
-            let starters: Vec<(Entity, Entity)> = {
-                let mut q = world.query_filtered::<
-                    (Entity, &Located, Option<&ItemFallSettled>),
-                    (With<mud_world::Item>, Without<ItemFalling>),
-                >();
+            let starters: Vec<(Entity, Entity)> = with_query::<
+                (Entity, &Located, Option<&ItemFallSettled>),
+                (With<mud_world::Item>, Without<ItemFalling>),
+                _,
+            >(world, |world, q| {
                 q.iter(world)
                     .filter(|(_, l, settled)| {
                         air_rooms.contains(&l.0) && settled.is_none_or(|s| s.0 != l.0)
                     })
                     .map(|(e, l, _)| (e, l.0))
                     .collect()
-            };
+            });
             for (item, room) in starters {
                 if item_can_fall(world, item) && room_below(world, room).is_some() {
                     try_insert(
@@ -475,13 +473,12 @@ fn item_gravity_tick(world: &mut World, tick: u64) {
             }
         }
     }
-    let due: Vec<Entity> = {
-        let mut q = world.query::<(Entity, &ItemFalling)>();
+    let due: Vec<Entity> = with_query::<(Entity, &ItemFalling), (), _>(world, |world, q| {
         q.iter(world)
             .filter(|(_, f)| f.due_tick <= tick)
             .map(|(e, _)| e)
             .collect()
-    };
+    });
     for item in due {
         item_fall_step(world, item, tick);
     }

@@ -61,6 +61,7 @@ use crate::commands::{
     Prevent, can_see_player, effect_prevents, name_of, name_or, room_has_light, room_is_dark,
     sees_characters_in_dark, send_msg, send_to, settle_slot,
 };
+use crate::query_cache::with_query;
 
 /// One combat round in ticks. Combat round = 4s (per
 /// `GameConfig.combat.round_seconds`), `TICK_HZ` = 10, so 40 ticks.
@@ -668,10 +669,8 @@ pub(crate) fn abort_casting(world: &mut World, caster: Entity) -> bool {
 /// Runs once per server tick.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn casting_tick(world: &mut World) {
-    let casters: Vec<Entity> = {
-        let mut q = world.query_filtered::<Entity, With<Casting>>();
-        q.iter(world).collect()
-    };
+    let casters: Vec<Entity> =
+        with_query::<Entity, With<Casting>, _>(world, |world, q| q.iter(world).collect());
     for caster in casters {
         let Some(snap) = world.get::<Casting>(caster).cloned() else {
             continue;

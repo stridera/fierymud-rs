@@ -24,6 +24,7 @@ use tracing::info;
 
 use crate::TickCount;
 use crate::commands::broadcast_room_except_players_rendered;
+use crate::query_cache::with_query;
 
 /// One refill cycle every 60 game ticks (= 6 seconds at 10 Hz).
 /// Plenty often to keep checks cheap; the actual respawn timing
@@ -72,15 +73,14 @@ const DOOR_RESET_ZONES_PER_PASS: usize = 6;
 pub(crate) fn door_reset_pass(world: &mut World, tick: u64) {
     // (zone, mode, period, how far past due)
     let mut due: Vec<(Entity, ResetMode, u64, u64)> = Vec::new();
-    {
-        let mut q = world.query::<(Entity, &ZoneDoorReset)>();
+    with_query::<(Entity, &ZoneDoorReset), (), _>(world, |world, q| {
         for (zone, r) in q.iter(world) {
             let age = tick.saturating_sub(r.last_reset);
             if r.mode != ResetMode::Never && age >= r.period_ticks {
                 due.push((zone, r.mode, r.period_ticks, age - r.period_ticks));
             }
         }
-    }
+    });
     if due.is_empty() {
         return;
     }
@@ -186,15 +186,14 @@ pub fn respawn_tick(world: &mut World) {
     // `max_instances` remains the global ceiling.
     let mut world_counts: HashMap<(i32, i32), i32> = HashMap::new();
     let mut reset_id_alive: std::collections::HashSet<i32> = std::collections::HashSet::new();
-    {
-        let mut q = world.query_filtered::<(&WorldKey, Option<&FromMobReset>), With<Mob>>();
+    with_query::<(&WorldKey, Option<&FromMobReset>), With<Mob>, _>(world, |world, q| {
         for (wk, fr) in q.iter(world) {
             *world_counts.entry((wk.zone, wk.id)).or_insert(0) += 1;
             if let Some(fr) = fr {
                 reset_id_alive.insert(fr.0);
             }
         }
-    }
+    });
 
     // Snapshot the catalog so we can mutate the world without holding a
     // borrow on the resource. Each entry owns its data; cloning is cheap
@@ -330,8 +329,7 @@ pub fn respawn_tick(world: &mut World) {
     // Staff-held copies (and their containers' contents) are not counted.
     let mut object_world_counts = object_world_counts(world);
     let mut reset_id_alive: std::collections::HashSet<i32> = std::collections::HashSet::new();
-    {
-        let mut q = world.query_filtered::<(Entity, &FromObjectReset), With<Item>>();
+    with_query::<(Entity, &FromObjectReset), With<Item>, _>(world, |world, q| {
         let owned: Vec<(Entity, i32)> = q.iter(world).map(|(e, fr)| (e, fr.0)).collect();
         for (item, reset_id) in owned {
             // An item a staff member holds gives its reset slot back for good
@@ -343,7 +341,7 @@ pub fn respawn_tick(world: &mut World) {
             }
             reset_id_alive.insert(reset_id);
         }
-    }
+    });
     let object_entries: Vec<mud_world::ObjectResetEntry> =
         world.resource::<ObjectResetCatalog>().entries.clone();
     let mut object_refilled = 0usize;

@@ -33,3 +33,22 @@ pub(crate) fn shape(world: &mut World, e: Entity, h: usize) {
     }
     bits!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11);
 }
+
+#[derive(Component)]
+struct Flicker<const N: usize>;
+
+/// Move `e` through a hash-chosen set of eight extra markers and back, the
+/// way a spell or fight flag comes and goes: leaves behind (empty)
+/// archetypes for every intermediate component set.
+pub(crate) fn flicker(world: &mut World, e: Entity, h: usize) {
+    let h = h.wrapping_mul(2_654_435_761) >> 5;
+    let mut ent = world.entity_mut(e);
+    macro_rules! on {
+        ($($n:literal),*) => { $( if h >> $n & 1 != 0 { ent.insert(Flicker::<$n>); } )* };
+    }
+    on!(0, 1, 2, 3, 4, 5, 6, 7);
+    macro_rules! off {
+        ($($n:literal),*) => { $( ent.remove::<Flicker<$n>>(); )* };
+    }
+    off!(0, 1, 2, 3, 4, 5, 6, 7);
+}

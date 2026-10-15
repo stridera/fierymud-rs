@@ -8,6 +8,7 @@ use mud_world::{
 use tracing::info;
 
 use crate::TickCount;
+use crate::query_cache::with_query;
 
 /// Player corpse decay (G4.1). Set high enough that a player can log
 /// back in days later and still recover their gear; matches legacy
@@ -218,15 +219,15 @@ pub fn corpse_decay_tick(world: &mut World) {
         expire_corpse(world, corpse, &name);
     }
     // Snapshot so we can mutate freely.
-    let corpses: Vec<(Entity, Entity, i32, String)> = {
-        let mut q = world.query_filtered::<
-            (Entity, &Located, &CorpseDecay, &Named),
-            (With<Corpse>, Without<crate::corpses::DecayDeleting>),
-        >();
+    let corpses: Vec<(Entity, Entity, i32, String)> = with_query::<
+        (Entity, &Located, &CorpseDecay, &Named),
+        (With<Corpse>, Without<crate::corpses::DecayDeleting>),
+        _,
+    >(world, |world, q| {
         q.iter(world)
             .map(|(e, l, d, n)| (e, l.0, d.remaining_secs, n.name.clone()))
             .collect()
-    };
+    });
     for (corpse, room, prev_remaining, name) in corpses {
         // Decrement first (or expire and despawn).
         let new_remaining = {
@@ -1142,13 +1143,11 @@ pub fn combat_tick(world: &mut World) {
     // filters a dead player gets re-aggroed every tick because the
     // pinned-to-1 HP still passes the `hp > 0` check, producing a
     // damage loop on the corpse.
-    let to_reengage: Vec<(Entity, Entity)> = {
-        let mut q =
-            world.query_filtered::<(Entity, &Located, &HateList), (
-                With<Mob>,
-                Without<Fighting>,
-                Without<mud_world::Feared>,
-            )>();
+    let to_reengage: Vec<(Entity, Entity)> = with_query::<
+        (Entity, &Located, &HateList),
+        (With<Mob>, Without<Fighting>, Without<mud_world::Feared>),
+        _,
+    >(world, |world, q| {
         q.iter(world)
             .filter_map(|(mob, loc, hate)| {
                 // Every mob carries a (usually empty) list.
@@ -1186,7 +1185,7 @@ pub fn combat_tick(world: &mut World) {
                     .map(|target| (mob, *target))
             })
             .collect()
-    };
+    });
     for (mob, target) in to_reengage {
         try_insert(world, mob, Fighting(target));
         try_insert(world, target, Fighting(mob));
@@ -1217,10 +1216,7 @@ pub fn combat_tick(world: &mut World) {
     // per-attacker effect lookup. Only entities with `Fighting` can swing, so
     // each one's own effects are checked, not every effect in the world.
     let berserk_attackers: std::collections::HashSet<Entity> = {
-        let fighters: Vec<Entity> = world
-            .query_filtered::<Entity, With<Fighting>>()
-            .iter(world)
-            .collect();
+        let fighters: Vec<Entity> = crate::query_cache::entities::<With<Fighting>>(world);
         fighters
             .into_iter()
             .filter(|&e| {
@@ -1263,18 +1259,21 @@ pub fn combat_tick(world: &mut World) {
     // through to the per-entity NaturalDamage / dmg_roll branch.
     let (weapon_dice, weapon_families): (WeaponDiceMap, WeaponFamilyMap) =
         if world.get_resource::<ObjectPrototypes>().is_some() {
-            let protos: Vec<(Entity, (i32, i32), i32)> = {
-                let mut q = world.query::<(
+            let protos: Vec<(Entity, (i32, i32), i32)> = with_query::<
+                (
                     &Located,
                     &EquippedSlot,
                     &WorldKey,
                     Option<&mud_world::components::WeaponDiceSizeAdjust>,
-                )>();
+                ),
+                (),
+                _,
+            >(world, |world, q| {
                 q.iter(world)
                     .filter(|(_, eq, _, _)| eq.0 == Slot::Wield)
                     .map(|(loc, _, key, adj)| (loc.0, (key.zone, key.id), adj.map_or(0, |a| a.0)))
                     .collect()
-            };
+            });
             let proto_catalog = world.resource::<ObjectPrototypes>();
             // Dice and weapon-skill family per wielder, resolved once here so
             // the per-swing hit roll never re-queries the world's equipment.
@@ -1306,12 +1305,12 @@ pub fn combat_tick(world: &mut World) {
     // Pre-pass: snapshot every entity's NaturalDamage component
     // (claws/teeth/fists) so the swing snapshot can roll for
     // unarmed attackers without a fresh borrow.
-    let natural_damage: std::collections::HashMap<Entity, (i32, i32, i32)> = {
-        let mut q = world.query::<(Entity, &NaturalDamage)>();
-        q.iter(world)
-            .map(|(e, n)| (e, (n.num, n.size, n.bonus)))
-            .collect()
-    };
+    let natural_damage: std::collections::HashMap<Entity, (i32, i32, i32)> =
+        with_query::<(Entity, &NaturalDamage), (), _>(world, |world, q| {
+            q.iter(world)
+                .map(|(e, n)| (e, (n.num, n.size, n.bonus)))
+                .collect()
+        });
     // Ghost / Frozen attackers are filtered out of the swing
     // snapshot — even if Fighting somehow lingers on a dead or
     // frozen entity, they can't swing. Stunned is checked
@@ -1602,13 +1601,16 @@ pub(crate) fn engage_swing_now(world: &mut World, attacker: Entity, target: Enti
     let is_mob = world.get::<mud_world::Mob>(attacker).is_some();
     // Lift the wielded-weapon's world key out so the prototype
     // lookup doesn't hold a borrow while we touch resources.
-    let wielded_key: Option<((i32, i32), i32)> = {
-        let mut q = world.query::<(
+    let wielded_key: Option<((i32, i32), i32)> = with_query::<
+        (
             &Located,
             &EquippedSlot,
             &WorldKey,
             Option<&mud_world::components::WeaponDiceSizeAdjust>,
-        )>();
+        ),
+        (),
+        _,
+    >(world, |world, q| {
         q.iter(world).find_map(|(loc, eq, key, adj)| {
             if loc.0 == attacker && eq.0 == Slot::Wield {
                 Some(((key.zone, key.id), adj.map_or(0, |a| a.0)))
@@ -1616,7 +1618,7 @@ pub(crate) fn engage_swing_now(world: &mut World, attacker: Entity, target: Enti
                 None
             }
         })
-    };
+    });
     let wielded: Option<WieldedDice> = wielded_key.and_then(|(key, adjust)| {
         let protos = world.get_resource::<ObjectPrototypes>()?;
         let p = protos.by_key.get(&key)?;
@@ -2576,13 +2578,12 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
         // Resolve credit before the Fighting links below are torn down:
         // `resolve_killer` falls back to a Player `Fighting` the victim.
         let pvp_killer: Option<Entity> = resolve_killer(world, victim, room);
-        let attackers: Vec<Entity> = {
-            let mut q = world.query::<(Entity, &Fighting)>();
+        let attackers: Vec<Entity> = with_query::<(Entity, &Fighting), (), _>(world, |world, q| {
             q.iter(world)
                 .filter(|(_, f)| f.0 == victim)
                 .map(|(e, _)| e)
                 .collect()
-        };
+        });
         try_remove::<Fighting>(world, victim);
         for a in attackers {
             try_remove::<Fighting>(world, a);
@@ -2709,10 +2710,8 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
         // every tick on the pinned-HP-1 ghost. It also matches
         // player expectation that death is a soft reset for "who's
         // angry at me right now".
-        let mobs: Vec<Entity> = {
-            let mut q = world.query_filtered::<Entity, With<Mob>>();
-            q.iter(world).collect()
-        };
+        let mobs: Vec<Entity> =
+            with_query::<Entity, With<Mob>, _>(world, |world, q| q.iter(world).collect());
         for mob in mobs {
             if let Some(mut mem) = world.get_mut::<MobMemory>(mob) {
                 mem.0.remove(&victim);
@@ -2886,13 +2885,13 @@ pub(crate) fn handle_death(world: &mut World, victim: Entity, victim_name: &str,
             killer.unwrap_or(victim),
             mud_world::TriggerEvent::Death,
         );
-        let owned_items: Vec<Entity> = {
-            let mut q = world.query_filtered::<(Entity, &Located), With<Item>>();
-            q.iter(world)
-                .filter(|(_, l)| l.0 == victim)
-                .map(|(e, _)| e)
-                .collect()
-        };
+        let owned_items: Vec<Entity> =
+            with_query::<(Entity, &Located), With<Item>, _>(world, |world, q| {
+                q.iter(world)
+                    .filter(|(_, l)| l.0 == victim)
+                    .map(|(e, _)| e)
+                    .collect()
+            });
         if illusory {
             // No corpse to catch what a queued DEATH trigger loads: it stays
             // on the floor instead of vanishing with the mob.
@@ -3032,16 +3031,16 @@ pub(crate) fn is_player_pet(world: &mut World, mob: Entity) -> bool {
 /// link is broken it is a stale claim, and the mob is an ordinary mob again.
 /// Cheap: only touches the few mobs carrying the marker.
 pub(crate) fn prune_stale_pet_markers(world: &mut World) {
-    let stale: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, Option<&mud_world::Follower>), (
-            With<Mob>,
-            With<mud_world::PersistentPet>,
-        )>();
+    let stale: Vec<Entity> = with_query::<
+        (Entity, Option<&mud_world::Follower>),
+        (With<Mob>, With<mud_world::PersistentPet>),
+        _,
+    >(world, |world, q| {
         q.iter(world)
             .filter(|(_, f)| !f.is_some_and(|f| world.get::<Player>(f.0).is_some()))
             .map(|(e, _)| e)
             .collect()
-    };
+    });
     for mob in stale {
         try_remove::<mud_world::PersistentPet>(world, mob);
     }
@@ -3457,12 +3456,13 @@ pub(crate) fn level_sweep_tick(world: &mut World) {
     if world.get_resource::<LevelTable>().is_none() {
         return;
     }
-    let players: Vec<(Entity, i32, i32, Option<i32>)> = world
-        .query_filtered::<(Entity, &Profile), With<Player>>()
-        .iter(world)
-        .filter(|(_, p)| !mud_db::enums::is_staff_level(p.level))
-        .map(|(e, p)| (e, p.level, p.experience, p.class_id))
-        .collect();
+    let players: Vec<(Entity, i32, i32, Option<i32>)> =
+        with_query::<(Entity, &Profile), With<Player>, _>(world, |world, q| {
+            q.iter(world)
+                .filter(|(_, p)| !mud_db::enums::is_staff_level(p.level))
+                .map(|(e, p)| (e, p.level, p.experience, p.class_id))
+                .collect()
+        });
     for (entity, level, xp, class_id) in players {
         let factor = mud_world::class_exp_factor(world, class_id);
         let (cap, ready) = {

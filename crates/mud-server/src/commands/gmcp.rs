@@ -428,8 +428,7 @@ pub(crate) fn send_char_effects(world: &mut World, target: Entity) {
 /// refreshes those. Players that have not yet been sent a full
 /// `Char.Effects` (login in progress) are only tracked, never pushed to.
 pub(crate) fn push_effect_changes(world: &mut World) {
-    let mut players = world.query_filtered::<Entity, (With<Connection>, With<GmcpSent>)>();
-    let players: Vec<Entity> = players.iter(world).collect();
+    let players = crate::query_cache::entities::<(With<Connection>, With<GmcpSent>)>(world);
     let mut todo: Vec<Entity> = Vec::new();
     for p in players {
         let hash = hash_effect_keys(effect_keys_of(world, p));
@@ -457,13 +456,16 @@ pub(crate) fn push_effect_changes(world: &mut World) {
 /// Players still fighting are left to the prompt path; the frame is
 /// change-gated, so an already-cleared panel costs nothing.
 pub(crate) fn push_combat_ends(world: &mut World) {
-    let mut q =
-        world.query_filtered::<(Entity, &GmcpSent), (With<Connection>, Without<Fighting>)>();
-    let todo: Vec<Entity> = q
-        .iter(world)
-        .filter(|(_, sent)| sent.0.contains_key("Char.Combat"))
-        .map(|(e, _)| e)
-        .collect();
+    let todo: Vec<Entity> = crate::query_cache::with_query::<
+        (Entity, &GmcpSent),
+        (With<Connection>, Without<Fighting>),
+        _,
+    >(world, |world, q| {
+        q.iter(world)
+            .filter(|(_, sent)| sent.0.contains_key("Char.Combat"))
+            .map(|(e, _)| e)
+            .collect()
+    });
     for p in todo {
         super::send_char_combat(world, p);
     }

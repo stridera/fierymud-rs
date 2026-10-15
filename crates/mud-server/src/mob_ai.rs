@@ -30,6 +30,7 @@ use mud_world::{
 use crate::commands::{
     WearWhere, carried_weight, carry_capacity, item_wear_positions, item_weight,
 };
+use crate::query_cache::with_query;
 
 thread_local! {
     /// Test hook: pins the scavenge 50% roll (per test thread).
@@ -1486,17 +1487,11 @@ pub(crate) fn mob_combat_ai_tick(world: &mut World) -> HashSet<Entity> {
     if !mud_world::mob_ai_enabled(world) {
         return acted;
     }
-    let mobs: Vec<Entity> = {
-        let mut q = world.query_filtered::<
-            Entity,
-            (
-                With<mud_world::Mob>,
-                With<MobAi>,
-                With<mud_world::Fighting>,
-            ),
-        >();
-        q.iter(world).collect()
-    };
+    let mobs: Vec<Entity> = with_query::<
+        Entity,
+        (With<mud_world::Mob>, With<MobAi>, With<mud_world::Fighting>),
+        _,
+    >(world, |world, q| q.iter(world).collect());
     if mobs.is_empty() {
         return acted;
     }
@@ -1565,13 +1560,14 @@ fn end_meditation(world: &mut World, mob: Entity, room: Entity) {
 /// without these while the flag is off, so on a flag that stays off this
 /// finds nothing; turning the flag back on only equips mobs spawned after.
 fn strip_mob_ai(world: &mut World) {
-    let mobs: Vec<Entity> = {
-        let mut q = world.query_filtered::<Entity, (
+    let mobs: Vec<Entity> = with_query::<
+        Entity,
+        (
             With<mud_world::Mob>,
             Or<(With<MobAi>, With<SpellSlots>, With<mud_world::Meditating>)>,
-        )>();
-        q.iter(world).collect()
-    };
+        ),
+        _,
+    >(world, |world, q| q.iter(world).collect());
     for mob in mobs {
         // Only a mob the AI sat down is stood back up: `Meditating` on a mob
         // without `MobAi` belongs to something else (for example a switched-in immortal).
@@ -1608,10 +1604,10 @@ pub(crate) fn mob_idle_ai_tick(world: &mut World) {
         strip_mob_ai(world);
         return;
     }
-    let player_rooms: HashSet<Entity> = {
-        let mut q = world.query_filtered::<&Located, With<mud_world::Player>>();
-        q.iter(world).map(|l| l.0).collect()
-    };
+    let player_rooms: HashSet<Entity> =
+        with_query::<&Located, With<mud_world::Player>, _>(world, |world, q| {
+            q.iter(world).map(|l| l.0).collect()
+        });
     if player_rooms.is_empty() {
         return;
     }

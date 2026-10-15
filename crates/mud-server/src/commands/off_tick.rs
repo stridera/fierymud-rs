@@ -57,14 +57,16 @@ impl Default for CommandJobs {
     }
 }
 
-/// The player has a command whose database work is still running. Later
-/// input waits in the input queue until it is gone.
-#[derive(Component)]
-pub(crate) struct AsyncBusy;
+/// True while the player has a command whose database work is still
+/// running. Later input waits in the input queue until it clears. A player
+/// carries one from spawn (see `bookkeeping`): toggling a marker per job
+/// moved the player between archetypes on every `save` or `qstat`.
+#[derive(Component, Default)]
+pub(crate) struct AsyncBusy(pub(crate) bool);
 
 /// Whether `player` is waiting on a job.
 pub(crate) fn is_busy(world: &World, player: Entity) -> bool {
-    world.get::<AsyncBusy>(player).is_some()
+    world.get::<AsyncBusy>(player).is_some_and(|b| b.0)
 }
 
 /// Run `work` (database I/O) off the tick and `finish` on a later one.
@@ -95,7 +97,7 @@ where
     let Some(tx) = world.get_resource::<CommandJobs>().map(|j| j.tx.clone()) else {
         return false;
     };
-    super::try_insert(world, player, AsyncBusy);
+    super::try_insert(world, player, AsyncBusy(true));
     let task = async move {
         // The work runs in its own task so a panic in it cannot strand the
         // player behind `AsyncBusy`: the outcome below always reaches the tick.
@@ -119,7 +121,7 @@ where
             if world.get_entity(player).is_err() {
                 return;
             }
-            world.entity_mut(player).remove::<AsyncBusy>();
+            crate::bookkeeping::reset::<AsyncBusy>(world, player);
             match outcome {
                 Some(out) => finish(world, player, out),
                 None => send_to(

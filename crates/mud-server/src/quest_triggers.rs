@@ -27,6 +27,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 use crate::commands::{Connection, DbPool};
+use crate::query_cache::with_query;
 
 /// In-memory copy of what the room-entry and `ask` paths need from the
 /// quest tables, so walking around and talking cost no database round
@@ -430,10 +431,10 @@ pub(crate) fn dispatch_skill_trigger(world: &mut World, player: Entity, ability_
 /// edge of an `Events.active` flip — see `events.rs` for the
 /// polling / edge-detection contract.
 pub(crate) fn dispatch_event_trigger(world: &mut World, event_id: i32) {
-    let players: Vec<Entity> = {
-        let mut q = world.query_filtered::<Entity, (With<Player>, With<Online>)>();
-        q.iter(world).collect()
-    };
+    let players: Vec<Entity> =
+        with_query::<Entity, (With<Player>, With<Online>), _>(world, |world, q| {
+            q.iter(world).collect()
+        });
     for player in players {
         spawn_candidate_lookup(world, player, "event-trigger", move |pool| async move {
             mud_db::quests::list_by_trigger_event(&pool, event_id).await
@@ -565,12 +566,15 @@ pub(crate) fn quest_expiry_tick(world: &mut World) {
         return;
     };
     // Snapshot online players for the notification map.
-    let online: std::collections::HashMap<String, mud_net::Outbound> = {
-        let mut q = world.query_filtered::<(&Account, &Connection), (With<Player>, With<Online>)>();
+    let online: std::collections::HashMap<String, mud_net::Outbound> = with_query::<
+        (&Account, &Connection),
+        (With<Player>, With<Online>),
+        _,
+    >(world, |world, q| {
         q.iter(world)
             .map(|(a, c)| (a.character_id.clone(), c.0.clone()))
             .collect()
-    };
+    });
     tokio::spawn(async move {
         let expired = match mud_db::quests::fail_expired_quests(&pool).await {
             Ok(rows) => rows,

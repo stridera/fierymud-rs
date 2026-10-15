@@ -17,6 +17,7 @@ use bevy_ecs::prelude::*;
 use mud_world::{Account, Contents, EquippedSlot, Item, Located, Player, WorldKey};
 
 use crate::commands::{Connection, DbPool, PendingPlayerUpdate, PlayerUpdateTx};
+use crate::query_cache::with_query;
 
 /// Where to tell one player about quest progress, and how to push the
 /// resulting ECS mutations (XP, gold, items) back to the world thread.
@@ -1013,10 +1014,10 @@ pub(crate) fn collect_watch_tick(world: &mut World) {
     if !tick.is_multiple_of(PACK_WATCH_PERIOD_TICKS) {
         return;
     }
-    let players: Vec<Entity> = {
-        let mut q = world.query_filtered::<Entity, (With<Player>, With<mud_world::Online>)>();
-        q.iter(world).collect()
-    };
+    let players: Vec<Entity> =
+        with_query::<Entity, (With<Player>, With<mud_world::Online>), _>(world, |world, q| {
+            q.iter(world).collect()
+        });
     for player in players {
         let Some(watch) = world.get::<CollectWatch>(player) else {
             // First sight (login): find out what they are collecting.

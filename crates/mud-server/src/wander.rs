@@ -28,6 +28,7 @@ use mud_world::{
 
 use crate::TickCount;
 use crate::commands::{arrival_from, broadcast_room_except_players_rendered, direction_name};
+use crate::query_cache::with_query;
 
 /// Every mob gets one wander check per 300 ticks (= 30s real-time at 10Hz).
 /// The checks are staggered by entity index ([`wander_slot`]) so each tick
@@ -89,11 +90,10 @@ pub fn wander_tick(world: &mut World) {
     // An entity-only scan keeps the cost of the untouched ~299/300 of the
     // world minimal; the gates below read components of the due mobs only.
     // The full gate runs in Rust here; the per-step exit roll happens later.
-    let due: Vec<Entity> = {
-        let mut q =
-            world.query_filtered::<Entity, (With<Mob>, Without<Fighting>, Without<RiddenBy>)>();
-        q.iter(world).filter(|&e| wander_slot(e, tick)).collect()
-    };
+    let due: Vec<Entity> = with_query::<Entity, (With<Mob>, Without<Fighting>, Without<RiddenBy>), _>(
+        world,
+        |world, q| q.iter(world).filter(|&e| wander_slot(e, tick)).collect(),
+    );
     let candidates: Vec<(Entity, Entity)> = due
         .into_iter()
         .filter_map(|e| {
@@ -188,10 +188,10 @@ pub fn wander_tick(world: &mut World) {
     // checks and life-sense rolls only ever reach players, so a move between
     // rooms nobody is in does none of that work. Players do not move during
     // this pass, so one snapshot serves every move.
-    let player_rooms: HashSet<Entity> = {
-        let mut q = world.query_filtered::<&Located, With<Player>>();
-        q.iter(world).map(|l| l.0).collect()
-    };
+    let player_rooms: HashSet<Entity> =
+        with_query::<&Located, With<Player>, _>(world, |world, q| {
+            q.iter(world).map(|l| l.0).collect()
+        });
     // Apply moves. Done in a separate pass so the candidate
     // snapshot's borrows are gone before we mutate `Located`.
     for (mob, from_room, target_room, dir) in moves {
@@ -285,11 +285,11 @@ pub fn mob_hide_tick(world: &mut World) {
     else {
         return;
     };
-    let candidates: Vec<Entity> = {
-        let mut q = world.query_filtered::<
-            Entity,
-            (With<Mob>, Without<mud_world::Hiddenness>, Without<Fighting>),
-        >();
+    let candidates: Vec<Entity> = with_query::<
+        Entity,
+        (With<Mob>, Without<mud_world::Hiddenness>, Without<Fighting>),
+        _,
+    >(world, |world, q| {
         q.iter(world)
             .filter(|&e| pulse_slot(e, tick))
             .filter(|&e| {
@@ -298,7 +298,7 @@ pub fn mob_hide_tick(world: &mut World) {
                     .is_some_and(|b| b.has(MobBehavior::NoClassAi))
             })
             .collect()
-    };
+    });
     for mob in candidates {
         if !crate::mob_ai::mob_can_act(world, mob)
             || mud_world::effective_level(world, mob) >= IMMORTAL_LEVEL
@@ -348,9 +348,11 @@ pub fn scavenger_tick(world: &mut World) {
     if !tick.is_multiple_of(SCAVENGER_PERIOD_TICKS) {
         return;
     }
-    let scavengers: Vec<(Entity, Entity)> = {
-        let mut q = world
-            .query_filtered::<(Entity, &Located, &MobBehaviors, Option<&MobTraits>), With<Mob>>();
+    let scavengers: Vec<(Entity, Entity)> = with_query::<
+        (Entity, &Located, &MobBehaviors, Option<&MobTraits>),
+        With<Mob>,
+        _,
+    >(world, |world, q| {
         q.iter(world)
             .filter(|(_, _, beh, traits)| {
                 beh.has(MobBehavior::Scavenger)
@@ -358,7 +360,7 @@ pub fn scavenger_tick(world: &mut World) {
             })
             .map(|(e, l, _, _)| (e, l.0))
             .collect()
-    };
+    });
     let scavengers: Vec<(Entity, Entity)> = scavengers
         .into_iter()
         .filter(|&(mob, _)| crate::mob_ai::mob_can_act(world, mob))
@@ -404,8 +406,9 @@ pub fn scavenger_tick(world: &mut World) {
     let player_rooms: HashSet<Entity> = if floor.is_empty() {
         HashSet::new()
     } else {
-        let mut q = world.query_filtered::<&Located, With<Player>>();
-        q.iter(world).map(|l| l.0).collect()
+        with_query::<&Located, With<Player>, _>(world, |world, q| {
+            q.iter(world).map(|l| l.0).collect()
+        })
     };
     for (mob, room) in scavengers {
         if let Some(items) = floor.get_mut(&room)

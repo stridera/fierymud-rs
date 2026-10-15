@@ -200,10 +200,7 @@ fn names_where(
     mut pred: impl FnMut(&World, Entity) -> bool,
     include: impl Fn(&World, Entity) -> bool,
 ) -> Vec<String> {
-    let mut found: Vec<Entity> = world
-        .query_filtered::<Entity, With<Named>>()
-        .iter(world)
-        .collect();
+    let mut found: Vec<Entity> = crate::query_cache::entities::<With<Named>>(world);
     found.retain(|e| include(world, *e) && pred(world, *e));
     found.sort();
     found.into_iter().map(|e| name_of(world, e)).collect()

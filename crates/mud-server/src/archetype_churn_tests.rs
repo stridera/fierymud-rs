@@ -7,6 +7,7 @@
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
     clippy::too_many_lines
 )]
 
@@ -495,5 +496,93 @@ fn effects_tick_catalog_lookup_share_of_the_sweep() {
     );
     if !cfg!(debug_assertions) {
         assert!(with[4].as_millis() < 5, "effects sweep took {:?}", with[4]);
+    }
+}
+
+/// One idle pass of the per-tick sweeps that walk every mob or item.
+fn idle_sweeps(world: &mut World, tick: u64) {
+    world.insert_resource(TickCount(tick));
+    crate::wander::wander_tick(world);
+    crate::wander::mob_hide_tick(world);
+    crate::triggers::random_trigger_tick(world);
+    crate::combat::combat_tick(world);
+    crate::casting::casting_tick(world);
+    crate::effects::break_on_combat_tick(world);
+    crate::flight::gravity_tick(world);
+    crate::item_decay::item_decay_tick(world);
+    crate::commands::room_entry_tick(world);
+}
+
+/// Fastest of five 20-tick runs of [`idle_sweeps`].
+fn time_idle_sweeps(world: &mut World, start_tick: u64) -> std::time::Duration {
+    (0..5u64)
+        .map(|run| {
+            let t0 = Instant::now();
+            for i in 0..20 {
+                idle_sweeps(world, start_tick + run * 20 + i);
+            }
+            t0.elapsed()
+        })
+        .min()
+        .unwrap()
+}
+
+/// Archetypes created by play (spell markers, fights, logins) never go
+/// away, so a sweep must not pay for each archetype in the world on every
+/// tick. Built fresh, a query matches itself against every archetype
+/// holding its rarest fetched component (all of them for an `Entity` +
+/// filters query); the per-tick sweeps keep their query state
+/// (`query_cache`) and only look at archetypes created since the last
+/// tick. On the 2026-10-14 scratch server 1,900 extra mob archetypes took
+/// the idle tick from 1.2 to 2.1 ms before the cache, 0.57 to 0.60 after.
+#[test]
+fn idle_sweeps_do_not_pay_per_archetype() {
+    let mut world = World::new();
+    crate::bookkeeping::register(&mut world);
+    world.insert_resource(TriggerCatalog::default());
+    let rooms: Vec<Entity> = (0..300).map(|_| world.spawn(Room).id()).collect();
+    for i in 0..5500usize {
+        let mob = world
+            .spawn((
+                Mob,
+                mud_world::Named {
+                    name: "a mob".into(),
+                },
+                Located(rooms[i % rooms.len()]),
+            ))
+            .id();
+        crate::archetype_noise::shape(&mut world, mob, i + 1);
+    }
+    // Warm-up: first use builds the cached states.
+    for t in 0..3 {
+        idle_sweeps(&mut world, 1 + t);
+    }
+    let before = world.archetypes().len();
+    let base = time_idle_sweeps(&mut world, 100);
+    // Play adds archetypes: walk some mobs through a few thousand marker
+    // combinations (left empty afterwards, as bevy keeps them).
+    let mobs: Vec<Entity> = crate::query_cache::entities::<With<Mob>>(&mut world);
+    for (i, &mob) in mobs.iter().enumerate().take(400) {
+        crate::archetype_noise::flicker(&mut world, mob, i + 7);
+    }
+    let after = world.archetypes().len();
+    assert!(after > before + 1000, "{before} -> {after} archetypes");
+    let grown = time_idle_sweeps(&mut world, 1000);
+    // Cost of one added archetype to one tick of these sweeps. Measured on
+    // the whole live tick: ~480 ns per added archetype with a fresh query
+    // per sweep, ~16 ns with cached states (which only skip the new, empty
+    // archetypes).
+    let added = (after - before) as f64;
+    let per_archetype_ns =
+        (grown.as_secs_f64() - base.as_secs_f64()).max(0.0) * 1e9 / (added * 20.0);
+    eprintln!(
+        "idle sweeps x20: {before} archetypes {base:?}, {after} archetypes {grown:?}, \
+         {per_archetype_ns:.1} ns per added archetype per tick"
+    );
+    if !cfg!(debug_assertions) {
+        assert!(
+            per_archetype_ns < 25.0,
+            "sweeps went from {base:?} to {grown:?} with {before} -> {after} archetypes"
+        );
     }
 }

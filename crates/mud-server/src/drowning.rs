@@ -10,6 +10,7 @@ use mud_world::{Flying, Frozen, Ghost, Located, Online, Player, RoomSector};
 
 use crate::TickCount;
 use crate::commands::{apply_damage, send_to};
+use crate::query_cache::with_query;
 
 /// One drowning tick = three seconds of held breath.
 const DROWNING_PERIOD_TICKS: u64 = 30;
@@ -25,14 +26,17 @@ pub fn drowning_tick(world: &mut World) {
     // Snapshot every player whose current room is Underwater and
     // who isn't Flying. Ghosts / Frozen players skip — death isn't
     // re-entered, and frozen players are admin-protected.
-    let drowners: Vec<(Entity, Entity, String)> = {
-        let mut q = world.query_filtered::<(Entity, &Located, &mud_world::Named), (
+    let drowners: Vec<(Entity, Entity, String)> = with_query::<
+        (Entity, &Located, &mud_world::Named),
+        (
             With<Player>,
             With<Online>,
             Without<Ghost>,
             Without<Frozen>,
             Without<Flying>,
-        )>();
+        ),
+        _,
+    >(world, |world, q| {
         q.iter(world)
             .filter(|(_, l, _)| {
                 world
@@ -41,7 +45,7 @@ pub fn drowning_tick(world: &mut World) {
             })
             .map(|(e, l, n)| (e, l.0, n.name.clone()))
             .collect()
-    };
+    });
     for (entity, room, name) in drowners {
         send_to(world, entity, "You can't breathe! You're drowning!\r\n");
         let (dead, _) = apply_damage(world, entity, DROWNING_DAMAGE);

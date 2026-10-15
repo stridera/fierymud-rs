@@ -13,6 +13,7 @@ use crate::commands::{
     group_root, has_flag, name_approval_gate, name_of, send_comm_channel_text, send_msg,
     send_rendered, send_to,
 };
+use crate::query_cache::with_query;
 
 inventory::submit! {
     Command {
@@ -203,13 +204,13 @@ pub(super) fn cmd_say(world: &mut World, player: Entity, message: &str) {
         return;
     };
     let speaker = name_of(world, player);
-    let targets: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-        q.iter(world)
-            .filter(|(_, l)| l.0 == located.0)
-            .map(|(e, _)| e)
-            .collect()
-    };
+    let targets: Vec<Entity> =
+        with_query::<(Entity, &Located), With<Player>, _>(world, |world, q| {
+            q.iter(world)
+                .filter(|(_, l)| l.0 == located.0)
+                .map(|(e, _)| e)
+                .collect()
+        });
     let norepeat = has_flag(world, player, PlayerFlag::NoRepeat);
     for target in targets {
         if target != player {
@@ -249,13 +250,13 @@ fn emote_as(world: &mut World, player: Entity, args: &str, suffix: &str) {
         return;
     };
     let player_name = name_of(world, player);
-    let targets: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-        q.iter(world)
-            .filter(|(_, l)| l.0 == located.0)
-            .map(|(e, _)| e)
-            .collect()
-    };
+    let targets: Vec<Entity> =
+        with_query::<(Entity, &Located), With<Player>, _>(world, |world, q| {
+            q.iter(world)
+                .filter(|(_, l)| l.0 == located.0)
+                .map(|(e, _)| e)
+                .collect()
+        });
     for t in targets {
         // Emote body is already third-person ("Strider smiles."), so the
         // GMCP frame is just the line minus its trailing CRLF. Observers
@@ -447,13 +448,13 @@ fn cmd_insult(world: &mut World, player: Entity, args: &str) {
         target,
         crate::commands::cap_sentence_start(&format!("{insulter} insults you: {line}\r\n")),
     );
-    let bystanders: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Player>>();
-        q.iter(world)
-            .filter(|(e, l)| l.0 == located.0 && *e != player && *e != target)
-            .map(|(e, _)| e)
-            .collect()
-    };
+    let bystanders: Vec<Entity> =
+        with_query::<(Entity, &Located), With<Player>, _>(world, |world, q| {
+            q.iter(world)
+                .filter(|(e, l)| l.0 == located.0 && *e != player && *e != target)
+                .map(|(e, _)| e)
+                .collect()
+        });
     let line_room =
         crate::commands::cap_sentence_start(&format!("{actor_name} insults {target_name}.\r\n"));
     let actors = [

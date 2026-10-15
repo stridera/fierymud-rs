@@ -6,6 +6,7 @@ use mud_world::{
 
 use crate::TickCount;
 use crate::commands::{broadcast_room_except_rendered, send_msg, send_to};
+use crate::query_cache::with_query;
 
 /// One regen tick = one second.
 const REGEN_PERIOD_TICKS: u64 = 10;
@@ -52,14 +53,17 @@ pub fn regen_tick(world: &mut World) {
     // hp to max in one shot when the spirit returns to the body;
     // gradually healing a corpse over time would be wrong both
     // mechanically (`release` becomes pointless) and thematically.
-    let updates: Vec<(Entity, Option<i32>, Option<i32>)> = {
-        let mut q = world.query_filtered::<(
+    let updates: Vec<(Entity, Option<i32>, Option<i32>)> = with_query::<
+        (
             Entity,
             Option<&Stamina>,
             Option<&Health>,
             &Posture,
             Option<&mud_world::RegenBonus>,
-        ), (With<Online>, Without<Fighting>, Without<Ghost>)>();
+        ),
+        (With<Online>, Without<Fighting>, Without<Ghost>),
+        _,
+    >(world, |world, q| {
         q.iter(world)
             .map(|(e, stamina, hp, posture, bonus)| {
                 // Rest / repose R6: flat RegenBonus (from the
@@ -97,7 +101,7 @@ pub fn regen_tick(world: &mut World) {
             })
             .filter(|(_, st, hp)| st.is_some() || hp.is_some())
             .collect()
-    };
+    });
 
     for (entity, new_stamina, new_hp) in updates {
         if let Some(new_stamina) = new_stamina
@@ -182,13 +186,13 @@ pub fn hunger_thirst_tick(world: &mut World) {
 
     // Snapshot pre-tick state so all mutations and notifications can
     // happen in a single pass without juggling re-borrows.
-    let snapshot: Vec<(Entity, i32, i32)> = {
-        let mut q = world.query_filtered::<
-            (Entity, &Hunger, &Thirst),
-            (With<Player>, With<Online>, Without<Ghost>, Without<Frozen>),
-        >();
+    let snapshot: Vec<(Entity, i32, i32)> = with_query::<
+        (Entity, &Hunger, &Thirst),
+        (With<Player>, With<Online>, Without<Ghost>, Without<Frozen>),
+        _,
+    >(world, |world, q| {
         q.iter(world).map(|(e, h, t)| (e, h.0, t.0)).collect()
-    };
+    });
 
     for (entity, old_hunger, old_thirst) in snapshot {
         let new_hunger = old_hunger + 1;
@@ -233,13 +237,13 @@ pub fn light_fuel_tick(world: &mut World) {
     // Snapshot lit items + their fuel + their location chain.
     // We resolve the carrier's room (if applicable) up front so the
     // gutter-out line lands at the right address.
-    let snapshot: Vec<(Entity, i32, Entity, String)> = {
-        let mut q = world.query_filtered::<(Entity, &LightFuel, &Located, &Named), With<Lit>>();
-        q.iter(world)
-            .filter(|(_, fuel, _, _)| fuel.remaining > 0)
-            .map(|(e, fuel, l, n)| (e, fuel.remaining, l.0, n.name.clone()))
-            .collect()
-    };
+    let snapshot: Vec<(Entity, i32, Entity, String)> =
+        with_query::<(Entity, &LightFuel, &Located, &Named), With<Lit>, _>(world, |world, q| {
+            q.iter(world)
+                .filter(|(_, fuel, _, _)| fuel.remaining > 0)
+                .map(|(e, fuel, l, n)| (e, fuel.remaining, l.0, n.name.clone()))
+                .collect()
+        });
     for (item, remaining, parent, item_name) in snapshot {
         // Decrement first.
         let new_remaining = remaining - 1;
@@ -293,13 +297,13 @@ pub fn drunkenness_tick(world: &mut World) {
     if !tick.is_multiple_of(DRUNKENNESS_PERIOD_TICKS) {
         return;
     }
-    let snapshot: Vec<(Entity, i32)> = {
-        let mut q = world.query_filtered::<(Entity, &Drunkenness), (With<Player>, With<Online>)>();
-        q.iter(world)
-            .filter(|(_, d)| d.0 > 0)
-            .map(|(e, d)| (e, d.0))
-            .collect()
-    };
+    let snapshot: Vec<(Entity, i32)> =
+        with_query::<(Entity, &Drunkenness), (With<Player>, With<Online>), _>(world, |world, q| {
+            q.iter(world)
+                .filter(|(_, d)| d.0 > 0)
+                .map(|(e, d)| (e, d.0))
+                .collect()
+        });
     for (entity, old) in snapshot {
         let new = old - 1;
         // Threshold crossings (going down).

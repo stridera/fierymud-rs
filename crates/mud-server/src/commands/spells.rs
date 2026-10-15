@@ -16,6 +16,7 @@ use crate::commands::{
     flip_door_both_sides, invoke_ability, name_of, refuse_hidden_exit, resolve_exit_arg, send_msg,
     send_to,
 };
+use crate::query_cache::with_query;
 
 inventory::submit! {
     Command {
@@ -623,13 +624,16 @@ pub(crate) fn cmd_cancel(world: &mut World, player: Entity, args: &str) {
         if let Some((dir, kind_label, room)) = dissolved {
             let player_name = crate::commands::name_of(world, player);
             let dir_name = crate::commands::direction_name(dir);
-            let players: Vec<bevy_ecs::entity::Entity> = {
-                let mut q = world.query_filtered::<(bevy_ecs::entity::Entity, &mud_world::Located), bevy_ecs::prelude::With<mud_world::Player>>();
+            let players: Vec<bevy_ecs::entity::Entity> = with_query::<
+                (bevy_ecs::entity::Entity, &mud_world::Located),
+                bevy_ecs::prelude::With<mud_world::Player>,
+                _,
+            >(world, |world, q| {
                 q.iter(world)
                     .filter(|(e, l)| *e != player && l.0 == room)
                     .map(|(e, _)| e)
                     .collect()
-            };
+            });
             let msg = format!(
                 "{player_name} gestures and the {kind_label} {dir_name} crumbles into nothing.\r\n"
             );

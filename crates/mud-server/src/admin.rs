@@ -122,6 +122,9 @@ pub struct AdminCommand {
 #[allow(clippy::large_enum_variant)]
 pub enum AdminRequest {
     WorldStatus,
+    Archetypes {
+        recent: usize,
+    },
     Players,
     LookRoom {
         zone_id: i32,
@@ -291,6 +294,7 @@ pub fn spawn_admin_server(pool: PgPool) -> (mpsc::Receiver<AdminCommand>, Option
 fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/api/admin/world/status", get(handle_world_status))
+        .route("/api/admin/world/archetypes", get(handle_archetypes))
         .route("/api/admin/players", get(handle_players))
         .route("/api/admin/room/{zone_id}/{id}", get(handle_look_room))
         .route("/api/admin/actor/{name}", get(handle_inspect_actor))
@@ -449,6 +453,21 @@ async fn handle_world_status(
         return json_err(e);
     }
     json_ok(enqueue(&state, AdminRequest::WorldStatus).await)
+}
+
+async fn handle_archetypes(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    if let Err(e) = check_auth(&state, &headers) {
+        return json_err(e);
+    }
+    let recent = params
+        .get("recent")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20);
+    json_ok(enqueue(&state, AdminRequest::Archetypes { recent }).await)
 }
 
 async fn handle_players(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
@@ -1100,9 +1119,12 @@ async fn drain_within(world: &mut World, pool: &PgPool, budget: std::time::Durat
     }
 }
 
+// One arm per request kind: the length is the size of the API.
+#[allow(clippy::too_many_lines)]
 fn service(world: &mut World, req: AdminRequest) -> AdminResponse {
     match req {
         AdminRequest::WorldStatus => Ok(world_status(world)),
+        AdminRequest::Archetypes { recent } => Ok(archetype_census(world, recent)),
         AdminRequest::Players => Ok(online_players(world)),
         AdminRequest::LookRoom { zone_id, id } => look_room(world, zone_id, id),
         AdminRequest::InspectActor { name } => inspect_actor(world, &name),
@@ -1720,6 +1742,90 @@ fn world_status(world: &mut World) -> Value {
         "tick_p95_ms": timing.p95_ms,
         "tick_max_ms": timing.max_ms,
     })
+}
+
+/// Most recent archetypes `archetype_census` lists at most.
+const CENSUS_RECENT_CAP: usize = 200;
+
+/// Archetype census for chasing archetype growth (`world/status` only has
+/// the count): for each component, how many archetypes and entities carry
+/// it, plus the component sets of the `recent` newest archetypes (the
+/// ones play created last, i.e. the components being added or toggled).
+/// Bevy never frees an archetype; see `bookkeeping` and `query_cache`.
+fn archetype_census(world: &World, recent: usize) -> Value {
+    let name_of = |id: &bevy_ecs::component::ComponentId| -> String {
+        world.components().get_info(*id).map_or_else(
+            || format!("{id:?}"),
+            |i| short_type_name(&i.name().to_string()),
+        )
+    };
+    let archetypes = world.archetypes();
+    let mut by_component: HashMap<bevy_ecs::component::ComponentId, (usize, u32)> = HashMap::new();
+    let mut empty = 0usize;
+    for a in archetypes.iter() {
+        if a.is_empty() {
+            empty += 1;
+        }
+        for id in a.components() {
+            let e = by_component.entry(*id).or_default();
+            e.0 += 1;
+            e.1 += a.len();
+        }
+    }
+    let mut by_component: Vec<(String, usize, u32)> = by_component
+        .into_iter()
+        .map(|(id, (n, entities))| (name_of(&id), n, entities))
+        .collect();
+    by_component.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let skip = archetypes
+        .len()
+        .saturating_sub(recent.min(CENSUS_RECENT_CAP));
+    let newest: Vec<Value> = archetypes
+        .iter()
+        .skip(skip)
+        .map(|a| {
+            let mut names: Vec<String> = a.components().iter().map(name_of).collect();
+            names.sort();
+            json!({
+                "id": a.id().index(),
+                "entities": a.len(),
+                "components": names,
+            })
+        })
+        .collect();
+    json!({
+        "archetypes": archetypes.len(),
+        "empty_archetypes": empty,
+        "tables": world.storages().tables.len(),
+        "by_component": by_component
+            .into_iter()
+            .map(|(name, n, entities)| json!({"component": name, "archetypes": n, "entities": entities}))
+            .collect::<Vec<_>>(),
+        "newest": newest,
+    })
+}
+
+/// `mud_world::components::Flying` -> `Flying`, path segments dropped
+/// inside generics too (`Cached<bevy_ecs::entity::Entity>` ->
+/// `Cached<Entity>`).
+fn short_type_name(full: &str) -> String {
+    let mut out = String::with_capacity(full.len());
+    let mut segment = String::new();
+    let mut chars = full.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == ':' && chars.peek() == Some(&':') {
+            chars.next();
+            segment.clear();
+        } else if c.is_alphanumeric() || c == '_' {
+            segment.push(c);
+        } else {
+            out.push_str(&segment);
+            segment.clear();
+            out.push(c);
+        }
+    }
+    out.push_str(&segment);
+    out
 }
 
 /// Every logged-in player session (`Player` + `Online` + `Account`).
@@ -3225,7 +3331,7 @@ mod command_dispatch_tests {
         world.init_resource::<AdminParked>();
         world
             .entity_mut(player)
-            .insert(commands::off_tick::AsyncBusy);
+            .insert(commands::off_tick::AsyncBusy(true));
         let (reply, mut rx) = oneshot::channel();
         world
             .resource::<AdminParked>()
@@ -3492,5 +3598,51 @@ mod session_create_tests {
         assert_eq!(answered(&mut replies), 1);
         drain_admin_requests(&mut world, &pool()).await;
         assert_eq!(answered(&mut replies), 1);
+    }
+}
+
+#[cfg(test)]
+mod archetype_census_tests {
+    use super::*;
+
+    #[derive(Component)]
+    struct Marker;
+
+    #[test]
+    fn short_names_drop_module_paths() {
+        assert_eq!(short_type_name("mud_world::components::Flying"), "Flying");
+        assert_eq!(
+            short_type_name("a::Cached<bevy_ecs::entity::Entity, (b::With<c::Mob>,)>"),
+            "Cached<Entity, (With<Mob>,)>"
+        );
+        assert_eq!(short_type_name("Plain"), "Plain");
+    }
+
+    #[test]
+    fn census_counts_archetypes_per_component_and_lists_the_newest() {
+        let mut world = World::new();
+        world.spawn(Mob);
+        let e = world.spawn(Mob).id();
+        world.entity_mut(e).insert(Marker);
+        world.entity_mut(e).remove::<Marker>();
+        let v = archetype_census(&world, 1);
+        assert_eq!(v["archetypes"], world.archetypes().len());
+        let rows = v["by_component"].as_array().unwrap();
+        let row = |name: &str| {
+            rows.iter()
+                .find(|r| r["component"] == name)
+                .unwrap_or_else(|| panic!("{name} missing from {rows:?}"))
+                .clone()
+        };
+        // `Mob` alone, then `Mob` + `Marker` (now empty): two archetypes,
+        // two live entities.
+        assert_eq!(row("Mob")["archetypes"], 2);
+        assert_eq!(row("Mob")["entities"], 2);
+        assert_eq!(row("Marker")["archetypes"], 1);
+        assert_eq!(row("Marker")["entities"], 0);
+        assert!(v["empty_archetypes"].as_u64().unwrap() >= 1);
+        let newest = v["newest"].as_array().unwrap();
+        assert_eq!(newest.len(), 1);
+        assert_eq!(newest[0]["components"], json!(["Marker", "Mob"]));
     }
 }

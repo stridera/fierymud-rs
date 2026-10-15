@@ -21,12 +21,17 @@
 
 use bevy_ecs::component::Mutable;
 use bevy_ecs::prelude::*;
-use mud_world::{Cooldowns, Mob, Player, Resistances, ScriptVars, Trophy};
+use mud_world::{
+    CharacterAchievements, Cooldowns, Mob, Player, Resistances, ScriptVars, SpellSlots, Trophy,
+    ZoneVisits,
+};
 
 use crate::combat::{DamagedBy, HateList, MobMemory};
-use crate::commands::ReengageLag;
+use crate::commands::gmcp::GmcpSent;
 use crate::commands::info::HideLag;
 use crate::commands::input_queue::{InputQueue, WaitState};
+use crate::commands::off_tick::AsyncBusy;
+use crate::commands::{LastNotedRoom, ReengageLag};
 use crate::idle::IdleCombatSeen;
 
 /// Declare the bookkeeping components as required by `Player` / `Mob`.
@@ -41,6 +46,16 @@ pub(crate) fn register(world: &mut World) {
     world.register_required_components::<Player, Cooldowns>();
     world.register_required_components::<Player, Resistances>();
     world.register_required_components::<Player, InputQueue>();
+    // Spell-slot cooldowns (first cast), the achievement and exploration
+    // records (first unlock / first room on a fresh character), the GMCP
+    // dedup table (first package), the last room the quest code noted
+    // (first sighting) and the off-tick job flag (every `save` / `qstat`).
+    world.register_required_components::<Player, SpellSlots>();
+    world.register_required_components::<Player, CharacterAchievements>();
+    world.register_required_components::<Player, ZoneVisits>();
+    world.register_required_components::<Player, GmcpSent>();
+    world.register_required_components::<Player, LastNotedRoom>();
+    world.register_required_components::<Player, AsyncBusy>();
     // The idle scan reads "last seen fighting" as activity; from spawn it
     // equals the login time, which the scan already counts as activity.
     world.register_required_components_with::<Player, IdleCombatSeen>(|| {
@@ -96,6 +111,9 @@ mod tests {
         assert!(pe.contains::<Trophy>() && pe.contains::<ScriptVars>());
         assert!(pe.contains::<Cooldowns>() && pe.contains::<Resistances>());
         assert!(pe.contains::<InputQueue>() && pe.contains::<IdleCombatSeen>());
+        assert!(pe.contains::<SpellSlots>() && pe.contains::<CharacterAchievements>());
+        assert!(pe.contains::<ZoneVisits>() && pe.contains::<GmcpSent>());
+        assert!(pe.contains::<LastNotedRoom>() && pe.contains::<AsyncBusy>());
         let me = world.entity(m);
         assert!(me.contains::<HateList>() && me.contains::<MobMemory>());
         for e in [p, m] {
@@ -107,6 +125,58 @@ mod tests {
         assert!(world.get::<DamagedBy>(m).unwrap().0.is_none());
         assert!(!crate::commands::input_queue::wait_active(&world, p));
         assert!(!crate::commands::input_queue::has_queued_input(&world, p));
+        assert!(!crate::commands::off_tick::is_busy(&world, p));
+        assert_eq!(
+            *world.get::<LastNotedRoom>(p).unwrap(),
+            LastNotedRoom::default()
+        );
+    }
+
+    /// What a session does to a player on every command, room change and
+    /// prompt (job flag, quest room note, GMCP dedup, a cast's slot, an
+    /// unlock) leaves it in the archetype it spawned in.
+    #[test]
+    fn session_bookkeeping_keeps_the_player_archetype() {
+        let mut world = world();
+        let room = world.spawn(Room).id();
+        let other = world.spawn(Room).id();
+        let p = world.spawn((Player, mud_world::Online, Located(room))).id();
+        let pa = archetype_of(&world, p);
+
+        // First sighting records the room; a move is noted on the next tick.
+        crate::commands::room_entry_tick(&mut world);
+        assert_eq!(
+            world.get::<LastNotedRoom>(p),
+            Some(&LastNotedRoom(Some(room)))
+        );
+        world.entity_mut(p).insert(Located(other));
+        crate::commands::room_entry_tick(&mut world);
+        assert_eq!(
+            world.get::<LastNotedRoom>(p),
+            Some(&LastNotedRoom(Some(other)))
+        );
+
+        world.get_mut::<AsyncBusy>(p).unwrap().0 = true;
+        assert!(crate::commands::off_tick::is_busy(&world, p));
+        reset::<AsyncBusy>(&mut world, p);
+        assert!(!crate::commands::off_tick::is_busy(&world, p));
+
+        crate::commands::gmcp::send_if_changed(&mut world, p, "Char.Vitals", "{}", false);
+        world
+            .get_mut::<SpellSlots>(p)
+            .unwrap()
+            .in_flight
+            .push(mud_world::SpellCooldown {
+                circle: 1,
+                secs_remaining: 30,
+                total_secs: 30,
+            });
+        world
+            .get_mut::<CharacterAchievements>(p)
+            .unwrap()
+            .unlocked
+            .insert(1, chrono::Utc::now());
+        assert_eq!(archetype_of(&world, p), pa);
     }
 
     /// A fight's bookkeeping (grudges, kill credit, lags) and its cleanup

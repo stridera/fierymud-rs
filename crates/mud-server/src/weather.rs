@@ -10,6 +10,7 @@ use mud_db::enums::Climate;
 use mud_world::{PrecipKind, TempBand, WeatherCatalog, WeatherState, ZoneClimate};
 
 use crate::TickCount;
+use crate::query_cache::with_query;
 
 /// Ticks per game hour (75 real seconds at 10 Hz; see `advance_clock`).
 const TICKS_PER_GAME_HOUR: u64 = 750;
@@ -33,14 +34,16 @@ pub fn weather_tick(world: &mut World) {
     // `WeatherCatalog.by_zone` — that lets the look-room weather
     // hint and `look sky` cleanly read "no weather" via a missing
     // map key, with no per-call zone lookup.
-    let climates: Vec<(i32, Climate)> = {
-        let mut q =
-            world.query_filtered::<(&mud_world::WorldKey, &ZoneClimate), With<mud_world::Zone>>();
+    let climates: Vec<(i32, Climate)> = with_query::<
+        (&mud_world::WorldKey, &ZoneClimate),
+        With<mud_world::Zone>,
+        _,
+    >(world, |world, q| {
         q.iter(world)
             .filter(|(_, c)| !matches!(c.0, Climate::None))
             .map(|(wk, c)| (wk.zone, c.0))
             .collect()
-    };
+    });
     // Read the current season once — drift_temp uses it to shift the
     // climate's allowed band. Without this, a Temperate zone in deep
     // winter still drifted Cool..Warm, which looked weird next to a
@@ -392,14 +395,16 @@ pub fn load_snapshot(world: &mut World) {
     // the catalog mutably — those should never carry weather, so a
     // legacy on-disk entry for zone 0 (the Void) needs to drop on
     // restore rather than re-poison the runtime.
-    let none_zones: std::collections::HashSet<i32> = {
-        let mut q =
-            world.query_filtered::<(&mud_world::WorldKey, &ZoneClimate), With<mud_world::Zone>>();
+    let none_zones: std::collections::HashSet<i32> = with_query::<
+        (&mud_world::WorldKey, &ZoneClimate),
+        With<mud_world::Zone>,
+        _,
+    >(world, |world, q| {
         q.iter(world)
             .filter(|(_, c)| matches!(c.0, Climate::None))
             .map(|(wk, _)| wk.zone)
             .collect()
-    };
+    });
     let mut catalog = world.resource_mut::<WeatherCatalog>();
     let mut restored = 0usize;
     let mut skipped = 0usize;

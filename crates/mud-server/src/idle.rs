@@ -24,6 +24,7 @@ use bevy_ecs::prelude::*;
 use mud_world::{Account, LastInputAt, LoggedInAt, Online, Player, WorldKeyIndex};
 
 use crate::TickCount;
+use crate::query_cache::with_query;
 
 /// Check every 10s. Fine enough that the void and the kick land within
 /// ten seconds of their thresholds; cheap enough that the scan doesn't
@@ -259,8 +260,7 @@ pub fn idle_kick_tick(world: &mut World) {
 /// login (pre-login idle / total timeouts). Cheap: linear in online
 /// players, run about once a second.
 pub fn sync_authenticated(world: &mut World, router: &crate::login::ConnRouter) {
-    let mut q = world.query_filtered::<Entity, With<Player>>();
-    for entity in q.iter(world) {
+    for entity in crate::query_cache::entities::<With<Player>>(world) {
         if let Some(conn_id) = router.find_conn(entity) {
             mud_net::mark_authenticated(conn_id);
         }
@@ -277,10 +277,8 @@ pub fn drain_idle_kicks(
     router: &mut crate::login::ConnRouter,
     pool: &mud_db::sqlx::PgPool,
 ) {
-    let pending: Vec<Entity> = {
-        let mut q = world.query_filtered::<Entity, With<IdleKickPending>>();
-        q.iter(world).collect()
-    };
+    let pending: Vec<Entity> =
+        with_query::<Entity, With<IdleKickPending>, _>(world, |world, q| q.iter(world).collect());
     let window = Duration::from_secs(idle_void_secs(world));
     for entity in pending {
         // Marked before a fight broke out: kicking now would leave a

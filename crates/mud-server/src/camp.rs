@@ -17,6 +17,7 @@ use mud_world::{Camping, ClassCatalog, Item, Located, PendingWakeAttachments, Pr
 
 use crate::TickCount;
 use crate::commands::{Camped, Quitting, send_msg, send_rendered};
+use crate::query_cache::with_query;
 
 /// Sectors a player may camp in. Mirrors the legacy refusal
 /// pattern: indoor (Structure), city, water variants, and air
@@ -91,10 +92,10 @@ fn compute_camp_tier(world: &mut World, player: Entity, kit_tier_bonus: i32) -> 
 /// aborts clear the `Camping` component.
 pub fn camp_tick(world: &mut World) {
     let now_tick = world.resource::<TickCount>().0;
-    let snapshot: Vec<(Entity, Camping)> = {
-        let mut q = world.query::<(Entity, &Camping)>();
-        q.iter(world).map(|(e, c)| (e, *c)).collect()
-    };
+    let snapshot: Vec<(Entity, Camping)> =
+        with_query::<(Entity, &Camping), (), _>(world, |world, q| {
+            q.iter(world).map(|(e, c)| (e, *c)).collect()
+        });
     for (entity, camp) in snapshot {
         // Combat-cancel: mid-camp ambush wakes you up.
         if crate::commands::in_combat(world, entity) {

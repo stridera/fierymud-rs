@@ -41,6 +41,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
+use crate::query_cache::with_query;
+
 /// Where a corpse is filed when its room carries no `WorldKey` and the
 /// owner has no recall point: the Void (zone 0, room 0).
 const FALLBACK_ROOM: (i32, i32) = (0, 0);
@@ -320,10 +322,9 @@ pub(crate) fn pending_death(world: &World, player: Entity) -> Option<DeathPersis
 /// `(item count, coin)` held by `container`: lets callers detect
 /// whether a looting command actually changed a corpse's contents.
 pub(crate) fn contents_fingerprint(world: &mut World, container: Entity) -> (usize, i64) {
-    let items = {
-        let mut q = world.query_filtered::<&Located, With<Item>>();
+    let items = with_query::<&Located, With<Item>, _>(world, |world, q| {
         q.iter(world).filter(|l| l.0 == container).count()
-    };
+    });
     let coin = world
         .get::<mud_world::CoinPile>(container)
         .map_or(0, |p| p.0);
@@ -431,13 +432,12 @@ pub(crate) fn corpses_of(world: &mut World, owner: Entity) -> Vec<Entity> {
 /// empty corpse row is deleted there too. Returns how many items moved.
 /// The corpse must be settled (see [`is_unsettled`]).
 pub(crate) fn hand_over(world: &mut World, player: Entity, corpse: Entity) -> usize {
-    let items: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Item>>();
+    let items: Vec<Entity> = with_query::<(Entity, &Located), With<Item>, _>(world, |world, q| {
         q.iter(world)
             .filter(|(_, l)| l.0 == corpse)
             .map(|(e, _)| e)
             .collect()
-    };
+    });
     for &it in &items {
         if let Ok(mut em) = world.get_entity_mut(it) {
             em.insert(Located(player));

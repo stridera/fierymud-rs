@@ -17,6 +17,7 @@ use mud_world::{
 };
 
 use crate::commands::{broadcast_room_except_rendered, cap_sentence_start, send_msg};
+use crate::query_cache::with_query;
 
 pub(crate) use mud_world::SECS_PER_MUD_HOUR;
 
@@ -30,10 +31,10 @@ pub(crate) use mud_world::SECS_PER_MUD_HOUR;
 /// `start_decomposing` added is removed; an item's own `timer_hours`
 /// clock never carries the marker.
 fn stop_decomposing_carried(world: &mut World) {
-    let rotting: Vec<Entity> = {
-        let mut q = world.query_filtered::<Entity, (With<Decomposing>, With<Item>)>();
-        q.iter(world).collect()
-    };
+    let rotting: Vec<Entity> =
+        with_query::<Entity, (With<Decomposing>, With<Item>), _>(world, |world, q| {
+            q.iter(world).collect()
+        });
     for item in rotting {
         if held_by_creature(world, item) {
             let mut em = world.entity_mut(item);
@@ -53,10 +54,10 @@ fn stop_decomposing_carried(world: &mut World) {
 /// or in a container there: the flag is set and `start_decomposing`
 /// starts the clock. A corpse's contents never decompose.
 fn settle_unheld_decay(world: &mut World) {
-    let flagged: Vec<Entity> = {
-        let mut q = world.query_filtered::<Entity, (With<DecaysUnheld>, With<Item>)>();
-        q.iter(world).collect()
-    };
+    let flagged: Vec<Entity> =
+        with_query::<Entity, (With<DecaysUnheld>, With<Item>), _>(world, |world, q| {
+            q.iter(world).collect()
+        });
     for item in flagged {
         let rotting = world
             .get::<ObjectFlags>(item)
@@ -126,10 +127,10 @@ pub fn item_decay_tick(world: &mut World) {
     settle_unheld_decay(world);
     // Snapshot first so we can both mutate timers AND despawn
     // without re-borrowing the query.
-    let snapshots: Vec<(Entity, i32)> = {
-        let mut q = world.query_filtered::<(Entity, &ItemTimer), With<Item>>();
-        q.iter(world).map(|(e, t)| (e, t.remaining_secs)).collect()
-    };
+    let snapshots: Vec<(Entity, i32)> =
+        with_query::<(Entity, &ItemTimer), With<Item>, _>(world, |world, q| {
+            q.iter(world).map(|(e, t)| (e, t.remaining_secs)).collect()
+        });
     let mut destroyed: Vec<Entity> = Vec::new();
     for (entity, current) in snapshots {
         let next = current.saturating_sub(1);
@@ -191,13 +192,13 @@ pub(crate) fn release_contents(
     holder: Entity,
     kind: &HolderKind,
 ) {
-    let contents: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Item>>();
-        q.iter(world)
-            .filter(|(_, l)| l.0 == container)
-            .map(|(e, _)| e)
-            .collect()
-    };
+    let contents: Vec<Entity> =
+        with_query::<(Entity, &Located), With<Item>, _>(world, |world, q| {
+            q.iter(world)
+                .filter(|(_, l)| l.0 == container)
+                .map(|(e, _)| e)
+                .collect()
+        });
     // A loose pile of coins *is* the money: when it rots the coins go with
     // it (legacy `decay_object` extracts the money object). Releasing its
     // amount would respawn a fresh pile that rots again, forever.
@@ -271,13 +272,12 @@ pub(crate) fn start_decomposing(world: &mut World, item: Entity) {
     if world.get::<Corpse>(item).is_some() {
         return;
     }
-    let inner: Vec<Entity> = {
-        let mut q = world.query_filtered::<(Entity, &Located), With<Item>>();
+    let inner: Vec<Entity> = with_query::<(Entity, &Located), With<Item>, _>(world, |world, q| {
         q.iter(world)
             .filter(|(_, l)| l.0 == item)
             .map(|(e, _)| e)
             .collect()
-    };
+    });
     for e in inner {
         start_decomposing(world, e);
     }

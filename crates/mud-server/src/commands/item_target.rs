@@ -120,13 +120,16 @@ fn place_hits(
             let Some(room) = room else {
                 return Vec::new();
             };
-            let mut q = world
-                .query_filtered::<(Entity, &Located, &Named, Option<&Keywords>), bevy_ecs::prelude::With<Item>>();
-            let mut hits: Vec<Entity> = q
-                .iter(world)
-                .filter(|(_, l, n, kw)| l.0 == room && matches(needle, n, *kw))
-                .map(|(e, _, _, _)| e)
-                .collect();
+            let mut hits: Vec<Entity> = crate::query_cache::with_query::<
+                (Entity, &Located, &Named, Option<&Keywords>),
+                bevy_ecs::prelude::With<Item>,
+                _,
+            >(world, |world, q| {
+                q.iter(world)
+                    .filter(|(_, l, n, kw)| l.0 == room && matches(needle, n, *kw))
+                    .map(|(e, _, _, _)| e)
+                    .collect()
+            });
             sort_newest_first(world, room, &mut hits, |e| *e);
             hits
         }
