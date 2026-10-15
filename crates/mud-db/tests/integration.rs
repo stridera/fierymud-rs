@@ -1824,6 +1824,64 @@ async fn mount_type_query_reports_a_missing_table_as_42p01() {
     assert_eq!(code.as_deref(), Some("42P01"));
 }
 
+/// The libraries query runs against the real table and returns unique, lowercase-named rows.
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn script_libraries_list_reads_the_table() {
+    let pool = pool().await;
+    let rows = mud_db::script_libraries::list_all(&pool)
+        .await
+        .expect("ScriptLibrary table exists (prisma db push)");
+    let mut names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+    let total = names.len();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(names.len(), total, "names are unique");
+    assert!(rows.iter().all(|r| !r.code.is_empty()));
+}
+
+/// A database that predates the table fails with Postgres 42P01, the code `load_script_libraries`
+/// keys on to boot with no libraries instead of failing.
+#[tokio::test]
+#[ignore = "requires live fierydev DB"]
+async fn script_library_query_reports_a_missing_table_as_42p01() {
+    let _ = dotenvy::from_path("../../.env");
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .expect("connect");
+    let schema = format!("scratch_scriptlib_{}", std::process::id());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&pool)
+        .await
+        .expect("create schema");
+    let result: sqlx::Result<_> = async {
+        sqlx::query(&format!("SET search_path = {schema}"))
+            .execute(&pool)
+            .await?;
+        Ok(mud_db::script_libraries::list_all(&pool).await)
+    }
+    .await;
+    sqlx::query("SET search_path = public")
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&pool)
+        .await
+        .ok();
+    let err = result
+        .expect("scratch setup")
+        .expect_err("no table in the scratch schema");
+    let code = err
+        .as_database_error()
+        .and_then(sqlx::error::DatabaseError::code)
+        .map(std::borrow::Cow::into_owned);
+    assert_eq!(code.as_deref(), Some("42P01"));
+}
+
 #[tokio::test]
 #[ignore = "requires live fierydev DB"]
 async fn internal_zones_are_the_seeded_plumbing_zones() {

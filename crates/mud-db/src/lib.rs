@@ -66,6 +66,7 @@ pub mod room_exits;
 pub mod room_extra_descriptions;
 pub mod rooms;
 pub mod script_errors;
+pub mod script_libraries;
 pub mod shops;
 pub mod socials;
 pub mod spell_circles;

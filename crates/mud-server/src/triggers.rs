@@ -1281,6 +1281,17 @@ pub struct ReloadStats {
     pub rooms_with_triggers: usize,
 }
 
+/// Swap the importable Lua libraries (`require(name)`) for a freshly loaded set. The script
+/// host's module cache is keyed on the set's generation, so the next `require` of any library
+/// re-evaluates the new source; modules already handed to running scripts are left alone.
+/// Returns the number of libraries now loaded.
+pub fn apply_reloaded_libraries(world: &mut World, libraries: mud_world::ScriptLibraries) -> usize {
+    let count = libraries.len();
+    world.insert_resource(libraries);
+    tracing::info!(libraries = count, "script libraries reloaded");
+    count
+}
+
 /// Atomically swap the world's `TriggerCatalog` resource for the
 /// new one and refresh every `Room` entity's `AttachedTriggers`
 /// from the new catalog's `room_attachments` map. Mob/object

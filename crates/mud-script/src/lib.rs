@@ -8,6 +8,7 @@
 //! while we hold `&mut World` and never re-enter.
 
 mod api_extra;
+mod require;
 
 use std::ptr::NonNull;
 
@@ -623,6 +624,7 @@ const LUA_MEMORY_LIMIT: usize = 64 * 1024 * 1024;
 /// tables, so each environment gets its own read-only *proxy* for them
 /// (`string.find = nil` raises instead of corrupting the real table),
 /// and metatables are locked so scripts can't reach the real ones.
+#[derive(Clone)]
 struct EnvKit {
     env_meta: Table,
     libs: Vec<(&'static str, Table)>,
@@ -704,6 +706,10 @@ impl LuaHost {
             tracing::warn!(error = %e, "Lua sandbox setup failed; trigger isolation degraded");
         }
         let env_kit = EnvKit::new(&lua).expect("Lua per-trigger environment setup");
+        // Replaces the `require` the sandbox stripped: a database-backed, sandboxed one.
+        if let Err(e) = require::install(&lua, &env_kit) {
+            tracing::warn!(error = %e, "Lua require() setup failed; scripts cannot load libraries");
+        }
         Self {
             lua,
             current_tick: 0,
@@ -992,7 +998,7 @@ impl LuaHost {
             let env = self.new_trigger_env()?;
             // Shadow everything that could output or yield; indexing a
             // boolean / calling `false` raises, which is a refusal.
-            for name in ["print", "coroutine"] {
+            for name in ["print", "coroutine", "require"] {
                 env.raw_set(name, false)?;
             }
             env.raw_set("actor", LuaReadActor { entity: actor })?;
@@ -1307,18 +1313,7 @@ impl LuaHost {
             None => globals.set("object", Value::Nil)?,
         }
 
-        // Override print so output flows back to the caller.
-        globals.set(
-            "print",
-            self.lua
-                .create_function(|lua, args: Variadic<Value>| -> mlua::Result<()> {
-                    let line = format_args(&args);
-                    if let Some(mut cap) = lua.app_data_mut::<LuaCapture>() {
-                        cap.lines.push(line);
-                    }
-                    Ok(())
-                })?,
-        )?;
+        Self::bind_api(&self.lua, globals, world)?;
 
         // `globals` is a script-scoped scratchpad table. The
         // DG-Script-converted corpus uses the
@@ -1330,6 +1325,41 @@ impl LuaHost {
         if globals.raw_get::<Value>("globals")?.is_nil() {
             globals.set("globals", self.lua.create_table()?)?;
         }
+
+        // `speech` is the SPEECH event's text. A trigger flagged for both
+        // SPEECH and another type (RANDOM, say) runs the same body for the
+        // non-speech fires, so `speech` defaults to "" rather than nil and
+        // `speech:find(...)` / `speech == "..."` just don't match. A resumed
+        // thread keeps whatever its body already set.
+        if globals.raw_get::<Value>("speech")?.is_nil() {
+            globals.set("speech", "")?;
+        }
+        // Caller-supplied event-context globals (`speech` for
+        // SPEECH triggers, etc.). Cleaned up alongside the
+        // built-ins below.
+        for (name, value) in extras {
+            globals.set(*name, *value)?;
+        }
+        Ok(())
+    }
+
+    /// The stateless script API (`print`, `world`, `combat`, `mobiles`, `time`, ...): everything
+    /// a body can call that does not depend on who fired it. Shared by trigger environments and
+    /// library environments (see `require`). Per-fire globals (`actor`, `self`, `object`,
+    /// `speech`, `event`, `globals`) are bound by [`LuaHost::bind_globals`] only.
+    #[allow(clippy::too_many_lines)]
+    fn bind_api(lua: &Lua, globals: &Table, world: &World) -> mlua::Result<()> {
+        // Override print so output flows back to the caller.
+        globals.set(
+            "print",
+            lua.create_function(|lua, args: Variadic<Value>| -> mlua::Result<()> {
+                let line = format_args(&args);
+                if let Some(mut cap) = lua.app_data_mut::<LuaCapture>() {
+                    cap.lines.push(line);
+                }
+                Ok(())
+            })?,
+        )?;
 
         // `skills.set_level(actor, name, level)` upserts an entry
         // into the actor's `KnownAbilities`. Used by the
@@ -1344,10 +1374,10 @@ impl LuaHost {
         // or a string name; nil falls through to the no-target
         // form (which `invoke_ability` handles as a self-cast or
         // current-target lookup).
-        let skills_tbl = self.lua.create_table()?;
+        let skills_tbl = lua.create_table()?;
         skills_tbl.set(
             "set_level",
-            self.lua.create_function(
+            lua.create_function(
                 |lua, (a, name, level): (AnyUserData, String, i32)| -> mlua::Result<()> {
                     let entity = a.borrow::<LuaActor>()?.entity;
                     skills_set_level(lua, entity, &name, level)
@@ -1356,7 +1386,7 @@ impl LuaHost {
         )?;
         skills_tbl.set(
             "execute",
-            self.lua.create_function(
+            lua.create_function(
                 |lua, (a, name, target): (AnyUserData, String, Value)| -> mlua::Result<()> {
                     let caster = a.borrow::<LuaActor>()?.entity;
                     let target_name = resolve_target_name(lua, &target)?;
@@ -1375,13 +1405,12 @@ impl LuaHost {
         // parameter is accepted so existing trigger bodies work
         // unchanged. 100+ corpus refs across mob combat AI and
         // greet flavor scripts.
-        let spells_tbl = self.lua.create_table()?;
+        let spells_tbl = lua.create_table()?;
         spells_tbl.set(
             "cast",
-            self.lua
-                .create_function(|lua, args: MultiValue| -> mlua::Result<()> {
-                    spells_cast_dispatch(lua, args)
-                })?,
+            lua.create_function(|lua, args: MultiValue| -> mlua::Result<()> {
+                spells_cast_dispatch(lua, args)
+            })?,
         )?;
         globals.set("spells", spells_tbl)?;
 
@@ -1393,27 +1422,24 @@ impl LuaHost {
         // deliberately omitted from v1 — triggers calling them
         // error cleanly with a "nil value" message instead of
         // silently corrupting world state.
-        let world_tbl = self.lua.create_table()?;
+        let world_tbl = lua.create_table()?;
         world_tbl.set(
             "count_mobiles",
-            self.lua
-                .create_function(|lua, (zone, id): (i32, i32)| -> mlua::Result<i64> {
-                    world_count_kind(lua, zone, id, EntityKind::Mob)
-                })?,
+            lua.create_function(|lua, (zone, id): (i32, i32)| -> mlua::Result<i64> {
+                world_count_kind(lua, zone, id, EntityKind::Mob)
+            })?,
         )?;
         world_tbl.set(
             "count_objects",
-            self.lua
-                .create_function(|lua, (zone, id): (i32, i32)| -> mlua::Result<i64> {
-                    world_count_kind(lua, zone, id, EntityKind::Item)
-                })?,
+            lua.create_function(|lua, (zone, id): (i32, i32)| -> mlua::Result<i64> {
+                world_count_kind(lua, zone, id, EntityKind::Item)
+            })?,
         )?;
         world_tbl.set(
             "find_mobile",
-            self.lua
-                .create_function(|lua, (zone, id): (i32, i32)| -> mlua::Result<Value> {
-                    world_find_kind(lua, zone, id, EntityKind::Mob)
-                })?,
+            lua.create_function(|lua, (zone, id): (i32, i32)| -> mlua::Result<Value> {
+                world_find_kind(lua, zone, id, EntityKind::Mob)
+            })?,
         )?;
         // `world.destroy(actor)` removes a mob or an item through the
         // server's cleanup (carried items, followers, reset timer; item
@@ -1424,35 +1450,33 @@ impl LuaHost {
         // for a death, so a reset-spawned mob respawns on its timer.
         world_tbl.set(
             "destroy",
-            self.lua
-                .create_function(|lua, target: Value| -> mlua::Result<()> {
-                    match target {
-                        Value::UserData(ud) => {
-                            let entity = ud.borrow::<LuaActor>()?.entity;
-                            world_mut_from_lua(lua, |world| script_destroy(world, entity))
-                        }
-                        // `world.destroy(object.name)`: resolved in the
-                        // script's own context, legacy purge style.
-                        Value::String(name) => {
-                            let name = name.to_str()?.to_string();
-                            let from = lua.app_data_ref::<SelfEntity>().map(|s| s.0);
-                            world_mut_from_lua(lua, |world| {
-                                if let Some(from) = from
-                                    && let Some(e) =
-                                        api_extra::resolve_destroy_name(world, from, &name)
-                                {
-                                    script_destroy(world, e);
-                                }
-                            })
-                        }
-                        // Nothing to purge (e.g. a failed `find_actor`).
-                        Value::Nil => Ok(()),
-                        other => Err(mlua::Error::external(format!(
-                            "world.destroy expects an actor or a name, got {}",
-                            other.type_name()
-                        ))),
+            lua.create_function(|lua, target: Value| -> mlua::Result<()> {
+                match target {
+                    Value::UserData(ud) => {
+                        let entity = ud.borrow::<LuaActor>()?.entity;
+                        world_mut_from_lua(lua, |world| script_destroy(world, entity))
                     }
-                })?,
+                    // `world.destroy(object.name)`: resolved in the
+                    // script's own context, legacy purge style.
+                    Value::String(name) => {
+                        let name = name.to_str()?.to_string();
+                        let from = lua.app_data_ref::<SelfEntity>().map(|s| s.0);
+                        world_mut_from_lua(lua, |world| {
+                            if let Some(from) = from
+                                && let Some(e) = api_extra::resolve_destroy_name(world, from, &name)
+                            {
+                                script_destroy(world, e);
+                            }
+                        })
+                    }
+                    // Nothing to purge (e.g. a failed `find_actor`).
+                    Value::Nil => Ok(()),
+                    other => Err(mlua::Error::external(format!(
+                        "world.destroy expects an actor or a name, got {}",
+                        other.type_name()
+                    ))),
+                }
+            })?,
         )?;
         globals.set("world", world_tbl)?;
 
@@ -1470,23 +1494,22 @@ impl LuaHost {
         // the caller's perspective.
         globals.set(
             "run_room_trigger",
-            self.lua
-                .create_function(|lua, (zone, id): (i32, i32)| -> mlua::Result<()> {
-                    let caller = lua.app_data_ref::<SelfEntity>().map(|s| s.0);
-                    world_mut_from_lua(lua, |world| {
-                        if !world.contains_resource::<mud_world::DeferredRoomTriggerFires>() {
-                            world.insert_resource(mud_world::DeferredRoomTriggerFires::default());
-                        }
-                        world
-                            .resource_mut::<mud_world::DeferredRoomTriggerFires>()
-                            .queue
-                            .push(mud_world::DeferredRoomTriggerFire {
-                                room_zone: zone,
-                                room_id: id,
-                                caller,
-                            });
-                    })
-                })?,
+            lua.create_function(|lua, (zone, id): (i32, i32)| -> mlua::Result<()> {
+                let caller = lua.app_data_ref::<SelfEntity>().map(|s| s.0);
+                world_mut_from_lua(lua, |world| {
+                    if !world.contains_resource::<mud_world::DeferredRoomTriggerFires>() {
+                        world.insert_resource(mud_world::DeferredRoomTriggerFires::default());
+                    }
+                    world
+                        .resource_mut::<mud_world::DeferredRoomTriggerFires>()
+                        .queue
+                        .push(mud_world::DeferredRoomTriggerFire {
+                            room_zone: zone,
+                            room_id: id,
+                            caller,
+                        });
+                })
+            })?,
         )?;
 
         // `_seconds_until(hour, minute)` — internal helper that
@@ -1501,24 +1524,23 @@ impl LuaHost {
         // the legacy "wait until next occurrence" semantic).
         globals.set(
             "_seconds_until",
-            self.lua
-                .create_function(|lua, (h, m): (i32, i32)| -> mlua::Result<i64> {
-                    let target_h = h.rem_euclid(24);
-                    let target_m = m.rem_euclid(60);
-                    let target = i64::from(target_h * 60 + target_m);
-                    let current = world_from_lua(lua, |w| {
-                        w.get_resource::<mud_world::MudClock>().map_or(0, |c| {
-                            i64::from(c.hour.rem_euclid(24) * 60 + c.minute.rem_euclid(60))
-                        })
-                    })?;
-                    let mut delta_minutes = target - current;
-                    if delta_minutes <= 0 {
-                        delta_minutes += 24 * 60;
-                    }
-                    // 75 real-time seconds per 60 game minutes
-                    // = 5/4 real seconds per game minute.
-                    Ok(delta_minutes.saturating_mul(5).saturating_div(4).max(1))
-                })?,
+            lua.create_function(|lua, (h, m): (i32, i32)| -> mlua::Result<i64> {
+                let target_h = h.rem_euclid(24);
+                let target_m = m.rem_euclid(60);
+                let target = i64::from(target_h * 60 + target_m);
+                let current = world_from_lua(lua, |w| {
+                    w.get_resource::<mud_world::MudClock>().map_or(0, |c| {
+                        i64::from(c.hour.rem_euclid(24) * 60 + c.minute.rem_euclid(60))
+                    })
+                })?;
+                let mut delta_minutes = target - current;
+                if delta_minutes <= 0 {
+                    delta_minutes += 24 * 60;
+                }
+                // 75 real-time seconds per 60 game minutes
+                // = 5/4 real seconds per game minute.
+                Ok(delta_minutes.saturating_mul(5).saturating_div(4).max(1))
+            })?,
         )?;
 
         // `wait_until(hour, minute)` — clock-aligned wait for
@@ -1530,64 +1552,61 @@ impl LuaHost {
         // Minute is fully honored (12.5 ticks ≈ 1 game minute).
         globals.set(
             "wait_until",
-            self.lua
-                .load(
-                    "local y = coroutine.yield; \
+            lua.load(
+                "local y = coroutine.yield; \
                          local s = _seconds_until; \
                          return function(h, m) y(s(h, m or 0)) end",
-                )
-                .eval::<Function>()?,
+            )
+            .eval::<Function>()?,
         )?;
 
         // `combat` namespace — engage/rescue. Implemented via
         // direct Fighting component manipulation; the regular
         // combat tick picks up the new pairing on its next pass.
-        let combat_tbl = self.lua.create_table()?;
+        let combat_tbl = lua.create_table()?;
         // `combat.engage(target)` / `combat.engage(attacker, target)`:
         // `target` is an actor or a name looked up in the attacker's room.
         // With one argument the script's `self` is the attacker.
         combat_tbl.set(
             "engage",
-            self.lua
-                .create_function(|lua, args: MultiValue| -> mlua::Result<()> {
-                    let Some((attacker, target)) = combat_pair(lua, args)? else {
-                        return Ok(());
-                    };
-                    world_mut_from_lua(lua, |world| script_engage(world, attacker, target))
-                })?,
+            lua.create_function(|lua, args: MultiValue| -> mlua::Result<()> {
+                let Some((attacker, target)) = combat_pair(lua, args)? else {
+                    return Ok(());
+                };
+                world_mut_from_lua(lua, |world| script_engage(world, attacker, target))
+            })?,
         )?;
         // `combat.rescue(victim)` / `combat.rescue(rescuer, victim)`: the
         // first fighter found hitting the victim switches to the rescuer.
         combat_tbl.set(
             "rescue",
-            self.lua
-                .create_function(|lua, args: MultiValue| -> mlua::Result<()> {
-                    let Some((rescuer, victim)) = combat_pair(lua, args)? else {
-                        return Ok(());
+            lua.create_function(|lua, args: MultiValue| -> mlua::Result<()> {
+                let Some((rescuer, victim)) = combat_pair(lua, args)? else {
+                    return Ok(());
+                };
+                world_mut_from_lua(lua, |world| {
+                    if rescuer == victim
+                        || world.get_entity(rescuer).is_err()
+                        || world.get_entity(victim).is_err()
+                    {
+                        return;
+                    }
+                    let attacker = {
+                        let mut q = world.query::<(Entity, &Fighting)>();
+                        q.iter(world)
+                            .find(|(e, f)| f.0 == victim && *e != rescuer)
+                            .map(|(e, _)| e)
                     };
-                    world_mut_from_lua(lua, |world| {
-                        if rescuer == victim
-                            || world.get_entity(rescuer).is_err()
-                            || world.get_entity(victim).is_err()
-                        {
-                            return;
+                    if let Some(attacker) = attacker
+                        && let Ok(mut em) = world.get_entity_mut(attacker)
+                    {
+                        em.insert(Fighting(rescuer));
+                        if let Ok(mut me) = world.get_entity_mut(rescuer) {
+                            me.insert(Fighting(attacker));
                         }
-                        let attacker = {
-                            let mut q = world.query::<(Entity, &Fighting)>();
-                            q.iter(world)
-                                .find(|(e, f)| f.0 == victim && *e != rescuer)
-                                .map(|(e, _)| e)
-                        };
-                        if let Some(attacker) = attacker
-                            && let Ok(mut em) = world.get_entity_mut(attacker)
-                        {
-                            em.insert(Fighting(rescuer));
-                            if let Ok(mut me) = world.get_entity_mut(rescuer) {
-                                me.insert(Fighting(attacker));
-                            }
-                        }
-                    })
-                })?,
+                    }
+                })
+            })?,
         )?;
         globals.set("combat", combat_tbl)?;
 
@@ -1598,8 +1617,7 @@ impl LuaHost {
         // Lua so the yield works without mlua's async feature.
         globals.set(
             "wait",
-            self.lua
-                .load("local y = coroutine.yield; return function(n) y(n or 1) end")
+            lua.load("local y = coroutine.yield; return function(n) y(n or 1) end")
                 .eval::<Function>()?,
         )?;
 
@@ -1611,7 +1629,7 @@ impl LuaHost {
         // run of a script (the one inside the dispatcher) reads it.
         globals.set(
             "allow_command",
-            self.lua.create_function(|lua, ()| -> mlua::Result<()> {
+            lua.create_function(|lua, ()| -> mlua::Result<()> {
                 if let Some(mut cap) = lua.app_data_mut::<LuaCapture>() {
                     cap.allow_command = true;
                 }
@@ -1624,30 +1642,28 @@ impl LuaHost {
         // catalog entry. The corpus uses these as
         // `objects.template(555, 77).name` to get a proto's
         // display name without spawning. 363 + 353 corpus refs.
-        let mobiles_tbl = self.lua.create_table()?;
+        let mobiles_tbl = lua.create_table()?;
         mobiles_tbl.set(
             "template",
-            self.lua
-                .create_function(|lua, (zone, id): (i32, i32)| -> mlua::Result<Value> {
-                    Ok(Value::UserData(lua.create_userdata(LuaProto {
-                        zone,
-                        id,
-                        kind: ProtoKind::Mob,
-                    })?))
-                })?,
+            lua.create_function(|lua, (zone, id): (i32, i32)| -> mlua::Result<Value> {
+                Ok(Value::UserData(lua.create_userdata(LuaProto {
+                    zone,
+                    id,
+                    kind: ProtoKind::Mob,
+                })?))
+            })?,
         )?;
         globals.set("mobiles", mobiles_tbl)?;
-        let objects_tbl = self.lua.create_table()?;
+        let objects_tbl = lua.create_table()?;
         objects_tbl.set(
             "template",
-            self.lua
-                .create_function(|lua, (zone, id): (i32, i32)| -> mlua::Result<Value> {
-                    Ok(Value::UserData(lua.create_userdata(LuaProto {
-                        zone,
-                        id,
-                        kind: ProtoKind::Item,
-                    })?))
-                })?,
+            lua.create_function(|lua, (zone, id): (i32, i32)| -> mlua::Result<Value> {
+                Ok(Value::UserData(lua.create_userdata(LuaProto {
+                    zone,
+                    id,
+                    kind: ProtoKind::Item,
+                })?))
+            })?,
         )?;
         globals.set("objects", objects_tbl)?;
 
@@ -1656,27 +1672,7 @@ impl LuaHost {
         // their "every 5s" actions); `.hour`/`.day`/`.month`/
         // `.year` come from `MudClock` — advanced one game hour
         // every 750 ticks (~75s real). Total ~32 corpus refs.
-        let time_tbl = self.lua.create_table()?;
-        let clock = world
-            .get_resource::<mud_world::MudClock>()
-            .cloned()
-            .unwrap_or_default();
-        time_tbl.set("stamp", clock.stamp)?;
-        time_tbl.set("hour", i64::from(clock.hour))?;
-        time_tbl.set("minute", i64::from(clock.minute))?;
-        time_tbl.set("day", i64::from(clock.day))?;
-        time_tbl.set("month", i64::from(clock.month))?;
-        time_tbl.set("year", i64::from(clock.year))?;
-        // String views of the calendar — let triggers branch on
-        // "if time.season == 'Winter' then …" without rebuilding
-        // the 16-month name table in every script.
-        time_tbl.set("month_name", mud_world::month_name(world, clock.month))?;
-        time_tbl.set("season", clock.season().label())?;
-        // Day/night convenience flag matches `commands::room_is_dark`'s
-        // window (22..=05) so triggers don't have to redo the math.
-        let is_night = matches!(clock.hour, 0..=4 | 22..=23);
-        time_tbl.set("is_night", is_night)?;
-        time_tbl.set("is_day", !is_night)?;
+        let time_tbl = make_time_table(lua, world)?;
         globals.set("time", time_tbl)?;
 
         // `find_actor(keyword)` searches the entire world for the
@@ -1686,10 +1682,9 @@ impl LuaHost {
         // a target by keyword.
         globals.set(
             "find_actor",
-            self.lua
-                .create_function(|lua, needle: String| -> mlua::Result<Value> {
-                    find_actor(lua, &needle)
-                })?,
+            lua.create_function(|lua, needle: String| -> mlua::Result<Value> {
+                find_actor(lua, &needle)
+            })?,
         )?;
 
         // `Effect.<Name>` resolves to a lowercased name string,
@@ -1698,14 +1693,13 @@ impl LuaHost {
         // uses these as effectively-typed enum constants
         // (`Effect.Bless`, `Effect.Sanctuary`, ...). Implemented
         // via metatable __index.
-        let effect_tbl = self.lua.create_table()?;
-        let effect_meta = self.lua.create_table()?;
+        let effect_tbl = lua.create_table()?;
+        let effect_meta = lua.create_table()?;
         effect_meta.set(
             "__index",
-            self.lua
-                .create_function(|_, (_t, key): (Value, String)| -> mlua::Result<String> {
-                    Ok(key.to_ascii_lowercase())
-                })?,
+            lua.create_function(|_, (_t, key): (Value, String)| -> mlua::Result<String> {
+                Ok(key.to_ascii_lowercase())
+            })?,
         )?;
         let _ = effect_tbl.set_metatable(Some(effect_meta));
         globals.set("Effect", effect_tbl)?;
@@ -1716,13 +1710,12 @@ impl LuaHost {
         // exclusively. 859 corpus refs.
         globals.set(
             "random",
-            self.lua
-                .create_function(|_, (low, high): (i64, i64)| -> mlua::Result<i64> {
-                    if low > high {
-                        return Ok(low);
-                    }
-                    Ok(rand::random_range(low..=high))
-                })?,
+            lua.create_function(|_, (low, high): (i64, i64)| -> mlua::Result<i64> {
+                if low > high {
+                    return Ok(low);
+                }
+                Ok(rand::random_range(low..=high))
+            })?,
         )?;
 
         // `percent_chance(N)` returns true with N% probability.
@@ -1730,10 +1723,9 @@ impl LuaHost {
         // random combat moves, or ambient room behavior.
         globals.set(
             "percent_chance",
-            self.lua
-                .create_function(|_, n: i64| -> mlua::Result<bool> {
-                    Ok(rand::random_range(1i64..=100) <= n.clamp(0, 100))
-                })?,
+            lua.create_function(|_, n: i64| -> mlua::Result<bool> {
+                Ok(rand::random_range(1i64..=100) <= n.clamp(0, 100))
+            })?,
         )?;
 
         // `get_room(zone, id)` returns a LuaRoom by lookup against
@@ -1742,30 +1734,41 @@ impl LuaHost {
         // checks all use this.
         globals.set(
             "get_room",
-            self.lua
-                .create_function(|lua, (zone, id): (i32, i32)| -> mlua::Result<Value> {
-                    get_room(lua, zone, id)
-                })?,
+            lua.create_function(|lua, (zone, id): (i32, i32)| -> mlua::Result<Value> {
+                get_room(lua, zone, id)
+            })?,
         )?;
 
-        api_extra::bind_globals(&self.lua, globals)?;
-
-        // `speech` is the SPEECH event's text. A trigger flagged for both
-        // SPEECH and another type (RANDOM, say) runs the same body for the
-        // non-speech fires, so `speech` defaults to "" rather than nil and
-        // `speech:find(...)` / `speech == "..."` just don't match. A resumed
-        // thread keeps whatever its body already set.
-        if globals.raw_get::<Value>("speech")?.is_nil() {
-            globals.set("speech", "")?;
-        }
-        // Caller-supplied event-context globals (`speech` for
-        // SPEECH triggers, etc.). Cleaned up alongside the
-        // built-ins below.
-        for (name, value) in extras {
-            globals.set(*name, *value)?;
-        }
+        api_extra::bind_globals(lua, globals)?;
         Ok(())
     }
+}
+
+/// The `time` namespace: a snapshot of `MudClock` as a table. Trigger environments get a fresh
+/// snapshot at every bind (and resume); library environments read it live (see `require`).
+fn make_time_table(lua: &Lua, world: &World) -> mlua::Result<Table> {
+    let time_tbl = lua.create_table()?;
+    let clock = world
+        .get_resource::<mud_world::MudClock>()
+        .cloned()
+        .unwrap_or_default();
+    time_tbl.set("stamp", clock.stamp)?;
+    time_tbl.set("hour", i64::from(clock.hour))?;
+    time_tbl.set("minute", i64::from(clock.minute))?;
+    time_tbl.set("day", i64::from(clock.day))?;
+    time_tbl.set("month", i64::from(clock.month))?;
+    time_tbl.set("year", i64::from(clock.year))?;
+    // String views of the calendar — let triggers branch on
+    // "if time.season == 'Winter' then …" without rebuilding
+    // the 16-month name table in every script.
+    time_tbl.set("month_name", mud_world::month_name(world, clock.month))?;
+    time_tbl.set("season", clock.season().label())?;
+    // Day/night convenience flag matches `commands::room_is_dark`'s
+    // window (22..=05) so triggers don't have to redo the math.
+    let is_night = matches!(clock.hour, 0..=4 | 22..=23);
+    time_tbl.set("is_night", is_night)?;
+    time_tbl.set("is_day", !is_night)?;
+    Ok(time_tbl)
 }
 
 #[derive(Default)]
@@ -6804,3 +6807,6 @@ mod room_scan_tests;
 
 #[cfg(test)]
 mod actor_scan_tests;
+
+#[cfg(test)]
+mod require_tests;

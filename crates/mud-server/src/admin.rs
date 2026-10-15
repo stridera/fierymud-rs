@@ -201,6 +201,9 @@ pub enum AdminRequest {
     /// rows on their next respawn naturally.
     ReloadTriggers {
         catalog: Box<mud_world::TriggerCatalog>,
+        /// The importable Lua libraries (`require(name)`), reloaded together
+        /// with the catalog; the script module cache is dropped with them.
+        libraries: Box<mud_world::ScriptLibraries>,
     },
     /// Manually invoke a trigger body against a chosen `self`
     /// entity, optionally with an `actor` binding. Bypasses the
@@ -980,7 +983,16 @@ async fn handle_trigger_reload(
             ));
         }
     };
-    json_ok(enqueue(&state, AdminRequest::ReloadTriggers { catalog }).await)
+    let libraries = match mud_world::load_script_libraries(&state.pool).await {
+        Ok(l) => Box::new(l),
+        Err(e) => {
+            return json_err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("script library query failed: {e}"),
+            ));
+        }
+    };
+    json_ok(enqueue(&state, AdminRequest::ReloadTriggers { catalog, libraries }).await)
 }
 
 fn json_ok(r: Result<Value, (StatusCode, String)>) -> (StatusCode, axum::Json<Value>) {
@@ -1176,7 +1188,9 @@ fn service(world: &mut World, req: AdminRequest) -> AdminResponse {
         AdminRequest::TriggerErrors { limit } => Ok(trigger_errors(world, limit)),
         AdminRequest::TriggerStats => Ok(trigger_stats(world)),
         AdminRequest::ValidateTriggers { zone_id } => Ok(validate_triggers(world, zone_id)),
-        AdminRequest::ReloadTriggers { catalog } => Ok(reload_triggers(world, *catalog)),
+        AdminRequest::ReloadTriggers { catalog, libraries } => {
+            Ok(reload_triggers(world, *catalog, *libraries))
+        }
         AdminRequest::FireTrigger {
             zone_id,
             id,
@@ -1488,17 +1502,23 @@ fn fire_trigger(
     }
 }
 
-/// Swap the live `TriggerCatalog` for `new` and refresh
+/// Swap the live `TriggerCatalog` (and the importable `ScriptLibraries`) for `new` and refresh
 /// `AttachedTriggers` on every Room entity using the new
 /// `room_attachments` map. Mob and item entities keep whatever
 /// attachments they were spawned with — the next respawn cycle
 /// picks up additions/removals naturally; reloading existing
 /// instances would risk surprising live combat.
-fn reload_triggers(world: &mut World, new: mud_world::TriggerCatalog) -> Value {
+fn reload_triggers(
+    world: &mut World,
+    new: mud_world::TriggerCatalog,
+    libraries: mud_world::ScriptLibraries,
+) -> Value {
     let stats = crate::triggers::apply_reloaded_catalog(world, new);
+    let library_count = crate::triggers::apply_reloaded_libraries(world, libraries);
     json!({
         "ok": true,
         "total": stats.total,
+        "libraries": library_count,
         "mob_links": stats.mob_links,
         "object_links": stats.object_links,
         "room_links": stats.room_links,

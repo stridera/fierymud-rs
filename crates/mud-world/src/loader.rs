@@ -7,8 +7,8 @@ use mud_db::{
     command_help, command_policy, content_tables, discord_config, effects, game_config, help,
     levels, liquids, login_message, mob_ai, mob_reset_equipment, mob_resets, mobs, mount_types,
     object_abilities, object_reset_contents, object_resets, objects, races, room_exits, rooms,
-    shops, socials, spell_circles, spell_slots, sphere_styles, sqlx::PgPool, system_text, triggers,
-    weather_text, zones,
+    script_libraries, shops, socials, spell_circles, spell_slots, sphere_styles, sqlx::PgPool,
+    system_text, triggers, weather_text, zones,
 };
 use tracing::{error, info, warn};
 
@@ -228,6 +228,30 @@ async fn load_sphere_styles(pool: &PgPool) -> sqlx::Result<crate::sphere_style::
                  fierylib/data/sql/2026-10-12-sphere-colors.sql is applied"
             );
             Ok(crate::sphere_style::SphereStyles::default())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Importable Lua libraries (`"ScriptLibrary"`, the `require("name")` namespace). A database
+/// without the table or its columns (42P01 / 42703) yields no libraries and an ERROR log: scripts
+/// that `require` something then fail with "module not found" instead of the server failing to
+/// boot or reload. Also used by the trigger reload.
+///
+/// # Errors
+/// Any database error other than a missing table / column.
+pub async fn load_script_libraries(
+    pool: &PgPool,
+) -> sqlx::Result<crate::script_library::ScriptLibraries> {
+    match script_libraries::list_all(pool).await {
+        Ok(rows) => Ok(crate::script_library::ScriptLibraries::from_rows(rows)),
+        Err(e) if is_missing_schema(&e) => {
+            error!(
+                "table \"ScriptLibrary\" is missing or out of date; require() finds no libraries \
+                 until the muditor schema is pushed (prisma db push) and \
+                 fierylib/data/sql/2026-10-14-script-library.sql is applied"
+            );
+            Ok(crate::script_library::ScriptLibraries::default())
         }
         Err(e) => Err(e),
     }
@@ -1066,6 +1090,13 @@ pub async fn load_from_db(world: &mut World, pool: &PgPool) -> sqlx::Result<Load
         "summon-mount tiers loaded (built-in tiers fill a side with no rows)"
     );
     world.insert_resource(mount_types);
+
+    let script_libraries = load_script_libraries(pool).await?;
+    info!(
+        libraries = script_libraries.len(),
+        "script libraries loaded (require(\"name\") resolves from these)"
+    );
+    world.insert_resource(script_libraries);
 
     let weather_text = load_weather_text(pool).await?;
     info!(

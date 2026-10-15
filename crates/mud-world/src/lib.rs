@@ -13,6 +13,7 @@ pub mod mount_type;
 pub mod movement;
 pub mod reset_gear;
 pub mod resources;
+pub mod script_library;
 pub mod sphere_style;
 pub mod stat_roll;
 pub mod targeting;
@@ -25,6 +26,7 @@ pub use command_policy::{CommandPolicy, PolicyFlag, PolicyFlags};
 pub use god::{GOD_PROFICIENCY, bypasses_restrictions, known_abilities_of, proficiency_of};
 pub use liquid_legacy::{BUILTIN_CODES as LEGACY_LIQUID_CODES, LegacyLiquidRow, LiquidLegacyIndex};
 pub use mount_type::{MountPlan, MountTypes};
+pub use script_library::ScriptLibraries;
 pub use sphere_style::SphereStyles;
 pub use stat_roll::{STAT_SCALE_MAX, roll_starting_stats};
 pub use wake_effects::{RoomWakeRow, WakeEffectCatalog, WakeRow, load_wake_effect_catalog};
@@ -74,8 +76,9 @@ pub use item_spawn::{
 };
 pub use loader::{
     LoadStats, ReloadStats, default_weather_for_climate, load_ability_catalog, load_content_tables,
-    load_effect_catalog, load_from_db, load_gear_contents, load_mob_ai_data, load_trigger_catalog,
-    merge_prototypes, reload_zones, wear_flags_primary_slot, wear_flags_slots,
+    load_effect_catalog, load_from_db, load_gear_contents, load_mob_ai_data, load_script_libraries,
+    load_trigger_catalog, merge_prototypes, reload_zones, wear_flags_primary_slot,
+    wear_flags_slots,
 };
 pub use mob_ai_rules::{
     AiAlign, AiCondition, AiKind, AiRule, AiTarget, AlignMask, MobAi, MobAiData, parse_conditions,

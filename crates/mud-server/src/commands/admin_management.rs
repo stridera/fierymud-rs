@@ -1007,13 +1007,26 @@ pub(crate) async fn cmd_treload(
             return;
         }
     };
+    let libraries = match mud_world::load_script_libraries(pool).await {
+        Ok(l) => l,
+        Err(e) => {
+            send_to(
+                world,
+                player,
+                format!("Script library reload failed: {e}\r\n"),
+            );
+            return;
+        }
+    };
     let stats = crate::triggers::apply_reloaded_catalog(world, new);
+    let library_count = crate::triggers::apply_reloaded_libraries(world, libraries);
     send_to(
         world,
         player,
         format!(
             "Trigger catalog reloaded: {} rows ({} mob, {} object, {} room \
-             attachment groups; {} rooms now carry triggers).\r\n\
+             attachment groups; {} rooms now carry triggers); {} script \
+             libraries.\r\n\
              Mob/object instance attachments unchanged — next respawn \
              picks up catalog edits.\r\n",
             stats.total,
@@ -1021,6 +1034,7 @@ pub(crate) async fn cmd_treload(
             stats.object_links,
             stats.room_links,
             stats.rooms_with_triggers,
+            library_count,
         ),
     );
 }
