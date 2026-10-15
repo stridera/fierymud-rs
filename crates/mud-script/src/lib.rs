@@ -2341,8 +2341,8 @@ fn actor_emit_with_perspective(
             world.insert_resource(LuaOutbox::default());
         }
         let mut out = world.resource_mut::<LuaOutbox>();
-        out.direct.push((actor, self_line));
-        out.messages.push((room, room_line, Some(actor)));
+        out.push_direct(actor, self_line);
+        out.push_room(room, room_line, Some(actor));
     })
 }
 
@@ -2955,18 +2955,18 @@ impl UserData for LuaActor {
                         world.insert_resource(LuaOutbox::default());
                     }
                     let mut out = world.resource_mut::<LuaOutbox>();
-                    out.direct.push((
+                    out.push_direct(
                         this.entity,
                         format!("You whisper to {resolved_name}, '{msg}'"),
-                    ));
-                    out.direct.push((
+                    );
+                    out.push_direct(
                         target_entity,
                         format!("{speaker_name} whispers to you, '{msg}'"),
-                    ));
+                    );
                     let bystander_line =
                         format!("{speaker_name} whispers something to {resolved_name}.");
                     for b in bystanders {
-                        out.direct.push((b, bystander_line.clone()));
+                        out.push_direct(b, bystander_line.clone());
                     }
                 })
             },
@@ -3500,7 +3500,7 @@ impl UserData for LuaActor {
                 let line = format!("{speaker_name} shouts, '{msg}'");
                 let mut out = world.resource_mut::<LuaOutbox>();
                 for t in audience {
-                    out.direct.push((t, line.clone()));
+                    out.push_direct(t, line.clone());
                 }
             })
         });
@@ -3613,7 +3613,7 @@ impl UserData for LuaActor {
         // `actor:send(msg)` sends a single private line to this
         // entity. Paired with `room:send_except(actor, ...)` for the
         // per-recipient framing pattern (10901 corpus refs). Pushed
-        // into `LuaOutbox.direct` and drained directly to the
+        // into `LuaOutbox.lines` and drained directly to the
         // entity's Connection by mud-server.
         methods.add_method("send", |lua, this, msg: String| -> mlua::Result<()> {
             world_mut_from_lua(lua, |world| {
@@ -3622,8 +3622,7 @@ impl UserData for LuaActor {
                 }
                 world
                     .resource_mut::<LuaOutbox>()
-                    .direct
-                    .push((this.entity, msg));
+                    .push_direct(this.entity, msg);
             })
         });
 
@@ -4530,8 +4529,7 @@ impl UserData for LuaRoom {
                 }
                 world
                     .resource_mut::<LuaOutbox>()
-                    .messages
-                    .push((this.entity, msg, None));
+                    .push_room(this.entity, msg, None);
             })
         });
 
@@ -4618,11 +4616,9 @@ impl UserData for LuaRoom {
                     if !world.contains_resource::<LuaOutbox>() {
                         world.insert_resource(LuaOutbox::default());
                     }
-                    world.resource_mut::<LuaOutbox>().messages.push((
-                        this.entity,
-                        msg,
-                        Some(except),
-                    ));
+                    world
+                        .resource_mut::<LuaOutbox>()
+                        .push_room(this.entity, msg, Some(except));
                 })
             },
         );
@@ -4715,7 +4711,7 @@ impl UserData for LuaRoom {
                     }
                     let mut out = world.resource_mut::<LuaOutbox>();
                     for n in neighbours {
-                        out.messages.push((n, msg.clone(), None));
+                        out.push_room(n, msg.clone(), None);
                     }
                 })
             },

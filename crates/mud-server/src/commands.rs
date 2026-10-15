@@ -3004,26 +3004,19 @@ impl Drop for OutboxHold {
 }
 
 fn flush_lua_outbox(world: &mut World) {
-    use mud_world::LuaOutbox;
-    let (messages, direct, commands, corpse_loot, arrivals) =
-        if world.contains_resource::<LuaOutbox>() {
-            let mut out = world.resource_mut::<LuaOutbox>();
-            (
-                std::mem::take(&mut out.messages),
-                std::mem::take(&mut out.direct),
-                std::mem::take(&mut out.commands),
-                std::mem::take(&mut out.corpse_loot),
-                std::mem::take(&mut out.arrivals),
-            )
-        } else {
-            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
-        };
-    if messages.is_empty()
-        && direct.is_empty()
-        && commands.is_empty()
-        && corpse_loot.is_empty()
-        && arrivals.is_empty()
-    {
+    use mud_world::{LuaOutbox, OutLine};
+    let (lines, commands, corpse_loot, arrivals) = if world.contains_resource::<LuaOutbox>() {
+        let mut out = world.resource_mut::<LuaOutbox>();
+        (
+            std::mem::take(&mut out.lines),
+            std::mem::take(&mut out.commands),
+            std::mem::take(&mut out.corpse_loot),
+            std::mem::take(&mut out.arrivals),
+        )
+    } else {
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+    };
+    if lines.is_empty() && commands.is_empty() && corpse_loot.is_empty() && arrivals.is_empty() {
         return;
     }
     // Items a script moved out of a player corpse into a player's hands:
@@ -3034,8 +3027,10 @@ fn flush_lua_outbox(world: &mut World) {
             crate::quest_progress::save_player_soon(world, player);
         }
     }
-    // Room broadcasts: snapshot recipients per room so the inner loop
-    // doesn't re-borrow World mid-send. Script lines are built from
+    // Script output, in the order the script made the calls (room
+    // broadcasts and private `actor:send` lines share one queue, so a
+    // recipient never sees a later line before an earlier one). Snapshot
+    // recipients per room so the inner loop doesn't re-borrow World mid-send. Script lines are built from
     // `self.name .. " says ..."`, so the first visible character is
     // capitalised ([`cap_script_line`]) unless the line opens with a URL.
     // Scripts often send one paragraph as several lines, so a line is only
@@ -3043,22 +3038,25 @@ fn flush_lua_outbox(world: &mut World) {
     // from this flush, or after a line that ended a sentence
     // ([`script_line_ends_sentence`]).
     let mut sentence_start: HashMap<Entity, bool> = HashMap::new();
-    let mut direct_sentence_start: HashMap<Entity, bool> = HashMap::new();
-    for (room, msg, except) in messages {
-        let recipients: Vec<Entity> = crate::room_index::contents_of(world, room)
-            .filter(|&e| Some(e) != except && world.get::<Connection>(e).is_some())
-            .collect();
-        for r in recipients {
-            let line = script_line_for(&mut sentence_start, r, &msg);
-            send_prose(world, r, line);
+    for out_line in lines {
+        match out_line {
+            OutLine::Room { room, msg, except } => {
+                let recipients: Vec<Entity> = crate::room_index::contents_of(world, room)
+                    .filter(|&e| Some(e) != except && world.get::<Connection>(e).is_some())
+                    .collect();
+                for r in recipients {
+                    let line = script_line_for(&mut sentence_start, r, &msg);
+                    send_prose(world, r, line);
+                }
+            }
+            // Direct one-to-one delivery (actor:send). send_to silently
+            // no-ops if the target has no Connection (mob targets,
+            // disconnected players) — that's the desired behavior.
+            OutLine::Direct { target, msg } => {
+                let line = script_line_for(&mut sentence_start, target, &msg);
+                send_prose(world, target, line);
+            }
         }
-    }
-    // Direct one-to-one delivery (actor:send). send_to silently no-ops
-    // if the target has no Connection (mob targets, disconnected
-    // players) — that's the desired behavior.
-    for (target, msg) in direct {
-        let line = script_line_for(&mut direct_sentence_start, target, &msg);
-        send_prose(world, target, line);
     }
 
     // Players a script walked through an exit (`actor:move`): they see the
@@ -11039,6 +11037,24 @@ pub(crate) fn format_wealth(total: i64) -> Option<String> {
         }
     }
     Some(parts.join(", "))
+}
+
+/// Legacy `statemoney`: `coins` (`[platinum, gold, silver, copper]` counts)
+/// stated per denomination as given, not folded into the largest coins:
+/// "500 copper", "2 silver and 3 copper", "1 platinum, 2 gold, and 3 copper".
+pub(crate) fn state_money(coins: [i64; 4]) -> String {
+    let parts: Vec<String> = COIN_DENOMINATIONS
+        .iter()
+        .zip(coins)
+        .filter(|(_, count)| *count != 0)
+        .map(|((_, name, tag), count)| format!("{tag}{count}</> {name}"))
+        .collect();
+    match parts.as_slice() {
+        [] => "0 coins".to_string(),
+        [one] => one.clone(),
+        [a, b] => format!("{a} and {b}"),
+        [init @ .., last] => format!("{}, and {last}", init.join(", ")),
+    }
 }
 
 /// [`format_wealth`] for call sites that always have a positive

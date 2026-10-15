@@ -2329,19 +2329,31 @@ pub struct DeferredRoomTriggerFires {
     pub queue: Vec<DeferredRoomTriggerFire>,
 }
 
-/// Queued output produced by Lua trigger bodies. `messages` carries
-/// room broadcasts (`room.send` / `room.send_except`); `direct`
-/// carries one-to-one lines (`actor.send`). mud-server drains both
-/// after each Lua call returns. mud-script writes; mud-server reads,
-/// decoupling the scripting host from the network layer.
+/// One line of script output, either a room broadcast or a private line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutLine {
+    /// `(room, msg, except)` - room broadcast (`room.send` /
+    /// `room.send_except`), optionally skipping one recipient.
+    Room {
+        room: Entity,
+        msg: String,
+        except: Option<Entity>,
+    },
+    /// `(target, msg)` - one-to-one delivery (`actor.send`) to the
+    /// target's Connection.
+    Direct { target: Entity, msg: String },
+}
+
+/// Queued output produced by Lua trigger bodies. `lines` carries every
+/// message in the order the script made the calls, whether a room
+/// broadcast or a private line, so each recipient sees them in script
+/// order. mud-server drains it after each Lua call returns. mud-script
+/// writes; mud-server reads, decoupling the scripting host from the
+/// network layer.
 #[derive(Resource, Debug, Default)]
 pub struct LuaOutbox {
-    /// `(room, msg, except)` — room broadcasts, optionally skipping
-    /// one recipient.
-    pub messages: Vec<(Entity, String, Option<Entity>)>,
-    /// `(target, msg)` — direct one-to-one delivery to the target's
-    /// Connection.
-    pub direct: Vec<(Entity, String)>,
+    /// Script output in call order (room broadcasts and private lines).
+    pub lines: Vec<OutLine>,
     /// `(actor, line)` — queued commands that should be dispatched as
     /// if `actor` had typed `line`. Drained by mud-server after the
     /// current Lua call returns to avoid re-entering the dispatcher
@@ -2356,6 +2368,25 @@ pub struct LuaOutbox {
     /// room's GREET triggers and its POSTENTRY triggers. Without it a
     /// scripted escort lands in silence and the lesson mob never greets.
     pub arrivals: Vec<Entity>,
+}
+
+impl LuaOutbox {
+    /// Queue a room broadcast, optionally skipping one recipient.
+    pub fn push_room(&mut self, room: Entity, msg: impl Into<String>, except: Option<Entity>) {
+        self.lines.push(OutLine::Room {
+            room,
+            msg: msg.into(),
+            except,
+        });
+    }
+
+    /// Queue a private line for one entity.
+    pub fn push_direct(&mut self, target: Entity, msg: impl Into<String>) {
+        self.lines.push(OutLine::Direct {
+            target,
+            msg: msg.into(),
+        });
+    }
 }
 
 /// Catalog of every shop, loaded from `Shops` + `ShopItems` at startup.

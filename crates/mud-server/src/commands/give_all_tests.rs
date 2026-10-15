@@ -415,19 +415,84 @@ fn a_receive_trigger_returning_true_nil_or_nothing_accepts() {
     }
 }
 
+/// Once a recipient refuses an item, `give all` stops offering it more
+/// (like `give N`): the refusal is not repeated for every item, and what
+/// was not offered stays with the giver.
 #[test]
-fn give_all_refuses_per_item_and_keeps_going() {
+fn give_all_stops_at_the_first_receive_refusal() {
     let mut s = scene();
-    let keeper = keeper_with(&mut s, "if object.id == 7 then return false end");
+    let keeper = keeper_with(
+        &mut s,
+        "actor:send('Keeper refuses.') if object.id == 7 then return false end",
+    );
+    // Newest first: the apple (offered last) would have been accepted, but
+    // the run ends at the first sword.
+    let apple = item_at(&mut s.fx.world, s.giver, 8, "a red apple", "apple");
     let a = item_at(&mut s.fx.world, s.giver, 7, "a steel sword", "sword");
     let b = item_at(&mut s.fx.world, s.giver, 7, "a steel sword", "sword");
-    let c = item_at(&mut s.fx.world, s.giver, 8, "a red apple", "apple");
     let out = s.cmd("give all keeper");
-    assert_eq!(s.holder(a), s.giver, "{out}");
-    assert_eq!(s.holder(b), s.giver, "{out}");
-    assert_eq!(s.holder(c), keeper, "{out}");
-    assert!(out.contains("You give a red apple to Keeper."), "{out}");
-    assert!(!out.contains("steel sword to Keeper"), "{out}");
+    assert_eq!(out.matches("Keeper refuses.").count(), 1, "{out}");
+    for item in [a, b, apple] {
+        assert_eq!(s.holder(item), s.giver, "{out}");
+    }
+    assert!(!out.contains("You give"), "{out}");
+    let _ = keeper;
+}
+
+#[test]
+fn give_all_dot_name_refusal_is_said_once_too() {
+    let mut s = scene();
+    keeper_with(&mut s, "actor:send('Keeper refuses.') return false");
+    let items = swords(&mut s, 4);
+    let out = s.cmd("give all.sword keeper");
+    assert_eq!(out.matches("Keeper refuses.").count(), 1, "{out}");
+    for item in items {
+        assert_eq!(s.holder(item), s.giver, "{out}");
+    }
+}
+
+/// Script output reaches each recipient in the order the script made the
+/// calls, whether it is a private `actor:send` or a room broadcast.
+#[test]
+fn script_output_keeps_call_order_across_send_and_room_send() {
+    let mut s = scene();
+    let (_bob, mut bob_rx) = s.player("Bob", 30);
+    keeper_with(
+        &mut s,
+        "actor:send('Line A.') self.room:send('Line B.') actor:send('Line C.')",
+    );
+    swords(&mut s, 1);
+    let out = s.cmd("give sword keeper");
+    let a = out.find("Line A.").expect(&out);
+    let b = out.find("Line B.").expect(&out);
+    let c = out.find("Line C.").expect(&out);
+    assert!(a < b && b < c, "{out}");
+    let heard = drain(&mut bob_rx);
+    assert!(heard.contains("Line B."), "{heard}");
+    assert!(
+        !heard.contains("Line A.") && !heard.contains("Line C."),
+        "{heard}"
+    );
+}
+
+/// `room:send_except` and `send_to_adjacent`-style room lines interleave
+/// with private lines in call order too.
+#[test]
+fn script_output_keeps_call_order_with_send_except() {
+    let mut s = scene();
+    keeper_with(
+        &mut s,
+        "actor:send('One.') self.room:send_except(actor, 'Two.') actor:send('Three.') \
+         self.room:send('Four.')",
+    );
+    swords(&mut s, 1);
+    let out = s.cmd("give sword keeper");
+    let pos: Vec<usize> = ["One.", "Three.", "Four."]
+        .iter()
+        .map(|w| out.find(w).expect(&out))
+        .collect();
+    assert!(pos.windows(2).all(|w| w[0] < w[1]), "{out}");
+    assert!(!out.contains("Two."), "{out}");
 }
 
 #[test]

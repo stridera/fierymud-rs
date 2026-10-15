@@ -131,3 +131,73 @@ fn get_all_prints_the_grouped_line_before_the_get_trigger_output() {
     assert!(line < first, "{out}");
     assert_eq!(count(&out, "The stick twitches."), 2, "{out}");
 }
+
+#[test]
+fn counted_get_groups_identical_items_into_one_line() {
+    let (mut fx, room, p, mut rx) = scene();
+    let sticks: Vec<Entity> = (0..3)
+        .map(|_| item_at(&mut fx.world, room, 7, "a small stick", "stick"))
+        .collect();
+    dispatch(&mut fx.world, p, "get 2 stick");
+    let out = drain(&mut rx);
+    assert_eq!(count(&out, "You pick up"), 1, "{out}");
+    assert!(out.contains("You pick up a small stick. (x2)"), "{out}");
+    let held = sticks
+        .iter()
+        .filter(|&&s| fx.world.get::<Located>(s).unwrap().0 == p)
+        .count();
+    assert_eq!(held, 2, "{out}");
+}
+
+#[test]
+fn counted_get_of_one_available_item_keeps_the_plain_line() {
+    let (mut fx, room, p, mut rx) = scene();
+    item_at(&mut fx.world, room, 7, "a small stick", "stick");
+    dispatch(&mut fx.world, p, "get 3 stick");
+    let out = drain(&mut rx);
+    assert!(out.contains("You pick up a small stick.\r\n"), "{out}");
+    assert!(!out.contains("(x"), "{out}");
+}
+
+/// Drop ANSI colour escapes so a line can be compared as plain text.
+fn plain(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            for e in chars.by_ref() {
+                if e.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[test]
+fn give_coins_states_the_denominations_the_player_typed() {
+    let (mut fx, room, p, mut rx) = scene();
+    fx.world.entity_mut(p).insert(mud_world::Wealth(5_000));
+    let (bob, mut bob_rx) = fx.person("Bob", 30, room);
+    dispatch(&mut fx.world, p, "give 500 copper bob");
+    let out = plain(&drain(&mut rx));
+    assert!(out.contains("You give Bob 500 copper."), "{out}");
+    assert!(!out.contains("gold"), "{out}");
+    assert!(plain(&drain(&mut bob_rx)).contains("Tester gives you 500 copper."));
+    dispatch(&mut fx.world, p, "give 2 gold 3 silver 4 copper bob");
+    let out = plain(&drain(&mut rx));
+    assert!(
+        out.contains("You give Bob 2 gold, 3 silver, and 4 copper."),
+        "{out}"
+    );
+    dispatch(&mut fx.world, p, "give 1 gold 7 copper bob");
+    let out = plain(&drain(&mut rx));
+    assert!(out.contains("You give Bob 1 gold and 7 copper."), "{out}");
+    assert_eq!(
+        fx.world.get::<mud_world::Wealth>(bob).unwrap().0,
+        500 + 234 + 107
+    );
+}

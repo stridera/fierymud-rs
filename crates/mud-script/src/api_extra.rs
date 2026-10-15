@@ -260,7 +260,7 @@ fn zone_echo(lua: &Lua, zone: i32, msg: &str) -> mlua::Result<()> {
         }
         let mut out = world.resource_mut::<LuaOutbox>();
         for room in rooms {
-            out.messages.push((room, msg.to_string(), None));
+            out.push_room(room, msg, None);
         }
     })
 }
@@ -327,7 +327,7 @@ fn wizard_notify(lua: &Lua, msg: &str) -> mlua::Result<()> {
         }
         let mut out = world.resource_mut::<LuaOutbox>();
         for e in staff {
-            out.direct.push((e, format!("<b:cyan>[wiznet]</> {msg}")));
+            out.push_direct(e, format!("<b:cyan>[wiznet]</> {msg}"));
         }
     })
 }
@@ -940,7 +940,7 @@ mod tests {
     use crate::LuaHost;
     use mud_world::components::{AppliedTo, EffectInstance, EffectSource, GroupMember, Health};
     use mud_world::liquid_legacy::LegacyLiquidRow;
-    use mud_world::resources::{AbilityDef, ObjectProto, TriggerAttach, TriggerDef};
+    use mud_world::resources::{AbilityDef, ObjectProto, OutLine, TriggerAttach, TriggerDef};
     use std::sync::{Arc, Mutex};
 
     /// Rooms (5,1) and (5,2) in zone 5, (6,1) in zone 6, a player in
@@ -1122,13 +1122,17 @@ mod tests {
         f.ok("zone.echo(5, 'The ground shakes.')");
         let out = f.world.resource::<LuaOutbox>();
         assert_eq!(
-            out.messages,
-            vec![(f.room, "The ground shakes.".to_string(), None)]
+            out.lines,
+            vec![OutLine::Room {
+                room: f.room,
+                msg: "The ground shakes.".to_string(),
+                except: None
+            }]
         );
         // An empty message queues nothing.
-        f.world.resource_mut::<LuaOutbox>().messages.clear();
+        f.world.resource_mut::<LuaOutbox>().lines.clear();
         f.ok("zone.echo(5, '')");
-        assert!(f.world.resource::<LuaOutbox>().messages.is_empty());
+        assert!(f.world.resource::<LuaOutbox>().lines.is_empty());
         let _ = f.other_room;
     }
 
@@ -1691,8 +1695,11 @@ mod tests {
         f.ok("wizard_notify('Now starting!')");
         let out = f.world.resource::<LuaOutbox>();
         assert_eq!(
-            out.direct,
-            vec![(god, "<b:cyan>[wiznet]</> Now starting!".to_string())]
+            out.lines,
+            vec![OutLine::Direct {
+                target: god,
+                msg: "<b:cyan>[wiznet]</> Now starting!".to_string()
+            }]
         );
     }
 
@@ -1730,7 +1737,7 @@ mod tests {
             Located(f.far_room),
         ));
         f.ok("for i = 1, 5 do wizard_notify('spam ' .. i) end");
-        assert_eq!(f.world.resource::<LuaOutbox>().direct.len(), 1);
+        assert_eq!(f.world.resource::<LuaOutbox>().lines.len(), 1);
     }
 
     // ----- actor:cast -----

@@ -11310,6 +11310,23 @@ pub(crate) fn cmd_get(world: &mut World, player: Entity, args: &str) {
         get_plain(world, player, rest);
         return;
     };
+    // `get 3 stick` off the floor: more than one match goes through the
+    // same grouped path as `get all.stick`, so the lines read "(x3)".
+    if container.is_none() && n > 1 {
+        let mut items =
+            crate::commands::item_target::find_items_all(world, player, needle, ItemClass::Room);
+        items.retain(|&e| crate::commands::senses::item_visible_to(world, player, e));
+        items.truncate(n);
+        if items.len() > 1 {
+            if crate::commands::composition::refuse_get_from_room(world, player) {
+                return;
+            }
+            let items: Vec<(Entity, String)> =
+                items.into_iter().map(|e| (e, name_of(world, e))).collect();
+            get_batch_from_floor(world, player, room, &items, needle);
+            return;
+        }
+    }
     for i in 0..n {
         let before = match container {
             Some(c) => find_in_container(world, needle, c),
@@ -11375,8 +11392,8 @@ pub(crate) fn cmd_put(world: &mut World, player: Entity, args: &str) {
 pub(crate) fn cmd_give(world: &mut World, player: Entity, args: &str) {
     // `give 5 gold bob`, `give 2 silver 3 copper to bob` (legacy
     // `parse_money`): coins are not carried items.
-    if let Some((copper, rest)) = parse_coin_amounts(args.trim()) {
-        give_coins(world, player, copper, rest);
+    if let Some((coins, rest)) = parse_coin_parts(args.trim()) {
+        give_coins(world, player, coins, rest);
         return;
     }
     if let Some(msg) = give_count_refusal(world, player, args.trim()) {
@@ -11493,7 +11510,7 @@ fn give_counted(
             GiveResult::Given(name) => note_given(given, name),
             GiveResult::Busy => return true,
             // The same item would meet the same refusal again.
-            GiveResult::Refused | GiveResult::Blocked => break,
+            GiveResult::Refused | GiveResult::Declined | GiveResult::Blocked => break,
         }
     }
     false
@@ -11564,9 +11581,10 @@ fn resolve_give_target(world: &mut World, player: Entity, target_word: &str) -> 
 /// (soulbound, no-drop, a GIVE trigger) is skipped; a recipient who cannot
 /// take more (too laden, a body that cannot hold things) ends the run, as
 /// in legacy where the rest would meet the same wall. A RECEIVE script that
-/// refuses an item (returns false) hands just that one back; a recipient whose
-/// RECEIVE trigger is still waiting ends the run, and the function returns
-/// true so the caller can say so.
+/// refuses an item (returns false) hands that one back and ends the run, like
+/// `give N`, so the rest stay with the giver; a recipient whose RECEIVE
+/// trigger is still waiting ends the run too, and the function returns true
+/// so the caller can say so.
 fn give_all(
     world: &mut World,
     player: Entity,
@@ -11618,7 +11636,9 @@ fn give_all(
             GiveResult::Given(name) => note_given(given, name),
             GiveResult::Refused => {}
             GiveResult::Busy => return true,
-            GiveResult::Blocked => break,
+            // The recipient turned one item down; offering it the rest
+            // would only repeat the refusal for each.
+            GiveResult::Declined | GiveResult::Blocked => break,
         }
     }
     false
@@ -11669,13 +11689,18 @@ fn announce_gives(
     }
 }
 
+/// Copper value of each denomination, in `[platinum, gold, silver, copper]`
+/// order (the order of [`parse_coin_parts`]'s counts).
+const COIN_SCALES: [i64; 4] = [1000, 100, 10, 1];
+
 /// Leading run of `<N> <platinum|gold|silver|copper>` pairs (legacy
 /// `parse_money`; any non-empty prefix of a coin name counts). Returns the
-/// total in copper and the remaining text, or `None` when the arguments do
+/// count typed for each denomination (`[platinum, gold, silver, copper]`,
+/// legacy `coins[]`) and the remaining text, or `None` when the arguments do
 /// not start with a coin amount.
-fn parse_coin_amounts(args: &str) -> Option<(i64, &str)> {
+fn parse_coin_parts(args: &str) -> Option<([i64; 4], &str)> {
     let mut rest = args.trim_start();
-    let mut total: i64 = 0;
+    let mut coins = [0_i64; 4];
     let mut found = false;
     loop {
         let Some((num, after_num)) = rest.split_once(char::is_whitespace) else {
@@ -11689,33 +11714,33 @@ fn parse_coin_amounts(args: &str) -> Option<(i64, &str)> {
             .split_once(char::is_whitespace)
             .unwrap_or((after_num, ""));
         let unit = unit.to_ascii_lowercase();
-        let scale = if unit.is_empty() {
+        let slot = if unit.is_empty() {
             None
         } else {
-            [
-                (1000_i64, "platinum"),
-                (100, "gold"),
-                (10, "silver"),
-                (1, "copper"),
-            ]
-            .iter()
-            .find(|(_, name)| name.starts_with(&unit))
-            .map(|(scale, _)| *scale)
+            ["platinum", "gold", "silver", "copper"]
+                .iter()
+                .position(|name| name.starts_with(&unit))
         };
-        let Some(scale) = scale else {
+        let Some(slot) = slot else {
             break;
         };
-        total = total.saturating_add(n.saturating_mul(scale));
+        coins[slot] = coins[slot].saturating_add(n);
         found = true;
         rest = after_unit.trim_start();
     }
-    found.then_some((total, rest))
+    found.then_some((coins, rest))
 }
 
 /// `give <coins> [to] <target>`: hand coin to another character. Mobs go
 /// through `bribe` (so BRIBE triggers fire); players get the legacy
 /// `perform_give_money` messages. Staff keep their purse, as in legacy.
-fn give_coins(world: &mut World, player: Entity, copper: i64, rest: &str) {
+fn give_coins(world: &mut World, player: Entity, coins: [i64; 4], rest: &str) {
+    let copper = COIN_SCALES
+        .iter()
+        .zip(coins)
+        .fold(0_i64, |acc, (scale, n)| {
+            acc.saturating_add(n.saturating_mul(*scale))
+        });
     let rest = rest.trim();
     let target_word = rest.strip_prefix("to ").map_or(rest, str::trim).trim();
     if target_word.is_empty() {
@@ -11768,7 +11793,9 @@ fn give_coins(world: &mut World, player: Entity, copper: i64, rest: &str) {
     }
     let target_name = name_of(world, target);
     let player_name = name_of(world, player);
-    let amount = format_amount(copper);
+    // Legacy `statemoney`: the coins as the giver typed them ("500 copper",
+    // not "5 gold").
+    let amount = crate::commands::state_money(coins);
     send_rendered(
         world,
         player,
@@ -12341,6 +12368,21 @@ fn get_all_from_floor(world: &mut World, player: Entity, room: Entity, filter: &
         }
         return;
     }
+    get_batch_from_floor(world, player, room, &items, filter);
+}
+
+/// Pick up `items` (floor items in `room`) in order with one grouped
+/// "You pick up X. (xN)" line per distinct name, the Get-trigger output
+/// after those lines, and a single room broadcast. Shared by `get all`,
+/// `get all.<name>` and `get N <name>`; `filter` only words the message when
+/// every candidate is fixed in place.
+fn get_batch_from_floor(
+    world: &mut World,
+    player: Entity,
+    room: Entity,
+    items: &[(Entity, String)],
+    filter: &str,
+) {
     let player_name = name_of(world, player);
     let cap = carry_capacity(world, player);
     let mut running = carried_weight(world, player);
@@ -12351,7 +12393,7 @@ fn get_all_from_floor(world: &mut World, player: Entity, room: Entity, filter: &
     let bypass_encumbrance = crate::commands::is_staff(world, player);
     // Get-trigger output waits until the grouped "You pick up" lines are out.
     let hold = crate::commands::OutboxHold::new();
-    for (item, item_name) in &items {
+    for (item, item_name) in items {
         if let Some(amount) = take_loose_coins(world, player, *item) {
             let coin =
                 crate::commands::format_wealth(amount).unwrap_or_else(|| "no coin".to_string());
@@ -12406,7 +12448,7 @@ fn get_all_from_floor(world: &mut World, player: Entity, room: Entity, filter: &
         send_to(
             world,
             player,
-            if needle.is_empty() {
+            if filter.is_empty() {
                 "You can't take that!\r\n".to_string()
             } else {
                 format!("You can't take anything matching '{filter}'.\r\n")
@@ -13280,6 +13322,10 @@ enum GiveResult {
     /// This item was refused (soulbound, no-drop, a GIVE or RECEIVE
     /// trigger); the reason was sent or the refusing script spoke.
     Refused,
+    /// The recipient's RECEIVE trigger refused this item (it is back with
+    /// the giver); a bulk give stops offering instead of repeating the
+    /// refusal for every remaining item.
+    Declined,
     /// The recipient's RECEIVE trigger is still waiting on an earlier give,
     /// so it cannot look at this item; it stays with the giver and the
     /// recipient was said to be busy.
@@ -13361,7 +13407,7 @@ fn give_one(
             if !silent {
                 crate::commands::drain_lua_outbox(world);
             }
-            return GiveResult::Refused;
+            return GiveResult::Declined;
         }
         crate::triggers::ReceiveOutcome::Busy => {
             // A bulk give says so once, after its summary.
@@ -18779,7 +18825,7 @@ mod playtest_2026_10_11_tests {
 
     use super::{
         PAGE_ROWS, cmd_achievements, cmd_diagnose, cmd_equipment, cmd_get, cmd_inventory, cmd_look,
-        cmd_wake, exit_state_sentence, page_window, parse_buy_quantity, parse_coin_amounts,
+        cmd_wake, exit_state_sentence, page_window, parse_buy_quantity, parse_coin_parts,
         second_person_condition, split_page_arg,
     };
     use crate::commands::dispatch;
@@ -19100,14 +19146,21 @@ mod playtest_2026_10_11_tests {
 
     #[test]
     fn coin_amounts_parse_like_legacy_parse_money() {
-        assert_eq!(parse_coin_amounts("5 gold bob"), Some((500, "bob")));
+        assert_eq!(parse_coin_parts("5 gold bob"), Some(([0, 5, 0, 0], "bob")));
         assert_eq!(
-            parse_coin_amounts("2 silver 3 copper to bob"),
-            Some((23, "to bob"))
+            parse_coin_parts("2 silver 3 copper to bob"),
+            Some(([0, 0, 2, 3], "to bob"))
         );
-        assert_eq!(parse_coin_amounts("1 platinum bob"), Some((1000, "bob")));
-        assert_eq!(parse_coin_amounts("3 dagger bob"), None);
-        assert_eq!(parse_coin_amounts("sword bob"), None);
+        assert_eq!(
+            parse_coin_parts("1 platinum bob"),
+            Some(([1, 0, 0, 0], "bob"))
+        );
+        assert_eq!(
+            parse_coin_parts("500 copper bob"),
+            Some(([0, 0, 0, 500], "bob"))
+        );
+        assert_eq!(parse_coin_parts("3 dagger bob"), None);
+        assert_eq!(parse_coin_parts("sword bob"), None);
     }
 
     // #37: paging.

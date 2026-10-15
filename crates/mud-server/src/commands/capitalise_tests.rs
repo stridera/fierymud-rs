@@ -514,16 +514,14 @@ fn lua_outbox_capitalises_room_and_direct_lines() {
         let mut out = fx
             .world
             .get_resource_or_insert_with(mud_world::LuaOutbox::default);
-        out.messages
-            .push((room, "the Knight Templar says hi".to_string(), None));
-        out.messages
-            .push((room, "https://fierymud.org rocks".to_string(), None));
-        out.direct.push((p, "the knight nods".to_string()));
+        out.push_room(room, "the Knight Templar says hi.", None);
+        out.push_room(room, "https://fierymud.org rocks.", None);
+        out.push_direct(p, "the knight nods");
     }
     super::flush_lua_outbox(&mut fx.world);
     let seen = drain(&mut rx);
-    assert!(seen.contains("The Knight Templar says hi"), "{seen}");
-    assert!(seen.contains("https://fierymud.org rocks"), "{seen}");
+    assert!(seen.contains("The Knight Templar says hi."), "{seen}");
+    assert!(seen.contains("https://fierymud.org rocks."), "{seen}");
     assert!(seen.contains("The knight nods"), "{seen}");
 }
 
@@ -542,8 +540,8 @@ fn lua_outbox_wraps_long_script_lines_to_the_terminal() {
         let mut out = fx
             .world
             .get_resource_or_insert_with(mud_world::LuaOutbox::default);
-        out.messages.push((room, speech.to_string(), None));
-        out.direct.push((p, speech.to_string()));
+        out.push_room(room, speech, None);
+        out.push_direct(p, speech);
     }
     super::flush_lua_outbox(&mut fx.world);
     let seen = drain(&mut rx);
@@ -571,7 +569,7 @@ fn lua_outbox_ignores_tag_only_lines_when_tracking_sentences() {
             "</>",
             "the Instructor tells you, 'Say <b:green>skip</> to move on.'",
         ] {
-            out.direct.push((p, line.to_string()));
+            out.push_direct(p, line);
         }
     }
     super::flush_lua_outbox(&mut fx.world);
@@ -604,12 +602,12 @@ fn lua_outbox_capitalises_only_sentence_starts() {
             "the third begins here!<reset>  ",
             "and a fourth?",
         ] {
-            out.messages.push((room, line.to_string(), None));
+            out.push_room(room, line, None);
         }
-        out.direct.push((p, "a lone direct line".to_string()));
-        out.direct.push((p, "continues without a stop".to_string()));
-        out.direct.push((p, "and ends. ".to_string()));
-        out.direct.push((p, "then restarts".to_string()));
+        out.push_direct(p, "a lone direct line");
+        out.push_direct(p, "continues without a stop");
+        out.push_direct(p, "and ends. ");
+        out.push_direct(p, "then restarts");
     }
     super::flush_lua_outbox(&mut fx.world);
     let seen = drain(&mut rx);
