@@ -270,20 +270,29 @@ fn coins_still_take_the_bribe_path() {
 
 /// A keeper mob with one RECEIVE trigger running `body`.
 fn keeper_with(s: &mut Scene, body: &str) -> Entity {
+    keeper_with_triggers(s, &[body])
+}
+
+/// A keeper carrying one RECEIVE trigger per body, in order.
+fn keeper_with_triggers(s: &mut Scene, bodies: &[&str]) -> Entity {
     let mut catalog = TriggerCatalog::default();
-    catalog.by_key.insert(
-        (99, 1),
-        TriggerDef {
-            zone_id: 99,
-            id: 1,
-            name: "t1".into(),
-            attach_type: TriggerAttach::Mob,
-            commands: body.into(),
-            flags: vec![TriggerEvent::Receive],
-            arg_list: vec![],
-            num_args: 0,
-        },
-    );
+    let mut keys = Vec::new();
+    for (n, body) in (1..).zip(bodies) {
+        keys.push((99, n));
+        catalog.by_key.insert(
+            (99, n),
+            TriggerDef {
+                zone_id: 99,
+                id: n,
+                name: format!("t{n}"),
+                attach_type: TriggerAttach::Mob,
+                commands: (*body).into(),
+                flags: vec![TriggerEvent::Receive],
+                arg_list: vec![],
+                num_args: 0,
+            },
+        );
+    }
     s.fx.world.insert_resource(catalog);
     s.fx.world
         .spawn((
@@ -294,7 +303,7 @@ fn keeper_with(s: &mut Scene, body: &str) -> Entity {
             Keywords(vec!["keeper".into()]),
             WorldKey { zone: 99, id: 5 },
             Located(s.room),
-            AttachedTriggers(vec![(99, 1)]),
+            AttachedTriggers(keys),
         ))
         .id()
 }
@@ -480,4 +489,49 @@ fn a_single_give_to_a_busy_recipient_is_not_taken() {
     assert!(!out.contains("You give"), "{out}");
     let with_keeper = items.iter().filter(|&&i| s.holder(i) == keeper).count();
     assert_eq!(with_keeper, 1, "{out}");
+}
+
+#[test]
+fn a_parked_receive_trigger_keeps_the_item_whatever_a_later_one_returns() {
+    let mut s = scene();
+    let keeper = keeper_with_triggers(&mut s, &["wait(50)", "return false"]);
+    let items = swords(&mut s, 1);
+    let out = s.cmd("give sword keeper");
+    assert_eq!(s.holder(items[0]), keeper, "{out}");
+    assert!(out.contains("You give a sword to Keeper."), "{out}");
+}
+
+#[test]
+fn a_refusing_script_that_gives_the_item_on_hands_it_there_not_back() {
+    let mut s = scene();
+    let (bob, _bob_rx) = s.player("Bob", 30);
+    keeper_with(&mut s, "self:command('give sword bob') return false");
+    let items = swords(&mut s, 1);
+    let out = s.cmd("give sword keeper");
+    assert_eq!(s.holder(items[0]), bob, "{out}");
+    assert!(!out.contains("You give"), "{out}");
+}
+
+#[test]
+fn a_refusing_script_with_nothing_queued_still_returns_the_item() {
+    let mut s = scene();
+    keeper_with(&mut s, "self:command('say no') return false");
+    let items = swords(&mut s, 1);
+    let out = s.cmd("give sword keeper");
+    assert_eq!(s.holder(items[0]), s.giver, "{out}");
+}
+
+#[test]
+fn a_deferred_receive_refusal_does_not_take_the_item_back() {
+    let mut s = scene();
+    let keeper = keeper_with(&mut s, "return false");
+    let items = swords(&mut s, 1);
+    s.fx.world.entity_mut(items[0]).insert(Located(keeper));
+    // Offered from inside another script: accepted, run once it returns.
+    s.fx.world.insert_resource(mud_script::ScriptRunning);
+    let outcome = crate::triggers::run_receive(&mut s.fx.world, keeper, s.giver, items[0]);
+    s.fx.world.remove_resource::<mud_script::ScriptRunning>();
+    assert_eq!(outcome, crate::triggers::ReceiveOutcome::Accepted);
+    crate::commands::drain_lua_outbox(&mut s.fx.world);
+    assert_eq!(s.holder(items[0]), keeper);
 }

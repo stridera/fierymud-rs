@@ -815,13 +815,27 @@ pub fn run_receive(
     item: Entity,
 ) -> ReceiveOutcome {
     if crate::deferred_triggers::lua_busy(world) {
-        // Called from inside a running script: no verdict is possible.
+        // Called from inside a running script: no verdict is possible. The
+        // give was already reported as accepted, so a refusal found later
+        // must not take the item back (the caller has counted it).
         crate::deferred_triggers::defer(world, move |w| {
-            run_receive(w, recipient, giver, item);
+            run_receive_inner(w, recipient, giver, item, false);
             drain_lua_outbox(w);
         });
         return ReceiveOutcome::Accepted;
     }
+    run_receive_inner(world, recipient, giver, item, true)
+}
+
+/// Body of [`run_receive`]. With `may_return` false (a deferred run) the
+/// item always stays with the recipient, whatever the scripts say.
+fn run_receive_inner(
+    world: &mut World,
+    recipient: Entity,
+    giver: Entity,
+    item: Entity,
+    may_return: bool,
+) -> ReceiveOutcome {
     let to_fire: Vec<(i32, i32, String, String)> = {
         let Some(at) = world.get::<AttachedTriggers>(recipient) else {
             return ReceiveOutcome::Accepted;
@@ -848,7 +862,9 @@ pub fn run_receive(
         .iter()
         .any(|(zone, id, _, _)| skip_if_busy(world, recipient, *zone, *id, TriggerEvent::Receive))
     {
-        return_to_giver(world, recipient, giver, item);
+        if may_return {
+            return_to_giver(world, recipient, giver, item);
+        }
         return ReceiveOutcome::Busy;
     }
     for (zone, id, name, body) in to_fire {
@@ -865,9 +881,23 @@ pub fn run_receive(
             TriggerEvent::Receive,
             result.is_ok(),
         );
+        // A script parked in `wait()` still holds `object` and will go on
+        // to use it, so the item is committed to it: no later trigger may
+        // take it back.
+        if world
+            .get_resource::<mud_script::LuaHost>()
+            .is_some_and(|h| h.is_trigger_parked(world, recipient, zone, id))
+        {
+            break;
+        }
         match result {
             // Legacy `receive_mtrigger` stops at the first 0.
-            Ok((_out, Some(false))) => {
+            Ok((_out, Some(false))) if may_return => {
+                // Run what the script queued first (`self:command("give
+                // ...")`): its own give wins while the item is still in
+                // the recipient's pack, and the item only comes back if
+                // it is still there afterwards.
+                drain_lua_outbox(world);
                 return_to_giver(world, recipient, giver, item);
                 return ReceiveOutcome::Refused;
             }
