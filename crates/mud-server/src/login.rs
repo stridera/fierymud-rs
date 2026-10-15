@@ -3162,9 +3162,10 @@ impl ConnRouter {
         // brand new, so the login below hands them their starting kit.
         self.fresh_characters.insert(character_id);
         let _ = user_id;
+        let race_label = race_display_name(world, &race);
         let _ = ctx.outbound.try_send(
             format!(
-                "Welcome to FieryMUD, {character_name}! Your {gender} {race} \
+                "Welcome to FieryMUD, {character_name}! Your {gender} {race_label} \
                  {class_plain_name} is ready. Stepping into the world…\r\n"
             )
             .into_bytes(),
@@ -7063,6 +7064,18 @@ fn send_class_prompt(outbound: &Outbound, world: &World) {
     );
 }
 
+/// The race as players read it ("Frost Dragonborn"), not its enum spelling
+/// (`DRAGONBORN_FROST`). Falls back to the stored name when the catalog has
+/// no display name for it.
+fn race_display_name(world: &World, race: &str) -> String {
+    world
+        .get_resource::<mud_world::RaceCatalog>()
+        .and_then(|c| c.by_race.get(race))
+        .map(|r| r.plain_name.trim())
+        .filter(|n| !n.is_empty())
+        .map_or_else(|| race.to_string(), str::to_string)
+}
+
 /// Look up a base class by number, name or unambiguous name prefix. `Found`
 /// carries `(class_id, canonical_plain_name)` so the caller can echo the
 /// canonical-cased form and stash the id for the `Characters` INSERT.
@@ -7088,8 +7101,9 @@ fn reject_menu_pick<T>(
     let message = match result {
         Pick::Ambiguous(labels) => ambiguity_message(typed, &labels),
         _ => format!(
-            "'{}' isn't one of the available {noun}s. Type a name or number from the list.\r\n",
-            typed.trim()
+            "'{}' isn't one of the available {}. Type a name or number from the list.\r\n",
+            typed.trim(),
+            if noun == "class" { "classes" } else { "races" }
         ),
     };
     let _ = outbound.try_send(message.into_bytes());
@@ -7746,6 +7760,58 @@ pub(crate) mod tests {
         });
         let menu = drain_text(&mut rx);
         assert!(menu.contains("Choose your race"), "{menu}");
+    }
+
+    #[test]
+    fn the_welcome_names_the_race_by_its_display_name() {
+        let mut world = World::new();
+        let mut catalog = mud_world::RaceCatalog::default();
+        catalog.by_race.insert(
+            "DRAGONBORN_FROST".into(),
+            mud_world::RaceDef {
+                race: "DRAGONBORN_FROST".into(),
+                plain_name: "Frost Dragonborn".into(),
+                playable: true,
+                ..Default::default()
+            },
+        );
+        catalog.by_race.insert(
+            "OGRE".into(),
+            mud_world::RaceDef {
+                race: "OGRE".into(),
+                playable: true,
+                ..Default::default()
+            },
+        );
+        world.insert_resource(catalog);
+        assert_eq!(
+            race_display_name(&world, "DRAGONBORN_FROST"),
+            "Frost Dragonborn"
+        );
+        // No display name authored, or no such race: the stored name.
+        assert_eq!(race_display_name(&world, "OGRE"), "OGRE");
+        assert_eq!(race_display_name(&world, "NOPE"), "NOPE");
+    }
+
+    #[test]
+    fn an_unknown_class_says_classes_not_classs() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        reject_menu_pick(
+            &tx,
+            "mage",
+            crate::login_menu::Pick::<()>::None,
+            "class",
+            || {},
+        );
+        let mut text = String::new();
+        while let Ok(frame) = rx.try_recv() {
+            text.push_str(&String::from_utf8_lossy(&frame));
+        }
+        assert!(
+            text.contains("isn't one of the available classes."),
+            "{text}"
+        );
+        assert!(!text.contains("classs"), "{text}");
     }
 
     #[test]

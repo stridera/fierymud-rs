@@ -129,6 +129,28 @@ fn whisper_and_ask_use_single_quotes() {
 }
 
 #[test]
+fn ask_shows_the_topic_to_the_target_and_hides_it_from_bystanders() {
+    let (mut fx, (alice, mut arx), (_bob, mut brx), _cara) = trio();
+    let a = fx.a;
+    let (_dave, mut drx) = player(&mut fx.world, a, "Dave");
+    dispatch(&mut fx.world, alice, "ask bob the key");
+    let (mine, _) = read(&mut arx);
+    assert!(mine.contains("You ask Bob about 'the key'"), "{mine:?}");
+    let (theirs, _) = read(&mut brx);
+    assert!(
+        theirs.contains("Alice asks you about 'the key'"),
+        "{theirs:?}"
+    );
+    assert!(!theirs.contains("something"), "{theirs:?}");
+    let (bystander, _) = read(&mut drx);
+    assert!(
+        bystander.contains("Alice asks Bob about something."),
+        "{bystander:?}"
+    );
+    assert!(!bystander.contains("the key"), "{bystander:?}");
+}
+
+#[test]
 fn global_channels_use_single_quotes() {
     let (mut fx, (alice, mut arx), _bob, (_cara, mut crx)) = trio();
     for (command, mine_verb, theirs_verb) in [

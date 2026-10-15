@@ -319,8 +319,8 @@ fn group_roster_shows_movement() {
     dispatch(&mut world, leader, "group");
     let out = plain(&drain(&mut lrx));
     assert!(out.contains("HP 90/100"), "{out}");
-    assert!(out.contains("MV 33/60"), "{out}");
-    assert!(out.contains("MV 12/44"), "{out}");
+    assert!(out.contains("Stam 33/60"), "{out}");
+    assert!(out.contains("Stam 12/44"), "{out}");
 }
 
 /// Issue #146: the roster also names each member's level and class,
@@ -392,8 +392,61 @@ fn group_roster_shows_a_mounts_movement_points() {
     assert_ne!(horse, leader);
     dispatch(&mut world, leader, "group");
     let out = plain(&drain(&mut lrx));
-    assert!(out.contains("MV 33/60"), "{out}");
-    assert!(out.contains("MV 21/90"), "{out}");
+    assert!(out.contains("Stam 33/60"), "{out}");
+    assert!(out.contains("Stam 21/90"), "{out}");
+}
+
+/// Playtest r12: the roster says stamina (not MV), and a row stays within 80
+/// columns for a 19-character name, a long class and an absent member.
+#[test]
+fn group_roster_rows_fit_80_columns_and_say_stamina() {
+    let mut world = world();
+    world
+        .resource_mut::<ClassCatalog>()
+        .by_id
+        .insert(3, class(3, "Necromancer", 1.0));
+    let room = world.spawn_empty().id();
+    let away = world.spawn_empty().id();
+    let (leader, mut lrx) = player(&mut world, "Abcdefghijklmnopqrs", 105, Some(3));
+    let (mate, _m) = player(&mut world, "Zyxwvutsrqponmlkjih", 100, Some(3));
+    world.entity_mut(leader).insert((
+        Located(room),
+        Health {
+            hp: 1200,
+            max: 1200,
+        },
+        mud_world::Stamina {
+            current: 100,
+            max: 100,
+        },
+    ));
+    world.entity_mut(mate).insert((
+        GroupMember(leader),
+        Located(away),
+        Health {
+            hp: 1200,
+            max: 1200,
+        },
+        mud_world::Stamina {
+            current: 100,
+            max: 100,
+        },
+    ));
+    dispatch(&mut world, leader, "group");
+    let out = plain(&drain(&mut lrx));
+    assert!(out.contains("Stam 100/100"), "{out}");
+    assert!(!out.contains("MV "), "{out}");
+    for line in out
+        .lines()
+        .filter(|l| l.contains("[leader]") || l.contains("[member"))
+    {
+        assert!(
+            line.chars().count() <= 80,
+            "{} cols: {line:?}",
+            line.chars().count()
+        );
+    }
+    assert!(out.contains("(elsewhere)"), "{out}");
 }
 
 // ----------------------------------------------------------- who legend

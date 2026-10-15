@@ -1111,10 +1111,11 @@ impl LuaHost {
     }
 
     /// Like `exec_for_event` but also captures the body's return
-    /// value as an optional boolean (true when the body ended with
-    /// `return true` or no return; false on `return false`; None
-    /// for non-boolean returns). Used by COMMAND dispatch to gate
-    /// whether the typed command continues to the default handler.
+    /// value as an optional boolean (true on `return true`; false on
+    /// `return false` or a numeric `return 0`, the legacy DG spelling;
+    /// None for no return, nil and other values). Used by COMMAND
+    /// dispatch to gate whether the typed command continues to the
+    /// default handler, and by RECEIVE to let a script refuse an item.
     ///
     /// Bodies that hit `wait(N)` yield via Lua coroutines. The thread
     /// is parked on `self.yielded` and `tick_yielded` resumes it once
@@ -1226,12 +1227,11 @@ impl LuaHost {
                 let return_bool = values
                     .into_iter()
                     .next()
-                    .and_then(|v| {
-                        if let Value::Boolean(b) = v {
-                            Some(b)
-                        } else {
-                            None
-                        }
+                    .and_then(|v| match v {
+                        Value::Boolean(b) => Some(b),
+                        // Legacy DG `return 0` spelled as a number.
+                        Value::Integer(0) | Value::Number(0.0) => Some(false),
+                        _ => None,
                     })
                     .or_else(|| allowed.then_some(true));
                 Ok((return_bool, None))
@@ -5717,6 +5717,25 @@ mod tests {
         assert_eq!(verdict("allow_command()\nreturn false"), Some(false));
         // The flag does not leak into the next run.
         assert_eq!(verdict("wait(1)"), None);
+    }
+
+    #[test]
+    fn numeric_zero_return_is_a_false_verdict() {
+        let (mut world, actor) = make_world_with_actor();
+        let mut host = LuaHost::new();
+        let mut verdict = |body: &str| {
+            host.exec_for_event_with_value(&mut world, actor, actor, None, body, &[])
+                .unwrap()
+                .1
+        };
+        assert_eq!(verdict("return 0"), Some(false));
+        assert_eq!(verdict("return 0.0"), Some(false));
+        assert_eq!(verdict("return false"), Some(false));
+        assert_eq!(verdict("return true"), Some(true));
+        // Any other number, nil and no return carry no verdict.
+        assert_eq!(verdict("return 1"), None);
+        assert_eq!(verdict("return nil"), None);
+        assert_eq!(verdict("local x = 1"), None);
     }
 
     #[test]

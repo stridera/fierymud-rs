@@ -778,18 +778,53 @@ pub fn fire_event_with_actor(
     }
 }
 
-/// Fire `RECEIVE`-flagged triggers on `recipient` when `giver` hands
-/// them `item`. Each fire binds `self` to recipient, `actor` to giver,
-/// `object` to the item. RECEIVE bodies typically inspect `object.id`
-/// to handle quest item turn-ins.
-pub fn fire_receive(world: &mut World, recipient: Entity, giver: Entity, item: Entity) {
+/// How the recipient's `RECEIVE` triggers took an offered item.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReceiveOutcome {
+    /// No trigger refused (none attached, all returned anything but
+    /// false / 0, or the script reached a `wait()` / was deferred, so its
+    /// verdict is unavailable). The item stays with the recipient.
+    Accepted,
+    /// A trigger returned `false` (or numeric `0`). The item has been put
+    /// back in the giver's inventory, unless the script already took it
+    /// elsewhere or destroyed it.
+    Refused,
+    /// A `RECEIVE` trigger on the recipient is still parked in a `wait()`
+    /// from an earlier give, so none ran. The item is back with the giver.
+    Busy,
+}
+
+/// Run `RECEIVE`-flagged triggers on `recipient` for `item`, which `giver`
+/// has just placed in the recipient's inventory (legacy `receive_mtrigger`).
+/// Each fire binds `self` to recipient, `actor` to giver, `object` to the
+/// item; bodies typically inspect `object.id` to handle quest item
+/// turn-ins.
+///
+/// Legacy runs the trigger before the item changes hands and a script that
+/// returns 0 cancels the give. Our bodies expect the item to be in the
+/// recipient's pack (`destroy_item`, `give_item`), so the caller moves it
+/// first and this puts it back on a refusal (see [`ReceiveOutcome`]).
+///
+/// The Lua outbox is NOT drained: the caller does that once it has printed
+/// (or withheld) its own give lines, so a script's reaction reads after
+/// them. Call [`drain_lua_outbox`] afterwards in every case.
+pub fn run_receive(
+    world: &mut World,
+    recipient: Entity,
+    giver: Entity,
+    item: Entity,
+) -> ReceiveOutcome {
     if crate::deferred_triggers::lua_busy(world) {
-        crate::deferred_triggers::defer(world, move |w| fire_receive(w, recipient, giver, item));
-        return;
+        // Called from inside a running script: no verdict is possible.
+        crate::deferred_triggers::defer(world, move |w| {
+            run_receive(w, recipient, giver, item);
+            drain_lua_outbox(w);
+        });
+        return ReceiveOutcome::Accepted;
     }
     let to_fire: Vec<(i32, i32, String, String)> = {
         let Some(at) = world.get::<AttachedTriggers>(recipient) else {
-            return;
+            return ReceiveOutcome::Accepted;
         };
         let keys = at.0.clone();
         let catalog = world.resource::<TriggerCatalog>();
@@ -805,18 +840,23 @@ pub fn fire_receive(world: &mut World, recipient: Entity, giver: Entity, item: E
             .collect()
     };
     if to_fire.is_empty() {
-        return;
+        return ReceiveOutcome::Accepted;
+    }
+    // A parked instance cannot start again (`TRIGGER_CHECK`), so the item
+    // would be taken without anyone looking at it. Hand it back instead.
+    if to_fire
+        .iter()
+        .any(|(zone, id, _, _)| skip_if_busy(world, recipient, *zone, *id, TriggerEvent::Receive))
+    {
+        return_to_giver(world, recipient, giver, item);
+        return ReceiveOutcome::Busy;
     }
     for (zone, id, name, body) in to_fire {
-        if skip_if_busy(world, recipient, zone, id, TriggerEvent::Receive) {
-            continue;
-        }
         let result = world.resource_scope::<mud_script::LuaHost, _>(|world, mut host| {
             gated(&mut host, TriggerEvent::Receive, (zone, id, &name), |h| {
-                h.exec_for_event(world, recipient, giver, Some(item), &body, &[])
+                h.exec_for_event_with_value(world, recipient, giver, Some(item), &body, &[])
             })
         });
-        drain_lua_outbox(world);
         record_fire(
             world,
             recipient,
@@ -825,9 +865,30 @@ pub fn fire_receive(world: &mut World, recipient: Entity, giver: Entity, item: E
             TriggerEvent::Receive,
             result.is_ok(),
         );
-        if let Err(e) = result {
-            record_failure(world, zone, id, &name, "RECEIVE", &e);
+        match result {
+            // Legacy `receive_mtrigger` stops at the first 0.
+            Ok((_out, Some(false))) => {
+                return_to_giver(world, recipient, giver, item);
+                return ReceiveOutcome::Refused;
+            }
+            Ok(_) => {}
+            Err(e) => record_failure(world, zone, id, &name, "RECEIVE", &e),
         }
+        if world.get_entity(recipient).is_err() {
+            break;
+        }
+    }
+    ReceiveOutcome::Accepted
+}
+
+/// Put `item` back in `giver`'s inventory if it is still sitting in
+/// `recipient`'s (a script that took it elsewhere or destroyed it wins).
+fn return_to_giver(world: &mut World, recipient: Entity, giver: Entity, item: Entity) {
+    if world.get_entity(giver).is_err() || world.get_entity(item).is_err() {
+        return;
+    }
+    if world.get::<mud_world::Located>(item).map(|l| l.0) == Some(recipient) {
+        world.entity_mut(item).insert(mud_world::Located(giver));
     }
 }
 

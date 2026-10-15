@@ -11409,8 +11409,8 @@ pub(crate) fn cmd_give(world: &mut World, player: Entity, args: &str) {
     // run began: a RECEIVE trigger may destroy the one or move the other.
     let target_name = name_of(world, target);
     let mut given: Vec<(String, usize)> = Vec::new();
-    if let Some(filter) = filter {
-        give_all(world, player, target, &filter, &mut given);
+    let busy = if let Some(filter) = filter {
+        give_all(world, player, target, &filter, &mut given)
     } else {
         give_counted(
             world,
@@ -11419,13 +11419,21 @@ pub(crate) fn cmd_give(world: &mut World, player: Entity, args: &str) {
             item_word,
             count.unwrap_or(1),
             &mut given,
-        );
-    }
+        )
+    };
     announce_gives(world, player, target, room, &target_name, &given);
+    if busy {
+        send_busy(world, player, &target_name);
+    }
+    // The recipient's reactions (RECEIVE script output) come after the
+    // summary line.
+    crate::commands::drain_lua_outbox(world);
 }
 
 /// `give N <item> <target>`: up to `count` matching carried items, one by
 /// one, stopping at the first refusal or when the recipient is gone.
+/// Returns whether it stopped because the recipient's RECEIVE trigger was
+/// busy (the remaining items stay with the giver).
 fn give_counted(
     world: &mut World,
     player: Entity,
@@ -11433,7 +11441,7 @@ fn give_counted(
     item_word: &str,
     count: usize,
     given: &mut Vec<(String, usize)>,
-) {
+) -> bool {
     // Items already offered in this command: a RECEIVE trigger that
     // hands one back must not be given (and counted) again.
     let mut offered: Vec<Entity> = Vec::new();
@@ -11466,10 +11474,12 @@ fn give_counted(
         offered.push(item);
         match give_one(world, player, target, item, true) {
             GiveResult::Given(name) => note_given(given, name),
+            GiveResult::Busy => return true,
             // The same item would meet the same refusal again.
             GiveResult::Refused | GiveResult::Blocked => break,
         }
     }
+    false
 }
 
 /// Whether `target` still stands in the giver's room and the giver is still
@@ -11504,14 +11514,17 @@ fn resolve_give_target(world: &mut World, player: Entity, target_word: &str) -> 
 /// visible item in inventory order. An item that refuses on its own account
 /// (soulbound, no-drop, a GIVE trigger) is skipped; a recipient who cannot
 /// take more (too laden, a body that cannot hold things) ends the run, as
-/// in legacy where the rest would meet the same wall.
+/// in legacy where the rest would meet the same wall. A RECEIVE script that
+/// refuses an item (returns false) hands just that one back; a recipient whose
+/// RECEIVE trigger is still waiting ends the run, and the function returns
+/// true so the caller can say so.
 fn give_all(
     world: &mut World,
     player: Entity,
     target: Entity,
     filter: &str,
     given: &mut Vec<(String, usize)>,
-) {
+) -> bool {
     let mut items: Vec<Entity> = with_query::<
         (
             Entity,
@@ -11542,7 +11555,7 @@ fn give_all(
                 format!("You don't even have one {filter}!\r\n"),
             );
         }
-        return;
+        return false;
     }
     for item in items {
         // An earlier trigger in the run may have purged or moved it.
@@ -11555,9 +11568,11 @@ fn give_all(
         match give_one(world, player, target, item, true) {
             GiveResult::Given(name) => note_given(given, name),
             GiveResult::Refused => {}
+            GiveResult::Busy => return true,
             GiveResult::Blocked => break,
         }
     }
+    false
 }
 
 /// Tally a handed-over item by its short description, first-seen order.
@@ -13143,13 +13158,30 @@ fn give_hold_refusal(world: &World, player: Entity, item: Entity) -> Option<Stri
     None
 }
 
+/// `<Mob> seems busy.`: its RECEIVE trigger is still waiting (see
+/// `ReceiveOutcome::Busy`).
+fn send_busy(world: &mut World, player: Entity, target_name: &str) {
+    send_msg(
+        world,
+        player,
+        format!(
+            "{} seems busy.\r\n",
+            crate::commands::cap_sentence_start(target_name)
+        ),
+    );
+}
+
 /// What became of one item offered by `give_one`.
 enum GiveResult {
     /// It changed hands; carries the name the summary should list it under.
     Given(String),
-    /// This item was refused (soulbound, no-drop, a GIVE trigger); the
-    /// reason was sent.
+    /// This item was refused (soulbound, no-drop, a GIVE or RECEIVE
+    /// trigger); the reason was sent or the refusing script spoke.
     Refused,
+    /// The recipient's RECEIVE trigger is still waiting on an earlier give,
+    /// so it cannot look at this item; it stays with the giver and the
+    /// recipient was said to be busy.
+    Busy,
     /// The recipient cannot take this or anything else (too laden, a body
     /// that cannot hold things); the reason was sent.
     Blocked,
@@ -13216,6 +13248,28 @@ fn give_one(
         crate::hiding::set_hiddenness(world, item, 0);
     }
 
+    // RECEIVE triggers on the recipient (legacy `receive_mtrigger`): a
+    // script that returns false / 0 sends the item back. Bodies gate on
+    // `object.id` to handle quest item turn-ins, so it is already in the
+    // recipient's pack here. The script's own output stays queued until the
+    // give lines are out (a bulk give prints its summary first).
+    match crate::triggers::run_receive(world, target, player, item) {
+        crate::triggers::ReceiveOutcome::Accepted => {}
+        crate::triggers::ReceiveOutcome::Refused => {
+            if !silent {
+                crate::commands::drain_lua_outbox(world);
+            }
+            return GiveResult::Refused;
+        }
+        crate::triggers::ReceiveOutcome::Busy => {
+            // A bulk give says so once, after its summary.
+            if !silent {
+                send_busy(world, player, &target_name);
+            }
+            return GiveResult::Busy;
+        }
+    }
+
     if !silent {
         send_to(
             world,
@@ -13233,13 +13287,11 @@ fn give_one(
             &[player, target],
             &format!("{player_name} gives {item_name} to {target_name}.\r\n"),
         );
+        crate::commands::drain_lua_outbox(world);
     }
     // A flying recipient may now be too heavy to stay up.
     crate::flight::check_overweight(world, target);
 
-    // Fire RECEIVE triggers on the recipient. Bodies typically gate
-    // on `object.id` to handle quest item turn-ins.
-    crate::triggers::fire_receive(world, target, player, item);
     // DELIVER_ITEM objective progression. Only when the recipient
     // is a mob with a known prototype (player-to-player gifts
     // don't satisfy quest deliveries).
@@ -16148,6 +16200,20 @@ fn group_level_class(world: &World, member: Entity) -> String {
     }
 }
 
+/// One group roster line, as plain cells.
+struct GroupRow {
+    name: String,
+    who: String,
+    hp: String,
+    hp_open: Option<&'static str>,
+    mv: String,
+    mv_open: Option<&'static str>,
+}
+
+/// Fixed part of a group roster row: 2 indent, the 8-char role tag, five single
+/// spaces, and the widest location tag `(elsewhere)`.
+const GROUP_ROW_FIXED_COLS: usize = 2 + 8 + 5 + 11;
+
 /// `group` (no args): list the player's current group — everyone
 /// transitively connected via `Follower` chains rooted at the
 /// chain's top. The leader is shown first, followed by members
@@ -16188,36 +16254,57 @@ pub(crate) fn cmd_group(world: &mut World, player: Entity, args: &str) {
         members.len()
     );
     let my_room = world.get::<Located>(player).map(|l| l.0);
-    for (i, m) in members.iter().enumerate() {
-        let name = name_of(world, *m);
+    // First pass: the plain cells, so the columns can be sized to what is
+    // actually shown and the whole row kept within 80 columns.
+    let rows: Vec<GroupRow> = members
+        .iter()
+        .map(|m| {
+            let hp = world.get::<Health>(*m);
+            // Movement (legacy `make_group_report_line` shows `NNNv/NNNV`).
+            // Mounts and pets carry `MovementPoints`; players carry `Stamina`.
+            let mv_pool = world
+                .get::<mud_world::MovementPoints>(*m)
+                .map(|p| (p.current, p.max))
+                .or_else(|| world.get::<Stamina>(*m).map(|s| (s.current, s.max)));
+            GroupRow {
+                name: name_of(world, *m),
+                // Level and class, compactly ("L25 Warrior"); a pet or
+                // mount with no profile leaves the column blank.
+                who: group_level_class(world, *m),
+                hp: hp.map_or(String::new(), |h| format!("HP {}/{}", h.hp, h.max)),
+                hp_open: hp.and_then(|h| vital_color_tag(h.hp, h.max)),
+                mv: mv_pool.map_or(String::new(), |(c, x)| format!("Stam {c}/{x}")),
+                mv_open: mv_pool.and_then(|(c, x)| vital_color_tag(c, x)),
+            }
+        })
+        .collect();
+    let width_of = |f: &dyn Fn(&GroupRow) -> usize| rows.iter().map(f).max().unwrap_or(0);
+    let name_w = width_of(&|r| r.name.chars().count()).max(6);
+    let hp_w = width_of(&|r| r.hp.chars().count());
+    let mv_w = width_of(&|r| r.mv.chars().count());
+    // The class column gives way when a long name leaves too little room.
+    let who_w = width_of(&|r| r.who.chars().count()).min(
+        80usize
+            .saturating_sub(GROUP_ROW_FIXED_COLS + name_w + hp_w + mv_w)
+            .max(8),
+    );
+    for (i, (m, row)) in members.iter().zip(&rows).enumerate() {
         let role_word = if i == 0 { "leader" } else { "member" };
         let role_open = if i == 0 { "<b:yellow>" } else { "<dim>" };
         let role_inner = format!("[{role_word:<6}]");
         let role_text = format!("{role_open}{role_inner}</>");
-        let name_padded = format!("{name:<20}");
+        let name_padded = format!("{:<name_w$}", row.name);
         let name_text = format!("<cyan>{name_padded}</>");
-        // Level and class, compactly ("L25 Warrior"); a pet or mount with no
-        // profile leaves the column blank.
-        let who_inner = group_level_class(world, *m);
-        let who_text = format!("{who_inner:<16}");
-        let hp_inner = world
-            .get::<Health>(*m)
-            .map_or(String::new(), |h| format!("HP {}/{}", h.hp, h.max));
-        let hp_padded = format!("{hp_inner:<14}");
-        let hp_open = world
-            .get::<Health>(*m)
-            .and_then(|h| vital_color_tag(h.hp, h.max));
-        let hp_text = hp_open.map_or(hp_padded.clone(), |open| format!("{open}{hp_padded}</>"));
-        // Movement (legacy `make_group_report_line` shows `NNNv/NNNV`).
-        // Mounts and pets carry `MovementPoints`; players carry `Stamina`.
-        let mv_pool = world
-            .get::<mud_world::MovementPoints>(*m)
-            .map(|p| (p.current, p.max))
-            .or_else(|| world.get::<Stamina>(*m).map(|s| (s.current, s.max)));
-        let mv_inner = mv_pool.map_or(String::new(), |(c, x)| format!("MV {c}/{x}"));
-        let mv_padded = format!("{mv_inner:<12}");
-        let mv_open = mv_pool.and_then(|(c, x)| vital_color_tag(c, x));
-        let mv_text = mv_open.map_or(mv_padded.clone(), |open| format!("{open}{mv_padded}</>"));
+        let who_cut: String = row.who.chars().take(who_w).collect();
+        let who_text = format!("{who_cut:<who_w$}");
+        let hp_padded = format!("{:<hp_w$}", row.hp);
+        let hp_text = row
+            .hp_open
+            .map_or(hp_padded.clone(), |open| format!("{open}{hp_padded}</>"));
+        let mv_padded = format!("{:<mv_w$}", row.mv);
+        let mv_text = row
+            .mv_open
+            .map_or(mv_padded.clone(), |open| format!("{open}{mv_padded}</>"));
         let here_text = match (my_room, world.get::<Located>(*m).map(|l| l.0)) {
             (Some(mine), Some(theirs)) if mine == theirs => "<green>here</>",
             _ => "<dim>elsewhere</>",

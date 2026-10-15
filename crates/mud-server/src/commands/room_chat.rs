@@ -300,10 +300,17 @@ fn cmd_ask(world: &mut World, player: Entity, args: &str) {
             format!("You ask {target_name} about '{topic}'.\r\n"),
         );
     }
+    // The addressee hears the question itself, as the asker appears to them.
+    let heard_from = shown_name(world, target, player, &player_name);
+    send_msg(
+        world,
+        target,
+        format!("{heard_from} asks you about '{topic}'.\r\n"),
+    );
     broadcast_room_anonymised(
         world,
         located.0,
-        &[player],
+        &[player, target],
         &[
             (player, player_name.as_str()),
             (target, target_name.as_str()),
@@ -317,7 +324,6 @@ fn cmd_ask(world: &mut World, player: Entity, args: &str) {
     // The addressee's frame names the asker as they see them.
     let gmcp_text = format!("{player_name} asks {target_name} about '{topic}'");
     send_comm_channel_text(world, player, "ask", &player_name, &gmcp_text);
-    let heard_from = shown_name(world, target, player, &player_name);
     let gmcp_to_target = format!("{heard_from} asks {target_name} about '{topic}'");
     send_comm_channel_text(world, target, "ask", &heard_from, &gmcp_to_target);
     crate::triggers::fire_speech_at(world, target, player, topic);

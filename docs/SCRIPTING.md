@@ -62,7 +62,7 @@ trigger carrying only those never runs on its own).
 | `GREET`, `GREET_ALL` | mob, object | A player or mob arrives in the room (identical behaviour). | listener / arriver | |
 | `SPEECH` | mob, object, room | Someone `say`s in the room, or `ask`/`tell`/`whisper`s the listener. Plain `say` wakes every scripted listener in the room plus the room's own triggers. | listener / speaker | `speech` (lowercased text) |
 | `SPEECH_TO` | mob | Directed speech (`ask`, `tell`, `whisper`) only; a trigger with both flags also answers plain `say`. | listener / speaker | `speech` |
-| `RECEIVE` | mob | A player gives the mob an item. | mob / giver | `object` = the item |
+| `RECEIVE` | mob | A player gives the mob an item. The script can refuse it (see [Return values](#return-values)). | mob / giver | `object` = the item |
 | `COMMAND` | mob, object, room | A player types any command. Order: the room, mobs in the room, then objects the player wears, carries, and finally objects on the floor. Not run for staff or wizinvis actors. | listener / typist | `cmd`, `args`, `arg` (= `args`), and for objects `location` = `"equip"`, `"inventory"` or `"room"` |
 | `FIGHT` | mob | After each combat round, for each fighter. | the fighter / its opponent | |
 | `ATTACK` | mob; object (worn) | Mob: a player starts an attack on it (self = target, actor = attacker). Object: the wearer just hit something. | see left; object: self = the item | object: `victim`, `damage` |
@@ -86,7 +86,8 @@ trigger carrying only those never runs on its own).
 Notes:
 
 * `DROP` and `GIVE` fire *before* the action, and the action is cancelled only when the script
-  removed or moved the item itself. The body's return value is **not** read for them.
+  removed or moved the item itself. The body's return value is **not** read for them (`RECEIVE` is
+  different: `return false` refuses the item, see Return values).
 * `run_room_trigger(zone, id)` runs *every* trigger on that room whatever its flags, with `self` =
   that room. The call is deferred until the current script returns.
 * Directly firing a body for testing: the `firetrig` command and `POST /api/admin/triggers/fire`
@@ -132,14 +133,31 @@ use the same gate as the first statement. Any other first line is run as ordinar
 
 ## Return values
 
-Only **`COMMAND`** reads the return value, following legacy `script_driver` (which starts with
-"block"):
+**`COMMAND`** and **`RECEIVE`** read the return value. `COMMAND` follows legacy `script_driver`
+(which starts with "block"):
 
 | What the body does | Result |
 | --- | --- |
 | `return true` | The command is **not** consumed: it continues to the normal handler (and later COMMAND triggers). Use this for "not my command". |
 | `return false`, no return, or reaching a `wait()` | The command is **consumed**. |
 | `allow_command()` then keep going | Lets the command through and the script keeps running (legacy `return 0` followed by a `wait`). |
+
+**`RECEIVE`** follows legacy `receive_mtrigger`: a script that returns 0 cancels the give.
+
+| What the body does | Result |
+| --- | --- |
+| `return false` or `return 0` | The item is **refused**: it goes back to the giver's inventory and the giver gets no `You give ...` line (the script's own output, e.g. a "refuses" echo, still shows). |
+| `return true`, `return nil`, no return, any other value | The item is **accepted** and stays with the mob. |
+| Reaching a `wait()` before returning | **Accepted**: the verdict is not available while the script is parked. Do the refusing before the first `wait()`. |
+
+The body runs with the item already in the mob's inventory (so `destroy_item` and `give_item` work), and
+the server moves it back on a refusal unless the script already took it elsewhere or destroyed it. With
+`give all` / `give all.<name>` each item is judged on its own and the run continues past a refusal;
+`give N <item>` stops at the first refusal. While an earlier `RECEIVE` run is still parked in a
+`wait()` the mob cannot look at another item (the busy guard below), so the give is not made: the item
+stays with the giver, the giver sees "<Mob> seems busy.", and a bulk give stops there (items 2..N stay
+with the giver). The converter spells legacy `return 0` as `return true` for non-`COMMAND` types, so a
+converted RECEIVE body that must refuse has to say `return false` explicitly.
 
 Every other event ignores what the body returns. In particular a mistaken `return false` in a
 `GREET` body does nothing.

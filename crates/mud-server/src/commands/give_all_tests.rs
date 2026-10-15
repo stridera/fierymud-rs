@@ -369,3 +369,115 @@ fn give_count_never_offers_the_same_item_twice() {
             .and_then(|c| c.get(EntityType::Mob, 99, 5, "n").cloned());
     assert_eq!(n, Some(1.into()), "{out}");
 }
+
+// --- RECEIVE verdicts (playtest r12) ----------------------------------
+
+#[test]
+fn a_receive_trigger_returning_false_sends_the_item_back() {
+    let mut s = scene();
+    let keeper = keeper_with(&mut s, "actor:send('Keeper refuses it.') return false");
+    let items = swords(&mut s, 1);
+    let out = s.cmd("give sword keeper");
+    assert_eq!(s.holder(items[0]), s.giver, "{out}");
+    assert!(out.contains("Keeper refuses it."), "{out}");
+    assert!(!out.contains("You give"), "{out}");
+    let _ = keeper;
+}
+
+#[test]
+fn a_receive_trigger_returning_zero_refuses_too() {
+    let mut s = scene();
+    keeper_with(&mut s, "return 0");
+    let items = swords(&mut s, 1);
+    let out = s.cmd("give sword keeper");
+    assert_eq!(s.holder(items[0]), s.giver, "{out}");
+    assert!(!out.contains("You give"), "{out}");
+}
+
+#[test]
+fn a_receive_trigger_returning_true_nil_or_nothing_accepts() {
+    for body in ["return true", "return nil", "local x = 1", "return 1"] {
+        let mut s = scene();
+        let keeper = keeper_with(&mut s, body);
+        let items = swords(&mut s, 1);
+        let out = s.cmd("give sword keeper");
+        assert_eq!(s.holder(items[0]), keeper, "{body}: {out}");
+        assert!(out.contains("You give a sword to Keeper."), "{body}: {out}");
+    }
+}
+
+#[test]
+fn give_all_refuses_per_item_and_keeps_going() {
+    let mut s = scene();
+    let keeper = keeper_with(&mut s, "if object.id == 7 then return false end");
+    let a = item_at(&mut s.fx.world, s.giver, 7, "a steel sword", "sword");
+    let b = item_at(&mut s.fx.world, s.giver, 7, "a steel sword", "sword");
+    let c = item_at(&mut s.fx.world, s.giver, 8, "a red apple", "apple");
+    let out = s.cmd("give all keeper");
+    assert_eq!(s.holder(a), s.giver, "{out}");
+    assert_eq!(s.holder(b), s.giver, "{out}");
+    assert_eq!(s.holder(c), keeper, "{out}");
+    assert!(out.contains("You give a red apple to Keeper."), "{out}");
+    assert!(!out.contains("steel sword to Keeper"), "{out}");
+}
+
+#[test]
+fn give_count_stops_at_the_first_receive_refusal() {
+    let mut s = scene();
+    keeper_with(&mut s, "actor:send('Keeper refuses.') return false");
+    let items = swords(&mut s, 3);
+    let out = s.cmd("give 3 sword keeper");
+    for item in items {
+        assert_eq!(s.holder(item), s.giver, "{out}");
+    }
+    assert_eq!(out.matches("Keeper refuses.").count(), 1, "{out}");
+    assert!(!out.contains("You give"), "{out}");
+}
+
+#[test]
+fn give_count_prints_the_summary_before_the_recipients_reaction() {
+    let mut s = scene();
+    keeper_with(&mut s, "actor:send('Keeper grumbles.')");
+    swords(&mut s, 3);
+    let out = s.cmd("give 3 sword keeper");
+    let summary = out.find("You give a sword to Keeper. (x3)").expect(&out);
+    let reaction = out.find("Keeper grumbles.").expect(&out);
+    assert!(summary < reaction, "{out}");
+}
+
+#[test]
+fn a_single_give_prints_its_line_before_the_reaction() {
+    let mut s = scene();
+    keeper_with(&mut s, "actor:send('Keeper grumbles.')");
+    swords(&mut s, 1);
+    let out = s.cmd("give sword keeper");
+    let line = out.find("You give a sword to Keeper.").expect(&out);
+    assert!(line < out.find("Keeper grumbles.").expect(&out), "{out}");
+}
+
+#[test]
+fn a_busy_receive_trigger_keeps_the_rest_with_the_giver() {
+    let mut s = scene();
+    let keeper = keeper_with(&mut s, "wait(50)");
+    let items = swords(&mut s, 3);
+    let out = s.cmd("give 3 sword keeper");
+    let with_keeper = items.iter().filter(|&&i| s.holder(i) == keeper).count();
+    assert_eq!(with_keeper, 1, "{out}");
+    assert_eq!(out.matches("Keeper seems busy.").count(), 1, "{out}");
+    assert!(out.contains("You give a sword to Keeper."), "{out}");
+    assert!(!out.contains("(x"), "{out}");
+}
+
+#[test]
+fn a_single_give_to_a_busy_recipient_is_not_taken() {
+    let mut s = scene();
+    let keeper = keeper_with(&mut s, "wait(50)");
+    let items = swords(&mut s, 2);
+    let first = s.cmd("give sword keeper");
+    assert!(first.contains("You give a sword to Keeper."), "{first}");
+    let out = s.cmd("give sword keeper");
+    assert!(out.contains("Keeper seems busy."), "{out}");
+    assert!(!out.contains("You give"), "{out}");
+    let with_keeper = items.iter().filter(|&&i| s.holder(i) == keeper).count();
+    assert_eq!(with_keeper, 1, "{out}");
+}
