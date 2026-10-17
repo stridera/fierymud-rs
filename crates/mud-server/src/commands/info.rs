@@ -12215,6 +12215,9 @@ fn get_from_container_inner(
         let items = {
             let mut v = items;
             v.retain(|(e, _)| crate::commands::senses::item_visible_to(world, player, *e));
+            // NPC corpses nested in the container stay put, silently, as
+            // on the floor.
+            v.retain(|(e, _)| !untakable_npc_corpse(world, player, *e));
             crate::commands::sort_newest_first(world, container, &mut v, |r| r.0);
             v
         };
@@ -12328,6 +12331,16 @@ fn get_from_container_inner(
         return;
     };
     let item_name = name_of(world, item);
+    // An NPC corpse nested in the container is as uncarriable as one on the
+    // floor.
+    if untakable_npc_corpse(world, player, item) {
+        send_msg(
+            world,
+            player,
+            format!("{item_name}: you can't take that!\r\n"),
+        );
+        return;
+    }
     // NO_TAKE — same fixture gate as the floor path.
     if !crate::commands::is_staff_gameplay(world, player)
         && has_restriction(world, item, mud_db::enums::ObjectRestriction::NoTake)

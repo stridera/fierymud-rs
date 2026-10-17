@@ -10,7 +10,7 @@ use mud_world::{
 use super::dispatch;
 use super::god_zone_tests::Fx;
 use super::item_guard_tests::item_at;
-use super::test_support::{Rx, drain};
+use super::test_support::{Rx, drain, object_proto};
 
 fn scene() -> (Fx, Entity, Entity, Rx) {
     let mut fx = Fx::new();
@@ -312,6 +312,60 @@ fn players_cannot_pick_up_npc_corpses() {
     let out = drain(&mut rx);
     assert!(out.contains("You pick up the corpse of a rat."), "{out}");
     assert_eq!(fx.world.get::<Located>(corpse).unwrap().0, p);
+}
+
+#[test]
+fn players_cannot_take_npc_corpses_out_of_containers() {
+    let (mut fx, room, p, mut rx) = scene();
+    // A corpse nested inside another corpse.
+    let outer = item_at(&mut fx.world, room, 7, "the corpse of an orc", "corpse orc");
+    fx.world.entity_mut(outer).insert(mud_world::Corpse);
+    let inner = item_at(&mut fx.world, outer, 8, "the corpse of a rat", "corpse rat");
+    fx.world.entity_mut(inner).insert(mud_world::Corpse);
+    let sword = item_at(&mut fx.world, outer, 9, "a rusty sword", "sword");
+
+    // `get all` from the outer corpse takes the loot and skips the nested
+    // corpse without a line about it.
+    dispatch(&mut fx.world, p, "get all orc");
+    let out = drain(&mut rx);
+    assert!(out.contains("You take a rusty sword"), "{out}");
+    assert!(!out.contains("rat"), "{out}");
+    assert_eq!(fx.world.get::<Located>(sword).unwrap().0, p);
+    assert_eq!(fx.world.get::<Located>(inner).unwrap().0, outer);
+
+    // A corpse put in a chest cannot be taken by name.
+    let mut proto = object_proto(30, 10, mud_db::enums::ObjectType::Container);
+    proto.name = "a wooden chest".into();
+    proto.keywords = vec!["chest".into()];
+    fx.world
+        .resource_mut::<mud_world::ObjectPrototypes>()
+        .by_key
+        .insert((30, 10), proto);
+    let chest = item_at(&mut fx.world, room, 10, "a wooden chest", "chest");
+    let boxed = item_at(
+        &mut fx.world,
+        chest,
+        11,
+        "the corpse of a bat",
+        "corpse bat",
+    );
+    fx.world.entity_mut(boxed).insert(mud_world::Corpse);
+    dispatch(&mut fx.world, p, "get corpse chest");
+    let out = drain(&mut rx);
+    assert!(
+        out.contains("The corpse of a bat: you can't take that!"),
+        "{out}"
+    );
+    assert_eq!(fx.world.get::<Located>(boxed).unwrap().0, chest);
+
+    // Staff are exempt.
+    fx.world.insert_resource(crate::DevMode(true));
+    dispatch(&mut fx.world, p, "get corpse chest");
+    let out = drain(&mut rx);
+    assert!(out.contains("You take the corpse of a bat"), "{out}");
+    assert_eq!(fx.world.get::<Located>(boxed).unwrap().0, p);
+    dispatch(&mut fx.world, p, "get all orc");
+    assert_eq!(fx.world.get::<Located>(inner).unwrap().0, p);
 }
 
 #[test]
