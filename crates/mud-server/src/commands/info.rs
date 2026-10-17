@@ -12257,6 +12257,15 @@ fn get_from_container_inner(
         // honest, but the gate doesn't reject.
         let bypass_encumbrance = crate::commands::is_staff_gameplay(world, player);
         for (item, item_name) in &items {
+            // A nested player corpse is refused for everyone, as on the floor.
+            if world.get::<mud_world::PlayerCorpse>(*item).is_some() {
+                send_msg(
+                    world,
+                    player,
+                    format!("{item_name}: you can't take that!\r\n"),
+                );
+                continue;
+            }
             // NO_TAKE items inside containers also stay put.
             // Plausible: a fixed lectern inside a shrine, a
             // welded gear inside a clockwork chassis. Staff
@@ -12331,9 +12340,11 @@ fn get_from_container_inner(
         return;
     };
     let item_name = name_of(world, item);
-    // An NPC corpse nested in the container is as uncarriable as one on the
-    // floor.
-    if untakable_npc_corpse(world, player, item) {
+    // A corpse nested in the container is as uncarriable as one on the
+    // floor: player corpses for everyone, NPC corpses for non-staff.
+    if world.get::<mud_world::PlayerCorpse>(item).is_some()
+        || untakable_npc_corpse(world, player, item)
+    {
         send_msg(
             world,
             player,

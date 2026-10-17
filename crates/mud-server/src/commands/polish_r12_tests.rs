@@ -369,6 +369,46 @@ fn players_cannot_take_npc_corpses_out_of_containers() {
 }
 
 #[test]
+fn nobody_takes_a_player_corpse_out_of_a_container() {
+    let (mut fx, room, p, mut rx) = scene();
+    let mut proto = object_proto(30, 10, mud_db::enums::ObjectType::Container);
+    proto.name = "a wooden chest".into();
+    proto.keywords = vec!["chest".into()];
+    fx.world
+        .resource_mut::<mud_world::ObjectPrototypes>()
+        .by_key
+        .insert((30, 10), proto);
+    let chest = item_at(&mut fx.world, room, 10, "a wooden chest", "chest");
+    let pc = item_at(&mut fx.world, chest, 11, "the corpse of Bob", "corpse bob");
+    fx.world
+        .entity_mut(pc)
+        .insert((mud_world::Corpse, mud_world::PlayerCorpse));
+    let gem = item_at(&mut fx.world, chest, 12, "a red gem", "gem");
+
+    for staff in [false, true] {
+        if staff {
+            fx.world.insert_resource(crate::DevMode(true));
+        }
+        dispatch(&mut fx.world, p, "get corpse chest");
+        let out = drain(&mut rx);
+        assert!(
+            out.contains("The corpse of Bob: you can't take that!")
+                || out.contains("the corpse of Bob: you can't take that!"),
+            "staff={staff}: {out}"
+        );
+        assert_eq!(fx.world.get::<Located>(pc).unwrap().0, chest);
+    }
+
+    // `get all chest` takes the rest and leaves the corpse.
+    dispatch(&mut fx.world, p, "get all chest");
+    let out = drain(&mut rx);
+    assert!(out.contains("You take a red gem"), "{out}");
+    assert!(out.contains("you can't take that!"), "{out}");
+    assert_eq!(fx.world.get::<Located>(gem).unwrap().0, p);
+    assert_eq!(fx.world.get::<Located>(pc).unwrap().0, chest);
+}
+
+#[test]
 fn counted_get_keeps_the_k_dot_index() {
     let (mut fx, room, p, mut rx) = scene();
     let sticks: Vec<Entity> = (0..3)
