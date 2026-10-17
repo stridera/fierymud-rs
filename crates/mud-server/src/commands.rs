@@ -951,6 +951,9 @@ mod polish_r12_tests;
 #[cfg(test)]
 #[path = "commands/polish_r3_tests.rs"]
 mod polish_r3_tests;
+#[cfg(test)]
+#[path = "commands/r14_engine_tests.rs"]
+mod r14_engine_tests;
 #[path = "commands/staff_find.rs"]
 mod staff_find;
 #[cfg(test)]

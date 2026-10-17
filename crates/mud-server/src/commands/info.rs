@@ -3510,7 +3510,13 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
                 .collect();
             if remaining <= hits.len() {
                 let mode = color_mode_for(world, player);
-                let body = render_color_tags(hits[remaining - 1].trim_end(), mode);
+                // Wrapped to the player's line width like descriptions are;
+                // `wrap_lines` keeps the builder's own line breaks (signs).
+                let width = crate::layout::wrap_width(world, player);
+                let body = render_color_tags(
+                    &crate::layout::wrap_lines(hits[remaining - 1].trim_end(), width),
+                    mode,
+                );
                 send_to(world, player, format!("\r\n{body}\r\n"));
                 return;
             }
@@ -3542,7 +3548,11 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
             });
         if remaining <= extras_hits.len() {
             let mode = color_mode_for(world, player);
-            let rendered = render_color_tags(extras_hits[remaining - 1].trim_end(), mode);
+            let width = crate::layout::wrap_width(world, player);
+            let rendered = render_color_tags(
+                &crate::layout::wrap_lines(extras_hits[remaining - 1].trim_end(), width),
+                mode,
+            );
             send_to(world, player, format!("\r\n{rendered}\r\n"));
             return;
         }
@@ -11993,7 +12003,9 @@ fn get_plain(world: &mut World, player: Entity, args: &str) {
     // A player's corpse can be dragged but never carried (legacy: it has
     // no TAKE flag). Carried corpses couldn't be saved with their owner's
     // gear, so nobody, staff included, picks one up.
-    if world.get::<mud_world::PlayerCorpse>(item).is_some() {
+    if world.get::<mud_world::PlayerCorpse>(item).is_some()
+        || untakable_npc_corpse(world, player, item)
+    {
         send_msg(
             world,
             player,
@@ -12358,6 +12370,16 @@ fn get_from_container_inner(
     }
 }
 
+/// An NPC corpse a non-staff player may not pick up. Legacy `make_corpse`
+/// gives every corpse no TAKE wear flag, so `can_get_obj` answers
+/// "$p: you can't take that!" (only LVL_GOD+ skips the check); corpses are
+/// dragged, not carried. Player corpses are refused for everyone elsewhere.
+fn untakable_npc_corpse(world: &World, player: Entity, item: Entity) -> bool {
+    world.get::<Corpse>(item).is_some()
+        && world.get::<mud_world::PlayerCorpse>(item).is_none()
+        && !crate::commands::is_staff_gameplay(world, player)
+}
+
 /// Sweep every floor item in `room` into the player's inventory,
 /// optionally filtered by a substring against the item's name or
 /// keywords. `filter == ""` means "every item." Mirrors the
@@ -12367,8 +12389,8 @@ fn get_from_container_inner(
 fn get_all_from_floor(world: &mut World, player: Entity, room: Entity, filter: &str) {
     let needle = filter.to_ascii_lowercase();
     // Mobs running `get all` (typically via a Lua trigger) don't
-    // sweep up corpses — same rule as the single-item path. Player
-    // floor sweeps still grab corpses if the player wants them.
+    // sweep up corpses — same rule as the single-item path. Players (not
+    // staff) are held off NPC corpses further down.
     let actor_is_mob = world.get::<Mob>(player).is_some();
     let items: Vec<(Entity, String)> = {
         let mut q = world.query_filtered::<
@@ -12394,6 +12416,10 @@ fn get_all_from_floor(world: &mut World, player: Entity, room: Entity, filter: &
     let items = {
         let mut v = items;
         v.retain(|(e, _)| crate::commands::senses::item_visible_to(world, player, *e));
+        // A bare `get all` leaves NPC corpses where they lie, silently.
+        if needle.is_empty() {
+            v.retain(|(e, _)| !untakable_npc_corpse(world, player, *e));
+        }
         crate::commands::sort_newest_first(world, room, &mut v, |r| r.0);
         v
     };
@@ -12449,6 +12475,15 @@ fn get_batch_from_floor(
                 player,
                 format!("{item_name}: you can't take that!\r\n"),
             );
+            continue;
+        }
+        // NPC corpses are skipped without a line per corpse (a sweep would
+        // spam); an explicit filter that only matched corpses still gets the
+        // summary line below.
+        if untakable_npc_corpse(world, player, *item) {
+            if !filter.is_empty() {
+                blocked += 1;
+            }
             continue;
         }
         // NO_TAKE fixtures skip silently in the bulk path — the
@@ -18309,20 +18344,20 @@ mod tests {
     fn get_two_word_container_name_still_picks_up_container() {
         // `get big corpse`: a floor item matches the whole string, so
         // it is picked up rather than reinterpreted as a container get.
+        // (A plain container: NPC corpses are not takeable by players.)
         let (mut world, room, player, _anvil) = make_floor_world();
         let corpse = world
             .spawn((
                 Item,
-                Corpse,
                 Named {
-                    name: "a big corpse".to_string(),
+                    name: "a big chest".to_string(),
                 },
-                Keywords(vec!["big".to_string(), "corpse".to_string()]),
+                Keywords(vec!["big".to_string(), "chest".to_string()]),
                 Located(room),
             ))
             .id();
         let inner = spawn_item(&mut world, "a coin", "coin", corpse);
-        cmd_get(&mut world, player, "big corpse");
+        cmd_get(&mut world, player, "big chest");
         assert_eq!(world.get::<Located>(corpse).unwrap().0, player);
         assert_eq!(world.get::<Located>(inner).unwrap().0, corpse);
     }

@@ -233,7 +233,7 @@ fn give_coins_rejects_a_non_positive_count_in_any_pair() {
 }
 
 #[test]
-fn counted_get_leaves_npc_corpses_to_mobs_but_players_still_take_them() {
+fn counted_get_leaves_npc_corpses_to_mobs_and_players_but_staff_take_them() {
     let (mut fx, room, p, mut rx) = scene();
     let corpses: Vec<Entity> = (0..2)
         .map(|_| {
@@ -257,11 +257,61 @@ fn counted_get_leaves_npc_corpses_to_mobs_but_players_still_take_them() {
     for &c in &corpses {
         assert_eq!(fx.world.get::<Located>(c).unwrap().0, room);
     }
+    // Players are refused too (legacy corpses have no TAKE flag)...
+    dispatch(&mut fx.world, p, "get 2 corpse");
+    let out = drain(&mut rx);
+    for &c in &corpses {
+        assert_eq!(fx.world.get::<Located>(c).unwrap().0, room, "{out}");
+    }
+    // ...but staff still take them.
+    fx.world.insert_resource(crate::DevMode(true));
     dispatch(&mut fx.world, p, "get 2 corpse");
     let out = drain(&mut rx);
     for &c in &corpses {
         assert_eq!(fx.world.get::<Located>(c).unwrap().0, p, "{out}");
     }
+}
+
+#[test]
+fn players_cannot_pick_up_npc_corpses() {
+    let (mut fx, room, p, mut rx) = scene();
+    let corpse = item_at(&mut fx.world, room, 7, "the corpse of a rat", "corpse");
+    fx.world.entity_mut(corpse).insert(mud_world::Corpse);
+    let stick = item_at(&mut fx.world, room, 8, "a small stick", "stick");
+
+    dispatch(&mut fx.world, p, "get corpse");
+    let out = drain(&mut rx);
+    assert!(
+        out.contains("The corpse of a rat: you can't take that!"),
+        "{out}"
+    );
+    assert_eq!(fx.world.get::<Located>(corpse).unwrap().0, room);
+
+    // `get all` leaves the corpse alone without a line about it.
+    dispatch(&mut fx.world, p, "get all");
+    let out = drain(&mut rx);
+    assert!(out.contains("You pick up a small stick."), "{out}");
+    assert!(!out.contains("corpse"), "{out}");
+    assert_eq!(fx.world.get::<Located>(stick).unwrap().0, p);
+    assert_eq!(fx.world.get::<Located>(corpse).unwrap().0, room);
+
+    // A sweep with nothing else to take says so rather than staying mute.
+    dispatch(&mut fx.world, p, "get all");
+    let out = drain(&mut rx);
+    assert!(out.contains("nothing here to pick up"), "{out}");
+
+    // An explicit `get all.corpse` is told it can't.
+    dispatch(&mut fx.world, p, "get all.corpse");
+    let out = drain(&mut rx);
+    assert!(out.contains("can't take"), "{out}");
+    assert_eq!(fx.world.get::<Located>(corpse).unwrap().0, room);
+
+    // Staff can.
+    fx.world.insert_resource(crate::DevMode(true));
+    dispatch(&mut fx.world, p, "get corpse");
+    let out = drain(&mut rx);
+    assert!(out.contains("You pick up the corpse of a rat."), "{out}");
+    assert_eq!(fx.world.get::<Located>(corpse).unwrap().0, p);
 }
 
 #[test]
