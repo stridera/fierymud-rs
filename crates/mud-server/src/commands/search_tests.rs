@@ -84,7 +84,7 @@ fn player(world: &mut World, room: Entity) -> (Entity, Rx) {
             Account {
                 user_id: String::new(),
                 character_id: "c-seeker".into(),
-                role: effective_rank(20, UserRole::Player),
+                role: effective_rank(20),
                 account_role: UserRole::Player,
                 perms: vec![],
             },
@@ -314,7 +314,7 @@ fn staff_always_find_hidden_exits_and_are_not_lagged() {
             .insert(Direction::West, hidden_door(ice, ExitState::Open));
     }
     let (p, mut rx) = searcher_with_int(&mut world, tunnel, 0);
-    world.get_mut::<Account>(p).unwrap().role = effective_rank(100, UserRole::Immortal);
+    world.get_mut::<Account>(p).unwrap().role = effective_rank(100);
 
     // INT 0 and a hopeless roll: a player would find nothing.
     super::info::search_with_roll(&mut world, p, "", &mut |_| panic!("staff never roll"));

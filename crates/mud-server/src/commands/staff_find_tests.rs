@@ -63,7 +63,7 @@ fn person(world: &mut World, level: i32, room: Entity) -> (Entity, Rx) {
             Account {
                 user_id: String::new(),
                 character_id: "c-b".into(),
-                role: effective_rank(level, UserRole::Player),
+                role: effective_rank(level),
                 account_role: UserRole::Player,
                 perms: vec![],
             },

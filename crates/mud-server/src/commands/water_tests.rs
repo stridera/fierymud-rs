@@ -56,7 +56,7 @@ impl Fx {
                 Account {
                     user_id: String::new(),
                     character_id: format!("c-{name}"),
-                    role: effective_rank(level, role),
+                    role: effective_rank(level),
                     account_role: role,
                     perms: vec![],
                 },

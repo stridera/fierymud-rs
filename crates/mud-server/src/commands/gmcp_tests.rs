@@ -136,7 +136,7 @@ pub(crate) fn player(world: &mut World, room: Entity, name: &str) -> (Entity, Rx
             Account {
                 user_id: String::new(),
                 character_id: format!("c-{name}"),
-                role: effective_rank(20, UserRole::Player),
+                role: effective_rank(20),
                 account_role: UserRole::Player,
                 perms: vec![],
             },

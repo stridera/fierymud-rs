@@ -3316,12 +3316,12 @@ impl ConnRouter {
             .get_resource::<mud_world::WizLock>()
             .is_some_and(|w| w.active);
         // A preselected character (name login) is known here, so its level
-        // counts toward staff rank (unlinked god characters have no account
-        // role). The email path has no character yet and falls back to the
-        // account role alone, i.e. it can only be stricter, never looser.
-        let wizlock_rank = preselected.as_ref().map_or(user.role, |c| {
-            mud_db::enums::effective_rank(c.level, user.role)
-        });
+        // alone decides staff rank (the website role does not count in game).
+        // The email path has no character yet and falls back to the account
+        // role for this pre-selection gate only.
+        let wizlock_rank = preselected
+            .as_ref()
+            .map_or(user.role, |c| mud_db::enums::effective_rank(c.level));
         if wizlock_active && !wizlock_rank.at_least(mud_db::enums::UserRole::Builder) {
             info!(
                 conn_id,
@@ -5098,8 +5098,8 @@ pub(crate) fn spawn_player(
         (Some(rz), Some(rr)) => index.rooms.get(&(rz, rr)).copied(),
         _ => None,
     };
-    let is_staff = mud_db::enums::effective_rank(c.level, user.role)
-        .at_least(mud_db::enums::UserRole::Immortal);
+    let is_staff =
+        mud_db::enums::effective_rank(c.level).at_least(mud_db::enums::UserRole::Immortal);
     let room_entity = resolve_login_room(world, (zone, room), recall_entity, race_start, is_staff);
 
     let health = Health {
@@ -5156,6 +5156,13 @@ pub(crate) fn spawn_player(
         );
     }
 
+    // Level-conferred permissions are recomputed from the current level, so a
+    // stale stored grant (a higher tier the character was demoted from) is
+    // dropped on login.
+    let mut login_perms = c.permissions.clone();
+    if let Some(table) = world.get_resource::<mud_world::LevelTable>() {
+        table.reconcile_permissions(c.level, &mut login_perms);
+    }
     let entity = world
         .spawn((
             Player,
@@ -5166,15 +5173,13 @@ pub(crate) fn spawn_player(
             Account {
                 user_id: user.id.clone(),
                 character_id: c.id.clone(),
-                // Effective in-game staff rank: max(website account role,
-                // role implied by character level). An unlinked legacy god
-                // character has no account role, so level is what grants
-                // its commands. See `mud_db::enums::effective_rank` for
-                // why trusting level is safe (XP capped at 99; staff-only
+                // Effective in-game staff rank: implied by character level
+                // alone. See `mud_db::enums::effective_rank` for why
+                // trusting level is safe (XP capped at 99; staff-only
                 // paths set level >= 100).
-                role: mud_db::enums::effective_rank(c.level, user.role),
+                role: mud_db::enums::effective_rank(c.level),
                 account_role: user.role,
-                perms: c.permissions.clone(),
+                perms: login_perms,
             },
             Connection(outbound),
             health,

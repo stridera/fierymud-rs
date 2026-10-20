@@ -78,7 +78,7 @@ fn player(world: &mut World, name: &str, level: i32, class_id: Option<i32>) -> (
             Account {
                 user_id: String::new(),
                 character_id: format!("c-{name}"),
-                role: effective_rank(level, UserRole::Player),
+                role: effective_rank(level),
                 account_role: UserRole::Player,
                 perms: vec![],
             },

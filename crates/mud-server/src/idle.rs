@@ -207,8 +207,8 @@ pub fn idle_kick_tick(world: &mut World) {
         >();
         q.iter(world)
             // Staff (any rank above Player) never idle out. `Account.role`
-            // is the effective rank (max of website role and level-derived
-            // role), so unlinked L100+ god characters are exempt too.
+            // is the effective rank (level-derived), so unlinked L100+ god
+            // characters are exempt too.
             .filter(|(.., acct)| {
                 use mud_db::enums::UserRole;
                 acct.role.rank() <= UserRole::Player.rank()
@@ -326,7 +326,7 @@ mod tests {
                 Account {
                     user_id: String::new(),
                     character_id: "c".into(),
-                    role: effective_rank(level, account_role),
+                    role: effective_rank(level),
                     account_role,
                     perms: vec![],
                 },
@@ -376,13 +376,13 @@ mod tests {
         // Unlinked god characters: Player account role, staff by level.
         let l100 = spawn_idle(&mut world, 100, UserRole::Player);
         let l105 = spawn_idle(&mut world, 105, UserRole::Player);
-        // Linked staff account on a low-level character.
+        // Low-level character on a staff account: mortal in game.
         let linked = spawn_idle(&mut world, 1, UserRole::Builder);
         idle_kick_tick(&mut world);
         assert!(world.get::<IdleKickPending>(mortal).is_some());
         assert!(world.get::<IdleKickPending>(l100).is_none());
         assert!(world.get::<IdleKickPending>(l105).is_none());
-        assert!(world.get::<IdleKickPending>(linked).is_none());
+        assert!(world.get::<IdleKickPending>(linked).is_some());
     }
 
     #[test]

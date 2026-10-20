@@ -1062,7 +1062,6 @@ mod tests {
 
     #[test]
     fn gods_of_level_101_and_up_cast_instantly() {
-        use mud_db::enums::UserRole;
         for level in [101, 102, 105] {
             let (mut world, room, _) = world_with_spell(2);
             let (caster, _rx) = caster_in(&mut world, room);
@@ -1071,7 +1070,7 @@ mod tests {
                 &mut world,
                 caster,
                 level,
-                mud_db::enums::effective_rank(level, UserRole::Player),
+                mud_db::enums::effective_rank(level),
             );
             start_mend(&mut world, caster);
             assert!(

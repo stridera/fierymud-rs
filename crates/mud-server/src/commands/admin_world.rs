@@ -2156,7 +2156,7 @@ pub(crate) fn cmd_advance(world: &mut World, player: Entity, args: &str) {
     // Capped at the requested level so a large pre-existing XP total
     // can't carry the target past what the caller authorized.
     crate::combat::level_up_to(world, target, target_level);
-    crate::combat::after_level_change(world, target, current_level);
+    crate::combat::after_level_change(world, target);
     send_msg(
         world,
         player,

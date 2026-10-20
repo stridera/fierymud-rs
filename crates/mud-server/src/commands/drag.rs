@@ -390,7 +390,7 @@ mod tests {
             Account {
                 user_id: String::new(),
                 character_id: "c-tester".into(),
-                role: effective_rank(20, UserRole::Player),
+                role: effective_rank(20),
                 account_role: UserRole::Player,
                 perms: vec![],
             },
@@ -668,7 +668,7 @@ mod tests {
         world.entity_mut(p).insert(Account {
             user_id: String::new(),
             character_id: "c-god".into(),
-            role: effective_rank(100, UserRole::Player),
+            role: effective_rank(100),
             account_role: UserRole::Player,
             perms: vec![],
         });

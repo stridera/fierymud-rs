@@ -20,7 +20,7 @@ fn level_account(level: i32) -> Account {
     Account {
         user_id: String::new(),
         character_id: String::new(),
-        role: effective_rank(level, UserRole::Player),
+        role: effective_rank(level),
         account_role: UserRole::Player,
         perms: vec![],
     }

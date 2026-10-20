@@ -1743,6 +1743,29 @@ pub struct LevelRow {
 }
 
 impl LevelTable {
+    /// Make `perms` agree with `level`: every permission some level row
+    /// confers is kept only when a row at or below `level` confers it, and
+    /// every permission conferred at `level` is present. Permissions no row
+    /// confers (explicit per-character grants) are left alone. Idempotent,
+    /// and independent of the previous level, so a stale grant (from a
+    /// higher tier, or restored from the database) is always dropped.
+    pub fn reconcile_permissions(&self, level: i32, perms: &mut Vec<mud_db::enums::Permission>) {
+        let conferred: Vec<mud_db::enums::Permission> = self
+            .rows
+            .iter()
+            .filter(|r| r.level <= level)
+            .flat_map(|r| r.permissions.iter().copied())
+            .collect();
+        perms.retain(|p| {
+            conferred.contains(p) || !self.rows.iter().any(|r| r.permissions.contains(p))
+        });
+        for p in conferred {
+            if !perms.contains(&p) {
+                perms.push(p);
+            }
+        }
+    }
+
     /// Cumulative XP needed to reach `level`, or `None` if the
     /// level isn't in the table (above max).
     #[must_use]

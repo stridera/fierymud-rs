@@ -1881,13 +1881,12 @@ pub(crate) fn cmd_set(world: &mut World, player: Entity, args: &str) {
                 send_to(world, player, denied.message());
                 return;
             }
-            let old_level = world.get::<Profile>(target).map_or(0, |p| p.level);
             let applied = world
                 .get_mut::<Profile>(target)
                 .map(|mut p| p.level = new_level)
                 .is_some();
             // Keep cached rank (Account.role) and level perms in sync.
-            crate::combat::after_level_change(world, target, old_level);
+            crate::combat::after_level_change(world, target);
             applied
         }
         "xp" | "exp" | "experience" => world

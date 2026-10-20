@@ -68,7 +68,7 @@ fn person(world: &mut World, name: &str, level: i32, room: Entity) -> (Entity, R
             Account {
                 user_id: String::new(),
                 character_id: format!("c-{name}"),
-                role: effective_rank(level, UserRole::Player),
+                role: effective_rank(level),
                 account_role: UserRole::Player,
                 perms: vec![],
             },

@@ -135,11 +135,12 @@ pub struct Online;
 /// save-on-disconnect uses to write state back.
 ///
 /// `role` is the *effective* in-game staff rank
-/// (`mud_db::enums::effective_rank(level, account_role)`), cached so the
+/// (`mud_db::enums::effective_rank(level)`), cached so the
 /// many permission checks stay a plain field read. Every code path that
 /// changes `Profile.level` must call [`Account::refresh_rank`] afterwards.
 /// Read `role` for any permission decision; `account_role` is only the
-/// website role (an unlinked legacy character has `Player` there).
+/// website role. It is informational and never feeds `role`: in game, rank
+/// follows character level alone.
 #[derive(Component, Debug, Clone)]
 pub struct Account {
     pub user_id: String,
@@ -160,7 +161,7 @@ pub struct MortalMode;
 impl Account {
     /// Recompute the cached effective rank after a level change.
     pub fn refresh_rank(&mut self, level: i32) {
-        self.role = mud_db::enums::effective_rank(level, self.account_role);
+        self.role = mud_db::enums::effective_rank(level);
     }
 }
 

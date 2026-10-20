@@ -268,31 +268,18 @@ fn role_title(role: UserRole) -> &'static str {
     }
 }
 
-fn parse_role(text: &str) -> UserRole {
-    match text {
-        "IMMORTAL" => UserRole::Immortal,
-        "BUILDER" => UserRole::Builder,
-        "HEAD_BUILDER" => UserRole::HeadBuilder,
-        "CODER" => UserRole::Coder,
-        "IMPLEMENTOR" => UserRole::Implementor,
-        _ => UserRole::Player,
-    }
-}
-
-/// Staff characters: level 100 and up, or an account with a staff role.
-/// The effective role is the higher of the account role and the one the
-/// character's level implies, as everywhere else.
+/// Staff characters: level 100 and up. The role is the one the character's
+/// level implies, as everywhere else (the website account role does not count).
 pub(crate) async fn staff_rows(
     pool: &mud_db::sqlx::PgPool,
 ) -> Result<Vec<StaffRow>, mud_db::sqlx::Error> {
     use mud_db::sqlx::Row;
     let rows = mud_db::sqlx::query(
         r#"
-        SELECT c.name, c.level, u.role::text AS role
+        SELECT c.name, c.level
         FROM "Characters" c
-        LEFT JOIN "Users" u ON u.id = c.user_id
         WHERE c.deleted_at IS NULL
-          AND (c.level >= 100 OR u.role <> 'PLAYER'::"UserRole")
+          AND c.level >= 100
         "#,
     )
     .fetch_all(pool)
@@ -301,12 +288,10 @@ pub(crate) async fn staff_rows(
         .iter()
         .map(|r| {
             let level: i32 = r.get("level");
-            let account_role =
-                parse_role(r.get::<Option<String>, _>("role").as_deref().unwrap_or(""));
             StaffRow {
                 name: r.get("name"),
                 level,
-                role: effective_rank(level, account_role),
+                role: effective_rank(level),
             }
         })
         .filter(|s| s.role != UserRole::Player)

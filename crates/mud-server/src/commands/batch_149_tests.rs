@@ -177,7 +177,7 @@ fn make_god(world: &mut World, p: Entity) {
     world.entity_mut(p).insert(Account {
         user_id: "u".into(),
         character_id: "c".into(),
-        role: effective_rank(100, UserRole::Player),
+        role: effective_rank(100),
         account_role: UserRole::Immortal,
         perms: vec![],
     });

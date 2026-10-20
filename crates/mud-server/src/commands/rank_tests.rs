@@ -12,7 +12,7 @@ use super::{Command, all_commands, command_permitted, dispatch};
 use crate::DevMode;
 
 /// Spawn a player the way `login::spawn_player` does: the cached
-/// `Account.role` is the effective rank of (level, website role).
+/// `Account.role` is the effective rank of the level.
 fn spawn(world: &mut World, name: &str, level: i32, account_role: UserRole) -> Entity {
     world
         .spawn((
@@ -24,7 +24,7 @@ fn spawn(world: &mut World, name: &str, level: i32, account_role: UserRole) -> E
             Account {
                 user_id: String::new(),
                 character_id: format!("c-{name}"),
-                role: effective_rank(level, account_role),
+                role: effective_rank(level),
                 account_role,
                 perms: vec![],
             },
@@ -113,15 +113,6 @@ fn linked_player_account_with_l100_character_is_immortal() {
     // A mortal with the same account role gets nothing.
     let mortal = spawn(&mut world, "Mortal", 99, UserRole::Player);
     assert!(!command_permitted(&world, mortal, cmd("wiznet")));
-}
-
-#[test]
-fn account_role_is_never_lowered_by_level() {
-    let mut world = World::new();
-    let p = spawn(&mut world, "Linked", 5, UserRole::Implementor);
-    assert_eq!(world.get::<Account>(p).unwrap().role, UserRole::Implementor);
-    world.get_mut::<Account>(p).unwrap().refresh_rank(5);
-    assert_eq!(world.get::<Account>(p).unwrap().role, UserRole::Implementor);
 }
 
 fn denied_in_audit_log(world: &World, args: &str) -> bool {
@@ -244,7 +235,7 @@ fn ceiling_uses_character_level_not_account_role() {
     // Website Implementor playing a level-1 character.
     let weak = spawn(&mut world, "Weak", 1, UserRole::Implementor);
     let victim = spawn(&mut world, "Victim", 1, UserRole::Player);
-    assert!(command_permitted(&world, weak, cmd("advance")));
+    assert!(!command_permitted(&world, weak, cmd("advance")));
     dispatch(&mut world, weak, "advance Victim 105");
     dispatch(&mut world, weak, "advance Victim 50");
     assert_eq!(level_of(&world, victim), 1);
@@ -293,7 +284,7 @@ fn level_table_perms_follow_level_both_ways() {
     );
     // Lowering the level removes the level-conferred permission.
     world.get_mut::<Profile>(target).unwrap().level = 50;
-    crate::combat::after_level_change(&mut world, target, 100);
+    crate::combat::after_level_change(&mut world, target);
     assert!(
         !world
             .get::<Account>(target)
@@ -707,4 +698,100 @@ fn set_coin_fields_are_absolute_and_repeatable() {
     assert_eq!(coins(&world), 900, "clamped to the 9 gold a purse holds");
     dispatch(&mut world, god, "set me gold 0");
     assert_eq!(coins(&world), 0);
+}
+
+// --- Demotion (#174): privileges follow the current level, never a stale grant.
+
+const SNEAK: i32 = 7; // a skill outside the character's class kit
+
+fn world_with_catalog() -> World {
+    use mud_db::abilities::AbilityKind;
+    let mut world = World::new();
+    let mut catalog = mud_world::AbilityCatalog::default();
+    catalog.by_name.insert(
+        "sneak".to_string(),
+        super::test_support::ability_def(SNEAK, "Sneak", AbilityKind::Skill),
+    );
+    world.insert_resource(catalog);
+    world.insert_resource(level_table(105));
+    world
+}
+
+#[test]
+fn demoted_immortal_loses_wiz_commands_and_god_skills() {
+    let mut world = world_with_catalog();
+    let imp = spawn(&mut world, "Imp", 105, UserRole::Player);
+    // Website account role is Immortal too (the Muditor promotion path): it
+    // must not keep the rank once the character is set back to 84.
+    let target = spawn(&mut world, "Mukashi", 50, UserRole::Immortal);
+    assert_eq!(
+        world.get::<Account>(target).unwrap().account_role,
+        UserRole::Immortal
+    );
+
+    dispatch(&mut world, imp, "advance Mukashi 100");
+    assert!(command_permitted(&world, target, cmd("wiznet")));
+    assert_eq!(mud_world::proficiency_of(&world, target, SNEAK), Some(1000));
+
+    // Staff demote to 84 through the same level-change path `set level` uses.
+    world.get_mut::<Profile>(target).unwrap().level = 84;
+    crate::combat::after_level_change(&mut world, target);
+    assert_eq!(world.get::<Account>(target).unwrap().role, UserRole::Player);
+    assert!(!command_permitted(&world, target, cmd("wiznet")));
+    assert!(!command_permitted(&world, target, cmd("goto")));
+    assert!(!mud_world::has_immortal_role(&world, target));
+    // The non-class skill is gone and nothing is left at god proficiency.
+    assert_eq!(mud_world::proficiency_of(&world, target, SNEAK), None);
+    assert!(mud_world::known_abilities_of(&world, target).is_none_or(|k| !k.has_any(SNEAK)));
+}
+
+#[test]
+fn demotion_between_staff_tiers_drops_higher_tier_commands() {
+    let mut world = world_with_catalog();
+    let coder = spawn(&mut world, "Coder", 104, UserRole::Player);
+    assert!(
+        command_permitted(&world, coder, cmd("areload")),
+        "Coder cmd"
+    );
+    world.get_mut::<Profile>(coder).unwrap().level = 101;
+    crate::combat::after_level_change(&mut world, coder);
+    assert_eq!(world.get::<Account>(coder).unwrap().role, UserRole::Builder);
+    assert!(
+        !command_permitted(&world, coder, cmd("areload")),
+        "Coder cmd"
+    );
+    assert!(!command_permitted(&world, coder, cmd("advance")));
+    assert!(command_permitted(&world, coder, cmd("goto")), "Builder cmd");
+    assert!(
+        command_permitted(&world, coder, cmd("wiznet")),
+        "Immortal cmd"
+    );
+}
+
+#[test]
+fn stale_stored_permission_is_dropped_on_demotion_and_kept_when_not_level_granted() {
+    use mud_db::enums::Permission;
+    let mut world = world_with_catalog();
+    let mut table = level_table(105);
+    table.rows[99].permissions = vec![Permission::Summon]; // level 100
+    world.insert_resource(table);
+    let p = spawn(&mut world, "Stale", 84, UserRole::Player);
+    // Summon restored from the database after a demotion, plus an explicit
+    // grant that no level row confers.
+    world.get_mut::<Account>(p).unwrap().perms = vec![Permission::Summon, Permission::Build];
+    crate::combat::after_level_change(&mut world, p);
+    assert_eq!(
+        world.get::<Account>(p).unwrap().perms,
+        vec![Permission::Build]
+    );
+}
+
+#[test]
+fn account_role_does_not_confer_in_game_rank() {
+    let mut world = world_with_catalog();
+    // A mortal alt on a website Implementor account is a plain mortal.
+    let alt = spawn(&mut world, "Alt", 20, UserRole::Implementor);
+    assert_eq!(world.get::<Account>(alt).unwrap().role, UserRole::Player);
+    assert!(!command_permitted(&world, alt, cmd("advance")));
+    assert!(!mud_world::bypasses_restrictions(&world, alt));
 }

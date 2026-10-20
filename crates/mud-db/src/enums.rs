@@ -1687,31 +1687,26 @@ pub const fn is_staff_level(level: i32) -> bool {
     level >= MIN_STAFF_LEVEL
 }
 
-/// In-game staff rank for a character: the higher of the website account
-/// role and the role implied by character level (`UserRole::from_level`).
+/// In-game staff rank for a character: the role implied by character level
+/// alone (`UserRole::from_level`), exactly as in legacy. The website account
+/// role does NOT count in game, so setting a character back below level 100
+/// (or to a lower staff tier) always removes the higher rank, and a mortal
+/// alt on a staff account gets no staff commands or god bypasses. The
+/// account role only governs Muditor. Decision: ops/approvals
+/// 2026-10-11-staff-rank-source (option A).
 ///
-/// Security reasoning: character level is authoritative for staff rank so
-/// that god characters whose legacy account was never linked to a website
-/// user (and therefore have no account role) still get their commands. This
-/// is safe only because level >= 100 is unreachable by gameplay: XP-based
-/// level-up is capped at [`MAX_MORTAL_LEVEL`] and never applies to staff,
-/// and every in-game path that sets a level (`advance`, `set level`)
+/// Level is safe to trust because level >= 100 is unreachable by gameplay:
+/// XP-based level-up is capped at [`MAX_MORTAL_LEVEL`] and never applies to
+/// staff, and every in-game path that sets a level (`advance`, `set level`)
 /// requires the actor's level to be strictly above both the target's current
 /// and new level, so nobody can mint an Implementor in game. The only other
 /// path is the authenticated admin HTTP `player/set`, which is audit-logged.
-/// The result is never lower than either input, so a
-/// demoted-by-level character still keeps a higher website role.
 ///
-/// This is the single place rank is combined; the result is cached in
-/// `Account.role` at login and refreshed whenever a level changes.
+/// The result is cached in `Account.role` at login and refreshed by
+/// `after_level_change` on every level write.
 #[must_use]
-pub const fn effective_rank(level: i32, account_role: UserRole) -> UserRole {
-    let by_level = UserRole::from_level(level);
-    if by_level.rank() > account_role.rank() {
-        by_level
-    } else {
-        account_role
-    }
+pub const fn effective_rank(level: i32) -> UserRole {
+    UserRole::from_level(level)
 }
 
 #[cfg(test)]
@@ -1722,30 +1717,22 @@ mod rank_tests {
     fn effective_rank_table() {
         use UserRole::{Builder, Coder, HeadBuilder, Immortal, Implementor, Player};
         let table = [
-            // (level, account role, expected)
-            (1, Player, Player),
-            (99, Player, Player),
-            (100, Player, Immortal),
-            (101, Player, Builder),
-            (102, Player, Builder),
-            (103, Player, HeadBuilder),
-            (104, Player, Coder),
-            (105, Player, Implementor),
-            (110, Player, Implementor),
-            // Account role wins when higher than the level-derived role.
-            (1, Implementor, Implementor),
-            (99, Builder, Builder),
-            (100, Coder, Coder),
-            (104, Implementor, Implementor),
-            // Level wins when higher.
-            (105, Immortal, Implementor),
-            (100, Immortal, Immortal),
+            (1, Player),
+            (84, Player),
+            (99, Player),
+            (100, Immortal),
+            (101, Builder),
+            (102, Builder),
+            (103, HeadBuilder),
+            (104, Coder),
+            (105, Implementor),
+            (110, Implementor),
             // Degenerate levels never grant anything.
-            (0, Player, Player),
-            (-5, Player, Player),
+            (0, Player),
+            (-5, Player),
         ];
-        for (level, role, want) in table {
-            assert_eq!(effective_rank(level, role), want, "L{level} {role:?}");
+        for (level, want) in table {
+            assert_eq!(effective_rank(level), want, "L{level}");
         }
     }
 

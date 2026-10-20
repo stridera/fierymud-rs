@@ -88,7 +88,7 @@ fn spawn(world: &mut World, name: &str, level: i32, xp: i32, class_id: i32) -> (
             Account {
                 user_id: String::new(),
                 character_id: format!("c-{name}"),
-                role: effective_rank(level, UserRole::Player),
+                role: effective_rank(level),
                 account_role: UserRole::Player,
                 perms: vec![],
             },
