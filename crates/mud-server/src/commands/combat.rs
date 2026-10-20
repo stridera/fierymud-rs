@@ -2049,6 +2049,14 @@ pub(crate) fn cmd_kick(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, refusal);
         return;
     }
+    // Still in the lag of the last kick: refused before any stamina is spent
+    // or the fight changes (the dispatcher repeats the gate for other paths).
+    if let Some(def) = crate::commands::skill_def(world, "kick")
+        && let Some(refusal) = crate::commands::ability_cooldown_refusal(world, player, &def, "use")
+    {
+        send_to(world, player, refusal);
+        return;
+    }
     let arg = args.trim();
     let target = if arg.is_empty() {
         let Some(fighting) = world.get::<Fighting>(player).copied() else {
@@ -3354,6 +3362,14 @@ pub(crate) fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
     if refuse_if_blind(world, player) {
         return;
     }
+    // Still recovering from the last bash (`Ability.cooldown_ms`).
+    let bash_def = crate::commands::skill_def(world, "bash");
+    if let Some(def) = &bash_def
+        && let Some(refusal) = crate::commands::ability_cooldown_refusal(world, player, def, "use")
+    {
+        send_to(world, player, refusal);
+        return;
+    }
     let cost = skill_stamina_cost(world, "bash", BASH_COST);
     if !check_stamina(world, player, cost, "bash") {
         return;
@@ -3415,6 +3431,10 @@ pub(crate) fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
     let target_obj =
         super::look_auras::pronouns(&super::look_auras::target_gender(world, target)).2;
 
+    if !bash_connects(world, player, target, bash_def.as_ref(), located.0) {
+        return;
+    }
+
     let (dead, threshold_msg) = apply_damage_from(world, target, damage, player);
 
     // Knockdown — set target to Sitting.
@@ -3454,6 +3474,89 @@ pub(crate) fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
     if dead {
         crate::combat::handle_death(world, target, &target_name, located.0);
     }
+}
+/// Resolve the attack roll of a bash and start its lag. A BASH row whose
+/// effects carry `"attackRoll": true` has to connect first (the
+/// accuracy/evasion contest, plus the target's dodge and parry); a miss is
+/// handled by [`bash_misses`] and returns false. The fight is already
+/// joined by the caller, so a miss is still an attack.
+fn bash_connects(
+    world: &mut World,
+    player: Entity,
+    target: Entity,
+    def: Option<&mud_world::AbilityDef>,
+    room: Entity,
+) -> bool {
+    let Some(def) = def else {
+        return true;
+    };
+    if crate::commands::ability_needs_attack_roll(world, def.id) {
+        let skill = crate::commands::known_skill_pct(world, player, def.id);
+        if crate::combat::skill_attack_roll(world, player, target, skill)
+            != crate::combat::SkillAttack::Hit
+        {
+            bash_misses(world, player, target, def, room);
+            return false;
+        }
+    }
+    crate::commands::start_ability_cooldown(world, player, def);
+    true
+}
+/// A bash that failed its attack roll: the BASH row's fail messages (or a
+/// plain default), the basher falls, and the bash lag starts all the same.
+fn bash_misses(
+    world: &mut World,
+    player: Entity,
+    target: Entity,
+    def: &mud_world::AbilityDef,
+    room: Entity,
+) {
+    use crate::commands::{Pronouns, Viewer, render_ability_template};
+    let actor_name = name_of(world, player);
+    let target_name = name_of(world, target);
+    let actor_p = Pronouns::of(world, player);
+    let target_p = Pronouns::of(world, target);
+    let set = world
+        .get_resource::<mud_world::AbilityCatalog>()
+        .and_then(|c| c.messages.get(&def.id))
+        .cloned()
+        .unwrap_or_default();
+    let to_caster = set
+        .fail_to_caster
+        .as_deref()
+        .unwrap_or("You try to bash {target.name} but fall flat on your face!");
+    let line = render_ability_template(
+        to_caster,
+        (&actor_name, actor_p),
+        (&target_name, target_p),
+        false,
+        Viewer::Actor,
+    );
+    send_msg(world, player, format!("{line}\r\n"));
+    if let Some(t) = set.fail_to_victim.as_deref() {
+        let line = render_ability_template(
+            t,
+            (&actor_name, actor_p),
+            (&target_name, target_p),
+            false,
+            Viewer::Target,
+        );
+        send_msg(world, target, format!("{line}\r\n"));
+    }
+    if let Some(t) = set.fail_to_room.as_deref() {
+        let line = render_ability_template(
+            t,
+            (&actor_name, actor_p),
+            (&target_name, target_p),
+            false,
+            Viewer::Bystander,
+        );
+        broadcast_room_except_rendered(world, room, &[player, target], &format!("{line}\r\n"));
+    }
+    // Legacy: the basher ends up sitting; a bash that misses is still a
+    // use and pays the recovery.
+    try_insert(world, player, Posture(PostureKind::Sitting));
+    crate::commands::start_ability_cooldown(world, player, def);
 }
 /// `taunt <target>`: redirect the target mob's aggro onto the
 /// caster. Sets target.Fighting = caster (overriding whoever

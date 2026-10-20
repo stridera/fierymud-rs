@@ -793,6 +793,9 @@ mod item_guard_tests;
 #[path = "commands/item_tag_tests.rs"]
 mod item_tag_tests;
 #[cfg(test)]
+#[path = "commands/kick_bash_lag_tests.rs"]
+mod kick_bash_lag_tests;
+#[cfg(test)]
 #[path = "commands/legacy_spell_data_tests.rs"]
 mod legacy_spell_data_tests;
 #[cfg(test)]
@@ -15405,6 +15408,84 @@ fn mortal_skill_refusal(
     None
 }
 
+/// The "not ready yet" line when `def` is still on cooldown for `player`
+/// (`Ability.cooldown_ms`, written by [`start_ability_cooldown`]; the racial
+/// cooldown is separate). `verb` is the dispatcher's verb ("use", "cast").
+pub(crate) fn ability_cooldown_refusal(
+    world: &World,
+    player: Entity,
+    def: &mud_world::AbilityDef,
+    verb: &str,
+) -> Option<String> {
+    let ready_at = world
+        .get::<Cooldowns>(player)?
+        .ready_at
+        .get(&def.id)
+        .copied()?;
+    let now = std::time::Instant::now();
+    if ready_at <= now {
+        return None;
+    }
+    let secs = ready_at
+        .saturating_duration_since(now)
+        .as_secs_f32()
+        .max(0.1);
+    Some(format!(
+        "You can't {verb} {} yet — {secs:.1}s remaining.\r\n",
+        def.name,
+    ))
+}
+
+/// Start `def`'s `Ability.cooldown_ms` recovery on `player`. A no-op for an
+/// ability whose row has no cooldown.
+pub(crate) fn start_ability_cooldown(
+    world: &mut World,
+    player: Entity,
+    def: &mud_world::AbilityDef,
+) {
+    if def.cooldown_ms <= 0 {
+        return;
+    }
+    let ready_at = std::time::Instant::now()
+        + std::time::Duration::from_millis(u64::try_from(def.cooldown_ms).unwrap_or(0));
+    let mut cd = world
+        .get_mut::<Cooldowns>(player)
+        .map(|mut c| std::mem::take(&mut *c))
+        .unwrap_or_default();
+    cd.ready_at.insert(def.id, ready_at);
+    try_insert(world, player, cd);
+}
+
+/// A clone of the catalog row for the skill `plain_name` (lowercase, as
+/// `AbilityCatalog::by_name` keys it); `None` when the catalog lacks it.
+pub(crate) fn skill_def(world: &World, plain_name: &str) -> Option<mud_world::AbilityDef> {
+    world
+        .get_resource::<AbilityCatalog>()?
+        .by_name
+        .get(plain_name)
+        .cloned()
+}
+
+/// Whether one of ability `ability_id`'s effect rows carries
+/// `"attackRoll": true`: the skill must first connect by the melee
+/// accuracy/evasion contest ([`crate::combat::skill_attack_roll`]) before
+/// its effects land. Builder data, so the dispatcher and the commands that
+/// resolve a skill inline (`bash`) read the same flag.
+pub(crate) fn ability_needs_attack_roll(world: &World, ability_id: i32) -> bool {
+    world
+        .get_resource::<AbilityCatalog>()
+        .and_then(|c| c.effects_for.get(&ability_id))
+        .is_some_and(|rows| {
+            rows.iter().any(|(_, params)| {
+                params
+                    .as_ref()
+                    .and_then(|p| p.get("attackRoll"))
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+            })
+        })
+}
+
 /// [`mortal_skill_refusal`] for a command that must settle whether the
 /// actor may use the skill `name` BEFORE it spends stamina or starts a
 /// fight (`kick`). Staff and mobs always pass; an unknown skill name passes
@@ -17501,24 +17582,9 @@ pub(crate) fn invoke_ability_core(
     // already passed the gate; subsequent per-target dispatches must
     // not be blocked by the cooldown that this very batch is about
     // to set.
-    if !aoe_repeat
-        && let Some(cd) = world.get::<Cooldowns>(player)
-        && let Some(ready_at) = cd.ready_at.get(&def.id).copied()
-    {
-        let now = std::time::Instant::now();
-        if ready_at > now {
-            let remaining = ready_at.saturating_duration_since(now);
-            let secs = remaining.as_secs_f32().max(0.1);
-            send_to(
-                world,
-                player,
-                format!(
-                    "You can't {verb} {} yet — {secs:.1}s remaining.\r\n",
-                    def.name,
-                ),
-            );
-            return;
-        }
+    if !aoe_repeat && let Some(refusal) = ability_cooldown_refusal(world, player, &def, verb) {
+        send_to(world, player, refusal);
+        return;
     }
 
     // Racial cooldown gate: an ability the caster's race grants (and
@@ -18115,6 +18181,9 @@ pub(crate) fn invoke_ability_core(
             );
         }
         engage_after_violent_cast(world, player, &def, target_entity);
+        // A whiff is a use of the skill: it pays the same recovery as a hit,
+        // so a missed kick or bash cannot be retried on the next input.
+        start_ability_cooldown(world, player, &def);
         settle_slot(world, player, slot_hold, true);
         return;
     }
@@ -21704,15 +21773,8 @@ pub(crate) fn invoke_ability_core(
     // a player isn't penalized for misfires). Also skipped on AOE
     // repeats — the first target in the batch already wrote the
     // cooldown; subsequent dispatches share the same cooldown window.
-    if !aoe_repeat && def.cooldown_ms > 0 && !applied_msgs.is_empty() {
-        let ready_at = std::time::Instant::now()
-            + std::time::Duration::from_millis(u64::try_from(def.cooldown_ms).unwrap_or(0));
-        let mut cd = world
-            .get_mut::<Cooldowns>(player)
-            .map(|mut c| std::mem::take(&mut *c))
-            .unwrap_or_default();
-        cd.ready_at.insert(def.id, ready_at);
-        crate::commands::try_insert(world, player, cd);
+    if !aoe_repeat && !applied_msgs.is_empty() {
+        start_ability_cooldown(world, player, &def);
     }
     // A race-granted active that landed starts its per-character racial
     // cooldown, kept apart from the ability's own `cooldown_ms` one.
