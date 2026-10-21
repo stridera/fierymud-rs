@@ -18147,9 +18147,8 @@ fn invoke_ability_core_inner(
         return;
     }
     // Saving-throw resolution. If the ability has a row in
-    // AbilitySavingThrow, evaluate the DC against caster's
-    // FormulaCtx, roll d20 + target's level (proxy for save bonus
-    // until full per-stat save calc lands), and branch on
+    // AbilitySavingThrow, roll the legacy save (level + the target's
+    // `SavingThrows`, see `crate::saves`) and branch on
     // on_save_action: NEGATE → skip all effects; HALF_DURATION →
     // halve the duration that's spawned for status/modify/knockdown
     // arms. Self-targeted saves auto-fail (caster doesn't resist
@@ -18162,7 +18161,7 @@ fn invoke_ability_core_inner(
     let save_action = if target_entity == player || banish_rolls_own_save {
         SaveOutcome::Failed
     } else {
-        save_action_for(world, &def, target_entity, &formula_ctx)
+        save_action_for(world, &def, target_entity)
     };
     if matches!(save_action, SaveOutcome::Negated) {
         let target_name = if target_entity == player {
@@ -19770,7 +19769,7 @@ fn invoke_ability_core_inner(
                 );
                 let saved = target_entity != player
                     && matches!(
-                        save_action_for(world, &def, target_entity, &formula_ctx),
+                        save_action_for(world, &def, target_entity),
                         SaveOutcome::Negated
                     );
                 let outcome = banish::banish(
@@ -21994,17 +21993,20 @@ fn is_status_debuff_effect(effect_type: &str) -> bool {
     matches!(effect_type, "status" | "modify" | "stun")
 }
 
-/// Roll a saving throw against an ability's `AbilitySavingThrow`
-/// row when one exists. Returns `Failed` (effects apply normally)
-/// when there's no row, the formula doesn't resolve, or the roll
-/// misses the DC. The save bonus is target's `Profile.level`
-/// today — full per-stat save calc is a follow-up that needs mob
-/// `CoreStats` first.
+/// Roll a saving throw against an ability's `AbilitySavingThrow` row when
+/// one exists. Returns `Failed` (effects apply normally) when there's no row,
+/// the save type is unknown (skills only), or the victim fails the roll.
+///
+/// The roll is legacy `mag_savingthrow` (see [`crate::saves`]): the ability's
+/// kind (and, for skills, the row's `save_type`) picks the category, the victim's level and `SavingThrows`
+/// modifier set the number. The row's `dc_formula` is no longer read here
+/// (it was `d20 + level >= 10 + skill / 5 + stat`, which any mob above
+/// level ~35 always passed); the column stays in the schema, unused, until
+/// it is dropped or repurposed.
 pub(crate) fn save_action_for(
     world: &mut World,
     def: &mud_world::AbilityDef,
     target: Entity,
-    formula_ctx: &FormulaCtx,
 ) -> SaveOutcome {
     let Some(save) = world
         .resource::<AbilityCatalog>()
@@ -22014,14 +22016,12 @@ pub(crate) fn save_action_for(
     else {
         return SaveOutcome::Failed;
     };
-    let Some(dc) = evaluate_simple_formula_ctx(&save.dc_formula, formula_ctx) else {
+    let Some(kind) =
+        crate::saves::SaveKind::for_ability(&save.save_type, def.kind, &def.plain_name)
+    else {
         return SaveOutcome::Failed;
     };
-    let target_level = mud_world::effective_level(world, target).max(1);
-    // Roll a d20 plus target's level. Save succeeds if total ≥ DC.
-    let roll = rand::random_range(1..=20);
-    let total = roll + target_level;
-    if total < dc {
+    if !crate::saves::roll_saving_throw(world, target, kind) {
         return SaveOutcome::Failed;
     }
     let action = save

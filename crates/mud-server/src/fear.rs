@@ -31,7 +31,7 @@ use mud_db::enums::MobBehavior;
 use mud_world::{
     AppliedTo, CombatStats, CoreStats, EffectCatalog, EffectInstance, EffectSource, EquippedSlot,
     Feared, Fighting, Frozen, Ghost, Item, Located, Mob, MobBehaviors, MobPrototypes, Player,
-    Posture, PostureKind, RiddenBy, SavingThrows, Slot, Stunned, WorldKey,
+    Posture, PostureKind, RiddenBy, Slot, Stunned, WorldKey,
 };
 
 use crate::combat::{mob_flee, remember_attacker};
@@ -245,18 +245,10 @@ pub(crate) fn panic_flee(world: &mut World, victim: Entity, source: Option<Entit
     if moved { Panic::Fled } else { Panic::Cornered }
 }
 
-/// Legacy `get_base_saves` default for `SAVING_PARA` (no class table here),
-/// improved by one point per two levels, plus the actor's own modifier.
-fn para_save_number(world: &World, actor: Entity) -> i32 {
-    let level = mud_world::effective_level(world, actor);
-    let modifier = world.get::<SavingThrows>(actor).map_or(0, |s| s.para);
-    105 - level / 2 + modifier
-}
-
-/// Legacy `mag_savingthrow(.., SAVING_PARA)`: `max(1, save) < d(0..99)`.
-/// `roll` is that d100 so tests can pin it.
+/// Legacy `mag_savingthrow(.., SAVING_PARA)` (see [`crate::saves`]).
+/// `roll` is the d(0..99) so tests can pin it.
 pub(crate) fn para_save(world: &World, actor: Entity, roll: i32) -> bool {
-    para_save_number(world, actor).max(1) < roll
+    crate::saves::saving_throw(world, actor, crate::saves::SaveKind::Para, roll)
 }
 
 fn has_behavior(world: &World, mob: Entity, flag: MobBehavior) -> bool {

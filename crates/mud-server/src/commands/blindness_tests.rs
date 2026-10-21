@@ -764,7 +764,7 @@ fn eye_gouge_formula_blinds_with_a_skill_scaled_accuracy_penalty() {
 
 /// Sunray-shaped data: fire damage plus the blind status with its accuracy /
 /// evasion penalties, and a WILL save whose action is `NEGATE_STATUS`.
-fn sunray_caster(save_dc: &str) -> (Fx, Entity, Rx) {
+fn sunray_caster() -> (Fx, Entity, Rx) {
     let (mut fx, p, rx) = caster_with_spells(vec![(
         1,
         "Sunray",
@@ -802,7 +802,8 @@ fn sunray_caster(save_dc: &str) -> (Fx, Entity, Rx) {
             1,
             mud_world::SavingThrow {
                 save_type: "WILL".into(),
-                dc_formula: save_dc.into(),
+                // Unused: the save is the legacy roll (`crate::saves`).
+                dc_formula: String::new(),
                 on_save_action: serde_json::json!("NEGATE_STATUS"),
             },
         );
@@ -811,8 +812,9 @@ fn sunray_caster(save_dc: &str) -> (Fx, Entity, Rx) {
 
 #[test]
 fn sunray_damages_and_blinds_when_the_save_fails() {
-    // DC 1000 is never met: the save fails, everything lands.
-    let (mut fx, p, mut rx) = sunray_caster("1000");
+    // A pinned roll of 0 never saves: everything lands.
+    let _pin = crate::saves::test_pin::pin(0);
+    let (mut fx, p, mut rx) = sunray_caster();
     let rat = target_mob(&mut fx, "a sewer rat");
     let _ = drain(&mut rx);
     cast(&mut fx, p, "cast 'sunray' rat");
@@ -824,9 +826,15 @@ fn sunray_damages_and_blinds_when_the_save_fails() {
 
 #[test]
 fn a_made_sunray_save_turns_away_only_the_blinding() {
-    // DC 0 is always met: legacy never saves against the damage, only the blind.
-    let (mut fx, p, mut rx) = sunray_caster("0");
+    // A strongly negative spell save plus a high roll always saves: legacy
+    // never saves against the damage, only the blind.
+    let _pin = crate::saves::test_pin::pin(99);
+    let (mut fx, p, mut rx) = sunray_caster();
     let rat = target_mob(&mut fx, "a sewer rat");
+    fx.world.entity_mut(rat).insert(mud_world::SavingThrows {
+        spell: -1000,
+        ..Default::default()
+    });
     let _ = drain(&mut rx);
     cast(&mut fx, p, "cast 'sunray' rat");
     let said = drain(&mut rx);

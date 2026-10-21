@@ -1174,8 +1174,8 @@ mod tests {
                 ABILITY,
                 mud_world::SavingThrow {
                     save_type: "WILL".into(),
-                    // Total is d20 + level >= 1: always saves.
-                    dc_formula: "0".into(),
+                    // Unused: the save is the legacy roll (`crate::saves`).
+                    dc_formula: String::new(),
                     on_save_action: serde_json::json!("NEGATE"),
                 },
             );
@@ -1275,9 +1275,15 @@ mod tests {
         let mut f = fx();
         let (c, mut rx) = person(&mut f, "Cleric", 50);
         let m = mob(&mut f, "a demon", 10);
-        f.world
-            .entity_mut(m)
-            .insert(mud_world::Keywords(vec!["demon".into()]));
+        f.world.entity_mut(m).insert((
+            mud_world::Keywords(vec!["demon".into()]),
+            // A strongly negative spell save with a high roll always saves.
+            mud_world::SavingThrows {
+                spell: -1000,
+                ..Default::default()
+            },
+        ));
+        let _pin = crate::saves::test_pin::pin(99);
         banish_spell(
             &mut f,
             c,
