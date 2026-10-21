@@ -11897,8 +11897,7 @@ pub(crate) fn level_progress(world: &World, profile: &Profile) -> Option<LevelPr
 }
 
 /// [`level_progress`] for a specific character: gods (immortal rank by
-/// `bypasses_restrictions`, which can be a website role on a sub-100
-/// character) have no XP-to-level to show, so `score`, `level`, the
+/// `bypasses_restrictions`) have no XP-to-level to show, so `score`, `level`, the
 /// vitals GMCP and the prompt `%e` all treat them as having none.
 #[must_use]
 pub(crate) fn level_progress_for(

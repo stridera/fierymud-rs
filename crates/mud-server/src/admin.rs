@@ -1297,13 +1297,14 @@ pub(crate) fn set_player_field(
                         args: format!("{player_name} {new_level}"),
                     });
             }
+            let old_level = world.get::<Profile>(entity).map_or(0, |p| p.level);
             if let Some(mut p) = world.get_mut::<Profile>(entity) {
                 p.level = new_level;
             } else {
                 applied = false;
             }
             // Keep cached rank (Account.role) and level perms in sync.
-            crate::combat::after_level_change(world, entity);
+            crate::combat::after_level_change(world, entity, old_level);
         }
         "experience" => {
             if let Some(mut p) = world.get_mut::<Profile>(entity) {

@@ -284,7 +284,7 @@ fn level_table_perms_follow_level_both_ways() {
     );
     // Lowering the level removes the level-conferred permission.
     world.get_mut::<Profile>(target).unwrap().level = 50;
-    crate::combat::after_level_change(&mut world, target);
+    crate::combat::after_level_change(&mut world, target, 100);
     assert!(
         !world
             .get::<Account>(target)
@@ -735,7 +735,7 @@ fn demoted_immortal_loses_wiz_commands_and_god_skills() {
 
     // Staff demote to 84 through the same level-change path `set level` uses.
     world.get_mut::<Profile>(target).unwrap().level = 84;
-    crate::combat::after_level_change(&mut world, target);
+    crate::combat::after_level_change(&mut world, target, 100);
     assert_eq!(world.get::<Account>(target).unwrap().role, UserRole::Player);
     assert!(!command_permitted(&world, target, cmd("wiznet")));
     assert!(!command_permitted(&world, target, cmd("goto")));
@@ -754,7 +754,7 @@ fn demotion_between_staff_tiers_drops_higher_tier_commands() {
         "Coder cmd"
     );
     world.get_mut::<Profile>(coder).unwrap().level = 101;
-    crate::combat::after_level_change(&mut world, coder);
+    crate::combat::after_level_change(&mut world, coder, 104);
     assert_eq!(world.get::<Account>(coder).unwrap().role, UserRole::Builder);
     assert!(
         !command_permitted(&world, coder, cmd("areload")),
@@ -769,21 +769,40 @@ fn demotion_between_staff_tiers_drops_higher_tier_commands() {
 }
 
 #[test]
-fn stale_stored_permission_is_dropped_on_demotion_and_kept_when_not_level_granted() {
+fn explicit_permission_grants_survive_when_the_top_level_confers_everything() {
     use mud_db::enums::Permission;
     let mut world = world_with_catalog();
+    // The real table: the top level confers every permission.
     let mut table = level_table(105);
-    table.rows[99].permissions = vec![Permission::Summon]; // level 100
+    table.rows[104].permissions = vec![
+        Permission::Build,
+        Permission::Code,
+        Permission::Admin,
+        Permission::God,
+        Permission::Summon,
+        Permission::Olc,
+    ];
     world.insert_resource(table);
-    let p = spawn(&mut world, "Stale", 84, UserRole::Player);
-    // Summon restored from the database after a demotion, plus an explicit
-    // grant that no level row confers.
-    world.get_mut::<Account>(p).unwrap().perms = vec![Permission::Summon, Permission::Build];
-    crate::combat::after_level_change(&mut world, p);
-    assert_eq!(
-        world.get::<Account>(p).unwrap().perms,
-        vec![Permission::Build]
-    );
+    // A level-102 character with explicit grants loaded from
+    // `Characters.permissions` (Muditor privilegeFlags). Login loads them
+    // unchanged; the game never writes the column back.
+    let p = spawn(&mut world, "Builder", 102, UserRole::Player);
+    world.get_mut::<Account>(p).unwrap().perms = vec![Permission::Olc, Permission::Summon];
+    // Demotion within staff tiers only revokes what the levels left confer.
+    world.get_mut::<Profile>(p).unwrap().level = 101;
+    crate::combat::after_level_change(&mut world, p, 102);
+    let acct = world.get::<Account>(p).unwrap();
+    assert_eq!(acct.role, UserRole::Builder);
+    assert!(acct.perms.contains(&Permission::Olc));
+    assert!(acct.perms.contains(&Permission::Summon));
+    // Dropping below the level that confers them revokes level-granted perms.
+    let q = spawn(&mut world, "Top", 105, UserRole::Player);
+    world.get_mut::<Account>(q).unwrap().perms = vec![Permission::God, Permission::Olc];
+    world.get_mut::<Profile>(q).unwrap().level = 84;
+    crate::combat::after_level_change(&mut world, q, 105);
+    let acct = world.get::<Account>(q).unwrap();
+    assert_eq!(acct.role, UserRole::Player);
+    assert!(acct.perms.is_empty());
 }
 
 #[test]

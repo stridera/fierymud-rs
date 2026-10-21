@@ -99,7 +99,7 @@ impl Fx {
     }
 
     /// A player the way `login::spawn_player` builds one: cached rank from
-    /// (level, website role).
+    /// the level.
     pub(super) fn person(&mut self, name: &str, level: i32, room: Entity) -> (Entity, Rx) {
         let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
         let e = self

@@ -3488,30 +3488,55 @@ pub(crate) fn level_sweep_tick(world: &mut World) {
 }
 
 /// Bring everything derived from a player's level back in sync after it
-/// changed (either direction): the cached effective staff rank in
-/// `Account.role`, and the permissions granted by the level table. Both are
-/// recomputed from the current `Profile.level` alone, never from the previous
-/// level, so a stale grant cannot survive a demotion (see
-/// `LevelTable::reconcile_permissions`). Permissions that no level row
-/// confers (explicit per-character grants) are untouched.
+/// changed from `old_level` to the current `Profile.level` (either
+/// direction): the cached effective staff rank in `Account.role`, and the
+/// permissions granted by the level table. Permissions of level rows above
+/// the new level are removed (lowering a level must not leave Summon-style
+/// perms behind); those of rows at or below it are granted. Permissions
+/// that no level row confers (explicit per-character grants) are untouched.
 /// Must be called after anything that changes a player's level, otherwise
 /// rank and permissions go stale until relog.
-pub(crate) fn after_level_change(world: &mut World, entity: Entity) {
+pub(crate) fn after_level_change(world: &mut World, entity: Entity, old_level: i32) {
     let Some(level) = world.get::<mud_world::Profile>(entity).map(|p| p.level) else {
         return;
     };
-    let Some(mut perms) = world
-        .get::<mud_world::Account>(entity)
-        .map(|a| a.perms.clone())
-    else {
-        return;
+    let (revoke, grant): (Vec<_>, Vec<_>) = {
+        let Some(table) = world.get_resource::<mud_world::LevelTable>() else {
+            return refresh_rank_only(world, entity, level);
+        };
+        let conferred = |at: i32| -> Vec<mud_db::enums::Permission> {
+            table
+                .rows
+                .iter()
+                .filter(|r| r.level <= at)
+                .flat_map(|r| r.permissions.iter().copied())
+                .collect()
+        };
+        let now = conferred(level);
+        let before = conferred(old_level);
+        (
+            before
+                .iter()
+                .copied()
+                .filter(|p| !now.contains(p))
+                .collect(),
+            now,
+        )
     };
-    if let Some(table) = world.get_resource::<mud_world::LevelTable>() {
-        table.reconcile_permissions(level, &mut perms);
-    }
     if let Some(mut acct) = world.get_mut::<mud_world::Account>(entity) {
         acct.refresh_rank(level);
-        acct.perms = perms;
+        acct.perms.retain(|p| !revoke.contains(p));
+        for p in grant {
+            if !acct.perms.contains(&p) {
+                acct.perms.push(p);
+            }
+        }
+    }
+}
+
+fn refresh_rank_only(world: &mut World, entity: Entity, level: i32) {
+    if let Some(mut acct) = world.get_mut::<mud_world::Account>(entity) {
+        acct.refresh_rank(level);
     }
 }
 

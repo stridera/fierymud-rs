@@ -5156,13 +5156,6 @@ pub(crate) fn spawn_player(
         );
     }
 
-    // Level-conferred permissions are recomputed from the current level, so a
-    // stale stored grant (a higher tier the character was demoted from) is
-    // dropped on login.
-    let mut login_perms = c.permissions.clone();
-    if let Some(table) = world.get_resource::<mud_world::LevelTable>() {
-        table.reconcile_permissions(c.level, &mut login_perms);
-    }
     let entity = world
         .spawn((
             Player,
@@ -5179,7 +5172,7 @@ pub(crate) fn spawn_player(
                 // paths set level >= 100).
                 role: mud_db::enums::effective_rank(c.level),
                 account_role: user.role,
-                perms: login_perms,
+                perms: c.permissions.clone(),
             },
             Connection(outbound),
             health,

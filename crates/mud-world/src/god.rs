@@ -17,8 +17,8 @@ pub const GOD_PROFICIENCY: i32 = 1000;
 
 /// True for a god: a character whose effective rank is `Immortal`
 /// (`LVL_IMMORT`, level 100) or above. `Account.role` is the cached
-/// effective rank (the higher of the website role and the level-implied
-/// role), so a level-100+ character counts even without a linked account.
+/// effective rank (implied by character level alone), so a level-100+
+/// character counts even without a linked account.
 /// `DevMode` deliberately does not count: this is about who the character is.
 /// A god who turned on `mortal` ([`MortalMode`]) is treated as a mortal here;
 /// their role and command permissions are untouched. This is the check for
