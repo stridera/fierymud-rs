@@ -12814,6 +12814,14 @@ fn put_plain(world: &mut World, player: Entity, args: &str) {
             if world.get::<Located>(*item).map(|l| l.0) != Some(player) {
                 continue;
             }
+            if crate::commands::container_over_capacity(world, container, *item) {
+                send_rendered(
+                    world,
+                    player,
+                    &format!("{item_name} won't fit in {container_name}.\r\n"),
+                );
+                continue;
+            }
             // DROP fires before the move; a cancelled item stays in hand.
             if !fire_put_triggers(world, player, *item, container) {
                 if world.get_entity(container).is_err() {
@@ -12861,6 +12869,14 @@ fn put_plain(world: &mut World, player: Entity, args: &str) {
     }
     let item_name = name_of(world, item);
     if refuse_drop_blocked(world, player, item, &item_name) {
+        return;
+    }
+    if crate::commands::container_over_capacity(world, container, item) {
+        send_rendered(
+            world,
+            player,
+            &format!("{item_name} won't fit in {container_name}.\r\n"),
+        );
         return;
     }
     // DROP fires before the move; a trigger that cancels it (or purges the

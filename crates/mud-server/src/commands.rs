@@ -963,6 +963,9 @@ mod polish_r3_tests;
 #[cfg(test)]
 #[path = "commands/r14_engine_tests.rs"]
 mod r14_engine_tests;
+#[cfg(test)]
+#[path = "commands/r17_item_tests.rs"]
+mod r17_item_tests;
 #[path = "commands/staff_find.rs"]
 mod staff_find;
 #[cfg(test)]
@@ -13628,6 +13631,23 @@ pub(crate) fn item_weight(world: &World, item: Entity) -> f64 {
     effective_weight(world, item, 0)
 }
 
+/// Legacy `perform_put`: `item` does not fit in `container` when the
+/// container's own weight plus what it already holds plus the item would
+/// exceed its `Capacity`. Containers with no authored capacity (and
+/// corpses) take anything.
+pub(crate) fn container_over_capacity(world: &World, container: Entity, item: Entity) -> bool {
+    let Some(capacity) = world.get::<WorldKey>(container).and_then(|k| {
+        world
+            .resource::<ObjectPrototypes>()
+            .by_key
+            .get(&(k.zone, k.id))
+            .and_then(|p| p.capacity)
+    }) else {
+        return false;
+    };
+    effective_weight(world, container, 0) + effective_weight(world, item, 0) > capacity
+}
+
 /// Deepest container nesting `effective_weight` follows. A cycle in
 /// `Located` is impossible by construction, but the cap keeps a
 /// corrupted world from recursing without bound.
@@ -14812,13 +14832,56 @@ pub(crate) fn proto_unusable_by(
 /// Wear one specific carried item (legacy `perform_wear`). Returns
 /// whether it ended up equipped. With `quiet` (legacy `collective`, used
 /// by `wear all`) refusals are not reported.
-#[allow(clippy::too_many_lines)]
 pub(crate) fn wear_item(
     world: &mut World,
     player: Entity,
     item: Entity,
     target: WearWhere,
     quiet: bool,
+) -> bool {
+    wear_item_checked(world, player, item, target, quiet, true)
+}
+
+/// Why `wearer` is too low a level for `item` (legacy `may_wear_eq`'s
+/// "high enough level" check), or `false`. Only characters with a `Profile`
+/// are held to it: mobs wear whatever their loadout gives them. Staff are
+/// exempt. Items without a prototype (corpses, synthesized) have no level.
+fn item_level_too_high(world: &World, wearer: Entity, item: Entity) -> bool {
+    let Some(level) = world.get::<Profile>(wearer).map(|p| p.level) else {
+        return false;
+    };
+    if level >= STAFF_LEVEL
+        || is_staff_gameplay(world, wearer)
+        || mud_world::bypasses_restrictions(world, wearer)
+    {
+        return false;
+    }
+    world
+        .get::<WorldKey>(item)
+        .and_then(|k| {
+            world
+                .resource::<ObjectPrototypes>()
+                .by_key
+                .get(&(k.zone, k.id))
+                .map(|p| p.level)
+        })
+        .is_some_and(|item_level| item_level > level)
+}
+
+/// Legacy `LVL_IMMORT`: characters at or above it ignore item level minimums.
+const STAFF_LEVEL: i32 = 100;
+
+/// [`wear_item`] with the item-level gate switchable. Spell-conjured gear
+/// (Armor of Gaia, conjured weapons) is put on directly by the spell, as
+/// legacy does with `equip_char`, so it skips the gate.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn wear_item_checked(
+    world: &mut World,
+    player: Entity,
+    item: Entity,
+    target: WearWhere,
+    quiet: bool,
+    check_level: bool,
 ) -> bool {
     let item_name = name_of(world, item);
     let say = |world: &mut World, msg: &str| {
@@ -14918,6 +14981,27 @@ pub(crate) fn wear_item(
         say(world, &msg);
         return false;
     };
+
+    // Legacy `may_wear_eq`: the object's level against the wearer's.
+    if check_level && item_level_too_high(world, player, item) {
+        say(
+            world,
+            &format!("You're not a high enough level to use {item_name}.\r\n"),
+        );
+        if !quiet && let Some(located) = world.get::<Located>(player).copied() {
+            let actor_name = name_of(world, player);
+            broadcast_room_visual(
+                world,
+                located.0,
+                player,
+                &[player],
+                &cap_sentence_start(&format!(
+                    "{actor_name} struggles and fails to use {item_name}.\r\n"
+                )),
+            );
+        }
+        return false;
+    }
 
     try_insert(world, item, EquippedSlot(dest_slot));
 
@@ -19541,11 +19625,12 @@ fn invoke_ability_core_inner(
                     for (proto, slot) in &pieces_made {
                         let created =
                             crate::item_spawn::spawn_item_from_proto(world, proto, target_entity);
-                        wear_item(
+                        wear_item_checked(
                             world,
                             target_entity,
                             created,
                             WearWhere::Position(*slot),
+                            false,
                             false,
                         );
                     }
@@ -19700,7 +19785,15 @@ fn invoke_ability_core_inner(
                         (&target_name_pre, target_p_pre),
                     );
                 }
-                if wield && wear_item(world, player, created, WearWhere::Hands(Slot::Wield), false)
+                if wield
+                    && wear_item_checked(
+                        world,
+                        player,
+                        created,
+                        WearWhere::Hands(Slot::Wield),
+                        false,
+                        false,
+                    )
                 {
                     applied_msgs.push(format!(
                         "{} ({} is conjured and wielded)",
@@ -25736,6 +25829,10 @@ pub(crate) fn broadcast_room_visual(
 pub(crate) const ATTACK_COST: i32 = 2;
 pub(crate) const KICK_COST: i32 = 5;
 pub(crate) const BASH_COST: i32 = 8;
+/// Berserker skills that used to run as Roar, Bash and Hit All: same costs.
+pub(crate) const HOWL_COST: i32 = ROAR_COST;
+pub(crate) const MAUL_COST: i32 = BASH_COST;
+pub(crate) const TANTRUM_COST: i32 = HITALL_COST;
 pub(crate) const BANDAGE_COST: i32 = 4;
 pub(crate) const LAYHANDS_COST: i32 = 12;
 pub(crate) const RESCUE_COST: i32 = 6;
@@ -25763,6 +25860,7 @@ fn skill_name_for_verb(verb: &str) -> &str {
     match verb {
         "tripup" => "trip up",
         "hitall" => "hit all",
+        "howl" => "battle howl",
         "gouge" => "eye gouge",
         "firstaid" => "first aid",
         "breathe" | "attack" => "",

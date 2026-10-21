@@ -10,15 +10,16 @@ use mud_world::{
 
 use crate::commands::{
     ATTACK_COST, AoeScope, BACKSTAB_COST, BANDAGE_COST, BASH_COST, BERSERK_COST, Category, Command,
-    DISARM_COST, DOORBASH_COST, GOUGE_COST, HITALL_COST, Help, KICK_COST, LAYHANDS_COST, REND_COST,
-    RESCUE_COST, ROAR_COST, ROUNDHOUSE_COST, SPRINGLEAP_COST, STOMP_COST, SWEEP_COST, TAUNT_COST,
-    THROATCUT_COST, TRIPUP_COST, aggro_alignment, apply_damage_from, auto_assist_followers_of,
-    broadcast_room_except_players_rendered, broadcast_room_except_rendered, check_stamina,
-    cmd_look, consider_verdict_color, direction_name, drain_stamina, engage_skill_shim,
-    find_actor_in_room, flip_door_both_sides, hit_chance_color, invoke_ability, invoke_ability_aoe,
-    invoke_ability_targeting, mob_helpers_engage, name_of, name_or, opposite, parse_direction,
-    refuse_hidden_exit, remove_effect_named, require_alert_posture, resolve_exit_arg, send_msg,
-    send_rendered, send_to, skill_stamina_cost, try_insert, try_remove,
+    DISARM_COST, DOORBASH_COST, GOUGE_COST, HITALL_COST, HOWL_COST, Help, KICK_COST, LAYHANDS_COST,
+    MAUL_COST, REND_COST, RESCUE_COST, ROAR_COST, ROUNDHOUSE_COST, SPRINGLEAP_COST, STOMP_COST,
+    SWEEP_COST, TANTRUM_COST, TAUNT_COST, THROATCUT_COST, TRIPUP_COST, aggro_alignment,
+    apply_damage_from, auto_assist_followers_of, broadcast_room_except_players_rendered,
+    broadcast_room_except_rendered, check_stamina, cmd_look, consider_verdict_color,
+    direction_name, drain_stamina, engage_skill_shim, find_actor_in_room, flip_door_both_sides,
+    hit_chance_color, invoke_ability, invoke_ability_aoe, invoke_ability_targeting,
+    mob_helpers_engage, name_of, name_or, opposite, parse_direction, refuse_hidden_exit,
+    remove_effect_named, require_alert_posture, resolve_exit_arg, send_msg, send_rendered, send_to,
+    skill_stamina_cost, try_insert, try_remove,
 };
 use crate::query_cache::with_query;
 
@@ -290,7 +291,7 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
-    names: &["roar", "howl"],
+    names: &["roar"],
     min_role: UserRole::Player,
     required_perm: None,
     category: Category::Combat,
@@ -305,6 +306,55 @@ inventory::submit! {
                it. Group members are not affected.",
     },
     run: cmd_roar,
+    }
+}
+
+inventory::submit! {
+    Command {
+    names: &["howl"],
+    min_role: UserRole::Player,
+    required_perm: None,
+    category: Category::Combat,
+    help: Help {
+        usage: "howl",
+        summary: "Battle Howl: a fearsome cry that sharpens your aim.",
+        long: "Costs 8 stamina. Berserker skill. The Battle Howl \
+               ability's own effect applies (an accuracy bonus that \
+               lasts longer the better you know it).",
+    },
+    run: cmd_howl,
+    }
+}
+
+inventory::submit! {
+    Command {
+    names: &["maul"],
+    min_role: UserRole::Player,
+    required_perm: None,
+    category: Category::Combat,
+    help: Help {
+        usage: "maul [<target>]",
+        summary: "Savage an opponent with crushing blows.",
+        long: "Costs 8 stamina. Berserker skill. Default target is \
+               your current Fighting target.",
+    },
+    run: cmd_maul,
+    }
+}
+
+inventory::submit! {
+    Command {
+    names: &["tantrum"],
+    min_role: UserRole::Player,
+    required_perm: None,
+    category: Category::Combat,
+    help: Help {
+        usage: "tantrum [<target>]",
+        summary: "Enter a frenzied rage of wild attacks.",
+        long: "Costs 10 stamina. Berserker skill. Default target is \
+               your current Fighting target.",
+    },
+    run: cmd_tantrum,
     }
 }
 
@@ -400,7 +450,7 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
-    names: &["hitall", "tantrum"],
+    names: &["hitall"],
     min_role: UserRole::Player,
     required_perm: None,
     category: Category::Combat,
@@ -744,7 +794,7 @@ inventory::submit! {
 
 inventory::submit! {
     Command {
-    names: &["bash", "bodyslam", "maul"],
+    names: &["bash", "bodyslam"],
     min_role: UserRole::Player,
     required_perm: None,
     category: Category::Combat,
@@ -2499,6 +2549,88 @@ pub(crate) fn cmd_roar(world: &mut World, player: Entity, _args: &str) {
         crate::fear::roar_target(world, player, victim, crate::fear::RoarRolls::random());
     }
 }
+/// `howl`: the Battle Howl skill (its own ability row, not Roar). The
+/// ability's data decides the effect and who gets it.
+pub(crate) fn cmd_howl(world: &mut World, player: Entity, _args: &str) {
+    if !require_alert_posture(world, player, "howl") {
+        return;
+    }
+    let cost = skill_stamina_cost(world, "howl", HOWL_COST);
+    if !check_stamina(world, player, cost, "howl") {
+        return;
+    }
+    drain_stamina(world, player, cost);
+    invoke_ability_targeting(
+        world,
+        player,
+        "battle_howl",
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
+        None,
+    );
+}
+
+/// `maul [<target>]`: the Maul skill's own ability row (not Bash).
+pub(crate) fn cmd_maul(world: &mut World, player: Entity, args: &str) {
+    cmd_single_target_skill(world, player, args, "maul", MAUL_COST);
+}
+
+/// `tantrum [<target>]`: the Tantrum skill's own ability row (not Hit All).
+pub(crate) fn cmd_tantrum(world: &mut World, player: Entity, args: &str) {
+    cmd_single_target_skill(world, player, args, "tantrum", TANTRUM_COST);
+}
+
+/// A violent single-target skill that is its own `Ability` row: `verb` is both
+/// the command word and the ability's plain name. No argument means the
+/// current opponent. Unusable skills are refused before stamina is spent.
+fn cmd_single_target_skill(
+    world: &mut World,
+    player: Entity,
+    args: &str,
+    verb: &str,
+    default_cost: i32,
+) {
+    if !require_alert_posture(world, player, verb) {
+        return;
+    }
+    let arg = args.trim();
+    let (dispatched, forced) = if arg.is_empty() {
+        let Some(Fighting(t)) = world.get::<Fighting>(player).copied() else {
+            let mut shown = verb.to_string();
+            shown[..1].make_ascii_uppercase();
+            send_to(
+                world,
+                player,
+                format!("{shown} whom? You aren't fighting.\r\n"),
+            );
+            return;
+        };
+        (verb.to_string(), Some(t))
+    } else {
+        (format!("{verb} {arg}"), None)
+    };
+    let allowed = match forced {
+        Some(t) => super::attack_ok::offensive_target_allowed(world, player, t),
+        None => offensive_word_allowed(world, player, arg),
+    };
+    if !allowed {
+        return;
+    }
+    let cost = skill_stamina_cost(world, verb, default_cost);
+    if !check_stamina(world, player, cost, verb) {
+        return;
+    }
+    drain_stamina(world, player, cost);
+    invoke_ability_targeting(
+        world,
+        player,
+        &dispatched,
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
+        forced,
+    );
+}
+
 pub(crate) fn cmd_rend(world: &mut World, player: Entity, args: &str) {
     if !require_alert_posture(world, player, "rend") {
         return;

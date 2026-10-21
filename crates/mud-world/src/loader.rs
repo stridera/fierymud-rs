@@ -2268,6 +2268,7 @@ pub async fn load_object_prototypes(pool: &PgPool) -> sqlx::Result<ObjectPrototy
                 examine_description: row.examine_description.as_deref().map(strip_ansi),
                 weight: row.weight,
                 weight_reduction: parse_weight_reduction(&row.values),
+                capacity: parse_container_capacity(&row.values),
                 recall_rooms: if matches!(row.r#type, mud_db::enums::ObjectType::Scroll) {
                     parse_recall_rooms(&row.values)
                 } else {
@@ -3068,6 +3069,18 @@ fn parse_weight_reduction(values: &serde_json::Value) -> f64 {
     } else {
         0.0
     }
+}
+
+/// Parse a container's capacity (lbs) from its `values` JSONB
+/// (`{"Capacity": 50}`). Number or numeric string; missing or unparseable
+/// is `None` (no limit); negatives count as 0.
+fn parse_container_capacity(values: &serde_json::Value) -> Option<f64> {
+    let raw = match values.get("Capacity") {
+        Some(serde_json::Value::Number(n)) => n.as_f64(),
+        Some(serde_json::Value::String(s)) => s.trim().parse().ok(),
+        _ => None,
+    }?;
+    raw.is_finite().then(|| raw.max(0.0))
 }
 
 /// Parse a recall scroll's destinations from its `values` JSONB:

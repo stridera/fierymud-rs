@@ -1117,6 +1117,11 @@ pub struct ObjectProto {
     /// hole). Read from `Objects.values."Weight Reduction"`; legacy
     /// `VAL_CONTAINER_WEIGHT_REDUCTION`. Zero for ordinary items.
     pub weight_reduction: f64,
+    /// Container capacity in lbs (`Objects.values."Capacity"`; legacy
+    /// `VAL_CONTAINER_CAPACITY`): the container's own weight plus its contents
+    /// plus anything newly put in must not exceed it. `None` when the row has
+    /// no capacity (no limit enforced).
+    pub capacity: Option<f64>,
     /// Scroll-of-recall destinations (`Objects.values."Recall Rooms"`):
     /// where reciting this scroll lands the target, by class. `None`
     /// for ordinary items; recall scrolls without it fall back to the

@@ -1034,6 +1034,7 @@ mod tests {
             examine_description: None,
             weight: 0.0,
             weight_reduction: 0.0,
+            capacity: None,
             recall_rooms: None,
             level: 1,
             wear_flags: vec![],

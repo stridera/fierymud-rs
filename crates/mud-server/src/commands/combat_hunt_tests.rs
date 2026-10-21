@@ -1255,3 +1255,118 @@ fn an_area_skill_the_class_lacks_is_refused_once_and_costs_nothing() {
     );
     assert_eq!(stamina(&world, p), 100, "no stamina spent: {out}");
 }
+
+// -- berserker Battle Howl / Maul / Tantrum are their own skills (playtest r17 B8) -------
+
+const BERSERKER: i32 = 15;
+const BATTLE_HOWL: i32 = 19;
+const MAUL: i32 = 232;
+const TANTRUM: i32 = 361;
+const BASH_ID: i32 = 18;
+const HIT_ALL_ID: i32 = 400;
+
+/// A level-80 berserker whose class has Battle Howl, Maul and Tantrum but not
+/// Roar, Bash or Hit All (the shipped data), with a rat in the room.
+fn berserker_arena() -> (World, Entity, Entity, Rx) {
+    let (mut world, room, p, rx) = arena();
+    let mut catalog = AbilityCatalog::default();
+    for (id, name, violent) in [
+        (BATTLE_HOWL, "Battle Howl", false),
+        (MAUL, "Maul", true),
+        (TANTRUM, "Tantrum", true),
+        (ROAR, "Roar", true),
+        (BASH_ID, "Bash", true),
+        (HIT_ALL_ID, "Hit All", false),
+    ] {
+        let mut def = ability_def(id, name, AbilityKind::Skill);
+        def.cast_time_rounds = 0;
+        def.violent = violent;
+        catalog.by_name.insert(name.to_ascii_lowercase(), def);
+    }
+    world.insert_resource(catalog);
+    world.init_resource::<EffectCatalog>();
+    world.insert_resource(SpellSlotData::default());
+    let mut skills = mud_world::ClassSkillsData::default();
+    for id in [BATTLE_HOWL, MAUL, TANTRUM] {
+        skills.min_level.insert((BERSERKER, id), 1);
+    }
+    // Something else the class can use, so the class has a skill list at all.
+    skills.min_level.insert((BERSERKER, 168), 1);
+    world.insert_resource(skills);
+    world.entity_mut(p).insert(mud_world::Profile {
+        level: 80,
+        class_id: Some(BERSERKER),
+        race: "HUMAN".into(),
+        experience: 0,
+        gender: "male".into(),
+    });
+    mob_in(&mut world, room, "a rat", "rat");
+    (world, room, p, rx)
+}
+
+#[test]
+fn a_berserker_can_use_howl_maul_and_tantrum() {
+    let (mut world, _room, p, mut rx) = berserker_arena();
+    for (cmd, args) in [("howl", ""), ("maul", "rat"), ("tantrum", "rat")] {
+        let before = stamina(&world, p);
+        match cmd {
+            "howl" => cmd_howl(&mut world, p, args),
+            "maul" => cmd_maul(&mut world, p, args),
+            _ => cmd_tantrum(&mut world, p, args),
+        }
+        let out = drain(&mut rx);
+        assert!(!out.contains("can't use"), "{cmd}: {out}");
+        assert!(!out.contains("No skill matching"), "{cmd}: {out}");
+        let skill = match cmd {
+            "howl" => "Battle Howl",
+            "maul" => "Maul",
+            _ => "Tantrum",
+        };
+        assert!(out.contains(&format!("You use {skill}")), "{cmd}: {out}");
+        assert!(stamina(&world, p) < before, "{cmd} costs stamina: {out}");
+    }
+}
+
+#[test]
+fn howl_maul_and_tantrum_check_their_own_class_rows() {
+    // A warrior has none of the three: each names its own skill, never
+    // Roar / Bash / Hit All.
+    let (mut world, room, p, mut rx) = warrior_arena();
+    {
+        let mut catalog = world.resource_mut::<AbilityCatalog>();
+        for (id, name) in [
+            (BATTLE_HOWL, "Battle Howl"),
+            (MAUL, "Maul"),
+            (TANTRUM, "Tantrum"),
+        ] {
+            let mut def = ability_def(id, name, AbilityKind::Skill);
+            def.cast_time_rounds = 0;
+            catalog.by_name.insert(name.to_ascii_lowercase(), def);
+        }
+    }
+    mob_in(&mut world, room, "a rat", "rat");
+    cmd_howl(&mut world, p, "");
+    cmd_maul(&mut world, p, "rat");
+    cmd_tantrum(&mut world, p, "rat");
+    let out = drain(&mut rx);
+    for name in ["Battle Howl", "Maul", "Tantrum"] {
+        assert!(
+            out.contains(&format!("Your class can't use {name}.")),
+            "{out}"
+        );
+    }
+    assert_eq!(stamina(&world, p), 100, "no stamina spent: {out}");
+}
+
+#[test]
+fn roar_bash_and_hitall_are_no_longer_reachable_as_howl_maul_tantrum() {
+    let names = |cmd: &str| -> Vec<&'static str> {
+        inventory::iter::<crate::commands::Command>()
+            .filter(|c| c.names.contains(&cmd))
+            .flat_map(|c| c.names.iter().copied())
+            .collect()
+    };
+    assert_eq!(names("howl"), ["howl"]);
+    assert_eq!(names("maul"), ["maul"]);
+    assert_eq!(names("tantrum"), ["tantrum"]);
+}
