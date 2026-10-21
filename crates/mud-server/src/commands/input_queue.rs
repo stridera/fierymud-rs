@@ -402,12 +402,8 @@ mod tests {
         (world, caster, rx)
     }
 
-    /// Tick the cast wind-up to completion, then let one queued line out.
-    async fn finish_cast_and_release(
-        world: &mut World,
-        caster: Entity,
-        pool: &mud_db::sqlx::PgPool,
-    ) {
+    /// Tick the cast wind-up to completion.
+    fn finish_cast(world: &mut World, caster: Entity) {
         for _ in 0..400 {
             if world.get::<Casting>(caster).is_none() {
                 break;
@@ -415,7 +411,76 @@ mod tests {
             crate::casting::casting_tick(world);
         }
         assert!(world.get::<Casting>(caster).is_none(), "cast never landed");
+    }
+
+    /// Move the server clock forward `ticks` (the post-cast lag is a wait
+    /// state on that clock).
+    fn advance(world: &mut World, ticks: u64) {
+        let now = world.get_resource::<crate::TickCount>().map_or(0, |t| t.0);
+        world.insert_resource(crate::TickCount(now + ticks));
+    }
+
+    /// Tick the cast wind-up to completion, ride out the post-cast lag, then
+    /// let one queued line out.
+    async fn finish_cast_and_release(
+        world: &mut World,
+        caster: Entity,
+        pool: &mud_db::sqlx::PgPool,
+    ) {
+        finish_cast(world, caster);
+        advance(world, crate::casting::POST_CAST_LAG_TICKS);
         run_queued_input(world, caster, pool).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_cast_typed_right_after_completion_waits_out_the_lag_then_runs() {
+        let (mut world, caster, mut rx) = buffer();
+        world.insert_resource(crate::TickCount(0));
+        let pool = lazy_pool();
+        dispatch_with_async(&mut world, caster, &pool, "cast 'armor'").await;
+        finish_cast(&mut world, caster);
+        assert!(
+            wait_active(&world, caster),
+            "the landed cast lags the caster"
+        );
+        let out = drain(&mut rx);
+        assert!(out.contains("You complete your spell"), "{out}");
+
+        // Typed straight away: held, not refused and not started.
+        dispatch_with_async(&mut world, caster, &pool, "cast 'bless'").await;
+        let out = drain(&mut rx);
+        assert!(!out.contains("busy spellcasting"), "{out}");
+        assert!(!started(&out, "bless"), "ran during the lag: {out}");
+        assert!(world.get::<Casting>(caster).is_none());
+        assert_eq!(queued_len(&world, caster), 1);
+
+        // One tick short of the lag: still held.
+        advance(&mut world, crate::casting::POST_CAST_LAG_TICKS - 1);
+        assert!(!run_queued_input(&mut world, caster, &pool).await);
+        assert!(world.get::<Casting>(caster).is_none());
+
+        // Lag over: the queued cast runs.
+        advance(&mut world, 1);
+        assert!(run_queued_input(&mut world, caster, &pool).await);
+        let out = drain(&mut rx);
+        assert!(started(&out, "bless"), "{out}");
+        assert!(world.get::<Casting>(caster).is_some());
+        assert!(!has_queued_input(&world, caster));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn flee_typed_during_the_post_cast_lag_is_held_like_everything_else() {
+        let (mut world, caster, mut rx) = buffer();
+        world.insert_resource(crate::TickCount(0));
+        let pool = lazy_pool();
+        dispatch_with_async(&mut world, caster, &pool, "cast 'armor'").await;
+        finish_cast(&mut world, caster);
+        let _ = drain(&mut rx);
+        dispatch_with_async(&mut world, caster, &pool, "flee").await;
+        assert_eq!(queued_len(&world, caster), 1, "flee waits out the lag");
+        assert!(!run_queued_input(&mut world, caster, &pool).await);
+        advance(&mut world, crate::casting::POST_CAST_LAG_TICKS);
+        assert!(run_queued_input(&mut world, caster, &pool).await);
     }
 
     fn started(out: &str, spell: &str) -> bool {

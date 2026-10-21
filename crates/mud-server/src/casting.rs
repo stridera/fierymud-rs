@@ -151,6 +151,13 @@ pub(crate) fn impose_cast_lag(world: &mut World, caster: Entity) {
     }
 }
 
+/// Legacy `complete_spell` ends a landed cast with `WAIT_STATE(ch,
+/// PULSE_VIOLENCE)`: one combat round (4s) in which the caster's typed
+/// input is held and then run in order, not refused. One constant for every
+/// spell (legacy has no per-spell value); the per-ability `cooldown_ms` is a
+/// different, refuse-with-message mechanism and is not involved.
+pub(crate) const POST_CAST_LAG_TICKS: u64 = COMBAT_ROUND_TICKS as u64;
+
 /// Catalog key (lowercased `plain_name`) of the Quick Chant skill.
 const QUICK_CHANT_KEY: &str = "quick_chant";
 
@@ -715,6 +722,7 @@ pub(crate) fn casting_tick(world: &mut World) {
             }
         }
         announce_cast_complete(world, caster, &snap);
+        crate::commands::reset_cast_landed();
         crate::commands::resolve_queued_cast(
             world,
             caster,
@@ -732,6 +740,14 @@ pub(crate) fn casting_tick(world: &mut World) {
                 em.remove::<SlotHold>();
             }
             settle_slot(world, caster, Some(hold), false);
+        }
+        // Legacy `complete_spell`: a cast that went off (landed or fizzled,
+        // the cases `cast_spell` answers `CAST_RESULT_CHARGE`) lags the
+        // caster. One refused at completion costs nothing. Staff get none
+        // (`impose_wait`). Mobs carry the same wait, which keeps them from
+        // acting.
+        if crate::commands::cast_landed() {
+            crate::commands::input_queue::impose_wait(world, caster, POST_CAST_LAG_TICKS);
         }
     }
 }
@@ -2396,6 +2412,41 @@ mod tests {
             !cast_lag_active(&world, mortal),
             "a landed spell is no abort"
         );
+    }
+
+    #[test]
+    fn a_landed_spell_holds_input_for_one_round_but_not_for_staff() {
+        let (mut world, room, _) = world_with_spell(2);
+        world.insert_resource(crate::TickCount(0));
+        let (mortal, _rx) = caster_in(&mut world, room);
+        let (staff, _rx2) = caster_in(&mut world, room);
+        make_staff(&mut world, staff, 50, mud_db::enums::UserRole::Builder);
+        let (_bob, _b) = bob_in(&mut world, room);
+        start_mend(&mut world, mortal);
+        start_mend(&mut world, staff);
+        run_ticks(&mut world, 200);
+        assert!(world.get::<Casting>(mortal).is_none());
+        assert!(crate::commands::input_queue::wait_active(&world, mortal));
+        assert!(!crate::commands::input_queue::wait_active(&world, staff));
+        world.insert_resource(crate::TickCount(POST_CAST_LAG_TICKS - 1));
+        assert!(crate::commands::input_queue::wait_active(&world, mortal));
+        world.insert_resource(crate::TickCount(POST_CAST_LAG_TICKS));
+        assert!(!crate::commands::input_queue::wait_active(&world, mortal));
+    }
+
+    #[test]
+    fn a_cast_refused_at_completion_costs_no_lag() {
+        let (mut world, room, _) = world_with_spell(2);
+        world.insert_resource(crate::TickCount(0));
+        let (caster, _rx) = caster_in(&mut world, room);
+        let (_bob, _b) = bob_in(&mut world, room);
+        start_mend(&mut world, caster);
+        assert!(world.get::<Casting>(caster).is_some());
+        // The spell's row vanishes before the chant ends: nothing is cast.
+        world.resource_mut::<AbilityCatalog>().by_name.clear();
+        run_ticks(&mut world, 200);
+        assert!(world.get::<Casting>(caster).is_none());
+        assert!(!crate::commands::input_queue::wait_active(&world, caster));
     }
     // ---- gods are never held back by class, race or alignment ----
 
