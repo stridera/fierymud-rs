@@ -814,6 +814,43 @@ fn a_conjured_decomposing_dagger_does_not_rot_while_held_but_does_once_dropped()
     assert!(rotting(&f.world), "dropped: decomposing");
 }
 
+/// Flame Blade (10:43) carries `timer` hours in the database: the conjured
+/// blade burns out after a period of use, even while wielded.
+#[test]
+fn a_conjured_blade_with_a_timer_burns_out_while_wielded() {
+    use mud_db::enums::ObjectFlag;
+    let mut f = ice_dagger_fx();
+    {
+        let mut protos = f.world.resource_mut::<ObjectPrototypes>();
+        let blade = protos.by_key.get_mut(&(10, 47)).unwrap();
+        blade.flags = vec![ObjectFlag::Magic, ObjectFlag::Decomposing];
+        blade.timer_hours = 1;
+    }
+    f.cast("'ice dagger'");
+    assert_eq!(wielded(&mut f), vec![(10, 47)]);
+    let blade = {
+        let mut q = f
+            .world
+            .query_filtered::<Entity, With<mud_world::ItemTimer>>();
+        q.single(&f.world).expect("the conjured blade has a timer")
+    };
+    assert_eq!(
+        f.world
+            .get::<mud_world::ItemTimer>(blade)
+            .unwrap()
+            .remaining_secs,
+        mud_world::SECS_PER_MUD_HOUR,
+    );
+    // Holding it does not stop its own timer.
+    for _ in 0..(mud_world::SECS_PER_MUD_HOUR - 1) {
+        crate::item_decay::item_decay_tick(&mut f.world);
+    }
+    assert_eq!(wielded(&mut f), vec![(10, 47)], "still burning");
+    crate::item_decay::item_decay_tick(&mut f.world);
+    assert!(wielded(&mut f).is_empty(), "burned out");
+    assert!(f.carried().is_empty());
+}
+
 fn ice_dagger_messages() -> mud_world::AbilityMessageSet {
     mud_world::AbilityMessageSet {
         success_to_caster: Some("<b:white>You conjure a dagger of ice.</>".into()),

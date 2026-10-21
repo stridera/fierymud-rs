@@ -438,7 +438,7 @@ async fn qcomplete_pays_the_quest_rewards() {
     assert_eq!(fx.status().await, "COMPLETED");
     let after = fx.paid().await;
     assert_eq!(after.0 - before.0, 50, "experience paid");
-    assert_eq!(after.1 - before.1, 7, "gold paid");
+    assert_eq!(after.1 - before.1, 700, "gold paid");
     let out = drain(&mut rx);
     assert!(out.contains("Force-completed quest"), "{out}");
     assert!(out.contains("+50 experience"), "{out}");
@@ -601,7 +601,7 @@ async fn racing_completions_pay_rewards_once() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     let after = fx.paid().await;
     assert_eq!(after.0 - before.0, 50, "experience paid once");
-    assert_eq!(after.1 - before.1, 7, "gold paid once");
+    assert_eq!(after.1 - before.1, 700, "gold paid once");
     let mut text = String::new();
     while let Ok(b) = rx.try_recv() {
         text.push_str(&String::from_utf8_lossy(&b));
@@ -1656,27 +1656,27 @@ async fn qcomplete_pays_once_with_an_autosave_in_flight() {
     super::drain_player_updates(&mut world);
     assert_eq!(
         fx.wealth().await,
-        107,
+        800,
         "the stale autosave erased the reward"
     );
-    assert_eq!(world.get::<mud_world::Wealth>(player).unwrap().0, 107);
+    assert_eq!(world.get::<mud_world::Wealth>(player).unwrap().0, 800);
 
-    // A later autosave writes the in-memory 107, not 107 + 7.
+    // A later autosave writes the in-memory 800, not 800 + 700.
     assert!(crate::login::spawn_background_save(
         &mut world, player, &fx.pool
     ));
     assert!(coordinator.flush(&mut world, Duration::from_secs(10)).await);
     coordinator.apply_completions(&mut world);
-    assert_eq!(fx.wealth().await, 107);
-    assert_eq!(world.get::<mud_world::Wealth>(player).unwrap().0, 107);
+    assert_eq!(fx.wealth().await, 800);
+    assert_eq!(world.get::<mud_world::Wealth>(player).unwrap().0, 800);
 
     // Typing it again completes nothing and pays nothing.
     assert!(super::try_dispatch_async(&mut world, player, &fx.pool, "qcomplete 1").await);
     let out = drive(&mut world, &mut rx, &fx.pool, "No in-progress quest").await;
     assert!(!out.contains("+7 gold"), "{out}");
     super::drain_player_updates(&mut world);
-    assert_eq!(fx.wealth().await, 107);
-    assert_eq!(world.get::<mud_world::Wealth>(player).unwrap().0, 107);
+    assert_eq!(fx.wealth().await, 800);
+    assert_eq!(world.get::<mud_world::Wealth>(player).unwrap().0, 800);
     fx.end().await;
 }
 
@@ -1753,7 +1753,10 @@ async fn qreward_claim_pays_once() {
     );
     super::drain_player_updates(&mut world);
     let paid = fx.wealth().await - 100;
-    assert!(paid == 9 || paid == 11, "paid {paid}");
+    assert!(
+        paid == 900 || paid == 1100,
+        "paid {paid} copper (9 or 11 gold)"
+    );
     assert_eq!(
         world.get::<mud_world::Wealth>(player).unwrap().0,
         100 + paid,
@@ -1887,25 +1890,25 @@ async fn objective_completion_pays_once_with_an_autosave_in_flight() {
     super::drain_player_updates(&mut world);
     assert_eq!(
         fx.wealth().await,
-        107,
+        800,
         "the stale autosave erased the reward"
     );
-    assert_eq!(world.get::<mud_world::Wealth>(player).unwrap().0, 107);
+    assert_eq!(world.get::<mud_world::Wealth>(player).unwrap().0, 800);
 
     assert!(crate::login::spawn_background_save(
         &mut world, player, &fx.pool
     ));
     assert!(coordinator.flush(&mut world, Duration::from_secs(10)).await);
     coordinator.apply_completions(&mut world);
-    assert_eq!(fx.wealth().await, 107);
-    assert_eq!(world.get::<mud_world::Wealth>(player).unwrap().0, 107);
+    assert_eq!(fx.wealth().await, 800);
+    assert_eq!(world.get::<mud_world::Wealth>(player).unwrap().0, 800);
 
     // A repeat completion check pays nothing more.
     crate::quest_progress::advance_quest(&fx.pool, &notify, &cq, fx.zone, fx.quest).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
     super::drain_player_updates(&mut world);
-    assert_eq!(fx.wealth().await, 107);
-    assert_eq!(world.get::<mud_world::Wealth>(player).unwrap().0, 107);
+    assert_eq!(fx.wealth().await, 800);
+    assert_eq!(world.get::<mud_world::Wealth>(player).unwrap().0, 800);
     fx.end().await;
 }
 
@@ -1955,7 +1958,7 @@ async fn qcomplete_is_all_or_nothing() {
     let out = drive(&mut world, &mut rx, &fx.pool, "+7 gold").await;
     assert!(out.contains("Force-completed quest"), "{out}");
     assert_eq!(fx.status().await, "COMPLETED");
-    assert_eq!(fx.paid().await, (50, 7), "paid once");
+    assert_eq!(fx.paid().await, (50, 700), "paid once");
     fx.end().await;
 }
 

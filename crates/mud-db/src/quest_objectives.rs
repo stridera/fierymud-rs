@@ -749,6 +749,16 @@ pub async fn get_reward(pool: &PgPool, reward_id: i32) -> sqlx::Result<Option<Qu
     .await
 }
 
+/// Copper in one gold coin. `wealth` is stored in copper; a GOLD quest
+/// reward's `amount` is in gold coins (what the Muditor editor labels it).
+pub const COPPER_PER_GOLD: i64 = 100;
+
+/// The copper a GOLD reward of `amount` gold coins pays.
+#[must_use]
+pub fn gold_reward_copper(amount: i32) -> i64 {
+    i64::from(amount).saturating_mul(COPPER_PER_GOLD)
+}
+
 /// What [`grant_simple_rewards`] did beyond the plain numeric deltas.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GrantOutcome {
@@ -819,7 +829,7 @@ async fn grant_simple_rewards_tx(
                 if let Some(amount) = r.amount {
                     sqlx::query!(
                         r#"UPDATE "Characters" SET wealth = wealth + $1 WHERE id = $2"#,
-                        i64::from(amount),
+                        gold_reward_copper(amount),
                         character_id,
                     )
                     .execute(&mut *tx)

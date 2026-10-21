@@ -782,7 +782,7 @@ async fn qreward_claim_pays_once() {
         .await
         .unwrap();
     assert!(matches!(first, ClaimOutcome::Claimed(_)));
-    assert_eq!(wealth_of(&fx).await, before + 50);
+    assert_eq!(wealth_of(&fx).await, before + 5000);
     assert_eq!(claimed_of(&fx, &cq).await, serde_json::json!([1_001]));
 
     let again = claim_reward(&fx.pool, &fx.char_id, &cq, &pick, &group)
@@ -793,7 +793,7 @@ async fn qreward_claim_pays_once() {
         .await
         .unwrap();
     assert_eq!(other, ClaimOutcome::AlreadyClaimed, "same choice group");
-    assert_eq!(wealth_of(&fx).await, before + 50, "no second payout");
+    assert_eq!(wealth_of(&fx).await, before + 5000, "no second payout");
 
     let missing = claim_reward(&fx.pool, &fx.char_id, "no-such-quest-row", &pick, &group)
         .await
@@ -850,6 +850,17 @@ async fn qreward_failed_claim_record_rolls_the_grant_back() {
         .await
         .unwrap();
     assert!(matches!(retry, ClaimOutcome::Claimed(_)));
-    assert_eq!(wealth_of(&fx).await, before + 50, "paid exactly once");
+    assert_eq!(wealth_of(&fx).await, before + 5000, "paid exactly once");
     fx.end().await;
+}
+
+/// A GOLD reward's `amount` is in gold coins; `wealth` is copper (100 per gold).
+#[test]
+fn gold_reward_amount_is_gold_coins_not_copper() {
+    assert_eq!(mud_db::quest_objectives::gold_reward_copper(5000), 500_000);
+    assert_eq!(mud_db::quest_objectives::gold_reward_copper(1), 100);
+    assert_eq!(
+        mud_db::quest_objectives::gold_reward_copper(i32::MAX),
+        i64::from(i32::MAX) * 100
+    );
 }

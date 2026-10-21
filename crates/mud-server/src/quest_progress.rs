@@ -386,7 +386,7 @@ pub(crate) fn reward_update(
         }),
         "GOLD" => r.amount.map(|a| PendingPlayerUpdate::WealthDelta {
             character_id: cid,
-            amount: i64::from(a),
+            amount: mud_db::quest_objectives::gold_reward_copper(a),
         }),
         "SKILL_POINTS" => r.amount.map(|a| PendingPlayerUpdate::SkillPointsDelta {
             character_id: cid,
