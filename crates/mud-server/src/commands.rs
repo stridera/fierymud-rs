@@ -18256,7 +18256,8 @@ fn invoke_ability_core_inner(
     // Set when a conjure-and-wield arm has already told the room, so the
     // post-loop room line does not repeat after the wield line.
     let mut room_line_sent = false;
-    // Set by a `create` effect with `wield: true` whose hands were full.
+    // Set by a `create` effect that made nothing and said why (hands full,
+    // no free armor slot, a blocked sector): no success line follows.
     let mut wield_refused = false;
     // Set by a multi-bolt damage arm, which sends the victim and room
     // templates once per bolt itself.
@@ -19435,6 +19436,125 @@ fn invoke_ability_core_inner(
                 // override_params (objectZoneId / objectId); content
                 // without a proto pinned reports a labeled no-op so
                 // the cast still resolves visibly.
+                //
+                // `blockedSectors` (Create Spring): in those sectors the
+                // spell makes nothing and says so (`blockedMessage` to the
+                // caster, `blockedRoomMessage` to the room).
+                let room_sector = world
+                    .get::<Located>(player)
+                    .and_then(|l| world.get::<RoomSector>(l.0))
+                    .map(|s| s.0);
+                if conjuration::sector_blocked(spec.override_params.as_ref(), room_sector) {
+                    let params = spec.override_params.as_ref();
+                    let caster_line = conjuration::text_param(params, "blockedMessage")
+                        .unwrap_or("Nothing happens.");
+                    send_msg(world, player, format!("{caster_line}\r\n"));
+                    if let (Some(room_line), Some(located)) = (
+                        conjuration::text_param(params, "blockedRoomMessage"),
+                        world.get::<Located>(player).copied(),
+                    ) {
+                        let rendered = render_ability_template(
+                            room_line,
+                            (&actor_name_pre, actor_p_pre),
+                            (&target_name_pre, target_p_pre),
+                            false,
+                            Viewer::Bystander,
+                        );
+                        broadcast_room_anonymised(
+                            world,
+                            located.0,
+                            &[player],
+                            &[(player, actor_name_pre.as_str())],
+                            &format!("{rendered}\r\n"),
+                        );
+                    }
+                    wield_refused = true;
+                    applied_msgs.push(format!("{pretty} (no spring possible here)"));
+                    continue;
+                }
+                // `equip` (Armor of Gaia): the pieces are put on the target,
+                // each only into a slot that is empty; with every slot taken
+                // nothing is made (`fullMessage` to the target).
+                let pieces = conjuration::equip_pieces(spec.override_params.as_ref());
+                if !pieces.is_empty() {
+                    let open: Vec<_> = {
+                        let mut worn =
+                            world.query_filtered::<(&Located, &EquippedSlot), With<Item>>();
+                        let filled: Vec<Slot> = worn
+                            .iter(world)
+                            .filter(|(l, _)| l.0 == target_entity)
+                            .map(|(_, eq)| eq.0)
+                            .collect();
+                        pieces
+                            .into_iter()
+                            .filter(|p| !filled.contains(&p.slot))
+                            .collect()
+                    };
+                    if open.is_empty() {
+                        let line =
+                            conjuration::text_param(spec.override_params.as_ref(), "fullMessage")
+                                .unwrap_or("You have nothing free to put it on.");
+                        send_to(world, target_entity, format!("{line}\r\n"));
+                        wield_refused = true;
+                        applied_msgs.push(format!("{pretty} (no free slot)"));
+                        continue;
+                    }
+                    let pieces_made: Vec<_> = open
+                        .iter()
+                        .filter_map(|p| {
+                            let proto = world
+                                .resource::<ObjectPrototypes>()
+                                .by_key
+                                .get(&(p.zone, p.id))
+                                .cloned();
+                            if proto.is_none() {
+                                tracing::warn!(
+                                    ability = %def.plain_name,
+                                    zone = p.zone,
+                                    id = p.id,
+                                    "equip piece names an object proto that is not loaded"
+                                );
+                            }
+                            proto.map(|proto| (proto, p.slot))
+                        })
+                        .collect();
+                    if pieces_made.is_empty() {
+                        applied_msgs.push(format!("{pretty} (no object proto loaded)"));
+                        continue;
+                    }
+                    // The invocation reads before the armor goes on, for the
+                    // caster and then the room.
+                    if let Some(header) = pending_header.take() {
+                        send_to(world, player, header);
+                    }
+                    if !room_line_sent {
+                        room_line_sent = true;
+                        broadcast_cast_room_line(
+                            world,
+                            player,
+                            target_entity,
+                            messages_pre.as_ref(),
+                            (&actor_name_pre, actor_p_pre),
+                            (&target_name_pre, target_p_pre),
+                        );
+                    }
+                    for (proto, slot) in &pieces_made {
+                        let created =
+                            crate::item_spawn::spawn_item_from_proto(world, proto, target_entity);
+                        wear_item(
+                            world,
+                            target_entity,
+                            created,
+                            WearWhere::Position(*slot),
+                            false,
+                        );
+                    }
+                    applied_msgs.push(format!(
+                        "{pretty} ({} pieces conjured and worn)",
+                        pieces_made.len()
+                    ));
+                    continue;
+                }
                 let default_zone = spec
                     .override_params
                     .as_ref()
@@ -19535,11 +19655,25 @@ fn invoke_ability_core_inner(
                 // room — Create Food / Minor Creation produce a
                 // carried item, not a room fixture (portals use the
                 // room-spawn path below).
-                let created = crate::item_spawn::spawn_item_from_proto(world, &proto, player);
+                // `room: true` (Create Spring): the object is made in the
+                // caster's room, not in their pack.
+                let to_room = spec
+                    .override_params
+                    .as_ref()
+                    .and_then(|p| p.get("room"))
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                let room_here = world.get::<Located>(player).map(|l| l.0);
+                let created = crate::item_spawn::spawn_item_from_proto(
+                    world,
+                    &proto,
+                    room_here.filter(|_| to_room).unwrap_or(player),
+                );
                 // Too heavy to carry: it lands at the caster's feet instead
                 // (the same encumbrance rule `get` enforces; staff are exempt).
-                let mut on_ground = false;
+                let mut on_ground = to_room;
                 if !wield
+                    && !to_room
                     && !is_staff_gameplay(world, player)
                     && item_weight(world, created) > 0.0
                     && carried_weight(world, player) > carry_capacity(world, player)
@@ -19609,7 +19743,9 @@ fn invoke_ability_core_inner(
                             );
                         }
                     }
-                    let place = if on_ground {
+                    let place = if to_room {
+                        "appears in the room"
+                    } else if on_ground {
                         "falls to the ground"
                     } else {
                         "appears in your pack"

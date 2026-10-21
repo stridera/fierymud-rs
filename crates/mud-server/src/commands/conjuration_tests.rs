@@ -854,3 +854,200 @@ fn the_caster_cast_line_keeps_its_colour() {
     let at = out.find("You conjure a dagger of ice.").expect(&out);
     assert!(out[..at].contains('\x1b'), "coloured: {out:?}");
 }
+
+// -- fixed conjurations: Flame Blade, Armor of Gaia, Create Spring -----------
+
+/// A proto of `kind` at `key` that wears on `wear`.
+fn wearable(f: &mut Fx, key: (i32, i32), kind: ObjectType, wear: mud_db::enums::WearFlag) {
+    f.world.init_resource::<mud_world::ObjectAbilityCatalog>();
+    f.object(key, kind);
+    let mut protos = f.world.resource_mut::<ObjectPrototypes>();
+    let p = protos.by_key.get_mut(&key).unwrap();
+    p.name = format!("object {}.{}", key.0, key.1);
+    p.wear_flags = vec![wear];
+}
+
+/// `(zone, id, slot)` of everything the caster has on, sorted.
+fn worn(f: &mut Fx) -> Vec<(i32, i32, mud_world::Slot)> {
+    let caster = f.caster;
+    let mut q = f
+        .world
+        .query_filtered::<(&Located, &WorldKey, &mud_world::EquippedSlot), With<Item>>();
+    let mut out: Vec<_> = q
+        .iter(&f.world)
+        .filter(|(l, _, _)| l.0 == caster)
+        .map(|(_, k, eq)| (k.zone, k.id, eq.0))
+        .collect();
+    out.sort_by_key(|&(z, i, _)| (z, i));
+    out
+}
+
+/// Keys of every item lying in the caster's room.
+fn on_floor(f: &mut Fx) -> Vec<(i32, i32)> {
+    let room = f.world.get::<Located>(f.caster).unwrap().0;
+    let mut q = f
+        .world
+        .query_filtered::<(&Located, &WorldKey), With<Item>>();
+    q.iter(&f.world)
+        .filter(|(l, _)| l.0 == room)
+        .map(|(_, k)| (k.zone, k.id))
+        .collect()
+}
+
+#[test]
+fn flame_blade_conjures_and_wields_the_blade() {
+    use mud_db::enums::WearFlag;
+    let mut f = fx();
+    wearable(&mut f, (10, 43), ObjectType::Weapon, WearFlag::Mainhand);
+    f.spell(
+        "FLAME_BLADE",
+        "create",
+        serde_json::json!({"objectType": "weapon", "objectZoneId": 10, "objectId": 43, "wield": true}),
+    );
+    let out = f.cast("'flame blade'");
+    assert_eq!(f.carried(), vec![(10, 43)], "{out}");
+    assert_eq!(wielded(&mut f), vec![(10, 43)], "{out}");
+    // Hands full: nothing more is made.
+    let again = f.cast("'flame blade'");
+    assert!(again.contains("Your hands are not free"), "{again}");
+    assert_eq!(f.carried(), vec![(10, 43)]);
+}
+
+fn armor_of_gaia_fx() -> Fx {
+    use mud_db::enums::WearFlag;
+    let mut f = fx();
+    wearable(&mut f, (10, 40), ObjectType::Armor, WearFlag::Body);
+    wearable(&mut f, (10, 41), ObjectType::Armor, WearFlag::Arms);
+    wearable(&mut f, (10, 42), ObjectType::Armor, WearFlag::Legs);
+    wearable(&mut f, (10, 44), ObjectType::Armor, WearFlag::Body);
+    f.spell(
+        "ARMOR_OF_GAIA",
+        "create",
+        serde_json::json!({
+            "equip": [
+                {"slot": "Body", "objectId": 40, "objectZoneId": 10},
+                {"slot": "Arms", "objectId": 41, "objectZoneId": 10},
+                {"slot": "Legs", "objectId": 42, "objectZoneId": 10}
+            ],
+            "fullMessage": "Your body is too encumbered to don the armor."
+        }),
+    );
+    f
+}
+
+#[test]
+fn armor_of_gaia_puts_on_the_body_arms_and_legs_pieces() {
+    use mud_world::Slot;
+    let mut f = armor_of_gaia_fx();
+    let out = f.cast("'armor of gaia'");
+    assert_eq!(
+        worn(&mut f),
+        vec![
+            (10, 40, Slot::Body),
+            (10, 41, Slot::Arms),
+            (10, 42, Slot::Legs)
+        ],
+        "{out}"
+    );
+}
+
+#[test]
+fn armor_of_gaia_only_fills_the_empty_slots_and_refuses_when_all_are_full() {
+    use mud_world::Slot;
+    let mut f = armor_of_gaia_fx();
+    // A helm-less caster already in a body piece keeps it.
+    let proto = f
+        .world
+        .resource::<ObjectPrototypes>()
+        .by_key
+        .get(&(10, 44))
+        .cloned()
+        .unwrap();
+    let own = crate::item_spawn::spawn_item_from_proto(&mut f.world, &proto, f.caster);
+    assert!(crate::commands::wear_item(
+        &mut f.world,
+        f.caster,
+        own,
+        crate::commands::WearWhere::Position(Slot::Body),
+        true
+    ));
+    f.cast("'armor of gaia'");
+    assert_eq!(
+        worn(&mut f),
+        vec![
+            (10, 41, Slot::Arms),
+            (10, 42, Slot::Legs),
+            (10, 44, Slot::Body)
+        ]
+    );
+    // Now everything is worn: refused, and nothing new is made.
+    let out = f.cast("'armor of gaia'");
+    assert!(
+        out.contains("Your body is too encumbered to don the armor."),
+        "{out}"
+    );
+    assert_eq!(worn(&mut f).len(), 3);
+    assert_eq!(f.carried().len(), 3);
+}
+
+fn create_spring_fx() -> Fx {
+    let mut f = fx();
+    f.object((0, 75), ObjectType::Fountain);
+    f.world
+        .resource_mut::<ObjectPrototypes>()
+        .by_key
+        .get_mut(&(0, 75))
+        .unwrap()
+        .name = "a clear pool of water".into();
+    f.spell(
+        "CREATE_SPRING",
+        "create",
+        serde_json::json!({
+            "room": true, "objectZoneId": 0, "objectId": 75,
+            "message": "A fresh clear spring of water bursts through the ground here.",
+            "roomMessage": "A fresh clear spring of water bursts through the ground here.",
+            "blockedSectors": ["SHALLOWS", "WATER", "UNDERWATER", "AIR"],
+            "blockedMessage": "Nothing happens.",
+            "blockedRoomMessage": "{actor.name} completes {actor.pos} spell, but nothing happens."
+        }),
+    );
+    f
+}
+
+#[test]
+fn create_spring_makes_the_spring_in_the_room_not_the_pack() {
+    let mut f = create_spring_fx();
+    let out = f.cast("'create spring'");
+    assert_eq!(on_floor(&mut f), vec![(0, 75)], "{out}");
+    assert!(f.carried().is_empty(), "{out}");
+    assert!(
+        out.contains("A fresh clear spring of water bursts through the ground here."),
+        "{out}"
+    );
+}
+
+#[test]
+fn create_spring_does_nothing_over_water_or_air() {
+    use mud_db::enums::Sector;
+    let mut f = create_spring_fx();
+    let room = f.world.get::<Located>(f.caster).unwrap().0;
+    for sector in [
+        Sector::Shallows,
+        Sector::Water,
+        Sector::Underwater,
+        Sector::Air,
+    ] {
+        f.world
+            .entity_mut(room)
+            .insert(mud_world::RoomSector(sector));
+        let out = f.cast("'create spring'");
+        assert!(out.contains("Nothing happens."), "{sector:?}: {out}");
+        assert!(on_floor(&mut f).is_empty(), "{sector:?}: {out}");
+        assert!(!out.contains("bursts through"), "{sector:?}: {out}");
+    }
+    f.world
+        .entity_mut(room)
+        .insert(mud_world::RoomSector(Sector::Field));
+    f.cast("'create spring'");
+    assert_eq!(on_floor(&mut f), vec![(0, 75)]);
+}

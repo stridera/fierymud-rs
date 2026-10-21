@@ -169,19 +169,13 @@ fn spells() -> Vec<Spell> {
             id: 105,
             name: "Create Water",
             violent: false,
-            targets: &["SELF", "OBJECT_INV"],
-            effects: vec![
-                (
-                    CREATE,
-                    serde_json::json!({"objectType": "Water in container or creates spring"}),
-                ),
-                alter(serde_json::json!({
-                    "mode": "liquid", "liquid": "water", "mixedLiquid": "slime-mold-juice",
-                    "amount": "1 + 15 * skill / 2",
-                    "fullMessage": "{item} seems to be full already.",
-                    "messageToCaster": "Water wells up within {item}."
-                })),
-            ],
+            targets: &["OBJECT_INV"],
+            effects: vec![alter(serde_json::json!({
+                "mode": "liquid", "liquid": "water", "mixedLiquid": "slime-mold-juice",
+                "amount": "1 + 15 * skill / 2",
+                "fullMessage": "{item} seems to be full already.",
+                "messageToCaster": "Water wells up within {item}."
+            }))],
         },
         Spell {
             id: 106,
@@ -850,6 +844,15 @@ fn create_water_fills_a_container() {
     assert!(out.contains("Water wells up within a test flask."), "{out}");
     let lc = f.world.get::<LiquidContainer>(flask).unwrap();
     assert_eq!((lc.liquid.as_str(), lc.remaining), ("water", 10));
+}
+
+#[test]
+fn create_water_without_a_container_says_it_needs_one() {
+    let mut f = fx();
+    let flask = f.drink(f.caster, "water", 10, 2);
+    let out = f.cast("create water", "");
+    assert!(out.contains("not a valid target"), "{out}");
+    assert_eq!(f.world.get::<LiquidContainer>(flask).unwrap().remaining, 2);
 }
 
 #[test]

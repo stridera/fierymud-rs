@@ -6,8 +6,8 @@
 //! * `create`: the `CreationRecipe` table (Minor Creation keywords, Create
 //!   Food by caster class), loaded into [`CreationRecipes`].
 
-use mud_db::enums::ObjectType;
-use mud_world::{CreationRecipes, ObjectPrototypes};
+use mud_db::enums::{ObjectType, Sector};
+use mud_world::{CreationRecipes, ObjectPrototypes, Slot};
 
 /// The mob prototype `(zone, id)` a `summon` effect spawns, from its
 /// override params. The error is a builder-facing message naming the ability
@@ -84,6 +84,74 @@ pub(super) fn pick_food(foods: &[(i32, i32)], skill: i32, jitter: usize) -> Opti
     let skill = usize::try_from(skill.clamp(0, 100)).unwrap_or(0);
     let base = skill.saturating_mul(foods.len()) / 101;
     foods.get((base + jitter).min(last)).copied()
+}
+
+/// One piece of a worn conjuration (Armor of Gaia): the object to make and
+/// the slot it goes on, from an entry of the effect's `equip` param.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct EquipPiece {
+    pub zone: i32,
+    pub id: i32,
+    pub slot: Slot,
+}
+
+/// The `equip` list of a `create` effect: `[{"objectZoneId", "objectId",
+/// "slot"}]`, in the order the pieces are put on. `slot` is a slot name
+/// (`Body`, `Arms`, `Legs`, ...), matched without regard to case. Entries
+/// that are malformed or name no slot are dropped.
+pub(super) fn equip_pieces(params: Option<&serde_json::Value>) -> Vec<EquipPiece> {
+    let Some(list) = params
+        .and_then(|p| p.get("equip"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    list.iter()
+        .filter_map(|entry| {
+            let int = |key: &str| {
+                entry
+                    .get(key)
+                    .and_then(serde_json::Value::as_i64)
+                    .and_then(|n| i32::try_from(n).ok())
+            };
+            let name = entry.get("slot").and_then(serde_json::Value::as_str)?;
+            let slot = Slot::ORDER
+                .iter()
+                .copied()
+                .find(|s| format!("{s:?}").eq_ignore_ascii_case(name))?;
+            Some(EquipPiece {
+                zone: int("objectZoneId")?,
+                id: int("objectId")?,
+                slot,
+            })
+        })
+        .collect()
+}
+
+/// True when a `create` effect's `blockedSectors` list names `sector`
+/// (Create Spring: no spring in water or air). Names match the enum
+/// variant without regard to case (`WATER`, `Shallows`).
+pub(super) fn sector_blocked(params: Option<&serde_json::Value>, sector: Option<Sector>) -> bool {
+    let Some(sector) = sector else {
+        return false;
+    };
+    let name = format!("{sector:?}");
+    params
+        .and_then(|p| p.get("blockedSectors"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|list| {
+            list.iter()
+                .filter_map(serde_json::Value::as_str)
+                .any(|s| s.eq_ignore_ascii_case(&name))
+        })
+}
+
+/// A non-blank text param of an effect.
+pub(super) fn text_param<'a>(params: Option<&'a serde_json::Value>, key: &str) -> Option<&'a str> {
+    params
+        .and_then(|p| p.get(key))
+        .and_then(serde_json::Value::as_str)
+        .filter(|t| !t.trim().is_empty())
 }
 
 /// Default caster line for a `create` effect that sets no `message` param.
