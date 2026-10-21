@@ -17278,10 +17278,57 @@ pub(crate) fn invoke_ability_with(
 /// ability the caster's class does not grant (so a race-only grant cannot be
 /// spammed through `cast`). A class-granted spell cast normally never
 /// touches it.
-#[allow(clippy::too_many_lines)]
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::fn_params_excessive_bools)]
 pub(crate) fn invoke_ability_core(
+    world: &mut World,
+    player: Entity,
+    args: &str,
+    kind: mud_db::abilities::AbilityKind,
+    verb: &str,
+    aoe_repeat: bool,
+    from_item: bool,
+    skip_queue: bool,
+    forced_target: Option<Entity>,
+    via_innate: bool,
+) {
+    // A typed spell that resolves on the spot (no wind-up: Recall,
+    // Protection from *, ...) lags the caster like one that finished a
+    // chant (legacy `complete_spell`). Wind-ups get theirs in
+    // `casting_tick`; item casts and AOE fan-out repeats never lag.
+    let inline_cast = !skip_queue
+        && !from_item
+        && !aoe_repeat
+        && matches!(kind, mud_db::abilities::AbilityKind::Spell);
+    let landed_before = CAST_LANDED.with(std::cell::Cell::get);
+    if inline_cast {
+        CAST_LANDED.with(|c| c.set(false));
+    }
+    invoke_ability_core_inner(
+        world,
+        player,
+        args,
+        kind,
+        verb,
+        aoe_repeat,
+        from_item,
+        skip_queue,
+        forced_target,
+        via_innate,
+    );
+    if inline_cast {
+        let landed = CAST_LANDED.with(std::cell::Cell::get);
+        if landed {
+            input_queue::impose_wait(world, player, crate::casting::POST_CAST_LAG_TICKS);
+        }
+        CAST_LANDED.with(|c| c.set(landed_before || landed));
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::fn_params_excessive_bools)]
+fn invoke_ability_core_inner(
     world: &mut World,
     player: Entity,
     args: &str,

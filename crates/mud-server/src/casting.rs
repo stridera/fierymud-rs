@@ -140,7 +140,7 @@ pub(crate) fn cast_lag_active(world: &World, caster: Entity) -> bool {
 /// post-`STOP_CASTING` wait state. Staff have no wait states (`WAIT_STATE`
 /// clears theirs).
 pub(crate) fn impose_cast_lag(world: &mut World, caster: Entity) {
-    if is_staff(world, caster) && !mud_world::is_mortal_mode(world, caster) {
+    if mud_world::bypasses_restrictions(world, caster) {
         return;
     }
     let lag = CastLag {
@@ -2399,7 +2399,7 @@ mod tests {
         let (mut world, room, _) = world_with_spell(2);
         world.insert_resource(crate::TickCount(0));
         let (caster, _rx) = caster_in(&mut world, room);
-        make_staff(&mut world, caster, 50, mud_db::enums::UserRole::Builder);
+        make_staff(&mut world, caster, 100, mud_db::enums::UserRole::Immortal);
         let (_bob, _b) = bob_in(&mut world, room);
         // Staff below god level still wind up, then abort without a wait.
         start_mend(&mut world, caster);
@@ -2420,7 +2420,7 @@ mod tests {
         world.insert_resource(crate::TickCount(0));
         let (mortal, _rx) = caster_in(&mut world, room);
         let (staff, _rx2) = caster_in(&mut world, room);
-        make_staff(&mut world, staff, 50, mud_db::enums::UserRole::Builder);
+        make_staff(&mut world, staff, 102, mud_db::enums::effective_rank(102));
         let (_bob, _b) = bob_in(&mut world, room);
         start_mend(&mut world, mortal);
         start_mend(&mut world, staff);
@@ -2432,6 +2432,20 @@ mod tests {
         assert!(crate::commands::input_queue::wait_active(&world, mortal));
         world.insert_resource(crate::TickCount(POST_CAST_LAG_TICKS));
         assert!(!crate::commands::input_queue::wait_active(&world, mortal));
+    }
+
+    #[test]
+    fn a_zero_cast_time_spell_lags_the_caster_too() {
+        let (mut world, room, _) = world_with_spell(0);
+        world.insert_resource(crate::TickCount(0));
+        let (caster, _rx) = caster_in(&mut world, room);
+        let (bob, _b) = bob_in(&mut world, room);
+        start_mend(&mut world, caster);
+        assert!(world.get::<Casting>(caster).is_none(), "no wind-up");
+        assert!(hp(&world, bob) > 5, "the spell landed at once");
+        assert!(crate::commands::input_queue::wait_active(&world, caster));
+        world.insert_resource(crate::TickCount(POST_CAST_LAG_TICKS));
+        assert!(!crate::commands::input_queue::wait_active(&world, caster));
     }
 
     #[test]

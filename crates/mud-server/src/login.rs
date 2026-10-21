@@ -2300,7 +2300,8 @@ impl ConnRouter {
     /// Release one waiting input line per playing character whose cast lock
     /// has lifted (`commands::input_queue`). Driven once per tick, so a
     /// queued alias such as `cast 'armor';cast 'bless'` runs its second
-    /// spell the tick after the first lands.
+    /// spell once the first has landed and its post-cast lag (one combat
+    /// round, `casting::POST_CAST_LAG_TICKS`) has run out.
     pub async fn drain_input_queues(&mut self, world: &mut World, pool: &PgPool) {
         let waiting: Vec<(ConnId, Entity)> = self
             .playing
