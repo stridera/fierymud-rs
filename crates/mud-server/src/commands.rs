@@ -18183,7 +18183,9 @@ pub(crate) fn invoke_ability_core(
         engage_after_violent_cast(world, player, &def, target_entity);
         // A whiff is a use of the skill: it pays the same recovery as a hit,
         // so a missed kick or bash cannot be retried on the next input.
-        start_ability_cooldown(world, player, &def);
+        if !aoe_repeat {
+            start_ability_cooldown(world, player, &def);
+        }
         settle_slot(world, player, slot_hold, true);
         return;
     }

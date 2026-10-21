@@ -252,3 +252,42 @@ fn without_the_attack_roll_flag_a_bash_always_lands() {
     let out = drain(&mut rx);
     assert!(hp(&fx.world, rat) < 100, "{out}");
 }
+
+#[test]
+fn a_character_who_never_learned_bash_cannot_bash() {
+    let (mut fx, p, rat, mut rx) = fixture();
+    // Practiced kit that does not include bash.
+    fx.world.entity_mut(p).insert(mud_world::KnownAbilities {
+        entries: vec![(KICK, 500, true)],
+    });
+    let before = stamina(&fx.world, p);
+    force_hit_roll(Some(1));
+    dispatch(&mut fx.world, p, "bash rat");
+    force_hit_roll(None);
+    let out = drain(&mut rx);
+    assert!(out.contains("You don't know how to use Bash"), "{out}");
+    assert_eq!(hp(&fx.world, rat), 100, "{out}");
+    assert_eq!(stamina(&fx.world, p), before, "no stamina spent: {out}");
+    assert!(fx.world.get::<Fighting>(p).is_none(), "no fight started");
+}
+
+#[test]
+fn a_refused_bash_does_not_stand_a_sitting_player_up() {
+    let (mut fx, p, _rat, mut rx) = fixture();
+    force_hit_roll(Some(100));
+    dispatch(&mut fx.world, p, "bash rat");
+    force_hit_roll(None);
+    drain(&mut rx);
+    assert_eq!(
+        fx.world.get::<Posture>(p).map(|x| x.0),
+        Some(PostureKind::Sitting)
+    );
+    dispatch(&mut fx.world, p, "bash rat");
+    let out = drain(&mut rx);
+    assert!(out.contains("You can't use Bash yet"), "{out}");
+    assert_eq!(
+        fx.world.get::<Posture>(p).map(|x| x.0),
+        Some(PostureKind::Sitting),
+        "the lag refusal came before the posture gate: {out}"
+    );
+}

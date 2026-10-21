@@ -3356,17 +3356,22 @@ pub(crate) fn cmd_bandage(world: &mut World, player: Entity, args: &str) {
     );
 }
 pub(crate) fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
+    // Bash lag (`Ability.cooldown_ms`), before the posture gate stands us up.
+    let bash_def = crate::commands::skill_def(world, "bash");
+    if let Some(def) = &bash_def
+        && let Some(refusal) = crate::commands::ability_cooldown_refusal(world, player, def, "use")
+    {
+        send_to(world, player, refusal);
+        return;
+    }
     if !require_alert_posture(world, player, "bash") {
         return;
     }
     if refuse_if_blind(world, player) {
         return;
     }
-    // Still recovering from the last bash (`Ability.cooldown_ms`).
-    let bash_def = crate::commands::skill_def(world, "bash");
-    if let Some(def) = &bash_def
-        && let Some(refusal) = crate::commands::ability_cooldown_refusal(world, player, def, "use")
-    {
+    // Characters without the skill are refused first (mobs and staff pass).
+    if let Some(refusal) = crate::commands::skill_use_refusal(world, player, "bash") {
         send_to(world, player, refusal);
         return;
     }
@@ -3422,8 +3427,7 @@ pub(crate) fn cmd_bash(world: &mut World, player: Entity, target_word: &str) {
     // Effective legacy damroll for the +3 flat formula.
     let damage = world
         .get::<CombatStats>(player)
-        .map_or(1, |cs| cs.attack_power / 5);
-    let damage = (damage + 3).max(1);
+        .map_or(4, |cs| (cs.attack_power / 5 + 3).max(1));
     drain_stamina(world, player, cost);
 
     let target_name = name_of(world, target);
