@@ -1370,3 +1370,83 @@ fn roar_bash_and_hitall_are_no_longer_reachable_as_howl_maul_tantrum() {
     assert_eq!(names("maul"), ["maul"]);
     assert_eq!(names("tantrum"), ["tantrum"]);
 }
+
+#[test]
+fn tantrum_lashes_out_at_everyone_in_the_room_for_one_stamina_cost() {
+    let (mut world, room, p, mut rx) = berserker_arena();
+    mob_in(&mut world, room, "a bat", "bat");
+    cmd_tantrum(&mut world, p, "");
+    let out = drain(&mut rx);
+    assert!(out.contains("You use Tantrum on a rat"), "{out}");
+    assert!(out.contains("a bat"), "{out}");
+    assert_eq!(stamina(&world, p), 100 - crate::commands::TANTRUM_COST);
+}
+
+#[test]
+fn tantrum_with_nobody_to_hit_costs_nothing() {
+    let (mut world, room, p, mut rx) = berserker_arena();
+    let rat = world
+        .query_filtered::<Entity, With<Mob>>()
+        .iter(&world)
+        .next()
+        .unwrap();
+    world.entity_mut(rat).remove::<Located>();
+    let _ = room;
+    cmd_tantrum(&mut world, p, "");
+    let out = drain(&mut rx);
+    assert!(out.contains("nothing here"), "{out}");
+    assert_eq!(stamina(&world, p), 100, "{out}");
+}
+
+#[test]
+fn maul_and_rend_at_an_absent_name_refuse_before_spending_stamina() {
+    let (mut world, _room, p, mut rx) = berserker_arena();
+    cmd_maul(&mut world, p, "nobody");
+    cmd_rend(&mut world, p, "nobody");
+    let out = drain(&mut rx);
+    assert_eq!(
+        out.matches("You don't see 'nobody' here.").count(),
+        2,
+        "{out}"
+    );
+    assert_eq!(stamina(&world, p), 100, "{out}");
+}
+
+#[test]
+fn a_race_that_grants_sweep_can_use_it_whatever_its_class() {
+    let (mut world, room, p, mut rx) = warrior_arena();
+    let mut def = ability_def(310, "Sweep", AbilityKind::Skill);
+    def.cast_time_rounds = 0;
+    world
+        .resource_mut::<AbilityCatalog>()
+        .by_name
+        .insert("sweep".into(), def);
+    mob_in(&mut world, room, "a rat", "rat");
+    cmd_sweep(&mut world, p, "");
+    let out = drain(&mut rx);
+    assert!(out.contains("Your class can't use Sweep."), "{out}");
+    assert_eq!(stamina(&world, p), 100, "{out}");
+
+    let mut data = mud_world::RaceAbilitiesData::default();
+    data.insert("DRAGON_FIRE", 310, 100);
+    world.insert_resource(data);
+    world.get_mut::<mud_world::Profile>(p).unwrap().race = "DRAGON_FIRE".into();
+    cmd_sweep(&mut world, p, "");
+    let out = drain(&mut rx);
+    assert!(!out.contains("can't use"), "{out}");
+    assert!(stamina(&world, p) < 100, "{out}");
+}
+
+#[test]
+fn doorbash_is_not_class_gated() {
+    let (mut world, _room, p, mut rx) = warrior_arena();
+    let mut def = ability_def(110, "Doorbash", AbilityKind::Skill);
+    def.cast_time_rounds = 0;
+    world
+        .resource_mut::<AbilityCatalog>()
+        .by_name
+        .insert("doorbash".into(), def);
+    cmd_doorbash(&mut world, p, "north");
+    let out = drain(&mut rx);
+    assert!(!out.contains("can't use"), "{out}");
+}

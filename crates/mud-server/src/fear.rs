@@ -515,7 +515,7 @@ fn fear_drops_weapon(world: &mut World, scene: &Scene, weapon: Entity) -> FearOu
         world,
         (
             &|_, v| format!("You made {v} drop {w}!"),
-            &|c, _| format!("{c} frightens you so badly that you forget to hold on to your {w}!"),
+            &|c, _| format!("{c} frightens you so badly that you forget to hold on to {w}!"),
             &|_, v| format!("{v} is so terrified that they drop {w}!"),
         ),
     );

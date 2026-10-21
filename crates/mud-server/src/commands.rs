@@ -5644,6 +5644,10 @@ mod tests {
         let (head, tail) = parse_quoted_first_token("'magic missile'");
         assert_eq!(head, "magic missile");
         assert_eq!(tail, None);
+        // An apostrophe between letters is part of the name.
+        let (head, tail) = parse_quoted_first_token("'gaia's cloak' bob");
+        assert_eq!(head, "gaia's cloak");
+        assert_eq!(tail, Some("bob"));
         // Double quotes work the same.
         let (head, tail) = parse_quoted_first_token("\"acid burst\" troll");
         assert_eq!(head, "acid burst");
@@ -15459,6 +15463,15 @@ fn mortal_skill_refusal(
     // — once Profile.class_id is enforced non-NULL by login,
     // this branch goes away.
     let profile_data = world.get::<Profile>(player).map(|p| (p.class_id, p.level));
+    // Race-innate skills (`RaceAbilities`, legacy `assign_race_skills`) are
+    // usable by the race whatever the class: dragon `sweep`.
+    if world
+        .get::<Profile>(player)
+        .zip(world.get_resource::<mud_world::RaceAbilitiesData>())
+        .is_some_and(|(p, d)| d.grants(&p.race, def.id))
+    {
+        return None;
+    }
     if let Some((Some(class_id), level)) = profile_data {
         let csd = world.resource::<mud_world::ClassSkillsData>();
         // Defensive: a class with zero ClassSkills rows means
@@ -16417,7 +16430,20 @@ pub(crate) fn parse_quoted_first_token(args: &str) -> (String, Option<&str>) {
     if matches!(opener, Some('\'' | '"')) {
         let q = opener.unwrap();
         let rest = &trimmed[q.len_utf8()..];
-        if let Some(close_idx) = rest.find(q) {
+        // An apostrophe inside a word (`gaia's cloak`) is part of the name,
+        // not the closing quote: a quote between two letters never closes.
+        let close = rest.char_indices().find(|&(i, c)| {
+            c == q
+                && !(rest[..i]
+                    .chars()
+                    .next_back()
+                    .is_some_and(char::is_alphabetic)
+                    && rest[i + c.len_utf8()..]
+                        .chars()
+                        .next()
+                        .is_some_and(char::is_alphabetic))
+        });
+        if let Some((close_idx, _)) = close {
             let phrase = rest[..close_idx].trim().to_string();
             let after = rest[close_idx + q.len_utf8()..].trim_start();
             let tail = (!after.is_empty()).then_some(after);
@@ -25863,7 +25889,9 @@ fn skill_name_for_verb(verb: &str) -> &str {
         "howl" => "battle howl",
         "gouge" => "eye gouge",
         "firstaid" => "first aid",
-        "breathe" | "attack" => "",
+        // `doorbash` is open to everyone: no class or race holds the Doorbash
+        // row, so the class gate would refuse it to all.
+        "breathe" | "attack" | "doorbash" => "",
         other => other,
     }
 }

@@ -12818,7 +12818,9 @@ fn put_plain(world: &mut World, player: Entity, args: &str) {
                 send_rendered(
                     world,
                     player,
-                    &format!("{item_name} won't fit in {container_name}.\r\n"),
+                    &crate::commands::cap_sentence_start(&format!(
+                        "{item_name} won't fit in {container_name}.\r\n"
+                    )),
                 );
                 continue;
             }
@@ -12875,7 +12877,9 @@ fn put_plain(world: &mut World, player: Entity, args: &str) {
         send_rendered(
             world,
             player,
-            &format!("{item_name} won't fit in {container_name}.\r\n"),
+            &crate::commands::cap_sentence_start(&format!(
+                "{item_name} won't fit in {container_name}.\r\n"
+            )),
         );
         return;
     }

@@ -221,7 +221,7 @@ fn put_refuses_what_would_overfill_the_container() {
     let (bag, mail) = bag_and_item(&mut world, p, 50.0, 65.0);
     dispatch(&mut world, p, "put mail bag");
     let out = drain(&mut rx);
-    assert!(out.contains("a banded mail won't fit in a bag."), "{out}");
+    assert!(out.contains("A banded mail won't fit in a bag."), "{out}");
     assert_eq!(world.get::<Located>(mail).map(|l| l.0), Some(p));
     let _ = bag;
 }
@@ -261,6 +261,6 @@ fn put_all_stores_what_fits_and_names_what_does_not() {
     let (_bag, mail) = bag_and_item(&mut world, p, 50.0, 65.0);
     dispatch(&mut world, p, "put all bag");
     let out = drain(&mut rx);
-    assert!(out.contains("a banded mail won't fit in a bag."), "{out}");
+    assert!(out.contains("A banded mail won't fit in a bag."), "{out}");
     assert_eq!(world.get::<Located>(mail).map(|l| l.0), Some(p));
 }

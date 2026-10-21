@@ -349,10 +349,11 @@ inventory::submit! {
     required_perm: None,
     category: Category::Combat,
     help: Help {
-        usage: "tantrum [<target>]",
+        usage: "tantrum",
         summary: "Enter a frenzied rage of wild attacks.",
-        long: "Costs 10 stamina. Berserker skill. Default target is \
-               your current Fighting target.",
+        long: "Costs 10 stamina. Berserker skill. Lashes out at every \
+               enemy in the room; your group and peaceful mobs are \
+               spared.",
     },
     run: cmd_tantrum,
     }
@@ -2361,6 +2362,23 @@ pub(crate) fn cmd_tripup(world: &mut World, player: Entity, args: &str) {
 /// Resolve `victim_word` among the actors in the attacker's room and run it through
 /// [`super::attack_ok::offensive_target_allowed`]. A word that names nobody
 /// passes: the ability dispatcher reports the miss (and gates the real target).
+/// Refuse (and say so) a typed victim nobody in the room answers to, so the
+/// skill command can stop before it spends stamina. `true` means keep going.
+fn victim_word_present(world: &mut World, player: Entity, victim_word: &str) -> bool {
+    let Some(located) = world.get::<Located>(player).copied() else {
+        return true;
+    };
+    if find_actor_in_room(world, victim_word, located.0, player).is_some() {
+        return true;
+    }
+    send_to(
+        world,
+        player,
+        format!("You don't see '{victim_word}' here.\r\n"),
+    );
+    false
+}
+
 fn offensive_word_allowed(world: &mut World, player: Entity, victim_word: &str) -> bool {
     let Some(located) = world.get::<Located>(player).copied() else {
         return true;
@@ -2575,9 +2593,38 @@ pub(crate) fn cmd_maul(world: &mut World, player: Entity, args: &str) {
     cmd_single_target_skill(world, player, args, "maul", MAUL_COST);
 }
 
-/// `tantrum [<target>]`: the Tantrum skill's own ability row (not Hit All).
-pub(crate) fn cmd_tantrum(world: &mut World, player: Entity, args: &str) {
-    cmd_single_target_skill(world, player, args, "tantrum", TANTRUM_COST);
+/// `tantrum`: the Tantrum skill's own ability row (not Hit All), run against
+/// every enemy in the room.
+pub(crate) fn cmd_tantrum(world: &mut World, player: Entity, _args: &str) {
+    if !require_alert_posture(world, player, "tantrum") {
+        return;
+    }
+    let Some(room) = world.get::<Located>(player).map(|l| l.0) else {
+        return;
+    };
+    if refuse_in_peaceful_room(world, player, room) {
+        return;
+    }
+    let cost = skill_stamina_cost(world, "tantrum", TANTRUM_COST);
+    if !check_stamina(world, player, cost, "tantrum") {
+        return;
+    }
+    // Legacy `SCMD_TANTRUM` swings at everyone in the room (group members,
+    // peaceful mobs and other players' pets are spared). Nothing to hit,
+    // nothing spent.
+    if !invoke_ability_aoe(
+        world,
+        player,
+        mud_db::abilities::AbilityKind::Skill,
+        "use",
+        "tantrum",
+        AoeScope::RoomEnemies,
+        "There's nothing here to throw a tantrum at.\r\n",
+        false,
+    ) {
+        return;
+    }
+    drain_stamina(world, player, cost);
 }
 
 /// A violent single-target skill that is its own `Ability` row: `verb` is both
@@ -2609,6 +2656,9 @@ fn cmd_single_target_skill(
     } else {
         (format!("{verb} {arg}"), None)
     };
+    if forced.is_none() && !victim_word_present(world, player, arg) {
+        return;
+    }
     let allowed = match forced {
         Some(t) => super::attack_ok::offensive_target_allowed(world, player, t),
         None => offensive_word_allowed(world, player, arg),
@@ -2645,6 +2695,9 @@ pub(crate) fn cmd_rend(world: &mut World, player: Entity, args: &str) {
     } else {
         (format!("rend {arg}"), None)
     };
+    if forced.is_none() && !victim_word_present(world, player, arg) {
+        return;
+    }
     let allowed = match forced {
         Some(t) => super::attack_ok::offensive_target_allowed(world, player, t),
         None => offensive_word_allowed(world, player, arg),
