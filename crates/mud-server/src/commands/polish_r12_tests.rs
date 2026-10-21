@@ -451,7 +451,11 @@ fn get_all_leaves_a_dead_players_corpse_and_its_purse_alone() {
     assert!(!out.contains("You pick up"), "{out}");
     assert_eq!(fx.world.get::<Located>(corpse).unwrap().0, room, "{out}");
     assert_eq!(fx.world.get::<mud_world::CoinPile>(corpse).unwrap().0, 5000);
-    assert!(fx.world.get::<mud_world::Wealth>(p).is_none_or(|w| w.0 == 0));
+    assert!(
+        fx.world
+            .get::<mud_world::Wealth>(p)
+            .is_none_or(|w| w.0 == 0)
+    );
 
     // A real loose pile still goes straight to the purse.
     let pile = item_at(&mut fx.world, room, 8, "a pile of coins", "coins");
