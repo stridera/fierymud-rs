@@ -436,23 +436,34 @@ impl Scene {
             caster,
             victim,
             room: world.get::<Located>(victim).map(|l| l.0),
-            caster_name: cap_sentence_start(&name_of(world, caster)),
-            victim_name: cap_sentence_start(&name_of(world, victim)),
+            caster_name: name_of(world, caster),
+            victim_name: name_of(world, victim),
         }
     }
 
     /// Legacy `act` to `TO_CHAR`, `TO_VICT` and `TO_NOTVICT`; each line is
     /// built from `(caster name, victim name)`.
     fn act(&self, world: &mut World, lines: (&Line, &Line, &Line)) {
+        // Names keep their article's case ("a hedgehog"); only a name that
+        // opens its line is capitalised, so "You frighten a hedgehog" and
+        // "A hedgehog shrieks madly" both read right.
         let (c, v) = (self.caster_name.as_str(), self.victim_name.as_str());
-        send_msg(world, self.caster, format!("{}\r\n", lines.0(c, v)));
-        send_msg(world, self.victim, format!("{}\r\n", lines.1(c, v)));
+        send_msg(
+            world,
+            self.caster,
+            format!("{}\r\n", cap_sentence_start(&lines.0(c, v))),
+        );
+        send_msg(
+            world,
+            self.victim,
+            format!("{}\r\n", cap_sentence_start(&lines.1(c, v))),
+        );
         if let Some(room) = self.room {
             broadcast_room_except_rendered(
                 world,
                 room,
                 &[self.caster, self.victim],
-                &format!("{}\r\n", lines.2(c, v)),
+                &format!("{}\r\n", cap_sentence_start(&lines.2(c, v))),
             );
         }
     }
@@ -503,7 +514,7 @@ fn fear_drops_weapon(world: &mut World, scene: &Scene, weapon: Entity) -> FearOu
     scene.act(
         world,
         (
-            &|_, v| format!("You made {v} drop their {w}!"),
+            &|_, v| format!("You made {v} drop {w}!"),
             &|c, _| format!("{c} frightens you so badly that you forget to hold on to your {w}!"),
             &|_, v| format!("{v} is so terrified that they drop {w}!"),
         ),
@@ -592,7 +603,7 @@ pub(crate) fn inflict_fear(
 ) -> FearOutcome {
     let scene = Scene::new(world, caster, victim);
     if world.get::<Posture>(victim).map(|p| p.0) == Some(PostureKind::Sleeping) {
-        let v = &scene.victim_name;
+        let v = cap_sentence_start(&scene.victim_name);
         send_msg(
             world,
             caster,
@@ -607,7 +618,7 @@ pub(crate) fn inflict_fear(
             (
                 &|_, v| format!("{v} doesn't even move."),
                 &|c, _| format!("{c} shows you visions of great horror, but you can't even move!"),
-                &|_, v| format!("{v} doesn't doesn't appear to notice."),
+                &|_, v| format!("{v} doesn't appear to notice."),
             ),
         );
         clear_fear(world, victim);

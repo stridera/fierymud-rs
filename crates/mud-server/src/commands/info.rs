@@ -3284,7 +3284,11 @@ fn run_help(world: &mut World, player: Entity, args: &str, scope: HelpScope) {
     // AbilityCatalog entry directly when the topic matches a
     // plain_name (case-insensitive, also tolerant of "burning_hands"
     // vs "burning hands" by underscore normalization).
-    let ability_key = topic.to_ascii_lowercase().replace(' ', "_");
+    // "Gaia's Cloak" is keyed `gaias_cloak`; the apostrophe is optional.
+    let ability_key = topic
+        .to_ascii_lowercase()
+        .replace(['\'', '\u{2019}'], "")
+        .replace(' ', "_");
     let ability_def = world
         .resource::<AbilityCatalog>()
         .by_name
@@ -4001,7 +4005,11 @@ pub(crate) fn cmd_examine(world: &mut World, player: Entity, args: &str) {
         if has_object_flag(world, target, mud_db::enums::ObjectFlag::Magic) {
             out.push_str("<magenta>It pulses faintly with magic.</>\r\n");
         }
-        if has_object_flag(world, target, mud_db::enums::ObjectFlag::Decomposing) {
+        // DECOMPOSING is also how magical conjures, springs and portals are
+        // timed out; only food and corpses actually rot.
+        if has_object_flag(world, target, mud_db::enums::ObjectFlag::Decomposing)
+            && rots_when_it_decomposes(world, target)
+        {
             out.push_str("<dim>It smells faintly of rot.</>\r\n");
         }
         if has_object_flag(world, target, mud_db::enums::ObjectFlag::Soulbound) {
@@ -13065,6 +13073,27 @@ pub(crate) fn cmd_donate(world: &mut World, player: Entity, args: &str) {
     crate::commands::composition::note_item_turns_solid(world, player, &item_name);
 }
 
+/// True when an item flagged DECOMPOSING is something that visibly rots:
+/// food, or a corpse. The flag is shared with the timed-out magical objects
+/// (flame blade, create-spring water, portals), which must not smell.
+fn rots_when_it_decomposes(world: &World, item: Entity) -> bool {
+    if world.get::<mud_world::Corpse>(item).is_some()
+        || world.get::<mud_world::PlayerCorpse>(item).is_some()
+    {
+        return true;
+    }
+    world
+        .get::<WorldKey>(item)
+        .and_then(|k| {
+            world
+                .resource::<ObjectPrototypes>()
+                .by_key
+                .get(&(k.zone, k.id))
+                .map(|p| p.r#type)
+        })
+        .is_some_and(|t| t == mud_db::enums::ObjectType::Food)
+}
+
 /// True when `item` carries the given proto-derived attribute flag
 /// (GLOW / HUM / INVISIBLE / SOULBOUND / …). Returns false when the
 /// `ObjectFlags` component is missing — the loader only attaches it
@@ -19257,6 +19286,42 @@ mod playtest_2026_10_11_tests {
         assert!(!out.contains("weighs"), "{out}");
         cmd_look(&mut world, p, "rock");
         assert!(drain(&mut rx).contains("It weighs about"));
+    }
+
+    // Playtest r17: DECOMPOSING times out conjures, springs and portals too;
+    // only food and corpses smell of rot.
+    #[test]
+    fn only_decomposing_food_smells_of_rot() {
+        use mud_db::enums::ObjectFlag;
+        let mut world = World::new();
+        let mut protos = ObjectPrototypes::default();
+        let mut bread = object_proto(30, 10, ObjectType::Food);
+        bread.name = "some bread".into();
+        protos.by_key.insert((30, 10), bread);
+        let mut well = object_proto(0, 33, ObjectType::Portal);
+        well.name = "a swirling moonwell".into();
+        protos.by_key.insert((0, 33), well);
+        world.insert_resource(protos);
+        let room = world.spawn((Room, RoomSector(Sector::Field))).id();
+        let (p, mut rx) = player_in(&mut world, room);
+        for (name, key, zone, id) in [
+            ("some bread", "bread", 30, 10),
+            ("a swirling moonwell", "moonwell", 0, 33),
+        ] {
+            world.spawn((
+                Item,
+                Named { name: name.into() },
+                Keywords(vec![key.into()]),
+                Located(room),
+                WorldKey { zone, id },
+                mud_world::ObjectFlags(vec![ObjectFlag::Decomposing]),
+            ));
+        }
+        cmd_look(&mut world, p, "bread");
+        assert!(drain(&mut rx).contains("smells faintly of rot"));
+        cmd_look(&mut world, p, "moonwell");
+        let out = drain(&mut rx);
+        assert!(!out.contains("rot"), "{out}");
     }
 
     // #29 helpers / #30 parsing.

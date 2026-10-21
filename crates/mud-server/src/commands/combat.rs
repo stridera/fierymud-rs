@@ -3039,10 +3039,18 @@ pub(crate) fn cmd_rescue(world: &mut World, player: Entity, args: &str) {
     }
     // Legacy `do_rescue` looks for an attacker before anything else:
     // "But nobody is fighting X!" (no stamina spent, no success message).
-    if let Some(located) = world.get::<Located>(player).copied()
-        && let Some(victim) = find_actor_in_room(world, arg, located.0, player)
-        && world.get::<Fighting>(victim).is_none()
-        && !crate::commands::is_being_attacked(world, victim)
+    // Nobody by that name here at all is refused the same way, instead of
+    // spending the stamina and announcing "Banzai! To the rescue..." to
+    // an empty room.
+    let Some(located) = world.get::<Located>(player).copied() else {
+        send_to(world, player, "You are nowhere.\r\n");
+        return;
+    };
+    let Some(victim) = find_actor_in_room(world, arg, located.0, player) else {
+        send_to(world, player, format!("You don't see '{arg}' here.\r\n"));
+        return;
+    };
+    if world.get::<Fighting>(victim).is_none() && !crate::commands::is_being_attacked(world, victim)
     {
         let victim_name = name_or(world, victim, arg);
         send_msg(

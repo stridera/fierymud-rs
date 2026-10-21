@@ -93,10 +93,14 @@ pub enum NameRank {
 /// Rank `needle` against one ability name, legacy word-by-word style.
 #[must_use]
 pub fn rank_ability_name(needle: &str, name: &str) -> NameRank {
+    // Apostrophes are not part of a typed ability name: "Gaia's Cloak" is
+    // keyed `gaias_cloak`, and the `spells` list prints it with the
+    // apostrophe, so both spellings must find it.
     let split = |s: &'_ str| -> Vec<String> {
         s.split(|c: char| c == '_' || c.is_whitespace())
+            .map(|p| p.replace(['\'', '\u{2019}'], ""))
             .filter(|p| !p.is_empty())
-            .map(str::to_ascii_lowercase)
+            .map(|p| p.to_ascii_lowercase())
             .collect()
     };
     let typed = split(needle);
@@ -120,6 +124,26 @@ mod tests {
 
     fn kw(words: &[&str]) -> Vec<String> {
         words.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn an_apostrophe_in_the_typed_name_is_ignored() {
+        assert_eq!(
+            rank_ability_name("gaia's cloak", "gaias_cloak"),
+            NameRank::Exact
+        );
+        assert_eq!(
+            rank_ability_name("gaias cloak", "gaias_cloak"),
+            NameRank::Exact
+        );
+        assert_eq!(
+            rank_ability_name("nature's", "natures_guidance"),
+            NameRank::Prefix
+        );
+        assert_eq!(
+            rank_ability_name("nature's g", "natures_embrace"),
+            NameRank::None
+        );
     }
 
     #[test]

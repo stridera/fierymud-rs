@@ -894,7 +894,7 @@ fn frozen_in_terror_paralyses_and_does_not_flee() {
     );
     let out = caster_rx(&mut f);
     assert!(
-        out.contains("You frighten A jackal so bad that they are frozen in terror!"),
+        out.contains("You frighten a jackal so bad that they are frozen in terror!"),
         "{out}"
     );
 }
@@ -974,7 +974,7 @@ fn drop_weapon_puts_the_wielded_item_in_the_room_and_lags_the_victim() {
     );
     let out = caster_rx(&mut f);
     assert!(
-        out.contains("You made A jackal drop their a rusty sword!"),
+        out.contains("You made a jackal drop a rusty sword!"),
         "{out}"
     );
 }

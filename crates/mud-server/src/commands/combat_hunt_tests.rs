@@ -1191,3 +1191,67 @@ fn rescue_refuses_your_own_name() {
     assert!(drain(&mut rx).contains("You can't rescue yourself."));
     assert_eq!(stamina(&world, p), 100, "no stamina spent");
 }
+
+#[test]
+fn rescue_refuses_a_name_nobody_here_answers_to() {
+    let (mut world, _room, p, mut rx) = arena();
+    cmd_rescue(&mut world, p, "nobody");
+    let out = drain(&mut rx);
+    assert!(out.contains("You don't see 'nobody' here."), "{out}");
+    assert!(!out.contains("Banzai"), "{out}");
+    assert_eq!(stamina(&world, p), 100, "no stamina spent");
+}
+
+// -- skills the class cannot use (playtest r17) ------------------------------------------
+
+const SNEAK: i32 = 301;
+const ROAR: i32 = 302;
+const KICK_ID: i32 = 303;
+const WARRIOR: i32 = 4;
+
+/// A warrior (class row for kick only) with sneak and roar in the catalog.
+fn warrior_arena() -> (World, Entity, Entity, Rx) {
+    let (mut world, room, p, rx) = arena();
+    let mut catalog = AbilityCatalog::default();
+    for (id, name) in [(SNEAK, "Sneak"), (ROAR, "Roar"), (KICK_ID, "Kick")] {
+        let mut def = ability_def(id, name, AbilityKind::Skill);
+        def.cast_time_rounds = 0;
+        catalog.by_name.insert(name.to_ascii_lowercase(), def);
+    }
+    world.insert_resource(catalog);
+    let mut skills = mud_world::ClassSkillsData::default();
+    skills.min_level.insert((WARRIOR, KICK_ID), 1);
+    world.insert_resource(skills);
+    world.entity_mut(p).insert(mud_world::Profile {
+        level: 20,
+        class_id: Some(WARRIOR),
+        race: "HUMAN".into(),
+        experience: 0,
+        gender: "male".into(),
+    });
+    (world, room, p, rx)
+}
+
+#[test]
+fn a_skill_the_class_lacks_is_refused_before_it_costs_stamina() {
+    let (mut world, _room, p, mut rx) = warrior_arena();
+    cmd_sneak(&mut world, p, "");
+    let out = drain(&mut rx);
+    assert!(out.contains("Your class can't use Sneak."), "{out}");
+    assert_eq!(stamina(&world, p), 100, "no stamina spent: {out}");
+}
+
+#[test]
+fn an_area_skill_the_class_lacks_is_refused_once_and_costs_nothing() {
+    let (mut world, room, p, mut rx) = warrior_arena();
+    mob_in(&mut world, room, "a rat", "rat");
+    mob_in(&mut world, room, "a bat", "bat");
+    cmd_roar(&mut world, p, "");
+    let out = drain(&mut rx);
+    assert_eq!(
+        out.matches("Your class can't use Roar.").count(),
+        1,
+        "{out}"
+    );
+    assert_eq!(stamina(&world, p), 100, "no stamina spent: {out}");
+}

@@ -22749,7 +22749,11 @@ pub(crate) fn render_ability_template(
                 target_p.reflexive,
             )
         };
+    // "{target.name}'s" is the possessive: for the viewer's own side that is
+    // "your", not "yourself's" / "you's".
     let rendered = template
+        .replace("{actor.name}'s", "{actor.pos}")
+        .replace("{target.name}'s", "{target.pos}")
         .replace("{actor.name}", &actor_name_s)
         .replace("{target.name}", &target_name_s)
         .replace("{actor.he}", actor_subj)
@@ -25751,10 +25755,37 @@ pub(crate) const THROATCUT_COST: i32 = 8;
 pub(crate) const BERSERK_COST: i32 = 8;
 pub(crate) const TAUNT_COST: i32 = 4;
 
+/// The ability name a skill command's stamina verb stands for, where the
+/// two differ. Verbs that are not class skills (`attack`) or that fan out
+/// to several abilities by race (`breathe`) pass through and are never
+/// gated here.
+fn skill_name_for_verb(verb: &str) -> &str {
+    match verb {
+        "tripup" => "trip up",
+        "hitall" => "hit all",
+        "gouge" => "eye gouge",
+        "firstaid" => "first aid",
+        "breathe" | "attack" => "",
+        other => other,
+    }
+}
+
 /// Pre-flight stamina check. Returns false if the player has Stamina and
 /// it's below `cost`; sends "You're too winded to <verb>." and the caller
 /// should abort. Players without a Stamina component pass (mobs, etc.).
 pub(crate) fn check_stamina(world: &World, player: Entity, cost: i32, verb: &str) -> bool {
+    // A skill the character may not use (wrong class, too low a level, not
+    // practiced) is refused BEFORE the stamina is spent. The shims drain it
+    // right after this check, and the ability dispatch that follows would
+    // refuse with the same line only after the cost was gone (and once per
+    // enemy for an area skill like `roar`).
+    let skill = skill_name_for_verb(verb);
+    if !skill.is_empty()
+        && let Some(refusal) = skill_use_refusal(world, player, skill)
+    {
+        send_to(world, player, refusal);
+        return false;
+    }
     if let Some(s) = world.get::<Stamina>(player).copied()
         && s.current < cost
     {

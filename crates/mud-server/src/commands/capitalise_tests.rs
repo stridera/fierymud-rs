@@ -198,6 +198,36 @@ fn no_known_template_token_survives_rendering() {
 }
 
 #[test]
+fn a_name_possessive_reads_your_to_the_viewer_never_yourselfs() {
+    // "You cure {target.name}'s blindness." on a self-cast.
+    let t = "You cure {target.name}'s blindness.";
+    let reflexive = render_ability_template(
+        t,
+        ("Ann", Pronouns::THEY),
+        ("Ann", Pronouns::THEY),
+        true,
+        Viewer::Actor,
+    );
+    assert_eq!(reflexive, "You cure your blindness.");
+    let other = render_ability_template(
+        t,
+        ("Ann", Pronouns::THEY),
+        ("a goblin", Pronouns::THEY),
+        false,
+        Viewer::Actor,
+    );
+    assert_eq!(other, "You cure a goblin's blindness.");
+    let victim = render_ability_template(
+        "{actor.name}'s spell cures {target.name}'s blindness.",
+        ("Ann", Pronouns::THEY),
+        ("Bob", Pronouns::THEY),
+        false,
+        Viewer::Target,
+    );
+    assert_eq!(victim, "Ann's spell cures your blindness.");
+}
+
+#[test]
 fn unknown_tokens_are_detected() {
     let out = render_ability_template(
         "{actor.bogus} waves {target.name}.",
