@@ -508,7 +508,7 @@ pub(crate) fn mob_scavenge(
         .get::<mud_world::Named>(item)
         .map(|n| n.name.clone())
         .unwrap_or_default();
-    if world.get::<mud_world::CoinPile>(item).is_some() {
+    if world.get::<mud_world::LooseCoins>(item).is_some() {
         crate::commands::info::take_loose_coins(world, mob, item);
     } else {
         world.entity_mut(item).insert(Located(mob));

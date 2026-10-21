@@ -11243,11 +11243,10 @@ fn drain_coin_pile(world: &mut World, container: Entity, player: Entity) -> Opti
 /// it to `player`'s `Wealth`, remove the pile, and return the amount.
 pub(crate) fn take_loose_coins(world: &mut World, player: Entity, item: Entity) -> Option<i64> {
     world.get::<Item>(item)?;
-    // A corpse's `CoinPile` is its loot, not a loose pile: it is handed out by
-    // `get all from corpse` (which honours the owner's claim), never here.
-    if world.get::<Corpse>(item).is_some() {
-        return None;
-    }
+    // Only a real loose pile (`LooseCoins`) pays out and is deleted. Any other
+    // item carrying a `CoinPile` (a corpse, or a bag holding a rotted corpse's
+    // coins) keeps them as loot for `get all from <it>`.
+    world.get::<mud_world::LooseCoins>(item)?;
     let amount = world.get::<CoinPile>(item)?.0;
     if amount > 0 {
         if let Some(mut w) = world.get_mut::<Wealth>(player) {
@@ -12164,7 +12163,31 @@ fn get_from_container_inner(
                 .trim()
                 .eq_ignore_ascii_case(player_name.as_str()),
         };
-        if !is_owner {
+        // Like `drag`: a consenting player (`consent` flag) lets others
+        // handle their remains. The owner is looked up online by character
+        // id, falling back to the corpse title like the owner check above.
+        let owner_consents = !is_owner && {
+            let owner_id = world
+                .get::<crate::corpses::PlayerCorpseOwner>(container)
+                .map(|o| o.0.clone());
+            let title_name = container_name
+                .strip_prefix("the corpse of ")
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let mut q = world.query_filtered::<
+                (&mud_world::Account, &Named, Option<&PlayerFlags>),
+                With<mud_world::Player>,
+            >();
+            q.iter(world).any(|(a, n, f)| {
+                let is_them = match &owner_id {
+                    Some(id) => a.character_id == *id,
+                    None => n.name.eq_ignore_ascii_case(&title_name),
+                };
+                is_them && f.is_some_and(|f| f.has(PlayerFlag::Consent))
+            })
+        };
+        if !is_owner && !owner_consents {
             send_to(
                 world,
                 player,
@@ -19533,6 +19556,7 @@ mod r2_playtest_tests {
         world.spawn((
             Item,
             CoinPile(100),
+            mud_world::LooseCoins,
             Named {
                 name: "a pile of coins".into(),
             },

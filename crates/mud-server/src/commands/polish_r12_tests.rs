@@ -459,10 +459,39 @@ fn get_all_leaves_a_dead_players_corpse_and_its_purse_alone() {
 
     // A real loose pile still goes straight to the purse.
     let pile = item_at(&mut fx.world, room, 8, "a pile of coins", "coins");
-    fx.world.entity_mut(pile).insert(mud_world::CoinPile(120));
+    fx.world
+        .entity_mut(pile)
+        .insert((mud_world::CoinPile(120), mud_world::LooseCoins));
     dispatch(&mut fx.world, p, "get all");
     let out = drain(&mut rx);
     assert!(out.contains("You pick up"), "{out}");
     assert_eq!(fx.world.get::<mud_world::Wealth>(p).unwrap().0, 120);
     assert!(fx.world.get::<mud_world::CoinPile>(corpse).is_some());
+}
+
+#[test]
+fn a_bag_holding_a_rotted_corpses_coins_survives_get_bag_and_get_all() {
+    // A decayed corpse's coins can land in a container as a plain `CoinPile`
+    // (not a `LooseCoins` pile). `get bag` / `get all` must pick the bag up,
+    // not pay the coins out and delete it.
+    let (mut fx, room, p, mut rx) = scene();
+    let bag = item_at(&mut fx.world, room, 7, "a canvas bag", "bag");
+    fx.world.entity_mut(bag).insert(mud_world::CoinPile(700));
+    dispatch(&mut fx.world, p, "get bag");
+    let out = drain(&mut rx);
+    assert!(out.contains("You pick up a canvas bag"), "{out}");
+    assert_eq!(fx.world.get::<Located>(bag).unwrap().0, p, "{out}");
+    assert_eq!(fx.world.get::<mud_world::CoinPile>(bag).unwrap().0, 700);
+    assert!(
+        fx.world
+            .get::<mud_world::Wealth>(p)
+            .is_none_or(|w| w.0 == 0)
+    );
+
+    let bag2 = item_at(&mut fx.world, room, 8, "a leather bag", "bag");
+    fx.world.entity_mut(bag2).insert(mud_world::CoinPile(300));
+    dispatch(&mut fx.world, p, "get all");
+    let out = drain(&mut rx);
+    assert_eq!(fx.world.get::<Located>(bag2).unwrap().0, p, "{out}");
+    assert_eq!(fx.world.get::<mud_world::CoinPile>(bag2).unwrap().0, 300);
 }

@@ -632,3 +632,36 @@ async fn booted_dev_world_resolves_container_keys() {
         assert_eq!(keyed, parsed.is_some(), "{k:?} Key {raw:?}");
     }
 }
+
+#[test]
+fn a_consenting_owner_lets_others_loot_their_corpse_a_non_consenting_one_does_not() {
+    // `consent` gates handling another player's remains, as it does for drag.
+    let mut fx = Fx::new();
+    fx.world.entity_mut(fx.player).insert(account("char-b"));
+    let (_corpse, gem) = player_corpse(&mut fx, "char-a", "the corpse of Dead");
+    // The dead owner is online (a ghost) without consent.
+    let owner = fx
+        .world
+        .spawn((
+            mud_world::Player,
+            Named {
+                name: "Dead".into(),
+            },
+            account("char-a"),
+            mud_world::PlayerFlags(vec![]),
+        ))
+        .id();
+    cmd_get(&mut fx.world, fx.player, "ruby from corpse");
+    assert!(fx.out().contains("isn't yours to loot"));
+    assert_ne!(fx.holder(gem), fx.player);
+
+    fx.world
+        .entity_mut(owner)
+        .insert(mud_world::PlayerFlags(vec![
+            mud_db::enums::PlayerFlag::Consent,
+        ]));
+    cmd_get(&mut fx.world, fx.player, "ruby from corpse");
+    let out = fx.out();
+    assert!(!out.contains("isn't yours to loot"), "{out}");
+    assert_eq!(fx.holder(gem), fx.player);
+}

@@ -7297,6 +7297,7 @@ end
             .spawn((
                 Item,
                 mud_world::CoinPile(100),
+                mud_world::LooseCoins,
                 Named {
                     name: "coins".into(),
                 },
