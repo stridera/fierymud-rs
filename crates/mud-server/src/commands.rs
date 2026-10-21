@@ -22266,6 +22266,14 @@ pub(crate) fn check_target_type(
         .is_some_and(|m| m.0 == target);
     for kind in valid_targets {
         match kind.as_str() {
+            // Legacy `TAR_SELF_ONLY`: a list that offers only the caster
+            // (plus kinds this match knows) refuses anyone else.
+            "SELF" => {
+                any_recognized = true;
+                if target_is_self {
+                    return None;
+                }
+            }
             "ENEMY_PC" => {
                 any_recognized = true;
                 if target_is_player && !target_is_self {

@@ -1051,3 +1051,37 @@ fn create_spring_does_nothing_over_water_or_air() {
     f.cast("'create spring'");
     assert_eq!(on_floor(&mut f), vec![(0, 75)]);
 }
+
+#[test]
+fn armor_of_gaia_is_self_only_and_refuses_another_player() {
+    use mud_world::Slot;
+    let mut f = armor_of_gaia_fx();
+    f.world
+        .resource_mut::<mud_world::AbilityCatalog>()
+        .targeting
+        .insert(
+            ABILITY,
+            mud_world::TargetingRule {
+                valid_targets: vec!["SELF".into()],
+                scope: "SINGLE".into(),
+                max_targets: 1,
+                require_los: false,
+            },
+        );
+    let room = f.world.get::<Located>(f.caster).unwrap().0;
+    let (friend, mut friend_rx) = player_in(&mut f.world, room);
+    f.world.entity_mut(friend).insert(mud_world::Named {
+        name: "Friend".into(),
+    });
+    f.world
+        .entity_mut(friend)
+        .insert(mud_world::Keywords(vec!["friend".into()]));
+    let out = f.cast("'armor of gaia' friend");
+    assert!(out.contains("not a valid target"), "{out}");
+    assert!(drain(&mut friend_rx).trim().is_empty());
+    assert!(worn(&mut f).is_empty() && f.carried().is_empty(), "{out}");
+    // On themselves it still works.
+    f.cast("'armor of gaia'");
+    assert_eq!(worn(&mut f).len(), 3);
+    assert_eq!(worn(&mut f)[0].2, Slot::Body);
+}
