@@ -28,6 +28,11 @@ pub struct AbilityMessageRow {
     pub fail_to_caster: Option<String>,
     pub fail_to_victim: Option<String>,
     pub fail_to_room: Option<String>,
+    /// Killing-blow lines (legacy `die_msg`). When a damage spell kills, these
+    /// replace the `success_to_*` lines.
+    pub kill_to_caster: Option<String>,
+    pub kill_to_victim: Option<String>,
+    pub kill_to_room: Option<String>,
     /// Emitted when a duration-tracked effect expires on the target.
     pub wearoff_to_target: Option<String>,
     pub wearoff_to_room: Option<String>,
@@ -52,6 +57,9 @@ pub async fn list_all(pool: &PgPool) -> sqlx::Result<Vec<AbilityMessageRow>> {
             fail_to_caster,
             fail_to_victim,
             fail_to_room,
+            kill_to_caster,
+            kill_to_victim,
+            kill_to_room,
             wearoff_to_target,
             wearoff_to_room,
             look_message

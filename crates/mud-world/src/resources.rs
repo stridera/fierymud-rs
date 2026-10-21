@@ -3107,9 +3107,26 @@ pub struct AbilityMessageSet {
     pub fail_to_caster: Option<String>,
     pub fail_to_victim: Option<String>,
     pub fail_to_room: Option<String>,
+    /// Killing-blow lines: sent instead of `success_to_*` when a damage
+    /// spell kills its target (legacy `die_msg`).
+    pub kill_to_caster: Option<String>,
+    pub kill_to_victim: Option<String>,
+    pub kill_to_room: Option<String>,
     pub wearoff_to_target: Option<String>,
     pub wearoff_to_room: Option<String>,
     pub look_message: Option<String>,
+}
+
+impl AbilityMessageSet {
+    /// True when the ability carries any killing-blow line. Legacy
+    /// `dam_message` then prints only the lines that exist (a `#` slot is
+    /// silent) in place of the normal hit lines.
+    #[must_use]
+    pub fn has_kill_messages(&self) -> bool {
+        self.kill_to_caster.is_some()
+            || self.kill_to_victim.is_some()
+            || self.kill_to_room.is_some()
+    }
 }
 
 // Five bool flags mirror schema columns; see mud_db::abilities::AbilityRow.

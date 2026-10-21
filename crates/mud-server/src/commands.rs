@@ -743,6 +743,9 @@ mod escape_tests;
 #[path = "commands/expand_tests.rs"]
 mod expand_tests;
 #[cfg(test)]
+#[path = "commands/fatality_message_tests.rs"]
+mod fatality_message_tests;
+#[cfg(test)]
 #[path = "commands/flag_behaviour_tests.rs"]
 mod flag_behaviour_tests;
 #[cfg(test)]
@@ -18623,34 +18626,14 @@ fn invoke_ability_core_inner(
                         );
                         break;
                     }
-                    if bolt_count > 1 {
-                        // Per-missile messages: victim and room templates for
-                        // every bolt (the caster's own line is sent with the
-                        // damage number below).
-                        if !custom_messaging {
-                            per_hit_messaging = true;
-                            send_hit_templates(
-                                world,
-                                player,
-                                target_entity,
-                                messages_pre
-                                    .as_ref()
-                                    .and_then(|m| m.success_to_victim.as_deref()),
-                                if target_entity == player {
-                                    messages_pre.as_ref().and_then(|m| {
-                                        m.success_self_room
-                                            .as_deref()
-                                            .or(m.success_to_room.as_deref())
-                                    })
-                                } else {
-                                    messages_pre
-                                        .as_ref()
-                                        .and_then(|m| m.success_to_room.as_deref())
-                                },
-                                (&actor_name_pre, actor_p_pre),
-                                (&target_name_pre, target_p_pre),
-                            );
-                        }
+                    // Per-missile messages: the victim and room templates of
+                    // every bolt (the caster's own line is sent with the
+                    // damage number below). They go out once the blow has
+                    // landed, so a killing bolt can swap in the fatality
+                    // lines.
+                    let bolt_templates = bolt_count > 1 && !custom_messaging;
+                    if bolt_templates {
+                        per_hit_messaging = true;
                     }
                     let mut body_sus = 100;
                     amount = if components.is_empty() {
@@ -18921,6 +18904,57 @@ fn invoke_ability_core_inner(
                         );
                         total_dealt = total_dealt.saturating_add(amount);
                         victim_dead = dead;
+                        // A killing blow from a spell with fatality lines
+                        // (legacy `die_msg`) prints those in place of the hit
+                        // lines, for the victim and bystanders here and for
+                        // the caster in the damage line below.
+                        let fatal_set = messages_pre
+                            .as_ref()
+                            .filter(|m| dead && !custom_messaging && m.has_kill_messages());
+                        let fatal = fatal_set.is_some();
+                        if fatal {
+                            per_hit_messaging = true;
+                            header_sent_with_damage = true;
+                        }
+                        if fatal || bolt_templates {
+                            let (victim_tpl, room_tpl) = if let Some(m) = fatal_set {
+                                (m.kill_to_victim.as_deref(), m.kill_to_room.as_deref())
+                            } else if let Some(m) = messages_pre.as_ref() {
+                                (
+                                    m.success_to_victim.as_deref(),
+                                    if target_entity == player {
+                                        m.success_self_room
+                                            .as_deref()
+                                            .or(m.success_to_room.as_deref())
+                                    } else {
+                                        m.success_to_room.as_deref()
+                                    },
+                                )
+                            } else {
+                                (None, None)
+                            };
+                            send_hit_templates(
+                                world,
+                                player,
+                                target_entity,
+                                victim_tpl,
+                                room_tpl,
+                                (&actor_name_pre, actor_p_pre),
+                                (&target_name_pre, target_p_pre),
+                            );
+                        }
+                        let fatal_caster_line = fatal_set
+                            .and_then(|m| m.kill_to_caster.as_deref())
+                            .map(|t| {
+                                let rendered = render_ability_template(
+                                    t,
+                                    (&actor_name_pre, actor_p_pre),
+                                    (&target_name_pre, target_p_pre),
+                                    target_entity == player,
+                                    Viewer::Actor,
+                                );
+                                render_color_tags(&rendered, mode)
+                            });
                         // Issue #63: show the damage number on spell hits,
                         // unconditionally and in the same shape melee uses
                         // ("... for N damage"), so spells and swings read
@@ -18931,7 +18965,17 @@ fn invoke_ability_core_inner(
                                 None => amount.to_string(),
                             };
                             let ability_lc = def.name.to_lowercase();
-                            if caster_template_exists && !damage_will_be_absorbed {
+                            if let Some(line) = fatal_caster_line {
+                                // The fatality line is the one result line.
+                                send_to(
+                                    world,
+                                    player,
+                                    format!(
+                                        "{} <dim>({damage_label} damage)</>\r\n",
+                                        line.trim_end()
+                                    ),
+                                );
+                            } else if caster_template_exists && !damage_will_be_absorbed && !fatal {
                                 // One result line: the template, number appended.
                                 header_sent_with_damage = true;
                                 send_to(
@@ -19064,6 +19108,23 @@ fn invoke_ability_core_inner(
                                 located.0,
                             );
                         }
+                    } else if bolt_templates && let Some(m) = messages_pre.as_ref() {
+                        // A bolt that did no damage still announces itself.
+                        send_hit_templates(
+                            world,
+                            player,
+                            target_entity,
+                            m.success_to_victim.as_deref(),
+                            if target_entity == player {
+                                m.success_self_room
+                                    .as_deref()
+                                    .or(m.success_to_room.as_deref())
+                            } else {
+                                m.success_to_room.as_deref()
+                            },
+                            (&actor_name_pre, actor_p_pre),
+                            (&target_name_pre, target_p_pre),
+                        );
                     }
                 }
                 if crate::combat::show_dice_for(world, player) {
