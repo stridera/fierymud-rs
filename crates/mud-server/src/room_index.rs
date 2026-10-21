@@ -17,7 +17,7 @@
 //! receive their own lines in call order regardless.
 
 use bevy_ecs::prelude::*;
-use mud_world::{Contents, Mob, Player, SnoopedBy, SwitchedFrom};
+use mud_world::{Contents, Mob, Player, Posture, PostureKind, SnoopedBy, SwitchedFrom};
 
 use crate::commands::Connection;
 
@@ -41,17 +41,32 @@ pub(crate) fn can_receive_output(world: &World, e: Entity) -> bool {
         || world.get::<SnoopedBy>(e).is_some()
 }
 
-/// Entities in `room` that can receive output (see [`can_receive_output`]).
+/// True while `e` is asleep. Legacy `act()` only delivers a room-wide
+/// message (`TO_ROOM` / `TO_NOTVICT`) to `SENDOK` recipients, i.e. awake ones;
+/// nothing room-wide carries `TO_SLEEP`.
+pub(crate) fn is_asleep(world: &World, e: Entity) -> bool {
+    world
+        .get::<Posture>(e)
+        .is_some_and(|p| p.0 == PostureKind::Sleeping)
+}
+
+/// Awake entities in `room` that can receive output (see
+/// [`can_receive_output`]). This is the audience of every room broadcast
+/// (arrivals, departures, emotes, fights, ...), so a sleeper sees none of
+/// it. Lines meant for a sleeper (damage to them, tells, channels, the
+/// "you are awakened" notice) are sent straight to them, not through here.
 pub(crate) fn listeners_in(world: &World, room: Entity) -> Vec<Entity> {
     contents_of(world, room)
-        .filter(|&e| can_receive_output(world, e))
+        .filter(|&e| can_receive_output(world, e) && !is_asleep(world, e))
         .collect()
 }
 
-/// Players in `room` that can receive output.
+/// Awake players in `room` that can receive output (see [`listeners_in`]).
 pub(crate) fn player_listeners_in(world: &World, room: Entity) -> Vec<Entity> {
     contents_of(world, room)
-        .filter(|&e| world.get::<Player>(e).is_some() && can_receive_output(world, e))
+        .filter(|&e| {
+            world.get::<Player>(e).is_some() && can_receive_output(world, e) && !is_asleep(world, e)
+        })
         .collect()
 }
 

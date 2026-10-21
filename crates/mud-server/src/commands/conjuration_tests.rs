@@ -335,6 +335,89 @@ fn minor_creation_of_an_unknown_word_makes_nothing() {
     assert!(f.carried().is_empty());
 }
 
+/// Name the dagger the way the shop lists it, so output assertions can
+/// look for it.
+fn name_object(f: &mut Fx, key: (i32, i32), name: &str, weight: f64) {
+    let mut protos = f.world.resource_mut::<ObjectPrototypes>();
+    let proto = protos.by_key.get_mut(&key).unwrap();
+    proto.name = name.into();
+    proto.weight = weight;
+}
+
+#[test]
+fn minor_creation_tells_the_caster_what_was_made_and_where_it_went() {
+    let mut f = minor_creation_fx();
+    name_object(&mut f, (10, 12), "an iron dagger", 1.0);
+    let out = f.cast("'minor creation' dagger");
+    assert!(
+        out.contains("You create an iron dagger, which appears in your hands."),
+        "{out}"
+    );
+    assert!(!out.contains("You cast minor creation"), "{out}");
+    assert_eq!(f.carried(), vec![(10, 12)]);
+}
+
+#[test]
+fn minor_creation_tells_the_room_what_was_made() {
+    let mut f = minor_creation_fx();
+    name_object(&mut f, (10, 12), "an iron dagger", 1.0);
+    let room = f.world.get::<Located>(f.caster).unwrap().0;
+    let (watcher, mut watcher_rx) = player_in(&mut f.world, room);
+    f.world.entity_mut(watcher).insert(mud_world::Named {
+        name: "Watcher".into(),
+    });
+    let caster = f.caster;
+    f.world.entity_mut(caster).insert(mud_world::Named {
+        name: "Tester".into(),
+    });
+    f.cast("'minor creation' dagger");
+    let seen = drain(&mut watcher_rx);
+    assert!(seen.contains("Tester creates an iron dagger."), "{seen}");
+}
+
+#[test]
+fn a_conjured_item_too_heavy_to_carry_falls_to_the_ground() {
+    let mut f = minor_creation_fx();
+    name_object(&mut f, (10, 12), "a stone anvil", 5000.0);
+    let out = f.cast("'minor creation' dagger");
+    assert!(
+        out.contains("You create a stone anvil, which falls to the ground."),
+        "{out}"
+    );
+    assert!(f.carried().is_empty(), "{out}");
+    let room = f.world.get::<Located>(f.caster).unwrap().0;
+    let mut q = f.world.query_filtered::<&Located, With<Item>>();
+    assert_eq!(q.iter(&f.world).filter(|l| l.0 == room).count(), 1);
+}
+
+#[test]
+fn the_conjure_message_comes_from_the_effect_params_when_set() {
+    let mut f = minor_creation_fx();
+    name_object(&mut f, (10, 12), "an iron dagger", 1.0);
+    f.spell(
+        "MINOR_CREATION",
+        "create",
+        serde_json::json!({
+            "message": "Light flares and {object} {where}!",
+            "roomMessage": "{actor.name} conjures {object}."
+        }),
+    );
+    let out = f.cast("'minor creation' dagger");
+    assert!(
+        out.contains("Light flares and an iron dagger appears in your hands!"),
+        "{out}"
+    );
+}
+
+#[test]
+fn conjure_lines_fill_object_and_where_tokens() {
+    let (caster, room) = conjuration::conjure_lines(None, "a loaf", false);
+    assert_eq!(caster, "You create a loaf, which appears in your hands.");
+    assert_eq!(room, "{actor.name} creates a loaf.");
+    let (caster, _) = conjuration::conjure_lines(None, "a loaf", true);
+    assert_eq!(caster, "You create a loaf, which falls to the ground.");
+}
+
 #[test]
 fn recipe_lookup_is_per_ability() {
     let mut f = minor_creation_fx();

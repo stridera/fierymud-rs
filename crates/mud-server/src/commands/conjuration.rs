@@ -85,3 +85,41 @@ pub(super) fn pick_food(foods: &[(i32, i32)], skill: i32, jitter: usize) -> Opti
     let base = skill.saturating_mul(foods.len()) / 101;
     foods.get((base + jitter).min(last)).copied()
 }
+
+/// Default caster line for a `create` effect that sets no `message` param.
+const DEFAULT_CONJURE_CASTER: &str = "You create {object}, which {where}.";
+/// Default bystander line for a `create` effect that sets no `roomMessage`.
+const DEFAULT_CONJURE_ROOM: &str = "{actor.name} creates {object}.";
+
+/// The `(caster, room)` lines for a conjured item, as templates still to be
+/// rendered for `{actor.*}` (see `render_ability_template`).
+///
+/// A builder sets them per ability in the `create` effect's override params:
+/// `message` (to the caster) and `roomMessage` (to everyone else). In either,
+/// `{object}` is the item's short description and `{where}` reads "appears in
+/// your hands" for an item that reached the caster's inventory, or "falls to
+/// the ground" for one too heavy to carry.
+pub(super) fn conjure_lines(
+    params: Option<&serde_json::Value>,
+    object_name: &str,
+    on_ground: bool,
+) -> (String, String) {
+    let text = |key: &str, default: &str| {
+        params
+            .and_then(|p| p.get(key))
+            .and_then(serde_json::Value::as_str)
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or(default)
+            .to_string()
+    };
+    let place = if on_ground {
+        "falls to the ground"
+    } else {
+        "appears in your hands"
+    };
+    let fill = |t: String| t.replace("{object}", object_name).replace("{where}", place);
+    (
+        fill(text("message", DEFAULT_CONJURE_CASTER)),
+        fill(text("roomMessage", DEFAULT_CONJURE_ROOM)),
+    )
+}

@@ -826,6 +826,9 @@ mod skill_attack_roll_tests;
 #[path = "commands/skill_target_tests.rs"]
 mod skill_target_tests;
 #[cfg(test)]
+#[path = "commands/sleep_sight_tests.rs"]
+mod sleep_sight_tests;
+#[cfg(test)]
 #[path = "commands/wand_charge_tests.rs"]
 mod wand_charge_tests;
 
@@ -1954,9 +1957,9 @@ fn dispatch_line(world: &mut World, player: Entity, line: &str, run: &mut AliasR
         return;
     }
 
-    // Legacy `command_interpreter` stance gate: speech commands need
-    // STANCE_RESTING or better.
-    if speech_blocked_asleep(world, player, cmd.names[0]) {
+    // Legacy `command_interpreter` stance gate: speech and sight commands
+    // need STANCE_RESTING or better.
+    if stance_blocked_asleep(world, player, cmd.names[0]) {
         return;
     }
 
@@ -2051,17 +2054,22 @@ pub(crate) const CAST_LAG_MSG: &str = "You are still recovering your concentrati
 /// command that needs `STANCE_RESTING`.
 pub(crate) const ASLEEP_MSG: &str = "In your dreams, or what?\r\n";
 
-/// Canonical names of the speech commands legacy `interpreter.cpp` gates at
-/// `STANCE_RESTING` (a sleeper may not use them). `gossip`, `gsay`, `tell`,
-/// `reply` and `clan` are `STANCE_SLEEPING` in legacy, so they stay usable.
-const SPEECH_NEEDS_WAKING: &[&str] = &[
-    "say", "emote", "emote's", "ask", "whisper", "insult", "shout", "qsay",
+/// Canonical names of the commands legacy `interpreter.cpp` gates at
+/// `STANCE_RESTING` (a sleeper may not use them): speech, and everything
+/// that needs open eyes (`look`, `examine`, `exits`, `scan`, ...). `gossip`,
+/// `gsay`, `tell`, `reply`, `clan`, `inventory` and `equipment` are
+/// `STANCE_SLEEPING` in legacy, so they stay usable.
+const NEEDS_WAKING: &[&str] = &[
+    // Speech.
+    "say", "emote", "emote's", "ask", "whisper", "insult", "shout", "qsay", // Sight.
+    "look", "examine", "exits", "scan", "glance", "diagnose", "consider", "identify", "read",
+    "search",
 ];
 
 /// True (after sending the legacy refusal) when `player` is asleep and
-/// `command` is a speech command that needs `STANCE_RESTING`.
-pub(crate) fn speech_blocked_asleep(world: &mut World, player: Entity, command: &str) -> bool {
-    if !SPEECH_NEEDS_WAKING.contains(&command) {
+/// `command` needs `STANCE_RESTING`.
+pub(crate) fn stance_blocked_asleep(world: &mut World, player: Entity, command: &str) -> bool {
+    if !NEEDS_WAKING.contains(&command) {
         return false;
     }
     sleeping_refusal(world, player)
@@ -19421,6 +19429,18 @@ pub(crate) fn invoke_ability_core(
                 // carried item, not a room fixture (portals use the
                 // room-spawn path below).
                 let created = crate::item_spawn::spawn_item_from_proto(world, &proto, player);
+                // Too heavy to carry: it lands at the caster's feet instead
+                // (the same encumbrance rule `get` enforces; staff are exempt).
+                let mut on_ground = false;
+                if !wield
+                    && !is_staff_gameplay(world, player)
+                    && item_weight(world, created) > 0.0
+                    && carried_weight(world, player) > carry_capacity(world, player)
+                    && let Some(room) = world.get::<Located>(player).map(|l| l.0)
+                {
+                    world.entity_mut(created).insert(Located(room));
+                    on_ground = true;
+                }
                 // Conjuring reads before wielding: the cast line is held for the
                 // end of the loop, so send it ahead of wear_item's own message.
                 if wield && let Some(header) = pending_header.take() {
@@ -19446,7 +19466,48 @@ pub(crate) fn invoke_ability_core(
                         pretty, proto.name
                     ));
                 } else {
-                    applied_msgs.push(format!("{} ({} appears in your pack)", pretty, proto.name));
+                    // Tell the caster what was made and where it went, and the
+                    // room what happened, instead of the bare "You cast X."
+                    // header (the wording is the effect's `message` /
+                    // `roomMessage` params, with `{object}` and `{where}`).
+                    let (caster_line, room_line) = conjuration::conjure_lines(
+                        spec.override_params.as_ref(),
+                        &proto.name,
+                        on_ground,
+                    );
+                    let render = |t: &str, viewer: Viewer| {
+                        render_ability_template(
+                            t,
+                            (&actor_name_pre, actor_p_pre),
+                            (&target_name_pre, target_p_pre),
+                            false,
+                            viewer,
+                        )
+                    };
+                    pending_header = None;
+                    send_msg(
+                        world,
+                        player,
+                        format!("{}\r\n", render(&caster_line, Viewer::Actor)),
+                    );
+                    if !room_line_sent {
+                        room_line_sent = true;
+                        if let Some(located) = world.get::<Located>(player).copied() {
+                            broadcast_room_anonymised(
+                                world,
+                                located.0,
+                                &[player],
+                                &[(player, actor_name_pre.as_str())],
+                                &format!("{}\r\n", render(&room_line, Viewer::Bystander)),
+                            );
+                        }
+                    }
+                    let place = if on_ground {
+                        "falls to the ground"
+                    } else {
+                        "appears in your pack"
+                    };
+                    applied_msgs.push(format!("{} ({} {place})", pretty, proto.name));
                 }
             }
             "portal" => {
