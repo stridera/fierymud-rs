@@ -1161,3 +1161,33 @@ fn retreat_tells_a_ghost_a_frozen_or_a_stunned_player_why_not() {
         assert!(drain(&mut rx).contains(expect), "{what}");
     }
 }
+
+// -- assist / rescue (playtest r16) -----------------------------------------------------
+
+#[test]
+fn assist_picks_up_the_allys_opponent_even_with_an_article_in_its_name() {
+    let (mut world, room, p, mut rx) = arena();
+    let ally = other_player(&mut world, room);
+    world.entity_mut(ally).insert(CombatStats::default());
+    // Two identical mobs: the assister must join the one the ally is fighting.
+    let decoy = mob_in(&mut world, room, "the skeletal warrior", "skeleton");
+    let foe = mob_in(&mut world, room, "the skeletal warrior", "skeleton");
+    for m in [decoy, foe] {
+        world.entity_mut(m).insert(CombatStats::default());
+    }
+    world.entity_mut(ally).insert(Fighting(foe));
+    world.entity_mut(foe).insert(Fighting(ally));
+
+    cmd_assist(&mut world, p, "victim");
+    let out = drain(&mut rx);
+    assert!(!out.contains("You don't see"), "{out}");
+    assert_eq!(world.get::<Fighting>(p).map(|f| f.0), Some(foe), "{out}");
+}
+
+#[test]
+fn rescue_refuses_your_own_name() {
+    let (mut world, _room, p, mut rx) = arena();
+    cmd_rescue(&mut world, p, "tester");
+    assert!(drain(&mut rx).contains("You can't rescue yourself."));
+    assert_eq!(stamina(&world, p), 100, "no stamina spent");
+}

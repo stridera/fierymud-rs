@@ -433,3 +433,32 @@ fn counted_get_keeps_the_k_dot_index() {
     assert_eq!(remaining.len(), 1, "{out}");
     assert_eq!(remaining, vec![sticks[2]], "{out}");
 }
+
+#[test]
+fn get_all_leaves_a_dead_players_corpse_and_its_purse_alone() {
+    // Playtest r16: the bulk path treated any item carrying a `CoinPile` as a
+    // loose pile, so a stranger's `get all` emptied the purse of someone
+    // else's corpse and despawned it.
+    let (mut fx, room, p, mut rx) = scene();
+    let corpse = item_at(&mut fx.world, room, 7, "the corpse of Bob", "corpse bob");
+    fx.world.entity_mut(corpse).insert((
+        mud_world::Corpse,
+        mud_world::PlayerCorpse,
+        mud_world::CoinPile(5000),
+    ));
+    dispatch(&mut fx.world, p, "get all");
+    let out = drain(&mut rx);
+    assert!(!out.contains("You pick up"), "{out}");
+    assert_eq!(fx.world.get::<Located>(corpse).unwrap().0, room, "{out}");
+    assert_eq!(fx.world.get::<mud_world::CoinPile>(corpse).unwrap().0, 5000);
+    assert!(fx.world.get::<mud_world::Wealth>(p).is_none_or(|w| w.0 == 0));
+
+    // A real loose pile still goes straight to the purse.
+    let pile = item_at(&mut fx.world, room, 8, "a pile of coins", "coins");
+    fx.world.entity_mut(pile).insert(mud_world::CoinPile(120));
+    dispatch(&mut fx.world, p, "get all");
+    let out = drain(&mut rx);
+    assert!(out.contains("You pick up"), "{out}");
+    assert_eq!(fx.world.get::<mud_world::Wealth>(p).unwrap().0, 120);
+    assert!(fx.world.get::<mud_world::CoinPile>(corpse).is_some());
+}

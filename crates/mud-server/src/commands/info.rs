@@ -11243,6 +11243,11 @@ fn drain_coin_pile(world: &mut World, container: Entity, player: Entity) -> Opti
 /// it to `player`'s `Wealth`, remove the pile, and return the amount.
 pub(crate) fn take_loose_coins(world: &mut World, player: Entity, item: Entity) -> Option<i64> {
     world.get::<Item>(item)?;
+    // A corpse's `CoinPile` is its loot, not a loose pile: it is handed out by
+    // `get all from corpse` (which honours the owner's claim), never here.
+    if world.get::<Corpse>(item).is_some() {
+        return None;
+    }
     let amount = world.get::<CoinPile>(item)?.0;
     if amount > 0 {
         if let Some(mut w) = world.get_mut::<Wealth>(player) {
@@ -12485,14 +12490,6 @@ fn get_batch_from_floor(
     // Get-trigger output waits until the grouped "You pick up" lines are out.
     let hold = crate::commands::OutboxHold::new();
     for (item, item_name) in items {
-        if let Some(amount) = take_loose_coins(world, player, *item) {
-            let coin =
-                crate::commands::format_wealth(amount).unwrap_or_else(|| "no coin".to_string());
-            send_rendered(world, player, &format!("You pick up {coin}.\r\n"));
-            autosplit_pickup(world, player, amount);
-            moved += 1;
-            continue;
-        }
         if world.get::<mud_world::PlayerCorpse>(*item).is_some() {
             send_msg(
                 world,
@@ -12508,6 +12505,18 @@ fn get_batch_from_floor(
             if !filter.is_empty() {
                 blocked += 1;
             }
+            continue;
+        }
+        // Loose coins (a decayed corpse's money) go to the purse. This runs
+        // after the corpse refusals above: a corpse that still holds a
+        // `CoinPile` is not a loose pile, and taking it here handed a dead
+        // player's purse to any passer-by and despawned the corpse with it.
+        if let Some(amount) = take_loose_coins(world, player, *item) {
+            let coin =
+                crate::commands::format_wealth(amount).unwrap_or_else(|| "no coin".to_string());
+            send_rendered(world, player, &format!("You pick up {coin}.\r\n"));
+            autosplit_pickup(world, player, amount);
+            moved += 1;
             continue;
         }
         // NO_TAKE fixtures skip silently in the bulk path — the

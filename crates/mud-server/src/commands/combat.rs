@@ -1202,8 +1202,22 @@ pub(crate) fn cmd_attack(world: &mut World, player: Entity, target_name: &str) {
 }
 
 /// `cmd_attack` with the Switch d101 roll injected (tests pin it).
-#[allow(clippy::too_many_lines)]
 fn attack_with_switch_roll(world: &mut World, player: Entity, target_name: &str, switch_roll: i32) {
+    attack_resolved(world, player, AttackTarget::Name(target_name), switch_roll);
+}
+
+/// Who an attack is aimed at: a typed keyword, or an entity the caller already
+/// resolved (`assist` picks its ally's opponent; round-tripping that through
+/// the opponent's display name loses a leading article and can pick the wrong
+/// one of two identical mobs).
+#[derive(Clone, Copy)]
+enum AttackTarget<'a> {
+    Name(&'a str),
+    Entity(Entity),
+}
+
+#[allow(clippy::too_many_lines)]
+fn attack_resolved(world: &mut World, player: Entity, aim: AttackTarget<'_>, switch_roll: i32) {
     if !require_alert_posture(world, player, "attack") {
         return;
     }
@@ -1214,8 +1228,11 @@ fn attack_with_switch_roll(world: &mut World, player: Entity, target_name: &str,
     if !check_stamina(world, player, cost, "attack") {
         return;
     }
-    let target_name = target_name.trim();
-    if target_name.is_empty() {
+    let target_name = match aim {
+        AttackTarget::Name(n) => n.trim(),
+        AttackTarget::Entity(_) => "",
+    };
+    if matches!(aim, AttackTarget::Name(_)) && target_name.is_empty() {
         send_to(world, player, "Attack what?\r\n");
         return;
     }
@@ -1228,15 +1245,23 @@ fn attack_with_switch_roll(world: &mut World, player: Entity, target_name: &str,
     // dead mob's keywords ("the corpse of a frost stallion" still matches
     // "stallion") never swallow the live one. CombatStats keeps the target
     // to attackable actors (mobs/players with the combat package).
-    let target = find_actor_in_room(world, target_name, located.0, player)
-        .filter(|&e| world.get::<mud_world::CombatStats>(e).is_some());
+    let target = match aim {
+        AttackTarget::Name(_) => find_actor_in_room(world, target_name, located.0, player),
+        AttackTarget::Entity(e) => Some(e).filter(|&e| {
+            e != player
+                && world.get::<Located>(e).is_some_and(|l| l.0 == located.0)
+                && crate::commands::can_see_player(world, player, e)
+        }),
+    }
+    .filter(|&e| world.get::<mud_world::CombatStats>(e).is_some());
 
     let Some(target) = target else {
-        send_rendered(
-            world,
-            player,
-            &format!("You don't see '{target_name}' here.\r\n"),
-        );
+        let msg = if target_name.is_empty() {
+            "You don't see them here.\r\n".to_string()
+        } else {
+            format!("You don't see '{target_name}' here.\r\n")
+        };
+        send_rendered(world, player, &msg);
         return;
     };
 
@@ -2989,7 +3014,13 @@ pub(crate) fn cmd_rescue(world: &mut World, player: Entity, args: &str) {
     // Self-target shortcut: refuse before draining stamina (the
     // redirect arm in invoke_ability also refuses, but we'd waste
     // the cost otherwise).
-    if arg.eq_ignore_ascii_case("me") || arg.eq_ignore_ascii_case("self") {
+    // Own name counts too: it used to slip through to the skill, which
+    // spent the stamina, printed the success line and told the room
+    // "X heroically rescues X!".
+    if arg.eq_ignore_ascii_case("me")
+        || arg.eq_ignore_ascii_case("self")
+        || arg.eq_ignore_ascii_case(&name_of(world, player))
+    {
         send_to(world, player, "You can't rescue yourself.\r\n");
         return;
     }
@@ -3065,8 +3096,12 @@ pub(crate) fn cmd_assist(world: &mut World, player: Entity, args: &str) {
         send_to(world, player, "Their target is already gone.\r\n");
         return;
     }
-    let target_name = name_or(world, ally_target, "(unknown)");
-    cmd_attack(world, player, &target_name);
+    attack_resolved(
+        world,
+        player,
+        AttackTarget::Entity(ally_target),
+        rand::random_range(1..=101),
+    );
 }
 pub(crate) fn cmd_retreat(world: &mut World, player: Entity, args: &str) {
     let arg = args.trim();
