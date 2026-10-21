@@ -100,6 +100,10 @@ fn turning_the_flag_off_strips_the_ai_and_stands_meditating_mobs_up() {
     // A pulse with the flag on: the buff first, then (spent slots) the sit.
     mob_idle_ai_tick(&mut f.world);
     f.world.spawn(effect(BLESS, "bless", f.mob));
+    // The cast lags the mob for a round (legacy `WAIT_STATE`).
+    let now = f.world.get_resource::<TickCount>().map_or(0, |t| t.0);
+    f.world
+        .insert_resource(TickCount(now + crate::casting::POST_CAST_LAG_TICKS));
     mob_idle_ai_tick(&mut f.world);
     assert!(f.world.get::<Meditating>(f.mob).is_some());
     // A caster with no rules (slots, no MobAi), and a player's own slots.
@@ -205,6 +209,10 @@ fn skills_and_hostile_spells_are_left_to_their_own_pulses() {
 fn a_buff_already_worn_is_not_recast() {
     let mut f = peaceful(vec![buff()]);
     f.world.spawn(effect(BLESS, "bless", f.mob));
+    // The cast lags the mob for a round (legacy `WAIT_STATE`).
+    let now = f.world.get_resource::<TickCount>().map_or(0, |t| t.0);
+    f.world
+        .insert_resource(TickCount(now + crate::casting::POST_CAST_LAG_TICKS));
     mob_idle_ai_tick(&mut f.world);
     assert!(last_used(&f.world, f.mob, 0).is_none());
 }
@@ -304,6 +312,10 @@ fn buffs_come_before_meditation() {
         "and sits on a later pulse"
     );
     f.world.spawn(effect(BLESS, "bless", f.mob));
+    // The cast lags the mob for a round (legacy `WAIT_STATE`).
+    let now = f.world.get_resource::<TickCount>().map_or(0, |t| t.0);
+    f.world
+        .insert_resource(TickCount(now + crate::casting::POST_CAST_LAG_TICKS));
     mob_idle_ai_tick(&mut f.world);
     assert!(f.world.get::<Meditating>(f.mob).is_some());
 }
