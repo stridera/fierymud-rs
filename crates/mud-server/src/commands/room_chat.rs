@@ -204,10 +204,11 @@ pub(super) fn cmd_say(world: &mut World, player: Entity, message: &str) {
         return;
     };
     let speaker = name_of(world, player);
+    // Legacy `do_say` is `act(.., TO_ROOM)`, which skips sleepers.
     let targets: Vec<Entity> =
         with_query::<(Entity, &Located), With<Player>, _>(world, |world, q| {
             q.iter(world)
-                .filter(|(_, l)| l.0 == located.0)
+                .filter(|(e, l)| l.0 == located.0 && !crate::room_index::is_asleep(world, *e))
                 .map(|(e, _)| e)
                 .collect()
         });
@@ -250,10 +251,11 @@ fn emote_as(world: &mut World, player: Entity, args: &str, suffix: &str) {
         return;
     };
     let player_name = name_of(world, player);
+    // Legacy `do_echo` is `act(.., TO_ROOM)`, which skips sleepers.
     let targets: Vec<Entity> =
         with_query::<(Entity, &Located), With<Player>, _>(world, |world, q| {
             q.iter(world)
-                .filter(|(_, l)| l.0 == located.0)
+                .filter(|(e, l)| l.0 == located.0 && !crate::room_index::is_asleep(world, *e))
                 .map(|(e, _)| e)
                 .collect()
         });

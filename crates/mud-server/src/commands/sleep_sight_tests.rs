@@ -145,3 +145,20 @@ fn resting_characters_keep_their_sight() {
     dispatch(&mut world, p, "exits");
     assert!(!drain(&mut rx).contains(DREAMS));
 }
+
+#[test]
+fn a_sleeper_does_not_hear_say_or_emote_but_an_awake_bystander_does() {
+    let (mut world, _mover, mut brx, mut srx) = arrival_setup();
+    let bob = entity_named(&mut world, "Bob");
+    dispatch(&mut world, bob, "say hello there");
+    dispatch(&mut world, bob, "emote dances around");
+    // Bob (the speaker) gets his own echo; the sleeper hears neither.
+    let own = drain(&mut brx);
+    assert!(own.contains("hello there"), "speaker echo: {own:?}");
+    let asleep = drain(&mut srx);
+    assert!(
+        !asleep.contains("hello there"),
+        "sleeper heard say: {asleep:?}"
+    );
+    assert!(!asleep.contains("dances"), "sleeper saw emote: {asleep:?}");
+}
